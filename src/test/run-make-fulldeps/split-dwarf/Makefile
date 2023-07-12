@@ -1,5 +1,6 @@
 -include ../tools.mk
 
+# ignore-e2k64 NIY
 # only-linux
 # min-llvm-version: 11.0
 

@@ -954,6 +954,13 @@ supported_targets! {
     ("armv6k-nintendo-3ds", armv6k_nintendo_3ds),
 
     ("armv7-unknown-linux-uclibceabihf", armv7_unknown_linux_uclibceabihf),
+
+    ("e2k64-unknown-linux-gnu", e2k64_unknown_linux_gnu),
+    ("e2kv2-unknown-linux-gnu", e2kv2_unknown_linux_gnu),
+    ("e2kv3-unknown-linux-gnu", e2kv3_unknown_linux_gnu),
+    ("e2kv4-unknown-linux-gnu", e2kv4_unknown_linux_gnu),
+    ("e2kv5-unknown-linux-gnu", e2kv5_unknown_linux_gnu),
+    ("e2kv6-unknown-linux-gnu", e2kv6_unknown_linux_gnu),
 }
 
 /// Warnings encountered when parsing the target `json`.

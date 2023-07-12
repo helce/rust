@@ -11,6 +11,7 @@
 // ignore-s390x
 // ignore-sparc
 // ignore-sparc64
+// ignore-e2k64
 
 #![feature(target_feature)]
 #![warn(unused_attributes)]

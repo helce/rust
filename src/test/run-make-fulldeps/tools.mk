@@ -138,9 +138,15 @@ ifeq ($(UNAME),OpenBSD)
 	EXTRACFLAGS := -lm -lpthread -lc++abi
 	RUSTC := $(RUSTC) -C linker="$(word 1,$(CC:ccache=))"
 else
+ifdef IS_LCCRT
+	EXTRACFLAGS := -lm -lrt -ldl -lpthread -L/usr/lib/lccrt/lib/e2k64/ -Wl,-rpath=/usr/lib/lccrt/lib/e2k64/ -llccrt_s -llcc
+	EXTRACXXFLAGS := -lstdc++
+	EXTRARSCXXFLAGS := -lstdc++
+else
 	EXTRACFLAGS := -lm -lrt -ldl -lpthread
 	EXTRACXXFLAGS := -lstdc++
 	EXTRARSCXXFLAGS := -lstdc++
+endif
 endif
 endif
 endif

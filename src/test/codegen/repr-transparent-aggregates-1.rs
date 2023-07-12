@@ -10,6 +10,7 @@
 // ignore-powerpc64
 // ignore-riscv64 see codegen/riscv-abi
 // ignore-windows
+// ignore-e2k64
 // See repr-transparent.rs
 
 #![feature(transparent_unions)]

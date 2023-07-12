@@ -88,6 +88,7 @@ fn main() {
         "hexagon",
         "riscv",
         "bpf",
+        "elbrus",
     ];
 
     let required_components = &[
@@ -178,7 +179,7 @@ fn main() {
     let mut cmd = Command::new(&llvm_config);
     cmd.arg(llvm_link_arg).arg("--libs");
 
-    if !is_crossed {
+    if !is_crossed || target.contains("e2k") {
         cmd.arg("--system-libs");
     } else if target.contains("windows-gnu") {
         println!("cargo:rustc-link-lib=shell32");

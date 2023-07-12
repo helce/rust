@@ -304,7 +304,7 @@ mod arch {
     }
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "powerpc64"))]
+#[cfg(any(target_arch = "x86_64", target_arch = "powerpc64", target_arch = "e2k64"))]
 mod arch {
     use crate::os::raw::{c_int, c_long};
 

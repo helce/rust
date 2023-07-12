@@ -18,6 +18,7 @@
 // ignore-x86
 // ignore-x86_64
 // ignore-xcore
+// ignore-e2k64
 
 fn main() {
 }

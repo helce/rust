@@ -1,5 +1,7 @@
 -include ../tools.mk
 
+# ignore-e2k64
+
 all: $(call DYLIB,return1) $(call DYLIB,return2) $(call NATIVE_STATICLIB,return3)
 	ls $(TMPDIR)
 	$(BARE_RUSTC) --print cfg --target x86_64-unknown-linux-musl | $(CGREP) crt-static

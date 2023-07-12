@@ -1,5 +1,6 @@
 -include ../tools.mk
 
+# ignore-e2k64
 # Issue #10814
 #
 # these are no_std to avoid having to have the standard library or any

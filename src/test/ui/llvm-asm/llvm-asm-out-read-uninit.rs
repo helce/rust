@@ -8,6 +8,7 @@
 // ignore-sparc64
 // ignore-mips
 // ignore-mips64
+// ignore-e2k64
 
 #![feature(llvm_asm)]
 #![allow(deprecated)] // llvm_asm!

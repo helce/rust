@@ -11,6 +11,7 @@
 // ignore-emscripten no processes
 // ignore-sgx no processes
 // ignore-musl FIXME #31506
+// ignore-e2k64
 // ignore-pretty
 // compile-flags: -C lto
 // no-prefer-dynamic

@@ -149,6 +149,7 @@ macro_rules! types {
 mod aarch64;
 mod arm;
 mod bpf;
+mod e2k64;
 mod hexagon;
 mod mips;
 mod nvptx;
@@ -162,6 +163,7 @@ mod x86;
 pub use aarch64::{AArch64InlineAsmReg, AArch64InlineAsmRegClass};
 pub use arm::{ArmInlineAsmReg, ArmInlineAsmRegClass};
 pub use bpf::{BpfInlineAsmReg, BpfInlineAsmRegClass};
+pub use e2k64::{E2k64InlineAsmReg, E2k64InlineAsmRegClass};
 pub use hexagon::{HexagonInlineAsmReg, HexagonInlineAsmRegClass};
 pub use mips::{MipsInlineAsmReg, MipsInlineAsmRegClass};
 pub use nvptx::{NvptxInlineAsmReg, NvptxInlineAsmRegClass};
@@ -190,6 +192,7 @@ pub enum InlineAsmArch {
     SpirV,
     Wasm32,
     Bpf,
+    E2k64,
 }
 
 impl FromStr for InlineAsmArch {
@@ -213,6 +216,7 @@ impl FromStr for InlineAsmArch {
             "spirv" => Ok(Self::SpirV),
             "wasm32" => Ok(Self::Wasm32),
             "bpf" => Ok(Self::Bpf),
+            "e2k64" => Ok(Self::E2k64),
             _ => Err(()),
         }
     }
@@ -243,6 +247,7 @@ pub enum InlineAsmReg {
     SpirV(SpirVInlineAsmReg),
     Wasm(WasmInlineAsmReg),
     Bpf(BpfInlineAsmReg),
+    E2k64(E2k64InlineAsmReg),
     // Placeholder for invalid register constraints for the current target
     Err,
 }
@@ -324,6 +329,9 @@ impl InlineAsmReg {
             InlineAsmArch::Bpf => {
                 Self::Bpf(BpfInlineAsmReg::parse(arch, has_feature, target, &name)?)
             }
+            InlineAsmArch::E2k64 => {
+                Self::E2k64(E2k64InlineAsmReg::parse(arch, has_feature, target, &name)?)
+            }
         })
     }
 
@@ -390,6 +398,7 @@ pub enum InlineAsmRegClass {
     SpirV(SpirVInlineAsmRegClass),
     Wasm(WasmInlineAsmRegClass),
     Bpf(BpfInlineAsmRegClass),
+    E2k64(E2k64InlineAsmRegClass),
     // Placeholder for invalid register constraints for the current target
     Err,
 }
@@ -409,6 +418,7 @@ impl InlineAsmRegClass {
             Self::SpirV(r) => r.name(),
             Self::Wasm(r) => r.name(),
             Self::Bpf(r) => r.name(),
+            Self::E2k64(r) => r.name(),
             Self::Err => rustc_span::symbol::sym::reg,
         }
     }
@@ -430,6 +440,7 @@ impl InlineAsmRegClass {
             Self::SpirV(r) => r.suggest_class(arch, ty).map(InlineAsmRegClass::SpirV),
             Self::Wasm(r) => r.suggest_class(arch, ty).map(InlineAsmRegClass::Wasm),
             Self::Bpf(r) => r.suggest_class(arch, ty).map(InlineAsmRegClass::Bpf),
+            Self::E2k64(r) => r.suggest_class(arch, ty).map(InlineAsmRegClass::E2k64),
             Self::Err => unreachable!("Use of InlineAsmRegClass::Err"),
         }
     }
@@ -458,6 +469,7 @@ impl InlineAsmRegClass {
             Self::SpirV(r) => r.suggest_modifier(arch, ty),
             Self::Wasm(r) => r.suggest_modifier(arch, ty),
             Self::Bpf(r) => r.suggest_modifier(arch, ty),
+            Self::E2k64(r) => r.suggest_modifier(arch, ty),
             Self::Err => unreachable!("Use of InlineAsmRegClass::Err"),
         }
     }
@@ -482,6 +494,7 @@ impl InlineAsmRegClass {
             Self::SpirV(r) => r.default_modifier(arch),
             Self::Wasm(r) => r.default_modifier(arch),
             Self::Bpf(r) => r.default_modifier(arch),
+            Self::E2k64(r) => r.default_modifier(arch),
             Self::Err => unreachable!("Use of InlineAsmRegClass::Err"),
         }
     }
@@ -505,6 +518,7 @@ impl InlineAsmRegClass {
             Self::SpirV(r) => r.supported_types(arch),
             Self::Wasm(r) => r.supported_types(arch),
             Self::Bpf(r) => r.supported_types(arch),
+            Self::E2k64(r) => r.supported_types(arch),
             Self::Err => unreachable!("Use of InlineAsmRegClass::Err"),
         }
     }
@@ -531,6 +545,7 @@ impl InlineAsmRegClass {
             InlineAsmArch::SpirV => Self::SpirV(SpirVInlineAsmRegClass::parse(arch, name)?),
             InlineAsmArch::Wasm32 => Self::Wasm(WasmInlineAsmRegClass::parse(arch, name)?),
             InlineAsmArch::Bpf => Self::Bpf(BpfInlineAsmRegClass::parse(arch, name)?),
+            InlineAsmArch::E2k64 => Self::E2k64(E2k64InlineAsmRegClass::parse(arch, name)?),
         })
     }
 
@@ -550,6 +565,7 @@ impl InlineAsmRegClass {
             Self::SpirV(r) => r.valid_modifiers(arch),
             Self::Wasm(r) => r.valid_modifiers(arch),
             Self::Bpf(r) => r.valid_modifiers(arch),
+            Self::E2k64(r) => r.valid_modifiers(arch),
             Self::Err => unreachable!("Use of InlineAsmRegClass::Err"),
         }
     }
@@ -733,6 +749,11 @@ pub fn allocatable_registers(
         InlineAsmArch::Bpf => {
             let mut map = bpf::regclass_map();
             bpf::fill_reg_map(arch, has_feature, target, &mut map);
+            map
+        }
+        InlineAsmArch::E2k64 => {
+            let mut map = e2k64::regclass_map();
+            e2k64::fill_reg_map(arch, has_feature, target, &mut map);
             map
         }
     }

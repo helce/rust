@@ -14,6 +14,7 @@
 // ignore-sparc64
 // ignore-x86
 // ignore-x86_64
+// ignore-e2k64
 // See repr-transparent.rs
 
 #![feature(transparent_unions)]

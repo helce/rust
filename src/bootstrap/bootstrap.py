@@ -289,7 +289,8 @@ def default_build_triple(verbose):
         'x64': 'x86_64',
         'x86': 'i686',
         'x86-64': 'x86_64',
-        'x86_64': 'x86_64'
+        'x86_64': 'x86_64',
+        'e2k': 'e2k64'
     }
 
     # Consider the direct transformation first and then the special cases

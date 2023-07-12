@@ -15,7 +15,8 @@
             target_arch = "arm",
             target_arch = "aarch64",
             target_arch = "mips",
-            target_arch = "mips64"))]
+            target_arch = "mips64",
+            target_arch = "e2k64"))]
 mod test_cases {
     fn is_move() {
         let y: &mut isize;

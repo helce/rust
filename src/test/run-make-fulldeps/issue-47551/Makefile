@@ -1,5 +1,6 @@
 # only-linux
 # ignore-32bit
+# ignore-e2k64 too long
 
 -include ../tools.mk
 

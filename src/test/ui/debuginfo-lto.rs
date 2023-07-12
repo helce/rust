@@ -8,6 +8,7 @@
 // compile-flags: -C lto -g
 // no-prefer-dynamic
 // ignore-asmjs wasm2js does not support source maps yet
+// ignore-e2k64 NIY
 
 extern crate debuginfo_lto_aux;
 

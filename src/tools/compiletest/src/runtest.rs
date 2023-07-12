@@ -2907,6 +2907,10 @@ impl<'test> TestCx<'test> {
             if self.config.target.contains("windows") {
                 cmd.env("IS_WINDOWS", "1");
             }
+
+            if self.config.target.contains("e2k") {
+                cmd.env("IS_LCCRT", "1");
+            }
         }
 
         let output = cmd.spawn().and_then(read2_abbreviated).expect("failed to spawn `make`");

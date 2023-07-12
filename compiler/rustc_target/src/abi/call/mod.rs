@@ -8,6 +8,7 @@ mod amdgpu;
 mod arm;
 mod avr;
 mod bpf;
+mod e2k64;
 mod hexagon;
 mod m68k;
 mod mips;
@@ -679,6 +680,7 @@ impl<'a, Ty> FnAbi<'a, Ty> {
             }
             "asmjs" => wasm::compute_c_abi_info(cx, self),
             "bpf" => bpf::compute_abi_info(self),
+            "e2k64" => e2k64::compute_abi_info(self),
             arch => {
                 return Err(AdjustForForeignAbiError::Unsupported { arch: arch.to_string(), abi });
             }

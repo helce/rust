@@ -10,6 +10,7 @@
 // ignore-wasm
 // ignore-emscripten no processes
 // ignore-sgx no processes
+// ignore-e2k64
 
 use std::env;
 use std::mem::MaybeUninit;

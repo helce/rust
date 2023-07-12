@@ -1,6 +1,7 @@
 -include ../tools.mk
 
 # ignore-musl
+# ignore-e2k64 NIY
 # Objects are reproducible but their path is not.
 
 all:  \

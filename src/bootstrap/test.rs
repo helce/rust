@@ -1245,6 +1245,10 @@ note: if you're sure you want to do this, please open an issue as to why. In the
         }
 
         if suite == "debuginfo" {
+            // Skip debuginfo tests for e2k, bug 105287, NIY
+            if builder.config.build.contains("e2k") {
+                return;
+            }
             builder
                 .ensure(dist::DebuggerScripts { sysroot: builder.sysroot(compiler), host: target });
         }

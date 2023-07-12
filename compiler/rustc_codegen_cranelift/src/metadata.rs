@@ -30,6 +30,7 @@ pub(crate) fn new_metadata_object(
         target_lexicon::Architecture::Aarch64(_) => object::Architecture::Aarch64,
         target_lexicon::Architecture::Arm(_) => object::Architecture::Arm,
         target_lexicon::Architecture::Avr => object::Architecture::Avr,
+        target_lexicon::Architecture::E2k64 => object::Architecture::E2k64,
         target_lexicon::Architecture::Hexagon => object::Architecture::Hexagon,
         target_lexicon::Architecture::Mips32(_) => object::Architecture::Mips,
         target_lexicon::Architecture::Mips64(_) => object::Architecture::Mips64,

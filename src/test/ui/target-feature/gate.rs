@@ -11,6 +11,7 @@
 // ignore-sparc
 // ignore-sparc64
 // ignore-s390x
+// ignore-e2k64
 // gate-test-sse4a_target_feature
 // gate-test-powerpc_target_feature
 // gate-test-avx512_target_feature

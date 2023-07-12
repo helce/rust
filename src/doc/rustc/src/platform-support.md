@@ -139,6 +139,12 @@ target | std | notes
 `armv7r-none-eabi` | * | Bare ARMv7-R
 `armv7r-none-eabihf` | * | Bare ARMv7-R, hardfloat
 `asmjs-unknown-emscripten` | ✓ | asm.js via Emscripten
+`e2k64-unknown-linux-gnu` | ✓ | E2K generic Linux (kernel 5.4, glibc 2.29)
+`e2kv2-unknown-linux-gnu` | ✓ | E2K elbrus-v2 Linux (kernel 5.4, glibc 2.29)
+`e2kv3-unknown-linux-gnu` | ✓ | E2K elbrus-v3 Linux (kernel 5.4, glibc 2.29)
+`e2kv4-unknown-linux-gnu` | ✓ | E2K elbrus-v4 Linux (kernel 5.4, glibc 2.29)
+`e2kv5-unknown-linux-gnu` | ✓ | E2K elbrus-v5 Linux (kernel 5.4, glibc 2.29)
+`e2kv6-unknown-linux-gnu` | ✓ | E2K elbrus-v6 Linux (kernel 5.4, glibc 2.29)
 `i586-pc-windows-msvc` | ✓ | 32-bit Windows w/o SSE
 `i586-unknown-linux-gnu` | ✓ | 32-bit Linux w/o SSE (kernel 4.4, glibc 2.23)
 `i586-unknown-linux-musl` | ✓ | 32-bit Linux w/o SSE, MUSL

@@ -11,6 +11,7 @@
 // ignore-pretty issue #37195
 // ignore-emscripten spawning processes is not supported
 // ignore-sgx no processes
+// ignore-e2k64 NIY
 
 use std::env;
 

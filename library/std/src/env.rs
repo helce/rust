@@ -887,6 +887,7 @@ pub mod consts {
     /// - riscv64
     /// - s390x
     /// - sparc64
+    /// - e2k64
     #[stable(feature = "env", since = "1.0.0")]
     pub const ARCH: &str = env!("STD_ENV_ARCH");
 

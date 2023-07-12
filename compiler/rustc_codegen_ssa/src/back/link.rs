@@ -406,6 +406,7 @@ fn link_rlib<'a, B: ArchiveBuilder<'a>>(
             "riscv32" => Architecture::Riscv32,
             "riscv64" => Architecture::Riscv64,
             "sparc64" => Architecture::Sparc64,
+            "e2k64" => Architecture::E2k64,
 
             // This is used to handle all "other" targets. This includes targets
             // in two categories:
@@ -464,6 +465,12 @@ fn link_rlib<'a, B: ArchiveBuilder<'a>>(
                 // float abi is enabled.
                 "riscv64" if sess.target.options.features.contains("+d") => {
                     let e_flags = elf::EF_RISCV_RVC | elf::EF_RISCV_FLOAT_ABI_DOUBLE;
+                    file.flags = FileFlags::Elf { e_flags };
+                }
+
+                // elbrus-v1(generic) was blocked in binutils, so set flag for elbrus-v2
+                "e2k64" => {
+                    let e_flags = elf::EF_E2K_MACH_EV2;
                     file.flags = FileFlags::Elf { e_flags };
                 }
 

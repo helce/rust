@@ -1,4 +1,5 @@
 // run-pass
+// ignore-e2k64 e2k-backend does not support this optimisation
 #![allow(dead_code)]
 // check that we don't have linear stack usage with multiple calls to `push`
 

@@ -3,6 +3,7 @@
 // The error message differs slightly between LLVM versions
 // min-llvm-version: 13.0
 // Regression test for #69092
+// ignore-e2k64
 
 #![feature(llvm_asm)]
 #![allow(deprecated)] // llvm_asm!

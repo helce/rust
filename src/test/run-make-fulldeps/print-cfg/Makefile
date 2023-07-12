@@ -1,5 +1,7 @@
 -include ../tools.mk
 
+# ignore-e2k64
+
 all: default
 	$(RUSTC) --target x86_64-pc-windows-gnu --print cfg | $(CGREP) windows
 	$(RUSTC) --target x86_64-pc-windows-gnu --print cfg | $(CGREP) x86_64

@@ -513,6 +513,10 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
 
   Options.EmitStackSizeSection = EmitStackSizeSection;
 
+  if (Trip.isElbrus()) {
+    Options.LccrtLlvmIREmbedStaticOnly = true;
+  }
+
   TargetMachine *TM = TheTarget->createTargetMachine(
       Trip.getTriple(), CPU, Feature, Options, RM, CM, OptLevel);
   return wrap(TM);

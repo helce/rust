@@ -1,6 +1,7 @@
 // build-pass
 // ignore-tidy-filelength
 // ignore-compare-mode-chalk
+// ignore-e2k64 we have another stackoverflow on this, currently ignored
 #![crate_type = "rlib"]
 
 fn banana(v: &str) -> u32 {

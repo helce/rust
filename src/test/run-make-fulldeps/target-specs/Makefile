@@ -1,4 +1,7 @@
 -include ../tools.mk
+
+# ignore-e2k64
+
 all:
 	$(RUSTC) foo.rs --target=my-awesome-platform.json --crate-type=lib --emit=asm
 	$(CGREP) -v morestack < $(TMPDIR)/foo.s

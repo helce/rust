@@ -318,6 +318,7 @@ impl AsmBuilderMethods<'tcx> for Builder<'a, 'll, 'tcx> {
                 InlineAsmArch::SpirV => {}
                 InlineAsmArch::Wasm32 => {}
                 InlineAsmArch::Bpf => {}
+                InlineAsmArch::E2k64 => {}
             }
         }
         if !options.contains(InlineAsmOptions::NOMEM) {
@@ -643,6 +644,7 @@ fn reg_to_llvm(reg: InlineAsmRegOrRegClass, layout: Option<&TyAndLayout<'tcx>>) 
             InlineAsmRegClass::SpirV(SpirVInlineAsmRegClass::reg) => {
                 bug!("LLVM backend does not support SPIR-V")
             }
+            InlineAsmRegClass::E2k64(E2k64InlineAsmRegClass::reg) => "r",
             InlineAsmRegClass::Err => unreachable!(),
         }
         .to_string(),
@@ -722,6 +724,7 @@ fn modifier_to_llvm(
         InlineAsmRegClass::SpirV(SpirVInlineAsmRegClass::reg) => {
             bug!("LLVM backend does not support SPIR-V")
         }
+        InlineAsmRegClass::E2k64(_) => None,
         InlineAsmRegClass::Err => unreachable!(),
     }
 }
@@ -786,6 +789,7 @@ fn dummy_output_type(cx: &CodegenCx<'ll, 'tcx>, reg: InlineAsmRegClass) -> &'ll 
         InlineAsmRegClass::SpirV(SpirVInlineAsmRegClass::reg) => {
             bug!("LLVM backend does not support SPIR-V")
         }
+        InlineAsmRegClass::E2k64(E2k64InlineAsmRegClass::reg) => cx.type_i64(),
         InlineAsmRegClass::Err => unreachable!(),
     }
 }

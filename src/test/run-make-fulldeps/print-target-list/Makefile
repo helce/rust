@@ -1,5 +1,7 @@
 -include ../tools.mk
 
+# ignore-e2k64
+
 # Checks that all the targets returned by `rustc --print target-list` are valid
 # target specifications
 all:
