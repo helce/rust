@@ -88,7 +88,6 @@ use rustc_middle::hir::place::{PlaceBase, PlaceWithHirId};
 use rustc_middle::ty::adjustment;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::Span;
-use rustc_trait_selection::opaque_types::InferCtxtExt as _;
 use std::ops::Deref;
 
 // a variation on try that just returns unit
@@ -104,7 +103,7 @@ macro_rules! ignore_err {
     };
 }
 
-trait OutlivesEnvironmentExt<'tcx> {
+pub(crate) trait OutlivesEnvironmentExt<'tcx> {
     fn add_implied_bounds(
         &mut self,
         infcx: &InferCtxt<'a, 'tcx>,
@@ -340,8 +339,29 @@ impl<'a, 'tcx> RegionCtxt<'a, 'tcx> {
         self.link_fn_params(body.params);
         self.visit_body(body);
         self.visit_region_obligations(body_id.hir_id);
+    }
 
-        self.constrain_opaque_types(self.outlives_environment.free_region_map());
+    fn visit_inline_const(&mut self, id: hir::HirId, body: &'tcx hir::Body<'tcx>) {
+        debug!("visit_inline_const(id={:?})", id);
+
+        // Save state of current function. We will restore afterwards.
+        let old_body_id = self.body_id;
+        let old_body_owner = self.body_owner;
+        let env_snapshot = self.outlives_environment.push_snapshot_pre_typeck_child();
+
+        let body_id = body.id();
+        self.body_id = body_id.hir_id;
+        self.body_owner = self.tcx.hir().body_owner_def_id(body_id);
+
+        self.outlives_environment.save_implied_bounds(body_id.hir_id);
+
+        self.visit_body(body);
+        self.visit_region_obligations(body_id.hir_id);
+
+        // Restore state from previous function.
+        self.outlives_environment.pop_snapshot_post_typeck_child(env_snapshot);
+        self.body_id = old_body_id;
+        self.body_owner = old_body_owner;
     }
 
     fn visit_region_obligations(&mut self, hir_id: hir::HirId) {
@@ -409,13 +429,13 @@ impl<'a, 'tcx> Visitor<'tcx> for RegionCtxt<'a, 'tcx> {
         // `visit_fn_body`.  We will restore afterwards.
         let old_body_id = self.body_id;
         let old_body_owner = self.body_owner;
-        let env_snapshot = self.outlives_environment.push_snapshot_pre_closure();
+        let env_snapshot = self.outlives_environment.push_snapshot_pre_typeck_child();
 
         let body = self.tcx.hir().body(body_id);
         self.visit_fn_body(hir_id, body, span);
 
         // Restore state from previous function.
-        self.outlives_environment.pop_snapshot_post_closure(env_snapshot);
+        self.outlives_environment.pop_snapshot_post_typeck_child(env_snapshot);
         self.body_id = old_body_id;
         self.body_owner = old_body_owner;
     }
@@ -461,6 +481,11 @@ impl<'a, 'tcx> Visitor<'tcx> for RegionCtxt<'a, 'tcx> {
                 self.link_match(discr, arms);
 
                 intravisit::walk_expr(self, expr);
+            }
+
+            hir::ExprKind::ConstBlock(anon_const) => {
+                let body = self.tcx.hir().body(anon_const.body);
+                self.visit_inline_const(anon_const.hir_id, body);
             }
 
             _ => intravisit::walk_expr(self, expr),

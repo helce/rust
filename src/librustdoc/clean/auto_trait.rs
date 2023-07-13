@@ -76,17 +76,17 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
             new_generics
         });
 
-        let negative_polarity;
+        let polarity;
         let new_generics = match result {
             AutoTraitResult::PositiveImpl(new_generics) => {
-                negative_polarity = false;
+                polarity = ty::ImplPolarity::Positive;
                 if discard_positive_impl {
                     return None;
                 }
                 new_generics
             }
             AutoTraitResult::NegativeImpl => {
-                negative_polarity = true;
+                polarity = ty::ImplPolarity::Negative;
 
                 // For negative impls, we use the generic params, but *not* the predicates,
                 // from the original type. Otherwise, the displayed impl appears to be a
@@ -115,15 +115,13 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
             visibility: Inherited,
             def_id: ItemId::Auto { trait_: trait_def_id, for_: item_def_id },
             kind: box ImplItem(Impl {
-                span: Span::dummy(),
                 unsafety: hir::Unsafety::Normal,
                 generics: new_generics,
                 trait_: Some(trait_ref.clean(self.cx)),
                 for_: ty.clean(self.cx),
                 items: Vec::new(),
-                negative_polarity,
-                synthetic: true,
-                blanket_impl: None,
+                polarity,
+                kind: ImplKind::Auto,
             }),
             cfg: None,
         })
@@ -136,7 +134,7 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
         let f = auto_trait::AutoTraitFinder::new(tcx);
 
         debug!("get_auto_trait_impls({:?})", ty);
-        let auto_traits: Vec<_> = self.cx.auto_traits.iter().cloned().collect();
+        let auto_traits: Vec<_> = self.cx.auto_traits.iter().copied().collect();
         let mut auto_traits: Vec<Item> = auto_traits
             .into_iter()
             .filter_map(|trait_def_id| {
@@ -193,8 +191,8 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
         // to its smaller and larger regions. Note that 'larger' regions correspond
         // to sub-regions in Rust code (e.g., in 'a: 'b, 'a is the larger region).
         for constraint in regions.constraints.keys() {
-            match constraint {
-                &Constraint::VarSubVar(r1, r2) => {
+            match *constraint {
+                Constraint::VarSubVar(r1, r2) => {
                     {
                         let deps1 = vid_map.entry(RegionTarget::RegionVid(r1)).or_default();
                         deps1.larger.insert(RegionTarget::RegionVid(r2));
@@ -203,15 +201,15 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                     let deps2 = vid_map.entry(RegionTarget::RegionVid(r2)).or_default();
                     deps2.smaller.insert(RegionTarget::RegionVid(r1));
                 }
-                &Constraint::RegSubVar(region, vid) => {
+                Constraint::RegSubVar(region, vid) => {
                     let deps = vid_map.entry(RegionTarget::RegionVid(vid)).or_default();
                     deps.smaller.insert(RegionTarget::Region(region));
                 }
-                &Constraint::VarSubReg(vid, region) => {
+                Constraint::VarSubReg(vid, region) => {
                     let deps = vid_map.entry(RegionTarget::RegionVid(vid)).or_default();
                     deps.larger.insert(RegionTarget::Region(region));
                 }
-                &Constraint::RegSubReg(r1, r2) => {
+                Constraint::RegSubReg(r1, r2) => {
                     // The constraint is already in the form that we want, so we're done with it
                     // Desired order is 'larger, smaller', so flip then
                     if region_name(r1) != region_name(r2) {
@@ -513,8 +511,8 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                         // as we want to combine them with any 'Output' qpaths
                         // later
 
-                        let is_fn = match &mut b {
-                            &mut GenericBound::TraitBound(ref mut p, _) => {
+                        let is_fn = match b {
+                            GenericBound::TraitBound(ref mut p, _) => {
                                 // Insert regions into the for_generics hash map first, to ensure
                                 // that we don't end up with duplicate bounds (e.g., for<'b, 'b>)
                                 for_generics.extend(p.generic_params.clone());
@@ -576,7 +574,7 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
                                         rhs,
                                     });
                                     continue; // If something other than a Fn ends up
-                                    // with parenthesis, leave it alone
+                                    // with parentheses, leave it alone
                                 }
                             }
 
@@ -699,8 +697,8 @@ impl<'a, 'tcx> AutoTraitFinder<'a, 'tcx> {
 }
 
 fn region_name(region: Region<'_>) -> Option<Symbol> {
-    match region {
-        &ty::ReEarlyBound(r) => Some(r.name),
+    match *region {
+        ty::ReEarlyBound(r) => Some(r.name),
         _ => None,
     }
 }
@@ -717,8 +715,8 @@ impl<'a, 'tcx> TypeFolder<'tcx> for RegionReplacer<'a, 'tcx> {
     }
 
     fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
-        (match r {
-            &ty::ReVar(vid) => self.vid_to_region.get(&vid).cloned(),
+        (match *r {
+            ty::ReVar(vid) => self.vid_to_region.get(&vid).cloned(),
             _ => None,
         })
         .unwrap_or_else(|| r.super_fold_with(self))

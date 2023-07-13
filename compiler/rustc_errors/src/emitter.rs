@@ -15,7 +15,7 @@ use rustc_span::{MultiSpan, SourceFile, Span};
 use crate::snippet::{Annotation, AnnotationType, Line, MultilineAnnotation, Style, StyledString};
 use crate::styled_buffer::StyledBuffer;
 use crate::{
-    CodeSuggestion, Diagnostic, DiagnosticId, Level, SubDiagnostic, SubstitutionHighlight,
+    CodeSuggestion, Diagnostic, DiagnosticId, Handler, Level, SubDiagnostic, SubstitutionHighlight,
     SuggestionStyle,
 };
 
@@ -449,11 +449,7 @@ pub trait Emitter {
         span: &mut MultiSpan,
         children: &mut Vec<SubDiagnostic>,
     ) {
-        let source_map = if let Some(ref sm) = source_map {
-            sm
-        } else {
-            return;
-        };
+        let Some(source_map) = source_map else { return };
         debug!("fix_multispans_in_extern_macros: before: span={:?} children={:?}", span, children);
         self.fix_multispan_in_extern_macros(source_map, span);
         for child in children.iter_mut() {
@@ -527,14 +523,27 @@ impl Emitter for EmitterWriter {
     }
 }
 
-/// An emitter that does nothing when emitting a diagnostic.
-pub struct SilentEmitter;
+/// An emitter that does nothing when emitting a non-fatal diagnostic.
+/// Fatal diagnostics are forwarded to `fatal_handler` to avoid silent
+/// failures of rustc, as witnessed e.g. in issue #89358.
+pub struct SilentEmitter {
+    pub fatal_handler: Handler,
+    pub fatal_note: Option<String>,
+}
 
 impl Emitter for SilentEmitter {
     fn source_map(&self) -> Option<&Lrc<SourceMap>> {
         None
     }
-    fn emit_diagnostic(&mut self, _: &Diagnostic) {}
+    fn emit_diagnostic(&mut self, d: &Diagnostic) {
+        if d.level == Level::Fatal {
+            let mut d = d.clone();
+            if let Some(ref note) = self.fatal_note {
+                d.note(note);
+            }
+            self.fatal_handler.emit_diagnostic(&d);
+        }
+    }
 }
 
 /// Maximum number of lines we will print for a multiline suggestion; arbitrary.
@@ -721,7 +730,7 @@ impl EmitterWriter {
         }
 
         let source_string = match file.get_line(line.line_index - 1) {
-            Some(s) => replace_tabs(&*s),
+            Some(s) => normalize_whitespace(&*s),
             None => return Vec::new(),
         };
 
@@ -1257,22 +1266,37 @@ impl EmitterWriter {
             }
             self.msg_to_buffer(&mut buffer, msg, max_line_num_len, "note", None);
         } else {
+            let mut label_width = 0;
             // The failure note level itself does not provide any useful diagnostic information
             if *level != Level::FailureNote {
                 buffer.append(0, level.to_str(), Style::Level(*level));
+                label_width += level.to_str().len();
             }
             // only render error codes, not lint codes
             if let Some(DiagnosticId::Error(ref code)) = *code {
                 buffer.append(0, "[", Style::Level(*level));
                 buffer.append(0, &code, Style::Level(*level));
                 buffer.append(0, "]", Style::Level(*level));
+                label_width += 2 + code.len();
             }
             let header_style = if is_secondary { Style::HeaderMsg } else { Style::MainHeaderMsg };
             if *level != Level::FailureNote {
                 buffer.append(0, ": ", header_style);
+                label_width += 2;
             }
             for &(ref text, _) in msg.iter() {
-                buffer.append(0, &replace_tabs(text), header_style);
+                // Account for newlines to align output to its label.
+                for (line, text) in normalize_whitespace(text).lines().enumerate() {
+                    buffer.append(
+                        0 + line,
+                        &format!(
+                            "{}{}",
+                            if line == 0 { String::new() } else { " ".repeat(label_width) },
+                            text
+                        ),
+                        header_style,
+                    );
+                }
             }
         }
 
@@ -1526,7 +1550,7 @@ impl EmitterWriter {
 
                             self.draw_line(
                                 &mut buffer,
-                                &replace_tabs(&unannotated_line),
+                                &normalize_whitespace(&unannotated_line),
                                 annotated_file.lines[line_idx + 1].line_index - 1,
                                 last_buffer_line_num,
                                 width_offset,
@@ -1648,7 +1672,7 @@ impl EmitterWriter {
                     buffer.puts(
                         row_num - 1,
                         max_line_num_len + 3,
-                        &replace_tabs(
+                        &normalize_whitespace(
                             &*file_lines
                                 .file
                                 .get_line(file_lines.lines[line_pos].line_index)
@@ -1674,7 +1698,7 @@ impl EmitterWriter {
                 }
 
                 // print the suggestion
-                buffer.append(row_num, &replace_tabs(line), Style::NoStyle);
+                buffer.append(row_num, &normalize_whitespace(line), Style::NoStyle);
 
                 // Colorize addition/replacements with green.
                 for &SubstitutionHighlight { start, end } in highlight_parts {
@@ -2057,6 +2081,7 @@ fn num_decimal_digits(num: usize) -> usize {
 // We replace some characters so the CLI output is always consistent and underlines aligned.
 const OUTPUT_REPLACEMENTS: &[(char, &str)] = &[
     ('\t', "    "),   // We do our own tab replacement
+    ('\u{200D}', ""), // Replace ZWJ with nothing for consistent terminal output of grapheme clusters.
     ('\u{202A}', ""), // The following unicode text flow control characters are inconsistently
     ('\u{202B}', ""), // supported accross CLIs and can cause confusion due to the bytes on disk
     ('\u{202D}', ""), // not corresponding to the visible source code, so we replace them always.
@@ -2068,7 +2093,7 @@ const OUTPUT_REPLACEMENTS: &[(char, &str)] = &[
     ('\u{2069}', ""),
 ];
 
-fn replace_tabs(str: &str) -> String {
+fn normalize_whitespace(str: &str) -> String {
     let mut s = str.to_string();
     for (c, replacement) in OUTPUT_REPLACEMENTS {
         s = s.replace(*c, replacement);

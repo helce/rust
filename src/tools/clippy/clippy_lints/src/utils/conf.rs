@@ -23,6 +23,14 @@ pub enum DisallowedMethod {
     WithReason { path: String, reason: Option<String> },
 }
 
+/// A single disallowed type, used by the `DISALLOWED_TYPE` lint.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum DisallowedType {
+    Simple(String),
+    WithReason { path: String, reason: Option<String> },
+}
+
 /// Conf with parse errors
 #[derive(Default)]
 pub struct TryConf {
@@ -255,7 +263,7 @@ define_Conf! {
     /// Lint: DISALLOWED_TYPE.
     ///
     /// The list of disallowed types, written as fully qualified paths.
-    (disallowed_types: Vec<String> = Vec::new()),
+    (disallowed_types: Vec<crate::utils::conf::DisallowedType> = Vec::new()),
     /// Lint: UNREADABLE_LITERAL.
     ///
     /// Should the fraction of a decimal be linted to include separators.
@@ -280,10 +288,10 @@ define_Conf! {
     ///
     /// The list of imports to always rename, a fully qualified path followed by the rename.
     (enforced_import_renames: Vec<crate::utils::conf::Rename> = Vec::new()),
-    /// Lint: RESTRICTED_SCRIPTS.
+    /// Lint: DISALLOWED_SCRIPT_IDENTS.
     ///
     /// The list of unicode scripts allowed to be used in the scope.
-    (allowed_scripts: Vec<String> = vec!["Latin".to_string()]),
+    (allowed_scripts: Vec<String> = ["Latin"].iter().map(ToString::to_string).collect()),
     /// Lint: NON_SEND_FIELDS_IN_SEND_TY.
     ///
     /// Whether to apply the raw pointer heuristic to determine if a type is `Send`.

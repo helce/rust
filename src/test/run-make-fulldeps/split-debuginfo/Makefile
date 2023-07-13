@@ -1,7 +1,6 @@
 -include ../tools.mk
 
 # ignore-e2k64 NIY
-# min-llvm-version: 11.0
 
 all: off packed unpacked
 

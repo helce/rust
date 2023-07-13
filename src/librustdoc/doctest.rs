@@ -1,7 +1,7 @@
 use rustc_ast as ast;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::sync::Lrc;
-use rustc_errors::{ColorConfig, ErrorReported};
+use rustc_errors::{ColorConfig, ErrorReported, FatalError};
 use rustc_hir as hir;
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_hir::intravisit;
@@ -38,9 +38,6 @@ use crate::passes::span_of_attrs;
 crate struct TestOptions {
     /// Whether to disable the default `extern crate my_crate;` when creating doctests.
     crate no_crate_inject: bool,
-    /// Whether to emit compilation warnings when compiling doctests. Setting this will suppress
-    /// the default `#![allow(unused)]`.
-    crate display_doctest_warnings: bool,
     /// Additional crate-level attributes to add to doctests.
     crate attrs: Vec<String>,
 }
@@ -65,6 +62,8 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
         }
     });
 
+    debug!(?lint_opts);
+
     let crate_types =
         if options.proc_macro_crate { vec![CrateType::ProcMacro] } else { vec![CrateType::Rlib] };
 
@@ -72,8 +71,8 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
         maybe_sysroot: options.maybe_sysroot.clone(),
         search_paths: options.libs.clone(),
         crate_types,
-        lint_opts: if !options.display_doctest_warnings { lint_opts } else { vec![] },
-        lint_cap: Some(options.lint_cap.unwrap_or_else(|| lint::Forbid)),
+        lint_opts,
+        lint_cap: Some(options.lint_cap.unwrap_or(lint::Forbid)),
         cg: options.codegen_options.clone(),
         externs: options.externs.clone(),
         unstable_features: options.render_options.unstable_features,
@@ -106,7 +105,6 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
     };
 
     let test_args = options.test_args.clone();
-    let display_doctest_warnings = options.display_doctest_warnings;
     let nocapture = options.nocapture;
     let externs = options.externs.clone();
     let json_unused_externs = options.json_unused_externs;
@@ -118,8 +116,7 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
             let collector = global_ctxt.enter(|tcx| {
                 let crate_attrs = tcx.hir().attrs(CRATE_HIR_ID);
 
-                let mut opts = scrape_test_config(crate_attrs);
-                opts.display_doctest_warnings |= options.display_doctest_warnings;
+                let opts = scrape_test_config(crate_attrs);
                 let enable_per_target_ignores = options.enable_per_target_ignores;
                 let mut collector = Collector::new(
                     tcx.crate_name(LOCAL_CRATE),
@@ -149,7 +146,9 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
 
                 collector
             });
-            compiler.session().abort_if_errors();
+            if compiler.session().diagnostic().has_errors_or_lint_errors() {
+                FatalError.raise();
+            }
 
             let unused_extern_reports = collector.unused_extern_reports.clone();
             let compiling_test_count = collector.compiling_test_count.load(Ordering::SeqCst);
@@ -163,7 +162,7 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
         Err(ErrorReported) => return Err(ErrorReported),
     };
 
-    run_tests(test_args, nocapture, display_doctest_warnings, tests);
+    run_tests(test_args, nocapture, tests);
 
     // Collect and warn about unused externs, but only if we've gotten
     // reports for each doctest
@@ -176,7 +175,7 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
                 .iter()
                 .map(|uexts| uexts.unused_extern_names.iter().collect::<FxHashSet<&String>>())
                 .fold(extern_names, |uextsa, uextsb| {
-                    uextsa.intersection(&uextsb).map(|v| *v).collect::<FxHashSet<&String>>()
+                    uextsa.intersection(&uextsb).copied().collect::<FxHashSet<&String>>()
                 })
                 .iter()
                 .map(|v| (*v).clone())
@@ -206,29 +205,19 @@ crate fn run(options: Options) -> Result<(), ErrorReported> {
     Ok(())
 }
 
-crate fn run_tests(
-    mut test_args: Vec<String>,
-    nocapture: bool,
-    display_doctest_warnings: bool,
-    tests: Vec<test::TestDescAndFn>,
-) {
+crate fn run_tests(mut test_args: Vec<String>, nocapture: bool, tests: Vec<test::TestDescAndFn>) {
     test_args.insert(0, "rustdoctest".to_string());
     if nocapture {
         test_args.push("--nocapture".to_string());
     }
-    test::test_main(
-        &test_args,
-        tests,
-        Some(test::Options::new().display_output(display_doctest_warnings)),
-    );
+    test::test_main(&test_args, tests, None);
 }
 
 // Look for `#![doc(test(no_crate_inject))]`, used by crates in the std facade.
 fn scrape_test_config(attrs: &[ast::Attribute]) -> TestOptions {
     use rustc_ast_pretty::pprust;
 
-    let mut opts =
-        TestOptions { no_crate_inject: false, display_doctest_warnings: false, attrs: Vec::new() };
+    let mut opts = TestOptions { no_crate_inject: false, attrs: Vec::new() };
 
     let test_attrs: Vec<_> = attrs
         .iter()
@@ -423,7 +412,7 @@ fn run_test(
 
     // Add a \n to the end to properly terminate the last line,
     // but only if there was output to be printed
-    if out_lines.len() > 0 {
+    if !out_lines.is_empty() {
         out_lines.push("");
     }
 
@@ -508,7 +497,7 @@ crate fn make_test(
     let mut prog = String::new();
     let mut supports_color = false;
 
-    if opts.attrs.is_empty() && !opts.display_doctest_warnings {
+    if opts.attrs.is_empty() {
         // If there aren't any attributes supplied by #![doc(test(attr(...)))], then allow some
         // lints that are commonly triggered in doctests. The crate-level test attributes are
         // commonly used to make tests fail in case they trigger warnings, so having this there in
@@ -611,6 +600,10 @@ crate fn make_test(
                         break;
                     }
                 }
+
+                // The supplied slice is only used for diagnostics,
+                // which are swallowed here anyway.
+                parser.maybe_consume_incorrect_semicolon(&[]);
             }
 
             // Reset errors so that they won't be reported as compiler bugs when dropping the
@@ -1124,7 +1117,7 @@ impl<'a, 'hir, 'tcx> HirCollector<'a, 'hir, 'tcx> {
         let mut attrs = Attributes::from_ast(ast_attrs, None);
 
         if let Some(ref cfg) = ast_attrs.cfg(self.tcx, &FxHashSet::default()) {
-            if !cfg.matches(&self.sess.parse_sess, Some(&self.sess.features_untracked())) {
+            if !cfg.matches(&self.sess.parse_sess, Some(self.sess.features_untracked())) {
                 return;
             }
         }

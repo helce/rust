@@ -30,8 +30,7 @@ use crate::hash::Hasher;
 /// [arc]: ../../std/sync/struct.Arc.html
 /// [ub]: ../../reference/behavior-considered-undefined.html
 #[stable(feature = "rust1", since = "1.0.0")]
-#[cfg_attr(all(not(test), bootstrap), rustc_diagnostic_item = "send_trait")]
-#[cfg_attr(all(not(test), not(bootstrap)), rustc_diagnostic_item = "Send")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "Send")]
 #[rustc_on_unimplemented(
     message = "`{Self}` cannot be sent between threads safely",
     label = "`{Self}` cannot be sent between threads safely"
@@ -360,7 +359,6 @@ pub trait StructuralEq {
 ///
 /// * Function item types (i.e., the distinct types defined for each function)
 /// * Function pointer types (e.g., `fn() -> i32`)
-/// * Array types, for all sizes, if the item type also implements `Copy` (e.g., `[i32; 123456]`)
 /// * Tuple types, if each component also implements `Copy` (e.g., `()`, `(i32, bool)`)
 /// * Closure types, if they capture no value from the environment
 ///   or if all such captured values implement `Copy` themselves.

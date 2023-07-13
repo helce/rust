@@ -90,6 +90,7 @@ pub struct Config {
     // llvm codegen options
     pub llvm_skip_rebuild: bool,
     pub llvm_assertions: bool,
+    pub llvm_tests: bool,
     pub llvm_plugins: bool,
     pub llvm_optimize: bool,
     pub llvm_thin_lto: bool,
@@ -140,7 +141,7 @@ pub struct Config {
     pub rust_verify_llvm_ir: bool,
     pub rust_thin_lto_import_instr_limit: Option<u32>,
     pub rust_remap_debuginfo: bool,
-    pub rust_new_symbol_mangling: bool,
+    pub rust_new_symbol_mangling: Option<bool>,
     pub rust_profile_use: Option<String>,
     pub rust_profile_generate: Option<String>,
     pub llvm_profile_use: Option<String>,
@@ -422,6 +423,7 @@ struct Llvm {
     thin_lto: Option<bool>,
     release_debuginfo: Option<bool>,
     assertions: Option<bool>,
+    tests: Option<bool>,
     plugins: Option<bool>,
     ccache: Option<StringOrBool>,
     version_check: Option<bool>,
@@ -715,6 +717,7 @@ impl Config {
         // Store off these values as options because if they're not provided
         // we'll infer default values for them later
         let mut llvm_assertions = None;
+        let mut llvm_tests = None;
         let mut llvm_plugins = None;
         let mut debug = None;
         let mut debug_assertions = None;
@@ -740,6 +743,7 @@ impl Config {
             }
             set(&mut config.ninja_in_file, llvm.ninja);
             llvm_assertions = llvm.assertions;
+            llvm_tests = llvm.tests;
             llvm_plugins = llvm.plugins;
             llvm_skip_rebuild = llvm_skip_rebuild.or(llvm.skip_rebuild);
             set(&mut config.llvm_optimize, llvm.optimize);
@@ -765,10 +769,12 @@ impl Config {
             config.llvm_from_ci = match llvm.download_ci_llvm {
                 Some(StringOrBool::String(s)) => {
                     assert!(s == "if-available", "unknown option `{}` for download-ci-llvm", s);
-                    // This is currently all tier 1 targets (since others may not have CI artifacts)
+                    // This is currently all tier 1 targets and tier 2 targets with host tools
+                    // (since others may not have CI artifacts)
                     // https://doc.rust-lang.org/rustc/platform-support.html#tier-1
                     // FIXME: this is duplicated in bootstrap.py
                     let supported_platforms = [
+                        // tier 1
                         "aarch64-unknown-linux-gnu",
                         "i686-pc-windows-gnu",
                         "i686-pc-windows-msvc",
@@ -777,6 +783,26 @@ impl Config {
                         "x86_64-apple-darwin",
                         "x86_64-pc-windows-gnu",
                         "x86_64-pc-windows-msvc",
+                        // tier 2 with host tools
+                        "aarch64-apple-darwin",
+                        "aarch64-pc-windows-msvc",
+                        "aarch64-unknown-linux-musl",
+                        "arm-unknown-linux-gnueabi",
+                        "arm-unknown-linux-gnueabihf",
+                        "armv7-unknown-linux-gnueabihf",
+                        "mips-unknown-linux-gnu",
+                        "mips64-unknown-linux-gnuabi64",
+                        "mips64el-unknown-linux-gnuabi64",
+                        "mipsel-unknown-linux-gnu",
+                        "powerpc-unknown-linux-gnu",
+                        "powerpc64-unknown-linux-gnu",
+                        "powerpc64le-unknown-linux-gnu",
+                        "riscv64gc-unknown-linux-gnu",
+                        "s390x-unknown-linux-gnu",
+                        "x86_64-unknown-freebsd",
+                        "x86_64-unknown-illumos",
+                        "x86_64-unknown-linux-musl",
+                        "x86_64-unknown-netbsd",
                     ];
                     supported_platforms.contains(&&*config.build.triple)
                 }
@@ -848,7 +874,7 @@ impl Config {
             config.rust_run_dsymutil = rust.run_dsymutil.unwrap_or(false);
             optimize = rust.optimize;
             ignore_git = rust.ignore_git;
-            set(&mut config.rust_new_symbol_mangling, rust.new_symbol_mangling);
+            config.rust_new_symbol_mangling = rust.new_symbol_mangling;
             set(&mut config.rust_optimize_tests, rust.optimize_tests);
             set(&mut config.codegen_tests, rust.codegen_tests);
             set(&mut config.rust_rpath, rust.rpath);
@@ -969,6 +995,7 @@ impl Config {
 
         config.llvm_skip_rebuild = llvm_skip_rebuild.unwrap_or(false);
         config.llvm_assertions = llvm_assertions.unwrap_or(false);
+        config.llvm_tests = llvm_tests.unwrap_or(false);
         config.llvm_plugins = llvm_plugins.unwrap_or(false);
         config.rust_optimize = optimize.unwrap_or(true);
 

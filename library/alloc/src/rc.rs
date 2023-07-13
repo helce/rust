@@ -41,7 +41,7 @@
 //! use std::rc::Rc;
 //!
 //! let my_rc = Rc::new(());
-//! Rc::downgrade(&my_rc);
+//! let my_weak = Rc::downgrade(&my_rc);
 //! ```
 //!
 //! `Rc<T>`'s implementations of traits like `Clone` may also be called using
@@ -313,11 +313,19 @@ pub struct Rc<T: ?Sized> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized> !marker::Send for Rc<T> {}
+
+// Note that this negative impl isn't strictly necessary for correctness,
+// as `Rc` transitively contains a `Cell`, which is itself `!Sync`.
+// However, given how important `Rc`'s `!Sync`-ness is,
+// having an explicit negative impl is nice for documentation purposes
+// and results in nicer error messages.
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized> !marker::Sync for Rc<T> {}
 
 #[stable(feature = "catch_unwind", since = "1.9.0")]
 impl<T: RefUnwindSafe + ?Sized> UnwindSafe for Rc<T> {}
+#[stable(feature = "rc_ref_unwind_safe", since = "1.58.0")]
+impl<T: RefUnwindSafe + ?Sized> RefUnwindSafe for Rc<T> {}
 
 #[unstable(feature = "coerce_unsized", issue = "27732")]
 impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Rc<U>> for Rc<T> {}
@@ -333,12 +341,12 @@ impl<T: ?Sized> Rc<T> {
         unsafe { self.ptr.as_ref() }
     }
 
-    fn from_inner(ptr: NonNull<RcBox<T>>) -> Self {
+    unsafe fn from_inner(ptr: NonNull<RcBox<T>>) -> Self {
         Self { ptr, phantom: PhantomData }
     }
 
     unsafe fn from_ptr(ptr: *mut RcBox<T>) -> Self {
-        Self::from_inner(unsafe { NonNull::new_unchecked(ptr) })
+        unsafe { Self::from_inner(NonNull::new_unchecked(ptr)) }
     }
 }
 
@@ -359,9 +367,11 @@ impl<T> Rc<T> {
         // pointers, which ensures that the weak destructor never frees
         // the allocation while the strong destructor is running, even
         // if the weak pointer is stored inside the strong one.
-        Self::from_inner(
-            Box::leak(box RcBox { strong: Cell::new(1), weak: Cell::new(1), value }).into(),
-        )
+        unsafe {
+            Self::from_inner(
+                Box::leak(box RcBox { strong: Cell::new(1), weak: Cell::new(1), value }).into(),
+            )
+        }
     }
 
     /// Constructs a new `Rc<T>` using a weak reference to itself. Attempting
@@ -412,16 +422,16 @@ impl<T> Rc<T> {
         // otherwise.
         let data = data_fn(&weak);
 
-        unsafe {
+        let strong = unsafe {
             let inner = init_ptr.as_ptr();
             ptr::write(ptr::addr_of_mut!((*inner).value), data);
 
             let prev_value = (*inner).strong.get();
             debug_assert_eq!(prev_value, 0, "No prior strong references should exist");
             (*inner).strong.set(1);
-        }
 
-        let strong = Rc::from_inner(init_ptr);
+            Rc::from_inner(init_ptr)
+        };
 
         // Strong references should collectively own a shared weak reference,
         // so don't run the destructor for our old weak reference.
@@ -513,10 +523,12 @@ impl<T> Rc<T> {
         // pointers, which ensures that the weak destructor never frees
         // the allocation while the strong destructor is running, even
         // if the weak pointer is stored inside the strong one.
-        Ok(Self::from_inner(
-            Box::leak(Box::try_new(RcBox { strong: Cell::new(1), weak: Cell::new(1), value })?)
-                .into(),
-        ))
+        unsafe {
+            Ok(Self::from_inner(
+                Box::leak(Box::try_new(RcBox { strong: Cell::new(1), weak: Cell::new(1), value })?)
+                    .into(),
+            ))
+        }
     }
 
     /// Constructs a new `Rc` with uninitialized contents, returning an error if the allocation fails
@@ -738,7 +750,7 @@ impl<T> Rc<mem::MaybeUninit<T>> {
     #[unstable(feature = "new_uninit", issue = "63291")]
     #[inline]
     pub unsafe fn assume_init(self) -> Rc<T> {
-        Rc::from_inner(mem::ManuallyDrop::new(self).ptr.cast())
+        unsafe { Rc::from_inner(mem::ManuallyDrop::new(self).ptr.cast()) }
     }
 }
 
@@ -889,6 +901,8 @@ impl<T: ?Sized> Rc<T> {
     ///
     /// let weak_five = Rc::downgrade(&five);
     /// ```
+    #[must_use = "this returns a new `Weak` pointer, \
+                  without modifying the original `Rc`"]
     #[stable(feature = "rc_weak", since = "1.4.0")]
     pub fn downgrade(this: &Self) -> Weak<T> {
         this.inner().inc_weak();
@@ -1204,9 +1218,11 @@ impl Rc<dyn Any> {
     /// ```
     pub fn downcast<T: Any>(self) -> Result<Rc<T>, Rc<dyn Any>> {
         if (*self).is::<T>() {
-            let ptr = self.ptr.cast::<RcBox<T>>();
-            forget(self);
-            Ok(Rc::from_inner(ptr))
+            unsafe {
+                let ptr = self.ptr.cast::<RcBox<T>>();
+                forget(self);
+                Ok(Rc::from_inner(ptr))
+            }
         } else {
             Err(self)
         }
@@ -1479,8 +1495,10 @@ impl<T: ?Sized> Clone for Rc<T> {
     /// ```
     #[inline]
     fn clone(&self) -> Rc<T> {
-        self.inner().inc_strong();
-        Self::from_inner(self.ptr)
+        unsafe {
+            self.inner().inc_strong();
+            Self::from_inner(self.ptr)
+        }
     }
 }
 
@@ -2235,17 +2253,21 @@ impl<T: ?Sized> Weak<T> {
     #[stable(feature = "rc_weak", since = "1.4.0")]
     pub fn upgrade(&self) -> Option<Rc<T>> {
         let inner = self.inner()?;
+
         if inner.strong() == 0 {
             None
         } else {
-            inner.inc_strong();
-            Some(Rc::from_inner(self.ptr))
+            unsafe {
+                inner.inc_strong();
+                Some(Rc::from_inner(self.ptr))
+            }
         }
     }
 
     /// Gets the number of strong (`Rc`) pointers pointing to this allocation.
     ///
     /// If `self` was created using [`Weak::new`], this will return 0.
+    #[must_use]
     #[stable(feature = "weak_counts", since = "1.41.0")]
     pub fn strong_count(&self) -> usize {
         if let Some(inner) = self.inner() { inner.strong() } else { 0 }
@@ -2254,6 +2276,7 @@ impl<T: ?Sized> Weak<T> {
     /// Gets the number of `Weak` pointers pointing to this allocation.
     ///
     /// If no strong pointers remain, this will return zero.
+    #[must_use]
     #[stable(feature = "weak_counts", since = "1.41.0")]
     pub fn weak_count(&self) -> usize {
         self.inner()
@@ -2324,6 +2347,7 @@ impl<T: ?Sized> Weak<T> {
     /// assert!(!first.ptr_eq(&third));
     /// ```
     #[inline]
+    #[must_use]
     #[stable(feature = "weak_ptr_eq", since = "1.39.0")]
     pub fn ptr_eq(&self, other: &Self) -> bool {
         self.ptr.as_ptr() == other.ptr.as_ptr()

@@ -7,8 +7,8 @@ use super::Pass;
 use crate::clean;
 use crate::clean::*;
 use crate::core::DocContext;
-use crate::fold::DocFolder;
 use crate::html::markdown::{find_testable_code, ErrorCodes, Ignore, LangString};
+use crate::visit::DocVisitor;
 use crate::visit_ast::inherits_doc_hidden;
 use rustc_hir as hir;
 use rustc_middle::lint::LintLevelSource;
@@ -27,17 +27,17 @@ struct DocTestVisibilityLinter<'a, 'tcx> {
 
 crate fn check_doc_test_visibility(krate: Crate, cx: &mut DocContext<'_>) -> Crate {
     let mut coll = DocTestVisibilityLinter { cx };
-
-    coll.fold_crate(krate)
+    coll.visit_crate(&krate);
+    krate
 }
 
-impl<'a, 'tcx> DocFolder for DocTestVisibilityLinter<'a, 'tcx> {
-    fn fold_item(&mut self, item: Item) -> Option<Item> {
+impl<'a, 'tcx> DocVisitor for DocTestVisibilityLinter<'a, 'tcx> {
+    fn visit_item(&mut self, item: &Item) {
         let dox = item.attrs.collapsed_doc_value().unwrap_or_else(String::new);
 
         look_for_tests(self.cx, &dox, &item);
 
-        Some(self.fold_item_recur(item))
+        self.visit_item_recur(item)
     }
 }
 
@@ -115,10 +115,10 @@ crate fn look_for_tests<'tcx>(cx: &DocContext<'tcx>, dox: &str, item: &Item) {
 
     let mut tests = Tests { found_tests: 0 };
 
-    find_testable_code(&dox, &mut tests, ErrorCodes::No, false, None);
+    find_testable_code(dox, &mut tests, ErrorCodes::No, false, None);
 
     if tests.found_tests == 0 && cx.tcx.sess.is_nightly_build() {
-        if should_have_doc_example(cx, &item) {
+        if should_have_doc_example(cx, item) {
             debug!("reporting error for {:?} (hir_id={:?})", item, hir_id);
             let sp = item.attr_span(cx.tcx);
             cx.tcx.struct_span_lint_hir(

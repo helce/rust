@@ -35,7 +35,6 @@ use rustc_span::source_map::{original_sp, DUMMY_SP};
 use rustc_span::symbol::{kw, sym, Ident};
 use rustc_span::{self, BytePos, MultiSpan, Span};
 use rustc_trait_selection::infer::InferCtxtExt as _;
-use rustc_trait_selection::opaque_types::InferCtxtExt as _;
 use rustc_trait_selection::traits::error_reporting::InferCtxtExt as _;
 use rustc_trait_selection::traits::{
     self, ObligationCause, ObligationCauseCode, StatementAsExpression, TraitEngine, TraitEngineExt,
@@ -587,38 +586,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
     }
 
-    /// Given a fully substituted set of bounds (`generic_bounds`), and the values with which each
-    /// type/region parameter was instantiated (`substs`), creates and registers suitable
-    /// trait/region obligations.
-    ///
-    /// For example, if there is a function:
-    ///
-    /// ```
-    /// fn foo<'a,T:'a>(...)
-    /// ```
-    ///
-    /// and a reference:
-    ///
-    /// ```
-    /// let f = foo;
-    /// ```
-    ///
-    /// Then we will create a fresh region variable `'$0` and a fresh type variable `$1` for `'a`
-    /// and `T`. This routine will add a region obligation `$1:'$0` and register it locally.
-    pub fn add_obligations_for_parameters(
-        &self,
-        cause: traits::ObligationCause<'tcx>,
-        predicates: ty::InstantiatedPredicates<'tcx>,
-    ) {
-        assert!(!predicates.has_escaping_bound_vars());
-
-        debug!("add_obligations_for_parameters(predicates={:?})", predicates);
-
-        for obligation in traits::predicates_for_generics(cause, self.param_env, predicates) {
-            self.register_predicate(obligation);
-        }
-    }
-
     // FIXME(arielb1): use this instead of field.ty everywhere
     // Only for fields! Returns <none> for methods>
     // Indifferent to privacy flags
@@ -643,11 +610,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     #[instrument(skip(self), level = "debug")]
     pub(in super::super) fn select_all_obligations_or_error(&self) {
-        if let Err(errors) = self
+        let errors = self
             .fulfillment_cx
             .borrow_mut()
-            .select_all_with_constness_or_error(&self, self.inh.constness)
-        {
+            .select_all_with_constness_or_error(&self, self.inh.constness);
+
+        if !errors.is_empty() {
             self.report_fulfillment_errors(&errors, self.inh.body_id, false);
         }
     }
@@ -658,13 +626,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         fallback_has_occurred: bool,
         mutate_fulfillment_errors: impl Fn(&mut Vec<traits::FulfillmentError<'tcx>>),
     ) {
-        let result = self
+        let mut result = self
             .fulfillment_cx
             .borrow_mut()
             .select_with_constness_where_possible(self, self.inh.constness);
-        if let Err(mut errors) = result {
-            mutate_fulfillment_errors(&mut errors);
-            self.report_fulfillment_errors(&errors, self.inh.body_id, fallback_has_occurred);
+        if !result.is_empty() {
+            mutate_fulfillment_errors(&mut result);
+            self.report_fulfillment_errors(&result, self.inh.body_id, fallback_has_occurred);
         }
     }
 
@@ -794,14 +762,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         // we can.  We don't care if some things turn
                         // out unconstrained or ambiguous, as we're
                         // just trying to get hints here.
-                        self.save_and_restore_in_snapshot_flag(|_| {
+                        let errors = self.save_and_restore_in_snapshot_flag(|_| {
                             let mut fulfill = <dyn TraitEngine<'_>>::new(self.tcx);
                             for obligation in ok.obligations {
                                 fulfill.register_predicate_obligation(self, obligation);
                             }
                             fulfill.select_where_possible(self)
-                        })
-                        .map_err(|_| ())?;
+                        });
+
+                        if !errors.is_empty() {
+                            return Err(());
+                        }
                     }
                     Err(_) => return Err(()),
                 }
@@ -949,7 +920,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     let mut err = rustc_errors::struct_span_err!(
                         self.sess(),
                         self_ty.span,
-                        E0783,
+                        E0782,
                         "{}",
                         msg,
                     );
@@ -1519,20 +1490,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     /// Add all the obligations that are required, substituting and normalized appropriately.
     #[tracing::instrument(level = "debug", skip(self, span, def_id, substs))]
-    fn add_required_obligations(&self, span: Span, def_id: DefId, substs: &SubstsRef<'tcx>) {
-        let (bounds, spans) = self.instantiate_bounds(span, def_id, &substs);
+    crate fn add_required_obligations(&self, span: Span, def_id: DefId, substs: &SubstsRef<'tcx>) {
+        let (bounds, _) = self.instantiate_bounds(span, def_id, &substs);
 
-        for (i, mut obligation) in traits::predicates_for_generics(
+        for obligation in traits::predicates_for_generics(
             traits::ObligationCause::new(span, self.body_id, traits::ItemObligation(def_id)),
             self.param_env,
             bounds,
-        )
-        .enumerate()
-        {
-            // This makes the error point at the bound, but we want to point at the argument
-            if let Some(span) = spans.get(i) {
-                obligation.cause.make_mut().code = traits::BindingObligation(def_id, *span);
-            }
+        ) {
             self.register_predicate(obligation);
         }
     }

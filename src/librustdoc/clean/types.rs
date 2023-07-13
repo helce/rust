@@ -34,7 +34,6 @@ use rustc_target::spec::abi::Abi;
 use crate::clean::cfg::Cfg;
 use crate::clean::external_path;
 use crate::clean::inline::{self, print_inlined_const};
-use crate::clean::types::Type::{QPath, ResolvedPath};
 use crate::clean::utils::{is_literal_expr, print_const_expr, print_evaluated_const};
 use crate::clean::Clean;
 use crate::core::DocContext;
@@ -43,10 +42,14 @@ use crate::formats::item_type::ItemType;
 use crate::html::render::cache::ExternalLocation;
 use crate::html::render::Context;
 
-use self::FnRetTy::*;
-use self::ItemKind::*;
-use self::SelfTy::*;
-use self::Type::*;
+crate use self::FnRetTy::*;
+crate use self::ItemKind::*;
+crate use self::SelfTy::*;
+crate use self::Type::{
+    Array, BareFunction, BorrowedRef, DynTrait, Generic, ImplTrait, Infer, Primitive, QPath,
+    RawPointer, Slice, Tuple,
+};
+crate use self::Visibility::{Inherited, Public};
 
 crate type ItemIdSet = FxHashSet<ItemId>;
 
@@ -113,16 +116,28 @@ impl From<DefId> for ItemId {
     }
 }
 
+/// The crate currently being documented.
 #[derive(Clone, Debug)]
 crate struct Crate {
-    crate name: Symbol,
-    crate src: FileName,
     crate module: Item,
-    crate externs: Vec<ExternalCrate>,
     crate primitives: ThinVec<(DefId, PrimitiveType)>,
     /// Only here so that they can be filtered through the rustdoc passes.
     crate external_traits: Rc<RefCell<FxHashMap<DefId, TraitWithExtraInfo>>>,
     crate collapsed: bool,
+}
+
+// `Crate` is frequently moved by-value. Make sure it doesn't unintentionally get bigger.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+rustc_data_structures::static_assert_size!(Crate, 80);
+
+impl Crate {
+    crate fn name(&self, tcx: TyCtxt<'_>) -> Symbol {
+        ExternalCrate::LOCAL.name(tcx)
+    }
+
+    crate fn src(&self, tcx: TyCtxt<'_>) -> FileName {
+        ExternalCrate::LOCAL.src(tcx)
+    }
 }
 
 /// This struct is used to wrap additional information added by rustdoc on a `trait` item.
@@ -138,6 +153,8 @@ crate struct ExternalCrate {
 }
 
 impl ExternalCrate {
+    const LOCAL: Self = Self { crate_num: LOCAL_CRATE };
+
     #[inline]
     crate fn def_id(&self) -> DefId {
         DefId { krate: self.crate_num, index: CRATE_DEF_INDEX }
@@ -204,7 +221,7 @@ impl ExternalCrate {
             .filter_map(|a| a.value_str())
             .map(to_remote)
             .next()
-            .or(extern_url.map(to_remote)) // NOTE: only matters if `extern_url_takes_precedence` is false
+            .or_else(|| extern_url.map(to_remote)) // NOTE: only matters if `extern_url_takes_precedence` is false
             .unwrap_or(Unknown) // Well, at least we tried.
     }
 
@@ -238,8 +255,8 @@ impl ExternalCrate {
                         hir::ItemKind::Mod(_) => {
                             as_keyword(Res::Def(DefKind::Mod, id.def_id.to_def_id()))
                         }
-                        hir::ItemKind::Use(ref path, hir::UseKind::Single)
-                            if item.vis.node.is_pub() =>
+                        hir::ItemKind::Use(path, hir::UseKind::Single)
+                            if tcx.visibility(id.def_id).is_public() =>
                         {
                             as_keyword(path.res.expect_non_local())
                                 .map(|(_, prim)| (id.def_id.to_def_id(), prim))
@@ -304,8 +321,8 @@ impl ExternalCrate {
                         hir::ItemKind::Mod(_) => {
                             as_primitive(Res::Def(DefKind::Mod, id.def_id.to_def_id()))
                         }
-                        hir::ItemKind::Use(ref path, hir::UseKind::Single)
-                            if item.vis.node.is_pub() =>
+                        hir::ItemKind::Use(path, hir::UseKind::Single)
+                            if tcx.visibility(id.def_id).is_public() =>
                         {
                             as_primitive(path.res.expect_non_local()).map(|(_, prim)| {
                                 // Pretend the primitive is local.
@@ -376,12 +393,19 @@ impl Item {
             ItemKind::StrippedItem(k) => k,
             _ => &*self.kind,
         };
-        if let ItemKind::ModuleItem(Module { span, .. }) | ItemKind::ImplItem(Impl { span, .. }) =
-            kind
-        {
-            *span
-        } else {
-            self.def_id.as_def_id().map(|did| rustc_span(did, tcx)).unwrap_or_else(|| Span::dummy())
+        match kind {
+            ItemKind::ModuleItem(Module { span, .. }) => *span,
+            ItemKind::ImplItem(Impl { kind: ImplKind::Auto, .. }) => Span::dummy(),
+            ItemKind::ImplItem(Impl { kind: ImplKind::Blanket(_), .. }) => {
+                if let ItemId::Blanket { impl_id, .. } = self.def_id {
+                    rustc_span(impl_id, tcx)
+                } else {
+                    panic!("blanket impl item has non-blanket ID")
+                }
+            }
+            _ => {
+                self.def_id.as_def_id().map(|did| rustc_span(did, tcx)).unwrap_or_else(Span::dummy)
+            }
         }
     }
 
@@ -562,7 +586,7 @@ impl Item {
     }
 
     crate fn stability_class(&self, tcx: TyCtxt<'_>) -> Option<String> {
-        self.stability(tcx).as_ref().and_then(|ref s| {
+        self.stability(tcx).as_ref().and_then(|s| {
             let mut classes = Vec::with_capacity(2);
 
             if s.level.is_unstable() {
@@ -823,9 +847,9 @@ impl AttributesExt for [ast::Attribute] {
                         // #[doc(cfg(...))]
                         if let Some(cfg_mi) = item
                             .meta_item()
-                            .and_then(|item| rustc_expand::config::parse_cfg(&item, sess))
+                            .and_then(|item| rustc_expand::config::parse_cfg(item, sess))
                         {
-                            match Cfg::parse(&cfg_mi) {
+                            match Cfg::parse(cfg_mi) {
                                 Ok(new_cfg) => cfg &= new_cfg,
                                 Err(e) => sess.span_err(e.span, e.msg),
                             }
@@ -884,7 +908,6 @@ impl<I: Iterator<Item = ast::NestedMetaItem> + IntoIterator<Item = ast::NestedMe
 /// kept separate because of issue #42760.
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 crate struct DocFragment {
-    crate line: usize,
     crate span: rustc_span::Span,
     /// The module this doc-comment came from.
     ///
@@ -896,6 +919,10 @@ crate struct DocFragment {
     crate need_backline: bool,
     crate indent: usize,
 }
+
+// `DocFragment` is used a lot. Make sure it doesn't unintentionally get bigger.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+rustc_data_structures::static_assert_size!(DocFragment, 32);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 crate enum DocFragmentKind {
@@ -937,7 +964,7 @@ impl<'a> FromIterator<&'a DocFragment> for String {
         T: IntoIterator<Item = &'a DocFragment>,
     {
         iter.into_iter().fold(String::new(), |mut acc, frag| {
-            add_doc_fragment(&mut acc, &frag);
+            add_doc_fragment(&mut acc, frag);
             acc
         })
     }
@@ -1005,7 +1032,6 @@ impl Attributes {
         additional_attrs: Option<(&[ast::Attribute], DefId)>,
     ) -> Attributes {
         let mut doc_strings: Vec<DocFragment> = vec![];
-        let mut doc_line = 0;
 
         fn update_need_backline(doc_strings: &mut Vec<DocFragment>) {
             if let Some(prev) = doc_strings.last_mut() {
@@ -1023,10 +1049,7 @@ impl Attributes {
                     DocFragmentKind::RawDoc
                 };
 
-                let line = doc_line;
-                doc_line += value.as_str().lines().count();
                 let frag = DocFragment {
-                    line,
                     span: attr.span,
                     doc: value,
                     kind,
@@ -1064,12 +1087,12 @@ impl Attributes {
 
         let ori = iter.next()?;
         let mut out = String::new();
-        add_doc_fragment(&mut out, &ori);
-        while let Some(new_frag) = iter.next() {
+        add_doc_fragment(&mut out, ori);
+        for new_frag in iter {
             if new_frag.kind != ori.kind || new_frag.parent_module != ori.parent_module {
                 break;
             }
-            add_doc_fragment(&mut out, &new_frag);
+            add_doc_fragment(&mut out, new_frag);
         }
         if out.is_empty() { None } else { Some(out) }
     }
@@ -1082,7 +1105,7 @@ impl Attributes {
 
         for new_frag in self.doc_strings.iter() {
             let out = ret.entry(new_frag.parent_module).or_default();
-            add_doc_fragment(out, &new_frag);
+            add_doc_fragment(out, new_frag);
         }
         ret
     }
@@ -1093,7 +1116,7 @@ impl Attributes {
         if self.doc_strings.is_empty() { None } else { Some(self.doc_strings.iter().collect()) }
     }
 
-    crate fn get_doc_aliases(&self) -> Box<[String]> {
+    crate fn get_doc_aliases(&self) -> Box<[Symbol]> {
         let mut aliases = FxHashSet::default();
 
         for attr in self.other_attrs.lists(sym::doc).filter(|a| a.has_name(sym::alias)) {
@@ -1101,16 +1124,16 @@ impl Attributes {
                 for l in values {
                     match l.literal().unwrap().kind {
                         ast::LitKind::Str(s, _) => {
-                            aliases.insert(s.as_str().to_string());
+                            aliases.insert(s);
                         }
                         _ => unreachable!(),
                     }
                 }
             } else {
-                aliases.insert(attr.value_str().map(|s| s.to_string()).unwrap());
+                aliases.insert(attr.value_str().unwrap());
             }
         }
-        aliases.into_iter().collect::<Vec<String>>().into()
+        aliases.into_iter().collect::<Vec<_>>().into()
     }
 }
 
@@ -1216,20 +1239,9 @@ impl WherePredicate {
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 crate enum GenericParamDefKind {
-    Lifetime {
-        outlives: Vec<Lifetime>,
-    },
-    Type {
-        did: DefId,
-        bounds: Vec<GenericBound>,
-        default: Option<Type>,
-        synthetic: Option<hir::SyntheticTyParamKind>,
-    },
-    Const {
-        did: DefId,
-        ty: Type,
-        default: Option<String>,
-    },
+    Lifetime { outlives: Vec<Lifetime> },
+    Type { did: DefId, bounds: Vec<GenericBound>, default: Option<Box<Type>>, synthetic: bool },
+    Const { did: DefId, ty: Box<Type>, default: Option<Box<String>> },
 }
 
 impl GenericParamDefKind {
@@ -1242,8 +1254,8 @@ impl GenericParamDefKind {
     // any embedded types, but `get_type` seems to be the wrong name for that.
     crate fn get_type(&self) -> Option<Type> {
         match self {
-            GenericParamDefKind::Type { default, .. } => default.clone(),
-            GenericParamDefKind::Const { ty, .. } => Some(ty.clone()),
+            GenericParamDefKind::Type { default, .. } => default.as_deref().cloned(),
+            GenericParamDefKind::Const { ty, .. } => Some((&**ty).clone()),
             GenericParamDefKind::Lifetime { .. } => None,
         }
     }
@@ -1255,11 +1267,15 @@ crate struct GenericParamDef {
     crate kind: GenericParamDefKind,
 }
 
+// `GenericParamDef` is used in many places. Make sure it doesn't unintentionally get bigger.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+rustc_data_structures::static_assert_size!(GenericParamDef, 56);
+
 impl GenericParamDef {
     crate fn is_synthetic_type_param(&self) -> bool {
         match self.kind {
             GenericParamDefKind::Lifetime { .. } | GenericParamDefKind::Const { .. } => false,
-            GenericParamDefKind::Type { ref synthetic, .. } => synthetic.is_some(),
+            GenericParamDefKind::Type { synthetic, .. } => synthetic,
         }
     }
 
@@ -1369,17 +1385,10 @@ crate enum FnRetTy {
     DefaultReturn,
 }
 
-impl GetDefId for FnRetTy {
-    fn def_id(&self) -> Option<DefId> {
-        match *self {
-            Return(ref ty) => ty.def_id(),
-            DefaultReturn => None,
-        }
-    }
-
-    fn def_id_full(&self, cache: &Cache) -> Option<DefId> {
-        match *self {
-            Return(ref ty) => ty.def_id_full(cache),
+impl FnRetTy {
+    crate fn as_return(&self) -> Option<&Type> {
+        match self {
+            Return(ret) => Some(ret),
             DefaultReturn => None,
         }
     }
@@ -1412,8 +1421,9 @@ crate struct PolyTrait {
 crate enum Type {
     /// A named type, which could be a trait.
     ///
-    /// This is mostly Rustdoc's version of [`hir::Path`]. It has to be different because Rustdoc's [`PathSegment`] can contain cleaned generics.
-    ResolvedPath { path: Path, did: DefId },
+    /// This is mostly Rustdoc's version of [`hir::Path`].
+    /// It has to be different because Rustdoc's [`PathSegment`] can contain cleaned generics.
+    Path { path: Path },
     /// A `dyn Trait` object: `dyn for<'a> Trait<'a> + Send + 'static`
     DynTrait(Vec<PolyTrait>, Option<Lifetime>),
     /// A type parameter.
@@ -1453,33 +1463,9 @@ crate enum Type {
     ImplTrait(Vec<GenericBound>),
 }
 
-crate trait GetDefId {
-    /// Use this method to get the [`DefId`] of a [`clean`] AST node.
-    /// This will return [`None`] when called on a primitive [`clean::Type`].
-    /// Use [`Self::def_id_full`] if you want to include primitives.
-    ///
-    /// [`clean`]: crate::clean
-    /// [`clean::Type`]: crate::clean::Type
-    // FIXME: get rid of this function and always use `def_id_full`
-    fn def_id(&self) -> Option<DefId>;
-
-    /// Use this method to get the [DefId] of a [clean] AST node, including [PrimitiveType]s.
-    ///
-    /// See [`Self::def_id`] for more.
-    ///
-    /// [clean]: crate::clean
-    fn def_id_full(&self, cache: &Cache) -> Option<DefId>;
-}
-
-impl<T: GetDefId> GetDefId for Option<T> {
-    fn def_id(&self) -> Option<DefId> {
-        self.as_ref().and_then(|d| d.def_id())
-    }
-
-    fn def_id_full(&self, cache: &Cache) -> Option<DefId> {
-        self.as_ref().and_then(|d| d.def_id_full(cache))
-    }
-}
+// `Type` is used a lot. Make sure it doesn't unintentionally get bigger.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+rustc_data_structures::static_assert_size!(Type, 72);
 
 impl Type {
     crate fn primitive_type(&self) -> Option<PrimitiveType> {
@@ -1503,7 +1489,7 @@ impl Type {
     /// Checks if this is a `T::Name` path for an associated type.
     crate fn is_assoc_ty(&self) -> bool {
         match self {
-            ResolvedPath { path, .. } => path.is_assoc_ty(),
+            Type::Path { path, .. } => path.is_assoc_ty(),
             _ => false,
         }
     }
@@ -1517,7 +1503,7 @@ impl Type {
 
     crate fn generics(&self) -> Option<Vec<&Type>> {
         match self {
-            ResolvedPath { path, .. } => path.generics(),
+            Type::Path { path, .. } => path.generics(),
             _ => None,
         }
     }
@@ -1540,7 +1526,7 @@ impl Type {
 
     fn inner_def_id(&self, cache: Option<&Cache>) -> Option<DefId> {
         let t: PrimitiveType = match *self {
-            ResolvedPath { did, .. } => return Some(did),
+            Type::Path { ref path } => return Some(path.def_id()),
             DynTrait(ref bounds, _) => return Some(bounds[0].trait_.def_id()),
             Primitive(p) => return cache.and_then(|c| c.primitive_locations.get(&p).cloned()),
             BorrowedRef { type_: box Generic(..), .. } => PrimitiveType::Reference,
@@ -1559,17 +1545,27 @@ impl Type {
             QPath { ref self_type, .. } => return self_type.inner_def_id(cache),
             Generic(_) | Infer | ImplTrait(_) => return None,
         };
-        cache.and_then(|c| Primitive(t).def_id_full(c))
-    }
-}
-
-impl GetDefId for Type {
-    fn def_id(&self) -> Option<DefId> {
-        self.inner_def_id(None)
+        cache.and_then(|c| Primitive(t).def_id(c))
     }
 
-    fn def_id_full(&self, cache: &Cache) -> Option<DefId> {
+    /// Use this method to get the [DefId] of a [clean] AST node, including [PrimitiveType]s.
+    ///
+    /// See [`Self::def_id_no_primitives`] for more.
+    ///
+    /// [clean]: crate::clean
+    crate fn def_id(&self, cache: &Cache) -> Option<DefId> {
         self.inner_def_id(Some(cache))
+    }
+
+    /// Use this method to get the [`DefId`] of a [`clean`] AST node.
+    /// This will return [`None`] when called on a primitive [`clean::Type`].
+    /// Use [`Self::def_id`] if you want to include primitives.
+    ///
+    /// [`clean`]: crate::clean
+    /// [`clean::Type`]: crate::clean::Type
+    // FIXME: get rid of this function and always use `def_id`
+    crate fn def_id_no_primitives(&self) -> Option<DefId> {
+        self.inner_def_id(None)
     }
 }
 
@@ -2087,16 +2083,6 @@ crate struct Typedef {
     crate item_type: Option<Type>,
 }
 
-impl GetDefId for Typedef {
-    fn def_id(&self) -> Option<DefId> {
-        self.type_.def_id()
-    }
-
-    fn def_id_full(&self, cache: &Cache) -> Option<DefId> {
-        self.type_.def_id_full(cache)
-    }
-}
-
 #[derive(Clone, Debug)]
 crate struct OpaqueTy {
     crate bounds: Vec<GenericBound>,
@@ -2177,15 +2163,13 @@ impl Constant {
 
 #[derive(Clone, Debug)]
 crate struct Impl {
-    crate span: Span,
     crate unsafety: hir::Unsafety,
     crate generics: Generics,
     crate trait_: Option<Path>,
     crate for_: Type,
     crate items: Vec<Item>,
-    crate negative_polarity: bool,
-    crate synthetic: bool,
-    crate blanket_impl: Option<Box<Type>>,
+    crate polarity: ty::ImplPolarity,
+    crate kind: ImplKind,
 }
 
 impl Impl {
@@ -2195,6 +2179,30 @@ impl Impl {
             .map(|t| t.def_id())
             .map(|did| tcx.provided_trait_methods(did).map(|meth| meth.ident.name).collect())
             .unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Debug)]
+crate enum ImplKind {
+    Normal,
+    Auto,
+    Blanket(Box<Type>),
+}
+
+impl ImplKind {
+    crate fn is_auto(&self) -> bool {
+        matches!(self, ImplKind::Auto)
+    }
+
+    crate fn is_blanket(&self) -> bool {
+        matches!(self, ImplKind::Blanket(_))
+    }
+
+    crate fn as_blanket_ty(&self) -> Option<&Type> {
+        match self {
+            ImplKind::Blanket(ty) => Some(ty),
+            _ => None,
+        }
     }
 }
 
@@ -2260,5 +2268,34 @@ impl TypeBinding {
             TypeBindingKind::Equality { ref ty } => ty,
             _ => panic!("expected equality type binding for parenthesized generic args"),
         }
+    }
+}
+
+/// The type, lifetime, or constant that a private type alias's parameter should be
+/// replaced with when expanding a use of that type alias.
+///
+/// For example:
+///
+/// ```
+/// type PrivAlias<T> = Vec<T>;
+///
+/// pub fn public_fn() -> PrivAlias<i32> { vec![] }
+/// ```
+///
+/// `public_fn`'s docs will show it as returning `Vec<i32>`, since `PrivAlias` is private.
+/// [`SubstParam`] is used to record that `T` should be mapped to `i32`.
+crate enum SubstParam {
+    Type(Type),
+    Lifetime(Lifetime),
+    Constant(Constant),
+}
+
+impl SubstParam {
+    crate fn as_ty(&self) -> Option<&Type> {
+        if let Self::Type(ty) = self { Some(ty) } else { None }
+    }
+
+    crate fn as_lt(&self) -> Option<&Lifetime> {
+        if let Self::Lifetime(lt) = self { Some(lt) } else { None }
     }
 }

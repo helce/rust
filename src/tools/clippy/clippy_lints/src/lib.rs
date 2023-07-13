@@ -218,6 +218,7 @@ mod float_equality_without_abs;
 mod float_literal;
 mod floating_point_arithmetic;
 mod format;
+mod format_args;
 mod formatting;
 mod from_over_into;
 mod from_str_radix_10;
@@ -265,6 +266,7 @@ mod map_err_ignore;
 mod map_unit_fn;
 mod match_on_vec_items;
 mod match_result_ok;
+mod match_str_case_mismatch;
 mod matches;
 mod mem_forget;
 mod mem_replace;
@@ -352,13 +354,17 @@ mod tabs_in_doc_comments;
 mod temporary_assignment;
 mod to_digit_is_some;
 mod to_string_in_display;
+mod trailing_empty_array;
 mod trait_bounds;
 mod transmute;
 mod transmuting_null;
 mod try_err;
 mod types;
+mod undocumented_unsafe_blocks;
 mod undropped_manually_drops;
 mod unicode;
+mod uninit_vec;
+mod unit_hash;
 mod unit_return_expecting_ord;
 mod unit_types;
 mod unnamed_address;
@@ -516,6 +522,8 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
     store.register_late_pass(|| Box::new(blocks_in_if_conditions::BlocksInIfConditions));
     store.register_late_pass(|| Box::new(collapsible_match::CollapsibleMatch));
     store.register_late_pass(|| Box::new(unicode::Unicode));
+    store.register_late_pass(|| Box::new(uninit_vec::UninitVec));
+    store.register_late_pass(|| Box::new(unit_hash::UnitHash));
     store.register_late_pass(|| Box::new(unit_return_expecting_ord::UnitReturnExpectingOrd));
     store.register_late_pass(|| Box::new(strings::StringAdd));
     store.register_late_pass(|| Box::new(implicit_return::ImplicitReturn));
@@ -660,7 +668,6 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
     store.register_early_pass(|| Box::new(double_parens::DoubleParens));
     store.register_late_pass(|| Box::new(to_string_in_display::ToStringInDisplay::new()));
     store.register_early_pass(|| Box::new(unsafe_removed_from_name::UnsafeNameRemoval));
-    store.register_early_pass(|| Box::new(if_not_else::IfNotElse));
     store.register_early_pass(|| Box::new(else_if_without_else::ElseIfWithoutElse));
     store.register_early_pass(|| Box::new(int_plus_one::IntPlusOne));
     store.register_early_pass(|| Box::new(formatting::Formatting));
@@ -714,6 +721,7 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
     store.register_late_pass(|| Box::new(option_if_let_else::OptionIfLetElse));
     store.register_late_pass(|| Box::new(future_not_send::FutureNotSend));
     store.register_late_pass(|| Box::new(if_let_mutex::IfLetMutex));
+    store.register_late_pass(|| Box::new(if_not_else::IfNotElse));
     store.register_late_pass(|| Box::new(equatable_if_let::PatternEquality));
     store.register_late_pass(|| Box::new(mut_mutex_lock::MutMutexLock));
     store.register_late_pass(|| Box::new(match_on_vec_items::MatchOnVecItems));
@@ -754,8 +762,8 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
     store.register_late_pass(|| Box::new(bool_assert_comparison::BoolAssertComparison));
     store.register_early_pass(move || Box::new(module_style::ModStyle));
     store.register_late_pass(|| Box::new(unused_async::UnusedAsync));
-    let disallowed_types = conf.disallowed_types.iter().cloned().collect::<FxHashSet<_>>();
-    store.register_late_pass(move || Box::new(disallowed_type::DisallowedType::new(&disallowed_types)));
+    let disallowed_types = conf.disallowed_types.clone();
+    store.register_late_pass(move || Box::new(disallowed_type::DisallowedType::new(disallowed_types.clone())));
     let import_renames = conf.enforced_import_renames.clone();
     store.register_late_pass(move || Box::new(missing_enforced_import_rename::ImportRename::new(import_renames.clone())));
     let scripts = conf.allowed_scripts.clone();
@@ -767,6 +775,11 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
     store.register_late_pass(move || Box::new(manual_assert::ManualAssert));
     let enable_raw_pointer_heuristic_for_send = conf.enable_raw_pointer_heuristic_for_send;
     store.register_late_pass(move || Box::new(non_send_fields_in_send_ty::NonSendFieldInSendTy::new(enable_raw_pointer_heuristic_for_send)));
+    store.register_late_pass(move || Box::new(undocumented_unsafe_blocks::UndocumentedUnsafeBlocks::default()));
+    store.register_late_pass(|| Box::new(match_str_case_mismatch::MatchStrCaseMismatch));
+    store.register_late_pass(move || Box::new(format_args::FormatArgs));
+    store.register_late_pass(|| Box::new(trailing_empty_array::TrailingEmptyArray));
+    // add lints here, do not remove this comment, it's used in `new_lint`
 }
 
 #[rustfmt::skip]
@@ -817,6 +830,7 @@ fn register_removed_non_tool_lints(store: &mut rustc_lint::LintStore) {
 ///
 /// Used in `./src/driver.rs`.
 pub fn register_renamed(ls: &mut rustc_lint::LintStore) {
+    // NOTE: when renaming a lint, add a corresponding test to tests/ui/rename.rs
     ls.register_renamed("clippy::stutter", "clippy::module_name_repetitions");
     ls.register_renamed("clippy::new_without_default_derive", "clippy::new_without_default");
     ls.register_renamed("clippy::cyclomatic_complexity", "clippy::cognitive_complexity");

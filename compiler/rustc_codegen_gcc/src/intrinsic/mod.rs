@@ -316,7 +316,7 @@ impl<'a, 'gcc, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'a, 'gcc, 'tcx> {
                     extended_asm.add_input_operand(None, "r", result.llval);
                     extended_asm.add_clobber("memory");
                     extended_asm.set_volatile_flag(true);
-                    
+
                     // We have copied the value to `result` already.
                     return;
                 }
@@ -363,8 +363,9 @@ impl<'a, 'gcc, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'a, 'gcc, 'tcx> {
         cond
     }
 
-    fn sideeffect(&mut self) {
-        // TODO(antoyo)
+    fn type_test(&mut self, _pointer: Self::Value, _typeid: Self::Value) -> Self::Value {
+        // Unsupported.
+        self.context.new_rvalue_from_int(self.int_type, 0)
     }
 
     fn va_start(&mut self, _va_list: RValue<'gcc>) -> RValue<'gcc> {

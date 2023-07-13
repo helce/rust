@@ -74,9 +74,10 @@ pub use self::sty::{
     Binder, BoundRegion, BoundRegionKind, BoundTy, BoundTyKind, BoundVar, BoundVariableKind,
     CanonicalPolyFnSig, ClosureSubsts, ClosureSubstsParts, ConstVid, EarlyBoundRegion,
     ExistentialPredicate, ExistentialProjection, ExistentialTraitRef, FnSig, FreeRegion, GenSig,
-    GeneratorSubsts, GeneratorSubstsParts, ParamConst, ParamTy, PolyExistentialProjection,
-    PolyExistentialTraitRef, PolyFnSig, PolyGenSig, PolyTraitRef, ProjectionTy, Region, RegionKind,
-    RegionVid, TraitRef, TyKind, TypeAndMut, UpvarSubsts, VarianceDiagInfo, VarianceDiagMutKind,
+    GeneratorSubsts, GeneratorSubstsParts, InlineConstSubsts, InlineConstSubstsParts, ParamConst,
+    ParamTy, PolyExistentialProjection, PolyExistentialTraitRef, PolyFnSig, PolyGenSig,
+    PolyTraitRef, ProjectionTy, Region, RegionKind, RegionVid, TraitRef, TyKind, TypeAndMut,
+    UpvarSubsts, VarianceDiagInfo, VarianceDiagMutKind,
 };
 pub use self::trait_def::TraitDef;
 
@@ -164,7 +165,18 @@ pub struct ImplHeader<'tcx> {
     pub predicates: Vec<Predicate<'tcx>>,
 }
 
-#[derive(Copy, Clone, PartialEq, TyEncodable, TyDecodable, HashStable, Debug)]
+#[derive(
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    TyEncodable,
+    TyDecodable,
+    HashStable,
+    Debug,
+    TypeFoldable
+)]
 pub enum ImplPolarity {
     /// `impl Trait for Type`
     Positive,
@@ -175,6 +187,27 @@ pub enum ImplPolarity {
     /// This is a "stability hack", not a real Rust feature.
     /// See #64631 for details.
     Reservation,
+}
+
+impl ImplPolarity {
+    /// Flips polarity by turning `Positive` into `Negative` and `Negative` into `Positive`.
+    pub fn flip(&self) -> Option<ImplPolarity> {
+        match self {
+            ImplPolarity::Positive => Some(ImplPolarity::Negative),
+            ImplPolarity::Negative => Some(ImplPolarity::Positive),
+            ImplPolarity::Reservation => None,
+        }
+    }
+}
+
+impl fmt::Display for ImplPolarity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Positive => f.write_str("positive"),
+            Self::Negative => f.write_str("negative"),
+            Self::Reservation => f.write_str("reservation"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy, Hash, TyEncodable, TyDecodable, HashStable)]
@@ -299,6 +332,10 @@ impl Visibility {
             Visibility::Restricted(def_id) => def_id.is_local(),
             Visibility::Invisible => false,
         }
+    }
+
+    pub fn is_public(self) -> bool {
+        matches!(self, Visibility::Public)
     }
 }
 
@@ -458,6 +495,29 @@ impl<'tcx> Predicate<'tcx> {
     #[inline]
     pub fn kind(self) -> Binder<'tcx, PredicateKind<'tcx>> {
         self.inner.kind
+    }
+
+    /// Flips the polarity of a Predicate.
+    ///
+    /// Given `T: Trait` predicate it returns `T: !Trait` and given `T: !Trait` returns `T: Trait`.
+    pub fn flip_polarity(&self, tcx: TyCtxt<'tcx>) -> Option<Predicate<'tcx>> {
+        let kind = self
+            .inner
+            .kind
+            .map_bound(|kind| match kind {
+                PredicateKind::Trait(TraitPredicate { trait_ref, constness, polarity }) => {
+                    Some(PredicateKind::Trait(TraitPredicate {
+                        trait_ref,
+                        constness,
+                        polarity: polarity.flip()?,
+                    }))
+                }
+
+                _ => None,
+            })
+            .transpose()?;
+
+        Some(tcx.mk_predicate(kind))
     }
 }
 
@@ -654,6 +714,8 @@ pub struct TraitPredicate<'tcx> {
     pub trait_ref: TraitRef<'tcx>,
 
     pub constness: BoundConstness,
+
+    pub polarity: ImplPolarity,
 }
 
 pub type PolyTraitPredicate<'tcx> = ty::Binder<'tcx, TraitPredicate<'tcx>>;
@@ -788,7 +850,11 @@ impl<'tcx> ToPredicate<'tcx> for ConstnessAnd<PolyTraitRef<'tcx>> {
     fn to_predicate(self, tcx: TyCtxt<'tcx>) -> Predicate<'tcx> {
         self.value
             .map_bound(|trait_ref| {
-                PredicateKind::Trait(ty::TraitPredicate { trait_ref, constness: self.constness })
+                PredicateKind::Trait(ty::TraitPredicate {
+                    trait_ref,
+                    constness: self.constness,
+                    polarity: ty::ImplPolarity::Positive,
+                })
             })
             .to_predicate(tcx)
     }
@@ -1866,7 +1932,8 @@ impl<'tcx> TyCtxt<'tcx> {
                 | DefKind::Static
                 | DefKind::AssocConst
                 | DefKind::Ctor(..)
-                | DefKind::AnonConst => self.mir_for_ctfe_opt_const_arg(def),
+                | DefKind::AnonConst
+                | DefKind::InlineConst => self.mir_for_ctfe_opt_const_arg(def),
                 // If the caller wants `mir_for_ctfe` of a function they should not be using
                 // `instance_mir`, so we'll assume const fn also wants the optimized version.
                 _ => {

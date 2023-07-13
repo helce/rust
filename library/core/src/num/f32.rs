@@ -449,7 +449,7 @@ impl f32 {
     // private use internally.
     #[inline]
     #[rustc_const_unstable(feature = "const_float_classify", issue = "72505")]
-    const fn abs_private(self) -> f32 {
+    pub(crate) const fn abs_private(self) -> f32 {
         f32::from_bits(self.to_bits() & 0x7fff_ffff)
     }
 
@@ -673,6 +673,9 @@ impl f32 {
 
     /// Returns the maximum of the two numbers.
     ///
+    /// Follows the IEEE-754 2008 semantics for maxNum, except for handling of signaling NaNs.
+    /// This matches the behavior of libm’s fmin.
+    ///
     /// ```
     /// let x = 1.0f32;
     /// let y = 2.0f32;
@@ -689,6 +692,9 @@ impl f32 {
 
     /// Returns the minimum of the two numbers.
     ///
+    /// Follows the IEEE-754 2008 semantics for minNum, except for handling of signaling NaNs.
+    /// This matches the behavior of libm’s fmin.
+    ///
     /// ```
     /// let x = 1.0f32;
     /// let y = 2.0f32;
@@ -701,6 +707,68 @@ impl f32 {
     #[inline]
     pub fn min(self, other: f32) -> f32 {
         intrinsics::minnumf32(self, other)
+    }
+
+    /// Returns the maximum of the two numbers, propagating NaNs.
+    ///
+    /// This returns NaN when *either* argument is NaN, as opposed to
+    /// [`f32::max`] which only returns NaN when *both* arguments are NaN.
+    ///
+    /// ```
+    /// #![feature(float_minimum_maximum)]
+    /// let x = 1.0f32;
+    /// let y = 2.0f32;
+    ///
+    /// assert_eq!(x.maximum(y), y);
+    /// assert!(x.maximum(f32::NAN).is_nan());
+    /// ```
+    ///
+    /// If one of the arguments is NaN, then NaN is returned. Otherwise this returns the greater
+    /// of the two numbers. For this operation, -0.0 is considered to be less than +0.0.
+    /// Note that this follows the semantics specified in IEEE 754-2019.
+    #[unstable(feature = "float_minimum_maximum", issue = "91079")]
+    #[inline]
+    pub fn maximum(self, other: f32) -> f32 {
+        if self > other {
+            self
+        } else if other > self {
+            other
+        } else if self == other {
+            if self.is_sign_positive() && other.is_sign_negative() { self } else { other }
+        } else {
+            self + other
+        }
+    }
+
+    /// Returns the minimum of the two numbers, propagating NaNs.
+    ///
+    /// This returns NaN when *either* argument is NaN, as opposed to
+    /// [`f32::min`] which only returns NaN when *both* arguments are NaN.
+    ///
+    /// ```
+    /// #![feature(float_minimum_maximum)]
+    /// let x = 1.0f32;
+    /// let y = 2.0f32;
+    ///
+    /// assert_eq!(x.minimum(y), x);
+    /// assert!(x.minimum(f32::NAN).is_nan());
+    /// ```
+    ///
+    /// If one of the arguments is NaN, then NaN is returned. Otherwise this returns the lesser
+    /// of the two numbers. For this operation, -0.0 is considered to be less than +0.0.
+    /// Note that this follows the semantics specified in IEEE 754-2019.
+    #[unstable(feature = "float_minimum_maximum", issue = "91079")]
+    #[inline]
+    pub fn minimum(self, other: f32) -> f32 {
+        if self < other {
+            self
+        } else if other < self {
+            other
+        } else if self == other {
+            if self.is_sign_negative() && other.is_sign_positive() { self } else { other }
+        } else {
+            self + other
+        }
     }
 
     /// Rounds toward zero and converts to any primitive integer type,
@@ -980,6 +1048,7 @@ impl f32 {
     /// #     .all(|(a, b)| a.to_bits() == b.to_bits()))
     /// ```
     #[unstable(feature = "total_cmp", issue = "72599")]
+    #[must_use]
     #[inline]
     pub fn total_cmp(&self, other: &Self) -> crate::cmp::Ordering {
         let mut left = self.to_bits() as i32;

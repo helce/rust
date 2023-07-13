@@ -493,10 +493,11 @@ class RustBuild(object):
 
     def downloading_llvm(self):
         opt = self.get_toml('download-ci-llvm', 'llvm')
-        # This is currently all tier 1 targets (since others may not have CI
-        # artifacts)
+        # This is currently all tier 1 targets and tier 2 targets with host tools
+        # (since others may not have CI artifacts)
         # https://doc.rust-lang.org/rustc/platform-support.html#tier-1
         supported_platforms = [
+            # tier 1
             "aarch64-unknown-linux-gnu",
             "i686-pc-windows-gnu",
             "i686-pc-windows-msvc",
@@ -505,6 +506,26 @@ class RustBuild(object):
             "x86_64-apple-darwin",
             "x86_64-pc-windows-gnu",
             "x86_64-pc-windows-msvc",
+            # tier 2 with host tools
+            "aarch64-apple-darwin",
+            "aarch64-pc-windows-msvc",
+            "aarch64-unknown-linux-musl",
+            "arm-unknown-linux-gnueabi",
+            "arm-unknown-linux-gnueabihf",
+            "armv7-unknown-linux-gnueabihf",
+            "mips-unknown-linux-gnu",
+            "mips64-unknown-linux-gnuabi64",
+            "mips64el-unknown-linux-gnuabi64",
+            "mipsel-unknown-linux-gnu",
+            "powerpc-unknown-linux-gnu",
+            "powerpc64-unknown-linux-gnu",
+            "powerpc64le-unknown-linux-gnu",
+            "riscv64gc-unknown-linux-gnu",
+            "s390x-unknown-linux-gnu",
+            "x86_64-unknown-freebsd",
+            "x86_64-unknown-illumos",
+            "x86_64-unknown-linux-musl",
+            "x86_64-unknown-netbsd",
         ]
         return opt == "true" \
             or (opt == "if-available" and self.build in supported_platforms)
@@ -960,7 +981,7 @@ class RustBuild(object):
                 self.cargo()))
         args = [self.cargo(), "build", "--manifest-path",
                 os.path.join(self.rust_root, "src/bootstrap/Cargo.toml")]
-        for _ in range(1, self.verbose):
+        for _ in range(0, self.verbose):
             args.append("--verbose")
         if self.use_locked_deps:
             args.append("--locked")
@@ -1006,7 +1027,15 @@ class RustBuild(object):
         if self.git_version >= distutils.version.LooseVersion("2.11.0"):
             update_args.append("--progress")
         update_args.append(module)
-        run(update_args, cwd=self.rust_root, verbose=self.verbose, exception=True)
+        try:
+            run(update_args, cwd=self.rust_root, verbose=self.verbose, exception=True)
+        except RuntimeError:
+            print("Failed updating submodule. This is probably due to uncommitted local changes.")
+            print('Either stash the changes by running "git stash" within the submodule\'s')
+            print('directory, reset them by running "git reset --hard", or commit them.')
+            print("To reset all submodules' changes run", end=" ")
+            print('"git submodule foreach --recursive git reset --hard".')
+            raise SystemExit(1)
 
         run(["git", "reset", "-q", "--hard"],
             cwd=module_path, verbose=self.verbose)
@@ -1091,17 +1120,22 @@ class RustBuild(object):
                     raise Exception("{} not found".format(vendor_dir))
 
         if self.use_vendored_sources:
+            config = ("[source.crates-io]\n"
+                      "replace-with = 'vendored-sources'\n"
+                      "registry = 'https://example.com'\n"
+                      "\n"
+                      "[source.vendored-sources]\n"
+                      "directory = '{}/vendor'\n"
+                      .format(self.rust_root))
             if not os.path.exists('.cargo'):
                 os.makedirs('.cargo')
-            with output('.cargo/config') as cargo_config:
-                cargo_config.write(
-                    "[source.crates-io]\n"
-                    "replace-with = 'vendored-sources'\n"
-                    "registry = 'https://example.com'\n"
-                    "\n"
-                    "[source.vendored-sources]\n"
-                    "directory = '{}/vendor'\n"
-                    .format(self.rust_root))
+                with output('.cargo/config') as cargo_config:
+                    cargo_config.write(config)
+            else:
+                print('info: using vendored source, but .cargo/config is already present.')
+                print('      Reusing the current configuration file. But you may want to '
+                      'configure vendoring like this:')
+                print(config)
         else:
             if os.path.exists('.cargo'):
                 shutil.rmtree('.cargo')

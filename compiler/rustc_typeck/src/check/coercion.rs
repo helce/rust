@@ -185,9 +185,10 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
                 debug!("coerce: unsize not object safe");
                 return Err(TypeError::ObjectUnsafeCoercion(did));
             }
-            Err(_) => {}
+            Err(error) => {
+                debug!(?error, "coerce: unsize failed");
+            }
         }
-        debug!("coerce: unsize failed");
 
         // Examine the supertype and consider auto-borrowing.
         match *b.kind() {
@@ -521,9 +522,7 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
 
         let traits =
             (self.tcx.lang_items().unsize_trait(), self.tcx.lang_items().coerce_unsized_trait());
-        let (unsize_did, coerce_unsized_did) = if let (Some(u), Some(cu)) = traits {
-            (u, cu)
-        } else {
+        let (Some(unsize_did), Some(coerce_unsized_did)) = traits else {
             debug!("missing Unsize or CoerceUnsized traits");
             return Err(TypeError::Mismatch);
         };
@@ -951,7 +950,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             };
             let mut fcx = traits::FulfillmentContext::new_in_snapshot();
             fcx.register_predicate_obligations(self, ok.obligations);
-            fcx.select_where_possible(&self).is_ok()
+            fcx.select_where_possible(&self).is_empty()
         })
     }
 
@@ -1459,7 +1458,7 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                             cause,
                             expected,
                             found,
-                            coercion_error,
+                            coercion_error.clone(),
                             fcx,
                             parent_id,
                             expression.map(|expr| (expr, blk_id)),
@@ -1473,7 +1472,7 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                             cause,
                             expected,
                             found,
-                            coercion_error,
+                            coercion_error.clone(),
                             fcx,
                             id,
                             None,
@@ -1484,7 +1483,12 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                         }
                     }
                     _ => {
-                        err = fcx.report_mismatched_types(cause, expected, found, coercion_error);
+                        err = fcx.report_mismatched_types(
+                            cause,
+                            expected,
+                            found,
+                            coercion_error.clone(),
+                        );
                     }
                 }
 
@@ -1493,7 +1497,14 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                 }
 
                 if let Some(expr) = expression {
-                    fcx.emit_coerce_suggestions(&mut err, expr, found, expected, None);
+                    fcx.emit_coerce_suggestions(
+                        &mut err,
+                        expr,
+                        found,
+                        expected,
+                        None,
+                        coercion_error,
+                    );
                 }
 
                 err.emit_unless(unsized_return);

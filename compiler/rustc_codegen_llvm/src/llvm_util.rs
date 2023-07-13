@@ -17,35 +17,25 @@ use std::path::Path;
 use std::ptr;
 use std::slice;
 use std::str;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Once;
 
-static POISONED: AtomicBool = AtomicBool::new(false);
 static INIT: Once = Once::new();
 
 pub(crate) fn init(sess: &Session) {
     unsafe {
         // Before we touch LLVM, make sure that multithreading is enabled.
+        if llvm::LLVMIsMultithreaded() != 1 {
+            bug!("LLVM compiled without support for threads");
+        }
         INIT.call_once(|| {
-            if llvm::LLVMStartMultithreaded() != 1 {
-                // use an extra bool to make sure that all future usage of LLVM
-                // cannot proceed despite the Once not running more than once.
-                POISONED.store(true, Ordering::SeqCst);
-            }
-
             configure_llvm(sess);
         });
-
-        if POISONED.load(Ordering::SeqCst) {
-            bug!("couldn't enable multi-threaded LLVM");
-        }
     }
 }
 
 fn require_inited() {
-    INIT.call_once(|| bug!("llvm is not initialized"));
-    if POISONED.load(Ordering::SeqCst) {
-        bug!("couldn't enable multi-threaded LLVM");
+    if !INIT.is_completed() {
+        bug!("LLVM is not initialized");
     }
 }
 
@@ -85,7 +75,9 @@ unsafe fn configure_llvm(sess: &Session) {
         if sess.print_llvm_passes() {
             add("-debug-pass=Structure", false);
         }
-        if !sess.opts.debugging_opts.no_generate_arange_section {
+        if sess.target.generate_arange_section
+            && !sess.opts.debugging_opts.no_generate_arange_section
+        {
             add("-generate-arange-section", false);
         }
 
@@ -95,8 +87,7 @@ unsafe fn configure_llvm(sess: &Session) {
         // Ref:
         // - https://github.com/rust-lang/rust/issues/85351
         // - https://reviews.llvm.org/D103167
-        let llvm_version = llvm_util::get_version();
-        if llvm_version >= (11, 0, 0) && llvm_version < (13, 0, 0) {
+        if llvm_util::get_version() < (13, 0, 0) {
             add("-enable-machine-outliner=never", false);
         }
 
@@ -124,11 +115,6 @@ unsafe fn configure_llvm(sess: &Session) {
     }
 
     if sess.opts.debugging_opts.llvm_time_trace {
-        // time-trace is not thread safe and running it in parallel will cause seg faults.
-        if !sess.opts.debugging_opts.no_parallel_llvm {
-            bug!("`-Z llvm-time-trace` requires `-Z no-parallel-llvm")
-        }
-
         llvm::LLVMTimeTraceProfilerInitialize();
     }
 
@@ -191,6 +177,7 @@ pub fn to_llvm_feature<'a>(sess: &Session, s: &'a str) -> Vec<&'a str> {
         ("aarch64", "dpb2") => vec!["ccdp"],
         ("aarch64", "frintts") => vec!["fptoint"],
         ("aarch64", "fcma") => vec!["complxnum"],
+        ("aarch64", "pmuv3") => vec!["perfmon"],
         (_, s) => vec![s],
     }
 }
@@ -415,14 +402,6 @@ pub fn llvm_global_features(sess: &Session) -> Vec<String> {
 
     // -Ctarget-features
     features.extend(sess.opts.cg.target_feature.split(',').flat_map(&filter));
-
-    // FIXME: Move outline-atomics to target definition when earliest supported LLVM is 12.
-    if get_version() >= (12, 0, 0)
-        && sess.target.llvm_target.contains("aarch64-unknown-linux")
-        && sess.target.llvm_target != "aarch64-unknown-linux-musl"
-    {
-        features.push("+outline-atomics".to_string());
-    }
 
     features
 }

@@ -282,7 +282,7 @@ target | std | host | notes
 `thumbv7a-pc-windows-msvc` | ? |  |
 `thumbv7a-uwp-windows-msvc` | ✓ |  |
 `thumbv7neon-unknown-linux-musleabihf` | ? |  | Thumb2-mode ARMv7a Linux with NEON, MUSL
-`wasm64-unknown-unknown` | * |  | WebAssembly
+[`wasm64-unknown-unknown`](platform-support/wasm64-unknown-unknown.md) | ? |  | WebAssembly
 `x86_64-apple-ios-macabi` | ✓ |  | Apple Catalyst on x86_64
 `x86_64-apple-tvos` | * | | x86 64-bit tvOS
 `x86_64-pc-windows-msvc` | ✓ |  | 64-bit Windows XP support
@@ -291,6 +291,7 @@ target | std | host | notes
 `x86_64-unknown-haiku` | ✓ | ✓ | 64-bit Haiku
 `x86_64-unknown-hermit` | ? |  |
 `x86_64-unknown-l4re-uclibc` | ? |  |
+[`x86_64-unknown-none`](platform-support/x86_64-unknown-none.md) | * |  | Freestanding/bare-metal x86_64, softfloat
 `x86_64-unknown-none-hermitkernel` | ? |  | HermitCore kernel
 `x86_64-unknown-none-linuxkernel` | * |  | Linux kernel modules
 `x86_64-unknown-openbsd` | ✓ | ✓ | 64-bit OpenBSD

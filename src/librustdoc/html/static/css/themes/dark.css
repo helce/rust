@@ -44,7 +44,7 @@ pre, .rustdoc.source .example-wrap {
 	scrollbar-color: rgb(64, 65, 67) #717171;
 }
 .sidebar {
-	scrollbar-color: rgba(32,34,37,.6) transparent;
+	scrollbar-color: rgba(32,34,37,.6) #5a5a5a;
 }
 
 /* Improve the scrollbar display on webkit-based browsers */
@@ -174,21 +174,28 @@ nav.main .current {
 nav.main .separator {
 	border-color: #eee;
 }
+
 a {
+	color: #D2991D;
+}
+a.srclink,
+a#toggle-all-docs,
+a.anchor,
+.small-section-header a,
+#source-sidebar a,
+pre.rust a,
+.sidebar a,
+.in-band a {
 	color: #ddd;
+}
+.search-results a {
+	color: #ddd;
+}
+a.test-arrow {
+	color: #dedede;
 }
 body.source .example-wrap pre.rust a {
 	background: #333;
-}
-
-.docblock:not(.type-decl) a:not(.srclink):not(.test-arrow),
-.docblock-short a:not(.srclink):not(.test-arrow), .item-info a,
-#help a {
-	color: #D2991D;
-}
-
-a.test-arrow {
-	color: #dedede;
 }
 
 details.rustdoc-toggle > summary.hideme > span,
@@ -217,10 +224,6 @@ details.undocumented > summary::before {
 
 .search-input:focus {
 	border-color: #008dfd;
-}
-
-.search-input:disabled {
-	background-color: #c5c4c4;
 }
 
 #crate-search + .search-input:focus {
@@ -484,4 +487,23 @@ div.files > .selected {
 }
 .setting-line > .title {
 	border-bottom-color: #ddd;
+}
+
+.scraped-example .example-wrap .rust span.highlight {
+	background: rgb(91, 59, 1);
+}
+.scraped-example .example-wrap .rust span.highlight.focus {
+	background: rgb(124, 75, 15);
+}
+.scraped-example:not(.expanded) .code-wrapper:before {
+	background: linear-gradient(to bottom, rgba(53, 53, 53, 1), rgba(53, 53, 53, 0));
+}
+.scraped-example:not(.expanded) .code-wrapper:after {
+	background: linear-gradient(to top, rgba(53, 53, 53, 1), rgba(53, 53, 53, 0));
+}
+.toggle-line-inner {
+	background: #616161;
+}
+.toggle-line:hover .toggle-line-inner {
+	background: ##898989;
 }

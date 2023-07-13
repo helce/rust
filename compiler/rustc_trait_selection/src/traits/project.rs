@@ -20,6 +20,7 @@ use super::{Normalized, NormalizedTy, ProjectionCacheEntry, ProjectionCacheKey};
 use crate::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use crate::infer::{InferCtxt, InferOk, LateBoundRegionConversionTime};
 use crate::traits::error_reporting::InferCtxtExt as _;
+use rustc_data_structures::sso::SsoHashSet;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_errors::ErrorReported;
 use rustc_hir::def_id::DefId;
@@ -944,9 +945,14 @@ fn opt_normalize_projection_type<'a, 'b, 'tcx>(
                 Normalized { value: projected_ty, obligations: projected_obligations }
             };
 
+            let mut deduped: SsoHashSet<_> = Default::default();
             let mut canonical =
                 SelectionContext::with_query_mode(selcx.infcx(), TraitQueryMode::Canonical);
+
             result.obligations.drain_filter(|projected_obligation| {
+                if !deduped.insert(projected_obligation.clone()) {
+                    return true;
+                }
                 // If any global obligations always apply, considering regions, then we don't
                 // need to include them. The `is_global` check rules out inference variables,
                 // so there's no need for the caller of `opt_normalize_projection_type`
@@ -1734,7 +1740,7 @@ fn confirm_callable_candidate<'cx, 'tcx>(
         ty: ret_type,
     });
 
-    confirm_param_env_candidate(selcx, obligation, predicate, false)
+    confirm_param_env_candidate(selcx, obligation, predicate, true)
 }
 
 fn confirm_param_env_candidate<'cx, 'tcx>(
@@ -1754,8 +1760,18 @@ fn confirm_param_env_candidate<'cx, 'tcx>(
     );
 
     let cache_projection = cache_entry.projection_ty;
-    let obligation_projection = obligation.predicate;
     let mut nested_obligations = Vec::new();
+    let obligation_projection = obligation.predicate;
+    let obligation_projection = ensure_sufficient_stack(|| {
+        normalize_with_depth_to(
+            selcx,
+            obligation.param_env,
+            obligation.cause.clone(),
+            obligation.recursion_depth + 1,
+            obligation_projection,
+            &mut nested_obligations,
+        )
+    });
     let cache_projection = if potentially_unnormalized_candidate {
         ensure_sufficient_stack(|| {
             normalize_with_depth_to(
@@ -1770,6 +1786,8 @@ fn confirm_param_env_candidate<'cx, 'tcx>(
     } else {
         cache_projection
     };
+
+    debug!(?cache_projection, ?obligation_projection);
 
     match infcx.at(cause, param_env).eq(cache_projection, obligation_projection) {
         Ok(InferOk { value: _, obligations }) => {

@@ -392,6 +392,9 @@ impl Error {
     /// originate from the OS itself. The `error` argument is an arbitrary
     /// payload which will be contained in this [`Error`].
     ///
+    /// If no extra payload is required, use the `From` conversion from
+    /// `ErrorKind`.
+    ///
     /// # Examples
     ///
     /// ```
@@ -402,6 +405,9 @@ impl Error {
     ///
     /// // errors can also be created from other errors
     /// let custom_error2 = Error::new(ErrorKind::Interrupted, custom_error);
+    ///
+    /// // creating an error without payload
+    /// let eof_error = Error::from(ErrorKind::UnexpectedEof);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn new<E>(kind: ErrorKind, error: E) -> Error
@@ -442,6 +448,7 @@ impl Error {
     /// println!("last OS error: {:?}", Error::last_os_error());
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[must_use]
     #[inline]
     pub fn last_os_error() -> Error {
         Error::from_raw_os_error(sys::os::errno() as i32)
@@ -509,6 +516,7 @@ impl Error {
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[must_use]
     #[inline]
     pub fn raw_os_error(&self) -> Option<i32> {
         match self.repr {
@@ -547,6 +555,7 @@ impl Error {
     /// }
     /// ```
     #[stable(feature = "io_error_inner", since = "1.3.0")]
+    #[must_use]
     #[inline]
     pub fn get_ref(&self) -> Option<&(dyn error::Error + Send + Sync + 'static)> {
         match self.repr {
@@ -620,6 +629,7 @@ impl Error {
     /// }
     /// ```
     #[stable(feature = "io_error_inner", since = "1.3.0")]
+    #[must_use]
     #[inline]
     pub fn get_mut(&mut self) -> Option<&mut (dyn error::Error + Send + Sync + 'static)> {
         match self.repr {
@@ -688,6 +698,7 @@ impl Error {
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[must_use]
     #[inline]
     pub fn kind(&self) -> ErrorKind {
         match self.repr {

@@ -437,7 +437,7 @@ impl<'a> Parser<'a> {
             PatKind::Box(pat)
         } else if self.check_inline_const(0) {
             // Parse `const pat`
-            let const_expr = self.parse_const_block(lo.to(self.token.span))?;
+            let const_expr = self.parse_const_block(lo.to(self.token.span), true)?;
 
             if let Some(re) = self.parse_range_end() {
                 self.parse_pat_range_begin_with(const_expr, re)?
@@ -817,7 +817,7 @@ impl<'a> Parser<'a> {
             // Ensure the user doesn't receive unhelpful unexpected token errors
             self.bump();
             if self.is_pat_range_end_start(0) {
-                let _ = self.parse_pat_range_end();
+                let _ = self.parse_pat_range_end().map_err(|mut e| e.cancel());
             }
 
             self.error_inclusive_range_with_extra_equals(span_with_eq);
@@ -884,7 +884,7 @@ impl<'a> Parser<'a> {
 
     fn parse_pat_range_end(&mut self) -> PResult<'a, P<Expr>> {
         if self.check_inline_const(0) {
-            self.parse_const_block(self.token.span)
+            self.parse_const_block(self.token.span, true)
         } else if self.check_path() {
             let lo = self.token.span;
             let (qself, path) = if self.eat_lt() {

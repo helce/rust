@@ -2,7 +2,7 @@
 //! documentation generated so we can test each different features.
 
 #![crate_name = "test_docs"]
-#![feature(doc_keyword)]
+#![feature(rustdoc_internals)]
 #![feature(doc_cfg)]
 
 use std::convert::AsRef;
@@ -12,6 +12,7 @@ use std::fmt;
 ///
 /// ```
 /// println!("nothing fancy");
+/// println!("but with two lines!");
 /// ```
 ///
 /// A failing to compile one:
@@ -46,6 +47,8 @@ impl AsRef<str> for Foo {
 }
 
 /// Just a normal enum.
+///
+/// # title!
 #[doc(alias = "ThisIsAnAlias")]
 pub enum WhoLetTheDogOut {
     /// Woof!
@@ -123,6 +126,13 @@ pub mod huge_amount_of_consts {
 
 /// Very long code text `hereIgoWithLongTextBecauseWhyNotAndWhyWouldntI`.
 pub mod long_code_block {}
+
+#[macro_export]
+macro_rules! repro {
+    () => {};
+}
+
+pub use crate::repro as repro2;
 
 /// # Top-doc Prose title
 ///

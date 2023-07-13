@@ -200,7 +200,7 @@ pub use self::local::fast::Key as __FastLocalKeyInner;
 #[doc(hidden)]
 pub use self::local::os::Key as __OsLocalKeyInner;
 #[unstable(feature = "libstd_thread_internals", issue = "none")]
-#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 #[doc(hidden)]
 pub use self::local::statik::Key as __StaticLocalKeyInner;
 
@@ -257,6 +257,7 @@ pub const fn require_unstable_const_init_thread_local() {}
 /// [`unwrap`]: crate::result::Result::unwrap
 /// [naming-threads]: ./index.html#naming-threads
 /// [stack-size]: ./index.html#stack-size
+#[must_use = "must eventually spawn the thread"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Debug)]
 pub struct Builder {
@@ -649,6 +650,7 @@ where
 ///
 /// handler.join().unwrap();
 /// ```
+#[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn current() -> Thread {
     thread_info::current_thread().expect(
@@ -737,6 +739,7 @@ pub fn yield_now() {
 ///
 /// [Mutex]: crate::sync::Mutex
 #[inline]
+#[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn panicking() -> bool {
     panicking::panicking()
@@ -1131,6 +1134,7 @@ impl Thread {
     /// assert!(thread::current().id() != other_thread_id);
     /// ```
     #[stable(feature = "thread_id", since = "1.19.0")]
+    #[must_use]
     pub fn id(&self) -> ThreadId {
         self.inner.id
     }
@@ -1173,6 +1177,7 @@ impl Thread {
     ///
     /// [naming-threads]: ./index.html#naming-threads
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[must_use]
     pub fn name(&self) -> Option<&str> {
         self.cname().map(|s| unsafe { str::from_utf8_unchecked(s.to_bytes()) })
     }
@@ -1360,6 +1365,7 @@ impl<T> JoinHandle<T> {
     /// println!("thread id: {:?}", thread.id());
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[must_use]
     pub fn thread(&self) -> &Thread {
         &self.0.thread
     }
@@ -1400,6 +1406,15 @@ impl<T> JoinHandle<T> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn join(mut self) -> Result<T> {
         self.0.join()
+    }
+
+    /// Checks if the the associated thread is still running its main function.
+    ///
+    /// This might return `false` for a brief moment after the thread's main
+    /// function has returned, but before the thread itself has stopped running.
+    #[unstable(feature = "thread_is_running", issue = "90470")]
+    pub fn is_running(&self) -> bool {
+        Arc::strong_count(&self.0.packet.0) > 1
     }
 }
 
@@ -1448,6 +1463,10 @@ fn _assert_sync_and_send() {
 /// differences in (co)processor capabilities, and will not modify the program's
 /// global state in order to more accurately query the amount of available
 /// parallelism.
+///
+/// Resource limits can be changed during the runtime of a program, therefore the value is
+/// not cached and instead recomputed every time this function is called. It should not be
+/// called from hot code.
 ///
 /// The value returned by this function should be considered a simplified
 /// approximation of the actual amount of parallelism available at any given

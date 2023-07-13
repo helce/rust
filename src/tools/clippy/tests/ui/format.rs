@@ -1,6 +1,6 @@
 // run-rustfix
 
-#![allow(clippy::print_literal, clippy::redundant_clone)]
+#![allow(clippy::print_literal, clippy::redundant_clone, clippy::to_string_in_format_args)]
 #![warn(clippy::useless_format)]
 
 struct Foo(pub String);
@@ -17,6 +17,8 @@ fn main() {
         r##"foo {{}}
 " bar"##
     );
+
+    let _ = format!("");
 
     format!("{}", "foo");
     format!("{:?}", "foo"); // Don't warn about `Debug`.
@@ -73,4 +75,10 @@ fn main() {
     let _s: String = format!("{}", &*v.join("\n"));
 
     format!("prepend {:+}", "s");
+
+    // Issue #8290
+    let x = "foo";
+    let _ = format!("{x}");
+    let _ = format!("{x:?}"); // Don't lint on debug
+    let _ = format!("{y}", y = x);
 }

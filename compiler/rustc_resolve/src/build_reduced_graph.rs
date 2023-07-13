@@ -15,7 +15,7 @@ use crate::{Resolver, ResolverArenas, Segment, ToNameBinding, VisResolutionError
 
 use rustc_ast::visit::{self, AssocCtxt, Visitor};
 use rustc_ast::{self as ast, AssocItem, AssocItemKind, MetaItemKind, StmtKind};
-use rustc_ast::{Block, FnKind, ForeignItem, ForeignItemKind, ImplKind, Item, ItemKind, NodeId};
+use rustc_ast::{Block, Fn, ForeignItem, ForeignItemKind, Impl, Item, ItemKind, NodeId};
 use rustc_ast_lowering::ResolverAstLowering;
 use rustc_attr as attr;
 use rustc_data_structures::sync::Lrc;
@@ -145,17 +145,11 @@ impl<'a> Resolver<'a> {
                     } else {
                         def_key.disambiguated_data.data.get_opt_name().expect("module without name")
                     };
-                    let expn_id = if def_kind == DefKind::Mod {
-                        self.cstore().module_expansion_untracked(def_id, &self.session)
-                    } else {
-                        // FIXME: Parent expansions for enums and traits are not kept in metadata.
-                        ExpnId::root()
-                    };
 
                     Some(self.new_module(
                         parent,
                         ModuleKind::Def(def_kind, def_id, name),
-                        expn_id,
+                        self.cstore().module_expansion_untracked(def_id, &self.session),
                         self.cstore().get_span_untracked(def_id, &self.session),
                         // FIXME: Account for `#[no_implicit_prelude]` attributes.
                         parent.map_or(false, |module| module.no_implicit_prelude),
@@ -886,7 +880,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
             }
 
             // These items do not add names to modules.
-            ItemKind::Impl(box ImplKind { of_trait: Some(..), .. }) => {
+            ItemKind::Impl(box Impl { of_trait: Some(..), .. }) => {
                 self.r.trait_impl_items.insert(local_def_id);
             }
             ItemKind::Impl { .. } | ItemKind::ForeignMod(..) | ItemKind::GlobalAsm(..) => {}
@@ -973,6 +967,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                 | DefKind::Use
                 | DefKind::ForeignMod
                 | DefKind::AnonConst
+                | DefKind::InlineConst
                 | DefKind::Field
                 | DefKind::LifetimeParam
                 | DefKind::GlobalAsm
@@ -1199,15 +1194,9 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
     // Mark the given macro as unused unless its name starts with `_`.
     // Macro uses will remove items from this set, and the remaining
     // items will be reported as `unused_macros`.
-    fn insert_unused_macro(
-        &mut self,
-        ident: Ident,
-        def_id: LocalDefId,
-        node_id: NodeId,
-        span: Span,
-    ) {
+    fn insert_unused_macro(&mut self, ident: Ident, def_id: LocalDefId, node_id: NodeId) {
         if !ident.as_str().starts_with('_') {
-            self.r.unused_macros.insert(def_id, (node_id, span));
+            self.r.unused_macros.insert(def_id, (node_id, ident));
         }
     }
 
@@ -1251,7 +1240,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                 self.r.define(module, ident, MacroNS, (res, vis, span, expansion, IsMacroExport));
             } else {
                 self.r.check_reserved_macro_name(ident, res);
-                self.insert_unused_macro(ident, def_id, item.id, span);
+                self.insert_unused_macro(ident, def_id, item.id);
             }
             self.r.visibilities.insert(def_id, vis);
             self.r.arenas.alloc_macro_rules_scope(MacroRulesScope::Binding(
@@ -1272,7 +1261,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                 _ => self.resolve_visibility(&item.vis),
             };
             if vis != ty::Visibility::Public {
-                self.insert_unused_macro(ident, def_id, item.id, span);
+                self.insert_unused_macro(ident, def_id, item.id);
             }
             self.r.define(module, ident, MacroNS, (res, vis, span, expansion));
             self.r.visibilities.insert(def_id, vis);
@@ -1386,7 +1375,7 @@ impl<'a, 'b> Visitor<'b> for BuildReducedGraphVisitor<'a, 'b> {
         if ctxt == AssocCtxt::Trait {
             let (def_kind, ns) = match item.kind {
                 AssocItemKind::Const(..) => (DefKind::AssocConst, ValueNS),
-                AssocItemKind::Fn(box FnKind(_, ref sig, _, _)) => {
+                AssocItemKind::Fn(box Fn { ref sig, .. }) => {
                     if sig.decl.has_self() {
                         self.r.has_self.insert(def_id);
                     }

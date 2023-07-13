@@ -13,7 +13,10 @@ use rustc_attr::{ConstStability, StabilityLevel};
 use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir as hir;
+use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
+use rustc_middle::ty;
+use rustc_middle::ty::DefIdTree;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::CRATE_DEF_INDEX;
 use rustc_target::spec::abi::Abi;
@@ -501,7 +504,16 @@ crate fn href_with_root_path(
     cx: &Context<'_>,
     root_path: Option<&str>,
 ) -> Result<(String, ItemType, Vec<String>), HrefError> {
-    let cache = &cx.cache();
+    let tcx = cx.tcx();
+    let def_kind = tcx.def_kind(did);
+    let did = match def_kind {
+        DefKind::AssocTy | DefKind::AssocFn | DefKind::AssocConst | DefKind::Variant => {
+            // documented on their parent's page
+            tcx.parent(did).unwrap()
+        }
+        _ => did,
+    };
+    let cache = cx.cache();
     let relative_to = &cx.current;
     fn to_module_fqp(shortty: ItemType, fqp: &[String]) -> &[String] {
         if shortty == ItemType::Module { fqp } else { &fqp[..fqp.len() - 1] }
@@ -595,9 +607,8 @@ crate fn href_relative_parts<'a>(fqp: &'a [String], relative_to_fqp: &'a [String
     }
 }
 
-/// Used when rendering a `ResolvedPath` structure. This invokes the `path`
-/// rendering function with the necessary arguments for linking to a local path.
-fn resolved_path<'a, 'cx: 'a>(
+/// Used to render a [`clean::Path`].
+fn resolved_path<'cx>(
     w: &mut fmt::Formatter<'_>,
     did: DefId,
     path: &clean::Path,
@@ -696,7 +707,7 @@ fn primitive_link(
 
 /// Helper to render type parameters
 fn tybounds<'a, 'tcx: 'a>(
-    bounds: &'a Vec<clean::PolyTrait>,
+    bounds: &'a [clean::PolyTrait],
     lt: &'a Option<clean::Lifetime>,
     cx: &'a Context<'tcx>,
 ) -> impl fmt::Display + 'a + Captures<'tcx> {
@@ -750,8 +761,9 @@ fn fmt_type<'cx>(
 
     match *t {
         clean::Generic(name) => write!(f, "{}", name),
-        clean::ResolvedPath { did, ref path } => {
+        clean::Type::Path { ref path } => {
             // Paths like `T::Output` and `Self::Output` should be rendered with all segments.
+            let did = path.def_id();
             resolved_path(f, did, path, path.is_assoc_ty(), use_absolute, cx)
         }
         clean::DynTrait(ref bounds, ref lt) => {
@@ -886,7 +898,7 @@ fn fmt_type<'cx>(
                     if bounds.len() > 1 || trait_lt.is_some() =>
                 {
                     write!(f, "{}{}{}(", amp, lt, m)?;
-                    fmt_type(&ty, f, use_absolute, cx)?;
+                    fmt_type(ty, f, use_absolute, cx)?;
                     write!(f, ")")
                 }
                 clean::Generic(..) => {
@@ -896,11 +908,11 @@ fn fmt_type<'cx>(
                         &format!("{}{}{}", amp, lt, m),
                         cx,
                     )?;
-                    fmt_type(&ty, f, use_absolute, cx)
+                    fmt_type(ty, f, use_absolute, cx)
                 }
                 _ => {
                     write!(f, "{}{}{}", amp, lt, m)?;
-                    fmt_type(&ty, f, use_absolute, cx)
+                    fmt_type(ty, f, use_absolute, cx)
                 }
             }
         }
@@ -990,14 +1002,15 @@ impl clean::Impl {
             }
 
             if let Some(ref ty) = self.trait_ {
-                if self.negative_polarity {
-                    write!(f, "!")?;
+                match self.polarity {
+                    ty::ImplPolarity::Positive | ty::ImplPolarity::Reservation => {}
+                    ty::ImplPolarity::Negative => write!(f, "!")?,
                 }
                 fmt::Display::fmt(&ty.print(cx), f)?;
                 write!(f, " for ")?;
             }
 
-            if let Some(ref ty) = self.blanket_impl {
+            if let Some(ref ty) = self.kind.as_blanket_ty() {
                 fmt_type(ty, f, use_absolute, cx)?;
             } else {
                 fmt_type(&self.for_, f, use_absolute, cx)?;

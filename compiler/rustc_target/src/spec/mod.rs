@@ -602,6 +602,7 @@ bitflags::bitflags! {
         const MEMORY  = 1 << 2;
         const THREAD  = 1 << 3;
         const HWADDRESS = 1 << 4;
+        const CFI     = 1 << 5;
     }
 }
 
@@ -612,6 +613,7 @@ impl SanitizerSet {
     fn as_str(self) -> Option<&'static str> {
         Some(match self {
             SanitizerSet::ADDRESS => "address",
+            SanitizerSet::CFI => "cfi",
             SanitizerSet::LEAK => "leak",
             SanitizerSet::MEMORY => "memory",
             SanitizerSet::THREAD => "thread",
@@ -644,6 +646,7 @@ impl IntoIterator for SanitizerSet {
     fn into_iter(self) -> Self::IntoIter {
         [
             SanitizerSet::ADDRESS,
+            SanitizerSet::CFI,
             SanitizerSet::LEAK,
             SanitizerSet::MEMORY,
             SanitizerSet::THREAD,
@@ -706,6 +709,59 @@ impl ToJson for FramePointer {
             Self::MayOmit => "may-omit",
         }
         .to_json()
+    }
+}
+
+/// Controls use of stack canaries.
+#[derive(Clone, Copy, Debug, PartialEq, Hash, Eq)]
+pub enum StackProtector {
+    /// Disable stack canary generation.
+    None,
+
+    /// On LLVM, mark all generated LLVM functions with the `ssp` attribute (see
+    /// llvm/docs/LangRef.rst). This triggers stack canary generation in
+    /// functions which contain an array of a byte-sized type with more than
+    /// eight elements.
+    Basic,
+
+    /// On LLVM, mark all generated LLVM functions with the `sspstrong`
+    /// attribute (see llvm/docs/LangRef.rst). This triggers stack canary
+    /// generation in functions which either contain an array, or which take
+    /// the address of a local variable.
+    Strong,
+
+    /// Generate stack canaries in all functions.
+    All,
+}
+
+impl StackProtector {
+    fn as_str(&self) -> &'static str {
+        match self {
+            StackProtector::None => "none",
+            StackProtector::Basic => "basic",
+            StackProtector::Strong => "strong",
+            StackProtector::All => "all",
+        }
+    }
+}
+
+impl FromStr for StackProtector {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<StackProtector, ()> {
+        Ok(match s {
+            "none" => StackProtector::None,
+            "basic" => StackProtector::Basic,
+            "strong" => StackProtector::Strong,
+            "all" => StackProtector::All,
+            _ => return Err(()),
+        })
+    }
+}
+
+impl fmt::Display for StackProtector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -961,6 +1017,8 @@ supported_targets! {
     ("e2kv4-unknown-linux-gnu", e2kv4_unknown_linux_gnu),
     ("e2kv5-unknown-linux-gnu", e2kv5_unknown_linux_gnu),
     ("e2kv6-unknown-linux-gnu", e2kv6_unknown_linux_gnu),
+
+    ("x86_64-unknown-none", x86_64_unknown_none),
 }
 
 /// Warnings encountered when parsing the target `json`.
@@ -1359,6 +1417,13 @@ pub struct TargetOptions {
 
     /// Minimum number of bits in #[repr(C)] enum. Defaults to 32.
     pub c_enum_min_bits: u64,
+
+    /// Whether or not the DWARF `.debug_aranges` section should be generated.
+    pub generate_arange_section: bool,
+
+    /// Whether the target supports stack canary checks. `true` by default,
+    /// since this is most common among tier 1 and tier 2 targets.
+    pub supports_stack_protector: bool,
 }
 
 impl Default for TargetOptions {
@@ -1464,6 +1529,8 @@ impl Default for TargetOptions {
             supported_sanitizers: SanitizerSet::empty(),
             default_adjusted_cabi: None,
             c_enum_min_bits: 32,
+            generate_arange_section: true,
+            supports_stack_protector: true,
         }
     }
 }
@@ -1529,6 +1596,7 @@ impl Target {
             AmdGpuKernel => self.arch == "amdgcn",
             AvrInterrupt | AvrNonBlockingInterrupt => self.arch == "avr",
             Wasm => ["wasm32", "wasm64"].contains(&&self.arch[..]),
+            Thiscall { .. } => self.arch == "x86",
             // On windows these fall-back to platform native calling convention (C) when the
             // architecture is not supported.
             //
@@ -1559,15 +1627,13 @@ impl Target {
             // > convention is used.
             //
             // -- https://docs.microsoft.com/en-us/cpp/cpp/argument-passing-and-naming-conventions
-            Stdcall { .. } | Fastcall | Thiscall { .. } | Vectorcall if self.is_like_windows => {
-                true
-            }
+            Stdcall { .. } | Fastcall | Vectorcall if self.is_like_windows => true,
             // Outside of Windows we want to only support these calling conventions for the
             // architectures for which these calling conventions are actually well defined.
-            Stdcall { .. } | Fastcall | Thiscall { .. } if self.arch == "x86" => true,
+            Stdcall { .. } | Fastcall if self.arch == "x86" => true,
             Vectorcall if ["x86", "x86_64"].contains(&&self.arch[..]) => true,
             // Return a `None` for other cases so that we know to emit a future compat lint.
-            Stdcall { .. } | Fastcall | Thiscall { .. } | Vectorcall => return None,
+            Stdcall { .. } | Fastcall | Vectorcall => return None,
         })
     }
 
@@ -1812,6 +1878,7 @@ impl Target {
                         for s in a {
                             base.$key_name |= match s.as_string() {
                                 Some("address") => SanitizerSet::ADDRESS,
+                                Some("cfi") => SanitizerSet::CFI,
                                 Some("leak") => SanitizerSet::LEAK,
                                 Some("memory") => SanitizerSet::MEMORY,
                                 Some("thread") => SanitizerSet::THREAD,
@@ -2049,6 +2116,8 @@ impl Target {
         key!(supported_sanitizers, SanitizerSet)?;
         key!(default_adjusted_cabi, Option<Abi>)?;
         key!(c_enum_min_bits, u64);
+        key!(generate_arange_section, bool);
+        key!(supports_stack_protector, bool);
 
         if base.is_builtin {
             // This can cause unfortunate ICEs later down the line.
@@ -2073,7 +2142,7 @@ impl Target {
     /// JSON decoding.
     pub fn search(
         target_triple: &TargetTriple,
-        sysroot: &PathBuf,
+        sysroot: &Path,
     ) -> Result<(Target, TargetWarnings), String> {
         use rustc_serialize::json;
         use std::env;
@@ -2288,6 +2357,8 @@ impl ToJson for Target {
         target_option_val!(split_debuginfo);
         target_option_val!(supported_sanitizers);
         target_option_val!(c_enum_min_bits);
+        target_option_val!(generate_arange_section);
+        target_option_val!(supports_stack_protector);
 
         if let Some(abi) = self.default_adjusted_cabi {
             d.insert("default-adjusted-cabi".to_string(), Abi::name(abi).to_json());

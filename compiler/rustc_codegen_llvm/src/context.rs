@@ -134,9 +134,6 @@ pub unsafe fn create_module(
     let llmod = llvm::LLVMModuleCreateWithNameInContext(mod_name.as_ptr(), llcx);
 
     let mut target_data_layout = sess.target.data_layout.clone();
-    if llvm_util::get_version() < (12, 0, 0) && sess.target.arch == "powerpc64" {
-        target_data_layout = target_data_layout.replace("-v256:256:256-v512:512:512", "");
-    }
     if llvm_util::get_version() < (13, 0, 0) {
         if sess.target.arch == "powerpc64" {
             target_data_layout = target_data_layout.replace("-S128", "");
@@ -219,6 +216,15 @@ pub unsafe fn create_module(
     if !sess.needs_plt() {
         let avoid_plt = "RtLibUseGOT\0".as_ptr().cast();
         llvm::LLVMRustAddModuleFlag(llmod, avoid_plt, 1);
+    }
+
+    if sess.is_sanitizer_cfi_enabled() {
+        // FIXME(rcvalle): Add support for non canonical jump tables.
+        let canonical_jump_tables = "CFI Canonical Jump Tables\0".as_ptr().cast();
+        // FIXME(rcvalle): Add it with Override behavior flag--LLVMRustAddModuleFlag adds it with
+        // Warning behavior flag. Add support for specifying the behavior flag to
+        // LLVMRustAddModuleFlag.
+        llvm::LLVMRustAddModuleFlag(llmod, canonical_jump_tables, 1);
     }
 
     // Control Flow Guard is currently only supported by the MSVC linker on Windows.
@@ -591,7 +597,6 @@ impl CodegenCx<'b, 'tcx> {
         ifn!("llvm.trap", fn() -> void);
         ifn!("llvm.debugtrap", fn() -> void);
         ifn!("llvm.frameaddress", fn(t_i32) -> i8p);
-        ifn!("llvm.sideeffect", fn() -> void);
 
         ifn!("llvm.powi.f32", fn(t_f32, t_i32) -> t_f32);
         ifn!("llvm.powi.f64", fn(t_f64, t_i32) -> t_f64);
@@ -778,6 +783,8 @@ impl CodegenCx<'b, 'tcx> {
         if self.sess().instrument_coverage() {
             ifn!("llvm.instrprof.increment", fn(i8p, t_i64, t_i32, t_i32) -> void);
         }
+
+        ifn!("llvm.type.test", fn(i8p, self.type_metadata()) -> i1);
 
         if self.sess().opts.debuginfo != DebugInfo::None {
             ifn!("llvm.dbg.declare", fn(self.type_metadata(), self.type_metadata()) -> void);

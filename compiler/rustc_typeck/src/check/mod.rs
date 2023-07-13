@@ -297,9 +297,9 @@ fn primary_body_of(
 fn has_typeck_results(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
     // Closures' typeck results come from their outermost function,
     // as they are part of the same "inference environment".
-    let outer_def_id = tcx.closure_base_def_id(def_id);
-    if outer_def_id != def_id {
-        return tcx.has_typeck_results(outer_def_id);
+    let typeck_root_def_id = tcx.typeck_root_def_id(def_id);
+    if typeck_root_def_id != def_id {
+        return tcx.has_typeck_results(typeck_root_def_id);
     }
 
     if let Some(def_id) = def_id.as_local() {
@@ -348,9 +348,9 @@ fn typeck_with_fallback<'tcx>(
 ) -> &'tcx ty::TypeckResults<'tcx> {
     // Closures' typeck results come from their outermost function,
     // as they are part of the same "inference environment".
-    let outer_def_id = tcx.closure_base_def_id(def_id.to_def_id()).expect_local();
-    if outer_def_id != def_id {
-        return tcx.typeck(outer_def_id);
+    let typeck_root_def_id = tcx.typeck_root_def_id(def_id.to_def_id()).expect_local();
+    if typeck_root_def_id != def_id {
+        return tcx.typeck(typeck_root_def_id);
     }
 
     let id = tcx.hir().local_def_id_to_hir_id(def_id);
@@ -535,8 +535,8 @@ fn fn_maybe_err(tcx: TyCtxt<'_>, sp: Span, abi: Abi) {
 }
 
 fn maybe_check_static_with_link_section(tcx: TyCtxt<'_>, id: LocalDefId, span: Span) {
-    // Only restricted on wasm32 target for now
-    if !tcx.sess.opts.target_triple.triple().starts_with("wasm32") {
+    // Only restricted on wasm target for now
+    if !tcx.sess.target.is_like_wasm {
         return;
     }
 

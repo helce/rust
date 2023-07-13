@@ -9,9 +9,9 @@ use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::TyCtxt;
 
 use rustc_ast::{ast, AttrStyle, Attribute, Lit, LitKind, NestedMetaItem};
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{pluralize, struct_span_err, Applicability};
-use rustc_feature::{AttributeType, BUILTIN_ATTRIBUTE_MAP};
+use rustc_feature::{AttributeDuplicates, AttributeType, BuiltinAttribute, BUILTIN_ATTRIBUTE_MAP};
 use rustc_hir as hir;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
@@ -23,6 +23,7 @@ use rustc_session::lint::builtin::{
 use rustc_session::parse::feature_err;
 use rustc_span::symbol::{sym, Symbol};
 use rustc_span::{MultiSpan, Span, DUMMY_SP};
+use std::collections::hash_map::Entry;
 
 pub(crate) fn target_from_impl_item<'tcx>(
     tcx: TyCtxt<'tcx>,
@@ -69,7 +70,7 @@ impl CheckAttrVisitor<'tcx> {
         let mut doc_aliases = FxHashMap::default();
         let mut is_valid = true;
         let mut specified_inline = None;
-        let mut seen = FxHashSet::default();
+        let mut seen = FxHashMap::default();
         let attrs = self.tcx.hir().attrs(hir_id);
         for attr in attrs {
             let attr_is_valid = match attr.name_or_empty() {
@@ -112,6 +113,7 @@ impl CheckAttrVisitor<'tcx> {
                     self.check_default_method_body_is_const(attr, span, target)
                 }
                 sym::must_not_suspend => self.check_must_not_suspend(&attr, span, target),
+                sym::must_use => self.check_must_use(hir_id, &attr, span, target),
                 sym::rustc_const_unstable
                 | sym::rustc_const_stable
                 | sym::unstable
@@ -147,8 +149,10 @@ impl CheckAttrVisitor<'tcx> {
                 _ => {}
             }
 
+            let builtin = attr.ident().and_then(|ident| BUILTIN_ATTRIBUTE_MAP.get(&ident.name));
+
             if hir_id != CRATE_HIR_ID {
-                if let Some((_, AttributeType::CrateLevel, ..)) =
+                if let Some(BuiltinAttribute { type_: AttributeType::CrateLevel, .. }) =
                     attr.ident().and_then(|ident| BUILTIN_ATTRIBUTE_MAP.get(&ident.name))
                 {
                     self.tcx.struct_span_lint_hir(UNUSED_ATTRIBUTES, hir_id, attr.span, |lint| {
@@ -164,21 +168,37 @@ impl CheckAttrVisitor<'tcx> {
                 }
             }
 
-            // Duplicate attributes
-            match attr.name_or_empty() {
-                name @ sym::macro_use => {
-                    let args = attr.meta_item_list().unwrap_or_else(Vec::new);
-                    let args: Vec<_> = args.iter().map(|arg| arg.name_or_empty()).collect();
-                    if !seen.insert((name, args)) {
-                        self.tcx.struct_span_lint_hir(
-                            UNUSED_ATTRIBUTES,
-                            hir_id,
+            if let Some(BuiltinAttribute { duplicates, .. }) = builtin {
+                check_duplicates(self.tcx, attr, hir_id, *duplicates, &mut seen);
+            }
+
+            // Warn on useless empty attributes.
+            if matches!(
+                attr.name_or_empty(),
+                sym::macro_use
+                    | sym::allow
+                    | sym::warn
+                    | sym::deny
+                    | sym::forbid
+                    | sym::feature
+                    | sym::repr
+                    | sym::target_feature
+            ) && attr.meta_item_list().map_or(false, |list| list.is_empty())
+            {
+                self.tcx.struct_span_lint_hir(UNUSED_ATTRIBUTES, hir_id, attr.span, |lint| {
+                    lint.build("unused attribute")
+                        .span_suggestion(
                             attr.span,
-                            |lint| lint.build("unused attribute").emit(),
-                        );
-                    }
-                }
-                _ => {}
+                            "remove this attribute",
+                            String::new(),
+                            Applicability::MachineApplicable,
+                        )
+                        .note(&format!(
+                            "attribute `{}` with an empty list has no effect",
+                            attr.name_or_empty()
+                        ))
+                        .emit();
+                });
             }
         }
 
@@ -765,7 +785,7 @@ impl CheckAttrVisitor<'tcx> {
                             "not a `use` item",
                         );
                     }
-                    err.note("read https://doc.rust-lang.org/nightly/rustdoc/the-doc-attribute.html#docno_inlinedocinline for more information")
+                    err.note("read https://doc.rust-lang.org/nightly/rustdoc/the-doc-attribute.html#inline-and-no_inline for more information")
                         .emit();
                 },
             );
@@ -962,7 +982,7 @@ impl CheckAttrVisitor<'tcx> {
                         }
 
                         sym::primitive => {
-                            if !self.tcx.features().doc_primitive {
+                            if !self.tcx.features().rustdoc_internals {
                                 self.tcx.struct_span_lint_hir(
                                     INVALID_DOC_ATTRIBUTES,
                                     hir_id,
@@ -1044,6 +1064,37 @@ impl CheckAttrVisitor<'tcx> {
         }
 
         is_valid
+    }
+
+    /// Warns against some misuses of `#[must_use]`
+    fn check_must_use(
+        &self,
+        hir_id: HirId,
+        attr: &Attribute,
+        span: &Span,
+        _target: Target,
+    ) -> bool {
+        let node = self.tcx.hir().get(hir_id);
+        if let Some(fn_node) = node.fn_kind() {
+            if let rustc_hir::IsAsync::Async = fn_node.asyncness() {
+                self.tcx.struct_span_lint_hir(UNUSED_ATTRIBUTES, hir_id, attr.span, |lint| {
+                    lint.build(
+                        "`must_use` attribute on `async` functions \
+                              applies to the anonymous `Future` returned by the \
+                              function, not the value within",
+                    )
+                    .span_label(
+                        *span,
+                        "this attribute does nothing, the `Future`s \
+                                returned by async functions are already `must_use`",
+                    )
+                    .emit();
+                });
+            }
+        }
+
+        // For now, its always valid
+        true
     }
 
     /// Checks if `#[must_not_suspend]` is applied to a function. Returns `true` if valid.
@@ -1957,4 +2008,78 @@ fn check_mod_attrs(tcx: TyCtxt<'_>, module_def_id: LocalDefId) {
 
 pub(crate) fn provide(providers: &mut Providers) {
     *providers = Providers { check_mod_attrs, ..*providers };
+}
+
+fn check_duplicates(
+    tcx: TyCtxt<'_>,
+    attr: &Attribute,
+    hir_id: HirId,
+    duplicates: AttributeDuplicates,
+    seen: &mut FxHashMap<Symbol, Span>,
+) {
+    use AttributeDuplicates::*;
+    if matches!(duplicates, WarnFollowingWordOnly) && !attr.is_word() {
+        return;
+    }
+    match duplicates {
+        DuplicatesOk => {}
+        WarnFollowing | FutureWarnFollowing | WarnFollowingWordOnly | FutureWarnPreceding => {
+            match seen.entry(attr.name_or_empty()) {
+                Entry::Occupied(mut entry) => {
+                    let (this, other) = if matches!(duplicates, FutureWarnPreceding) {
+                        let to_remove = entry.insert(attr.span);
+                        (to_remove, attr.span)
+                    } else {
+                        (attr.span, *entry.get())
+                    };
+                    tcx.struct_span_lint_hir(UNUSED_ATTRIBUTES, hir_id, this, |lint| {
+                        let mut db = lint.build("unused attribute");
+                        db.span_note(other, "attribute also specified here").span_suggestion(
+                            this,
+                            "remove this attribute",
+                            String::new(),
+                            Applicability::MachineApplicable,
+                        );
+                        if matches!(duplicates, FutureWarnFollowing | FutureWarnPreceding) {
+                            db.warn(
+                                "this was previously accepted by the compiler but is \
+                                 being phased out; it will become a hard error in \
+                                 a future release!",
+                            );
+                        }
+                        db.emit();
+                    });
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(attr.span);
+                }
+            }
+        }
+        ErrorFollowing | ErrorPreceding => match seen.entry(attr.name_or_empty()) {
+            Entry::Occupied(mut entry) => {
+                let (this, other) = if matches!(duplicates, ErrorPreceding) {
+                    let to_remove = entry.insert(attr.span);
+                    (to_remove, attr.span)
+                } else {
+                    (attr.span, *entry.get())
+                };
+                tcx.sess
+                    .struct_span_err(
+                        this,
+                        &format!("multiple `{}` attributes", attr.name_or_empty()),
+                    )
+                    .span_note(other, "attribute also specified here")
+                    .span_suggestion(
+                        this,
+                        "remove this attribute",
+                        String::new(),
+                        Applicability::MachineApplicable,
+                    )
+                    .emit();
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(attr.span);
+            }
+        },
+    }
 }

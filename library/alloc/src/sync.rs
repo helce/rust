@@ -252,7 +252,7 @@ impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Arc<U>> for Arc<T> {}
 impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Arc<U>> for Arc<T> {}
 
 impl<T: ?Sized> Arc<T> {
-    fn from_inner(ptr: NonNull<ArcInner<T>>) -> Self {
+    unsafe fn from_inner(ptr: NonNull<ArcInner<T>>) -> Self {
         Self { ptr, phantom: PhantomData }
     }
 
@@ -348,7 +348,7 @@ impl<T> Arc<T> {
             weak: atomic::AtomicUsize::new(1),
             data,
         };
-        Self::from_inner(Box::leak(x).into())
+        unsafe { Self::from_inner(Box::leak(x).into()) }
     }
 
     /// Constructs a new `Arc<T>` using a weak reference to itself. Attempting
@@ -397,7 +397,7 @@ impl<T> Arc<T> {
 
         // Now we can properly initialize the inner value and turn our weak
         // reference into a strong reference.
-        unsafe {
+        let strong = unsafe {
             let inner = init_ptr.as_ptr();
             ptr::write(ptr::addr_of_mut!((*inner).data), data);
 
@@ -415,9 +415,9 @@ impl<T> Arc<T> {
             // possible with safe code alone.
             let prev_value = (*inner).strong.fetch_add(1, Release);
             debug_assert_eq!(prev_value, 0, "No prior strong references should exist");
-        }
 
-        let strong = Arc::from_inner(init_ptr);
+            Arc::from_inner(init_ptr)
+        };
 
         // Strong references should collectively own a shared weak reference,
         // so don't run the destructor for our old weak reference.
@@ -529,7 +529,7 @@ impl<T> Arc<T> {
             weak: atomic::AtomicUsize::new(1),
             data,
         })?;
-        Ok(Self::from_inner(Box::leak(x).into()))
+        unsafe { Ok(Self::from_inner(Box::leak(x).into())) }
     }
 
     /// Constructs a new `Arc` with uninitialized contents, returning an error
@@ -743,7 +743,7 @@ impl<T> Arc<mem::MaybeUninit<T>> {
     #[must_use = "`self` will be dropped if the result is not used"]
     #[inline]
     pub unsafe fn assume_init(self) -> Arc<T> {
-        Arc::from_inner(mem::ManuallyDrop::new(self).ptr.cast())
+        unsafe { Arc::from_inner(mem::ManuallyDrop::new(self).ptr.cast()) }
     }
 }
 
@@ -804,6 +804,7 @@ impl<T: ?Sized> Arc<T> {
     /// let x_ptr = Arc::into_raw(x);
     /// assert_eq!(unsafe { &*x_ptr }, "hello");
     /// ```
+    #[must_use = "losing the pointer will leak memory"]
     #[stable(feature = "rc_raw", since = "1.17.0")]
     pub fn into_raw(this: Self) -> *const T {
         let ptr = Self::as_ptr(&this);
@@ -953,6 +954,7 @@ impl<T: ?Sized> Arc<T> {
     /// assert_eq!(1, Arc::weak_count(&five));
     /// ```
     #[inline]
+    #[must_use]
     #[stable(feature = "arc_counts", since = "1.15.0")]
     pub fn weak_count(this: &Self) -> usize {
         let cnt = this.inner().weak.load(SeqCst);
@@ -982,6 +984,7 @@ impl<T: ?Sized> Arc<T> {
     /// assert_eq!(2, Arc::strong_count(&five));
     /// ```
     #[inline]
+    #[must_use]
     #[stable(feature = "arc_counts", since = "1.15.0")]
     pub fn strong_count(this: &Self) -> usize {
         this.inner().strong.load(SeqCst)
@@ -1079,8 +1082,6 @@ impl<T: ?Sized> Arc<T> {
         drop(Weak { ptr: self.ptr });
     }
 
-    #[inline]
-    #[stable(feature = "ptr_eq", since = "1.17.0")]
     /// Returns `true` if the two `Arc`s point to the same allocation
     /// (in a vein similar to [`ptr::eq`]).
     ///
@@ -1098,6 +1099,9 @@ impl<T: ?Sized> Arc<T> {
     /// ```
     ///
     /// [`ptr::eq`]: core::ptr::eq "ptr::eq"
+    #[inline]
+    #[must_use]
+    #[stable(feature = "ptr_eq", since = "1.17.0")]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         this.ptr.as_ptr() == other.ptr.as_ptr()
     }
@@ -1337,7 +1341,7 @@ impl<T: ?Sized> Clone for Arc<T> {
             abort();
         }
 
-        Self::from_inner(self.ptr)
+        unsafe { Self::from_inner(self.ptr) }
     }
 }
 
@@ -1664,9 +1668,11 @@ impl Arc<dyn Any + Send + Sync> {
         T: Any + Send + Sync + 'static,
     {
         if (*self).is::<T>() {
-            let ptr = self.ptr.cast::<ArcInner<T>>();
-            mem::forget(self);
-            Ok(Arc::from_inner(ptr))
+            unsafe {
+                let ptr = self.ptr.cast::<ArcInner<T>>();
+                mem::forget(self);
+                Ok(Arc::from_inner(ptr))
+            }
         } else {
             Err(self)
         }
@@ -1895,7 +1901,7 @@ impl<T: ?Sized> Weak<T> {
             // value can be initialized after `Weak` references have already been created. In that case, we
             // expect to observe the fully initialized value.
             match inner.strong.compare_exchange_weak(n, n + 1, Acquire, Relaxed) {
-                Ok(_) => return Some(Arc::from_inner(self.ptr)), // null checked above
+                Ok(_) => return Some(unsafe { Arc::from_inner(self.ptr) }), // null checked above
                 Err(old) => n = old,
             }
         }
@@ -1904,6 +1910,7 @@ impl<T: ?Sized> Weak<T> {
     /// Gets the number of strong (`Arc`) pointers pointing to this allocation.
     ///
     /// If `self` was created using [`Weak::new`], this will return 0.
+    #[must_use]
     #[stable(feature = "weak_counts", since = "1.41.0")]
     pub fn strong_count(&self) -> usize {
         if let Some(inner) = self.inner() { inner.strong.load(SeqCst) } else { 0 }
@@ -1920,6 +1927,7 @@ impl<T: ?Sized> Weak<T> {
     /// Due to implementation details, the returned value can be off by 1 in
     /// either direction when other threads are manipulating any `Arc`s or
     /// `Weak`s pointing to the same allocation.
+    #[must_use]
     #[stable(feature = "weak_counts", since = "1.41.0")]
     pub fn weak_count(&self) -> usize {
         self.inner()
@@ -1999,6 +2007,7 @@ impl<T: ?Sized> Weak<T> {
     ///
     /// [`ptr::eq`]: core::ptr::eq "ptr::eq"
     #[inline]
+    #[must_use]
     #[stable(feature = "weak_ptr_eq", since = "1.39.0")]
     pub fn ptr_eq(&self, other: &Self) -> bool {
         self.ptr.as_ptr() == other.ptr.as_ptr()

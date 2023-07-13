@@ -19,8 +19,8 @@
 use crate::ffi::CString;
 
 // Re-export some of our utilities which are expected by other crates.
-pub use crate::panicking::{begin_panic, begin_panic_fmt, panic_count};
-pub use core::panicking::panic_display;
+pub use crate::panicking::{begin_panic, panic_count};
+pub use core::panicking::{panic_display, panic_fmt};
 
 use crate::sync::Once;
 use crate::sys;
@@ -128,8 +128,7 @@ fn lang_start_internal(
     let ret_code = panic::catch_unwind(move || panic::catch_unwind(main).unwrap_or(101) as isize)
         .map_err(move |e| {
             mem::forget(e);
-            rtprintpanic!("drop of the panic payload panicked");
-            sys::abort_internal()
+            rtabort!("drop of the panic payload panicked");
         });
     panic::catch_unwind(cleanup).map_err(rt_abort)?;
     ret_code

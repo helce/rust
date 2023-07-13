@@ -469,11 +469,6 @@ fn stdin_works_with_modified_lines() {
 #[test]
 fn stdin_disable_all_formatting_test() {
     init_log();
-    match option_env!("CFG_RELEASE_CHANNEL") {
-        None | Some("nightly") => {}
-        // These tests require nightly.
-        _ => return,
-    }
     let input = String::from("fn main() { println!(\"This should not be formatted.\"); }");
     let mut child = Command::new(rustfmt().to_str().unwrap())
         .stdin(Stdio::piped())
@@ -493,6 +488,24 @@ fn stdin_disable_all_formatting_test() {
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
     assert_eq!(input, String::from_utf8(output.stdout).unwrap());
+}
+
+#[test]
+fn stdin_generated_files_issue_5172() {
+    init_log();
+    let input = Input::Text("//@generated\nfn   main() {}".to_owned());
+    let mut config = Config::default();
+    config.set().emit_mode(EmitMode::Stdout);
+    config.set().format_generated_files(false);
+    config.set().newline_style(NewlineStyle::Unix);
+    let mut buf: Vec<u8> = vec![];
+    {
+        let mut session = Session::new(config, Some(&mut buf));
+        session.format(input).unwrap();
+        assert!(session.has_no_errors());
+    }
+    // N.B. this should be changed once `format_generated_files` is supported with stdin
+    assert_eq!(buf, "stdin:\n\n//@generated\nfn main() {}\n".as_bytes());
 }
 
 #[test]
@@ -540,9 +553,9 @@ fn check_files(files: Vec<PathBuf>, opt_config: &Option<PathBuf>) -> (Vec<Format
 
         debug!("Testing '{}'...", file_name.display());
 
-        match idempotent_check(&file_name, &opt_config) {
+        match idempotent_check(&file_name, opt_config) {
             Ok(ref report) if report.has_warnings() => {
-                print!("{}", FormatReportFormatterBuilder::new(&report).build());
+                print!("{}", FormatReportFormatterBuilder::new(report).build());
                 fails += 1;
             }
             Ok(report) => reports.push(report),
@@ -694,7 +707,7 @@ fn read_significant_comments(file_name: &Path) -> HashMap<String, String> {
     reader
         .lines()
         .map(|line| line.expect("failed getting line"))
-        .take_while(|line| line_regex.is_match(line))
+        .filter(|line| line_regex.is_match(line))
         .filter_map(|line| {
             regex.captures_iter(&line).next().map(|capture| {
                 (

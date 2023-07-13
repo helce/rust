@@ -104,6 +104,7 @@ impl Layout {
     /// The minimum size in bytes for a memory block of this layout.
     #[stable(feature = "alloc_layout", since = "1.28.0")]
     #[rustc_const_stable(feature = "const_alloc_layout", since = "1.50.0")]
+    #[must_use]
     #[inline]
     pub const fn size(&self) -> usize {
         self.size_
@@ -137,6 +138,7 @@ impl Layout {
     /// allocate backing structure for `T` (which could be a trait
     /// or other unsized type like a slice).
     #[stable(feature = "alloc_layout", since = "1.28.0")]
+    #[must_use]
     #[inline]
     pub fn for_value<T: ?Sized>(t: &T) -> Self {
         let (size, align) = (mem::size_of_val(t), mem::align_of_val(t));
@@ -171,6 +173,7 @@ impl Layout {
     /// [trait object]: ../../book/ch17-02-trait-objects.html
     /// [extern type]: ../../unstable-book/language-features/extern-types.html
     #[unstable(feature = "layout_for_ptr", issue = "69835")]
+    #[must_use]
     pub unsafe fn for_value_raw<T: ?Sized>(t: *const T) -> Self {
         // SAFETY: we pass along the prerequisites of these functions to the caller
         let (size, align) = unsafe { (mem::size_of_val_raw(t), mem::align_of_val_raw(t)) };
@@ -187,6 +190,7 @@ impl Layout {
     /// some other means.
     #[unstable(feature = "alloc_layout_extra", issue = "55724")]
     #[rustc_const_unstable(feature = "alloc_layout_extra", issue = "55724")]
+    #[must_use]
     #[inline]
     pub const fn dangling(&self) -> NonNull<u8> {
         // SAFETY: align is guaranteed to be non-zero
@@ -277,7 +281,9 @@ impl Layout {
         // > `usize::MAX`)
         let new_size = self.size() + pad;
 
-        Layout::from_size_align(new_size, self.align()).unwrap()
+        // SAFETY: self.align is already known to be valid and new_size has been
+        // padded already.
+        unsafe { Layout::from_size_align_unchecked(new_size, self.align()) }
     }
 
     /// Creates a layout describing the record for `n` instances of
@@ -399,9 +405,17 @@ impl Layout {
     #[stable(feature = "alloc_layout_manipulation", since = "1.44.0")]
     #[inline]
     pub fn array<T>(n: usize) -> Result<Self, LayoutError> {
-        let (layout, offset) = Layout::new::<T>().repeat(n)?;
-        debug_assert_eq!(offset, mem::size_of::<T>());
-        Ok(layout.pad_to_align())
+        let array_size = mem::size_of::<T>().checked_mul(n).ok_or(LayoutError)?;
+
+        // SAFETY:
+        // - Size: `array_size` cannot be too big because `size_of::<T>()` must
+        //   be a multiple of `align_of::<T>()`. Therefore, `array_size`
+        //   rounded up to the nearest multiple of `align_of::<T>()` is just
+        //   `array_size`. And `array_size` cannot be too big because it was
+        //   just checked by the `checked_mul()`.
+        // - Alignment: `align_of::<T>()` will always give an acceptable
+        //   (non-zero, power of two) alignment.
+        Ok(unsafe { Layout::from_size_align_unchecked(array_size, mem::align_of::<T>()) })
     }
 }
 

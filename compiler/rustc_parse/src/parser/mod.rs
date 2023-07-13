@@ -1095,8 +1095,12 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses inline const expressions.
-    fn parse_const_block(&mut self, span: Span) -> PResult<'a, P<Expr>> {
-        self.sess.gated_spans.gate(sym::inline_const, span);
+    fn parse_const_block(&mut self, span: Span, pat: bool) -> PResult<'a, P<Expr>> {
+        if pat {
+            self.sess.gated_spans.gate(sym::inline_const_pat, span);
+        } else {
+            self.sess.gated_spans.gate(sym::inline_const, span);
+        }
         self.eat_keyword(kw::Const);
         let blk = self.parse_block()?;
         let anon_const = AnonConst {
@@ -1258,7 +1262,7 @@ impl<'a> Parser<'a> {
     /// Parses `pub`, `pub(crate)` and `pub(in path)` plus shortcuts `crate` for `pub(crate)`,
     /// `pub(self)` for `pub(in self)` and `pub(super)` for `pub(in super)`.
     /// If the following element can't be a tuple (i.e., it's a function definition), then
-    /// it's not a tuple struct field), and the contents within the parentheses isn't valid,
+    /// it's not a tuple struct field), and the contents within the parentheses aren't valid,
     /// so emit a proper diagnostic.
     // Public for rustfmt usage.
     pub fn parse_visibility(&mut self, fbt: FollowedByType) -> PResult<'a, Visibility> {

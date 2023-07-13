@@ -686,7 +686,7 @@ impl Wtf8 {
     }
 }
 
-/// Returns a slice of the given string for the byte range [`begin`..`end`).
+/// Returns a slice of the given string for the byte range \[`begin`..`end`).
 ///
 /// # Panics
 ///
@@ -809,7 +809,8 @@ impl<'a> Iterator for Wtf8CodePoints<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<CodePoint> {
-        next_code_point(&mut self.bytes).map(|c| CodePoint { value: c })
+        // SAFETY: `self.bytes` has been created from a WTF-8 string
+        unsafe { next_code_point(&mut self.bytes).map(|c| CodePoint { value: c }) }
     }
 
     #[inline]

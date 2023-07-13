@@ -2,11 +2,11 @@ use crate::clean::auto_trait::AutoTraitFinder;
 use crate::clean::blanket_impl::BlanketImplFinder;
 use crate::clean::{
     inline, Clean, Crate, ExternalCrate, Generic, GenericArg, GenericArgs, ImportSource, Item,
-    ItemKind, Lifetime, Path, PathSegment, Primitive, PrimitiveType, ResolvedPath, Type,
-    TypeBinding, Visibility,
+    ItemKind, Lifetime, Path, PathSegment, Primitive, PrimitiveType, Type, TypeBinding, Visibility,
 };
 use crate::core::DocContext;
 use crate::formats::item_type::ItemType;
+use crate::visit_lib::LibEmbargoVisitor;
 
 use rustc_ast as ast;
 use rustc_ast::tokenstream::TokenTree;
@@ -24,17 +24,12 @@ use std::mem;
 mod tests;
 
 crate fn krate(cx: &mut DocContext<'_>) -> Crate {
-    use crate::visit_lib::LibEmbargoVisitor;
-
     let module = crate::visit_ast::RustdocVisitor::new(cx).visit();
 
-    let mut externs = Vec::new();
-    for &cnum in cx.tcx.crates(()).iter() {
-        externs.push(ExternalCrate { crate_num: cnum });
+    for &cnum in cx.tcx.crates(()) {
         // Analyze doc-reachability for extern items
         LibEmbargoVisitor::new(cx).visit_lib(cnum);
     }
-    externs.sort_unstable_by_key(|e| e.crate_num);
 
     // Clean the crate, translating the entire librustc_ast AST to one that is
     // understood by rustdoc.
@@ -57,8 +52,6 @@ crate fn krate(cx: &mut DocContext<'_>) -> Crate {
     }
 
     let local_crate = ExternalCrate { crate_num: LOCAL_CRATE };
-    let src = local_crate.src(cx.tcx);
-    let name = local_crate.name(cx.tcx);
     let primitives = local_crate.primitives(cx.tcx);
     let keywords = local_crate.keywords(cx.tcx);
     {
@@ -79,15 +72,7 @@ crate fn krate(cx: &mut DocContext<'_>) -> Crate {
         }));
     }
 
-    Crate {
-        name,
-        src,
-        module,
-        externs,
-        primitives,
-        external_traits: cx.external_traits.clone(),
-        collapsed: false,
-    }
+    Crate { module, primitives, external_traits: cx.external_traits.clone(), collapsed: false }
 }
 
 fn external_generic_args(
@@ -171,8 +156,8 @@ crate fn strip_path_generics(path: Path) -> Path {
 
 crate fn qpath_to_string(p: &hir::QPath<'_>) -> String {
     let segments = match *p {
-        hir::QPath::Resolved(_, ref path) => &path.segments,
-        hir::QPath::TypeRelative(_, ref segment) => return segment.ident.to_string(),
+        hir::QPath::Resolved(_, path) => &path.segments,
+        hir::QPath::TypeRelative(_, segment) => return segment.ident.to_string(),
         hir::QPath::LangItem(lang_item, ..) => return lang_item.name().to_string(),
     };
 
@@ -201,7 +186,8 @@ crate fn build_deref_target_impls(cx: &mut DocContext<'_>, items: &[Item], ret: 
             for &did in prim.impls(tcx).iter().filter(|did| !did.is_local()) {
                 inline::build_impl(cx, None, did, None, ret);
             }
-        } else if let ResolvedPath { did, .. } = *target {
+        } else if let Type::Path { path } = target {
+            let did = path.def_id();
             if !did.is_local() {
                 inline::build_impls(cx, None, did, None, ret);
             }
@@ -217,15 +203,15 @@ crate fn name_from_pat(p: &hir::Pat<'_>) -> Symbol {
         PatKind::Wild | PatKind::Struct(..) => return kw::Underscore,
         PatKind::Binding(_, _, ident, _) => return ident.name,
         PatKind::TupleStruct(ref p, ..) | PatKind::Path(ref p) => qpath_to_string(p),
-        PatKind::Or(ref pats) => {
+        PatKind::Or(pats) => {
             pats.iter().map(|p| name_from_pat(p).to_string()).collect::<Vec<String>>().join(" | ")
         }
-        PatKind::Tuple(ref elts, _) => format!(
+        PatKind::Tuple(elts, _) => format!(
             "({})",
             elts.iter().map(|p| name_from_pat(p).to_string()).collect::<Vec<String>>().join(", ")
         ),
-        PatKind::Box(ref p) => return name_from_pat(&**p),
-        PatKind::Ref(ref p, _) => return name_from_pat(&**p),
+        PatKind::Box(p) => return name_from_pat(&*p),
+        PatKind::Ref(p, _) => return name_from_pat(&*p),
         PatKind::Lit(..) => {
             warn!(
                 "tried to get argument name from PatKind::Lit, which is silly in function arguments"
@@ -233,7 +219,7 @@ crate fn name_from_pat(p: &hir::Pat<'_>) -> Symbol {
             return Symbol::intern("()");
         }
         PatKind::Range(..) => return kw::Underscore,
-        PatKind::Slice(ref begin, ref mid, ref end) => {
+        PatKind::Slice(begin, ref mid, end) => {
             let begin = begin.iter().map(|p| name_from_pat(p).to_string());
             let mid = mid.as_ref().map(|p| format!("..{}", name_from_pat(&**p))).into_iter();
             let end = end.iter().map(|p| name_from_pat(p).to_string());
@@ -374,8 +360,8 @@ crate fn resolve_type(cx: &mut DocContext<'_>, path: Path) -> Type {
         Res::SelfTy(..) if path.segments.len() == 1 => Generic(kw::SelfUpper),
         Res::Def(DefKind::TyParam, _) if path.segments.len() == 1 => Generic(path.segments[0].name),
         _ => {
-            let did = register_res(cx, path.res);
-            ResolvedPath { path, did }
+            let _ = register_res(cx, path.res);
+            Type::Path { path }
         }
     }
 }
@@ -407,20 +393,12 @@ crate fn register_res(cx: &mut DocContext<'_>, res: Res) -> DefId {
     debug!("register_res({:?})", res);
 
     let (did, kind) = match res {
-        Res::Def(DefKind::AssocTy | DefKind::AssocFn | DefKind::AssocConst, i) => {
-            // associated items are documented, but on the page of their parent
-            (cx.tcx.parent(i).unwrap(), ItemType::Trait)
-        }
-        Res::Def(DefKind::Variant, i) => {
-            // variant items are documented, but on the page of their parent
-            (cx.tcx.parent(i).expect("cannot get parent def id"), ItemType::Enum)
-        }
-        // Each of these have their own page.
+        // These should be added to the cache using `record_extern_fqn`.
         Res::Def(
             kind
             @
-            (Fn | TyAlias | Enum | Trait | Struct | Union | Mod | ForeignTy | Const | Static
-            | Macro(..) | TraitAlias),
+            (AssocTy | AssocFn | AssocConst | Variant | Fn | TyAlias | Enum | Trait | Struct
+            | Union | Mod | ForeignTy | Const | Static | Macro(..) | TraitAlias),
             i,
         ) => (i, kind.into()),
         // This is part of a trait definition; document the trait.
@@ -435,8 +413,9 @@ crate fn register_res(cx: &mut DocContext<'_>, res: Res) -> DefId {
         | Res::NonMacroAttr(_)
         | Res::Err => return res.def_id(),
         Res::Def(
-            TyParam | ConstParam | Ctor(..) | ExternCrate | Use | ForeignMod | AnonConst | OpaqueTy
-            | Field | LifetimeParam | GlobalAsm | Impl | Closure | Generator,
+            TyParam | ConstParam | Ctor(..) | ExternCrate | Use | ForeignMod | AnonConst
+            | InlineConst | OpaqueTy | Field | LifetimeParam | GlobalAsm | Impl | Closure
+            | Generator,
             id,
         ) => return id,
     };
@@ -507,7 +486,7 @@ crate fn has_doc_flag(attrs: ty::Attributes<'_>, flag: Symbol) -> bool {
 /// so that the channel is consistent.
 ///
 /// Set by `bootstrap::Builder::doc_rust_lang_org_channel` in order to keep tests passing on beta/stable.
-crate const DOC_RUST_LANG_ORG_CHANNEL: &'static str = env!("DOC_RUST_LANG_ORG_CHANNEL");
+crate const DOC_RUST_LANG_ORG_CHANNEL: &str = env!("DOC_RUST_LANG_ORG_CHANNEL");
 
 /// Render a sequence of macro arms in a format suitable for displaying to the user
 /// as part of an item declaration.
@@ -533,7 +512,7 @@ pub(super) fn display_macro_source(
     name: Symbol,
     def: &ast::MacroDef,
     def_id: DefId,
-    vis: impl Clean<Visibility>,
+    vis: Visibility,
 ) -> String {
     let tts: Vec<_> = def.body.inner_tokens().into_trees().collect();
     // Extract the spans of all matchers. They represent the "interface" of the macro.
@@ -542,8 +521,6 @@ pub(super) fn display_macro_source(
     if def.macro_rules {
         format!("macro_rules! {} {{\n{}}}", name, render_macro_arms(matchers, ";"))
     } else {
-        let vis = vis.clean(cx);
-
         if matchers.len() <= 1 {
             format!(
                 "{}macro {}{} {{\n    ...\n}}",

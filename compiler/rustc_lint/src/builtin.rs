@@ -32,8 +32,7 @@ use rustc_ast_pretty::pprust::{self, expr_to_string};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_errors::{Applicability, DiagnosticBuilder, DiagnosticStyledString};
-use rustc_feature::{deprecated_attributes, AttributeGate, AttributeTemplate, AttributeType};
-use rustc_feature::{GateIssue, Stability};
+use rustc_feature::{deprecated_attributes, AttributeGate, BuiltinAttribute, GateIssue, Stability};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId, LocalDefIdSet, CRATE_DEF_ID};
@@ -369,12 +368,12 @@ impl EarlyLintPass for UnsafeCode {
 
     fn check_item(&mut self, cx: &EarlyContext<'_>, it: &ast::Item) {
         match it.kind {
-            ast::ItemKind::Trait(box ast::TraitKind(_, ast::Unsafe::Yes(_), ..)) => self
+            ast::ItemKind::Trait(box ast::Trait { unsafety: ast::Unsafe::Yes(_), .. }) => self
                 .report_unsafe(cx, it.span, |lint| {
                     lint.build("declaration of an `unsafe` trait").emit()
                 }),
 
-            ast::ItemKind::Impl(box ast::ImplKind { unsafety: ast::Unsafe::Yes(_), .. }) => self
+            ast::ItemKind::Impl(box ast::Impl { unsafety: ast::Unsafe::Yes(_), .. }) => self
                 .report_unsafe(cx, it.span, |lint| {
                     lint.build("implementation of an `unsafe` trait").emit()
                 }),
@@ -657,6 +656,24 @@ impl<'tcx> LateLintPass<'tcx> for MissingDoc {
             return;
         }
 
+        // If the method is an impl for an item with docs_hidden, don't doc.
+        if method_context(cx, impl_item.hir_id()) == MethodLateContext::PlainImpl {
+            let parent = cx.tcx.hir().get_parent_did(impl_item.hir_id());
+            let impl_ty = cx.tcx.type_of(parent);
+            let outerdef = match impl_ty.kind() {
+                ty::Adt(def, _) => Some(def.did),
+                ty::Foreign(def_id) => Some(*def_id),
+                _ => None,
+            };
+            let is_hidden = match outerdef {
+                Some(id) => cx.tcx.is_doc_hidden(id),
+                None => false,
+            };
+            if is_hidden {
+                return;
+            }
+        }
+
         let (article, desc) = cx.tcx.article_and_description(impl_item.def_id.to_def_id());
         self.check_missing_docs_attrs(cx, impl_item.def_id, impl_item.span, article, desc);
     }
@@ -903,7 +920,7 @@ impl EarlyLintPass for AnonymousParameters {
             // This is a hard error in future editions; avoid linting and erroring
             return;
         }
-        if let ast::AssocItemKind::Fn(box FnKind(_, ref sig, _, _)) = it.kind {
+        if let ast::AssocItemKind::Fn(box Fn { ref sig, .. }) = it.kind {
             for arg in sig.decl.inputs.iter() {
                 if let ast::PatKind::Ident(_, ident, None) = arg.pat.kind {
                     if ident.name == kw::Empty {
@@ -941,7 +958,7 @@ impl EarlyLintPass for AnonymousParameters {
 pub struct DeprecatedAttr {
     // This is not free to compute, so we want to keep it around, rather than
     // compute it for every attribute.
-    depr_attrs: Vec<&'static (Symbol, AttributeType, AttributeTemplate, AttributeGate)>,
+    depr_attrs: Vec<&'static BuiltinAttribute>,
 }
 
 impl_lint_pass!(DeprecatedAttr => []);
@@ -972,14 +989,14 @@ fn lint_deprecated_attr(
 
 impl EarlyLintPass for DeprecatedAttr {
     fn check_attribute(&mut self, cx: &EarlyContext<'_>, attr: &ast::Attribute) {
-        for &&(n, _, _, ref g) in &self.depr_attrs {
-            if attr.ident().map(|ident| ident.name) == Some(n) {
+        for BuiltinAttribute { name, gate, .. } in &self.depr_attrs {
+            if attr.ident().map(|ident| ident.name) == Some(*name) {
                 if let &AttributeGate::Gated(
                     Stability::Deprecated(link, suggestion),
                     name,
                     reason,
                     _,
-                ) = g
+                ) = gate
                 {
                     let msg =
                         format!("use of deprecated attribute `{}`: {}. See {}", name, reason, link);
@@ -3112,18 +3129,13 @@ impl<'tcx> LateLintPass<'tcx> for DerefNullPtr {
             false
         }
 
-        if let rustc_hir::ExprKind::Unary(ref un_op, ref expr_deref) = expr.kind {
-            if let rustc_hir::UnOp::Deref = un_op {
-                if is_null_ptr(cx, expr_deref) {
-                    cx.struct_span_lint(DEREF_NULLPTR, expr.span, |lint| {
-                        let mut err = lint.build("dereferencing a null pointer");
-                        err.span_label(
-                            expr.span,
-                            "this code causes undefined behavior when executed",
-                        );
-                        err.emit();
-                    });
-                }
+        if let rustc_hir::ExprKind::Unary(rustc_hir::UnOp::Deref, expr_deref) = expr.kind {
+            if is_null_ptr(cx, expr_deref) {
+                cx.struct_span_lint(DEREF_NULLPTR, expr.span, |lint| {
+                    let mut err = lint.build("dereferencing a null pointer");
+                    err.span_label(expr.span, "this code causes undefined behavior when executed");
+                    err.emit();
+                });
             }
         }
     }
@@ -3178,7 +3190,7 @@ impl<'tcx> LateLintPass<'tcx> for NamedAsmLabels {
                         let snippet = template_snippet.as_str();
                         if let Some(pos) = snippet.find(needle) {
                             let end = pos
-                                + &snippet[pos..]
+                                + snippet[pos..]
                                     .find(|c| c == ':')
                                     .unwrap_or(snippet[pos..].len() - 1);
                             let inner = InnerSpan::new(pos, end);

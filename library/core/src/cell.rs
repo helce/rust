@@ -240,6 +240,11 @@ pub struct Cell<T: ?Sized> {
 #[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl<T: ?Sized> Send for Cell<T> where T: Send {}
 
+// Note that this negative impl isn't strictly necessary for correctness,
+// as `Cell` wraps `UnsafeCell`, which is itself `!Sync`.
+// However, given how important `Cell`'s `!Sync`-ness is,
+// having an explicit negative impl is nice for documentation purposes
+// and results in nicer error messages.
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized> !Sync for Cell<T> {}
 
@@ -308,7 +313,8 @@ impl<T: Ord + Copy> Ord for Cell<T> {
 }
 
 #[stable(feature = "cell_from", since = "1.12.0")]
-impl<T> From<T> for Cell<T> {
+#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
+impl<T> const From<T> for Cell<T> {
     fn from(t: T) -> Cell<T> {
         Cell::new(t)
     }
@@ -1236,7 +1242,8 @@ impl<T: ?Sized + Ord> Ord for RefCell<T> {
 }
 
 #[stable(feature = "cell_from", since = "1.12.0")]
-impl<T> From<T> for RefCell<T> {
+#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
+impl<T> const From<T> for RefCell<T> {
     fn from(t: T) -> RefCell<T> {
         RefCell::new(t)
     }
@@ -1333,6 +1340,7 @@ impl<'b, T: ?Sized> Ref<'b, T> {
     /// with the widespread use of `r.borrow().clone()` to clone the contents of
     /// a `RefCell`.
     #[stable(feature = "cell_extras", since = "1.15.0")]
+    #[must_use]
     #[inline]
     pub fn clone(orig: &Ref<'b, T>) -> Ref<'b, T> {
         Ref { value: orig.value, borrow: orig.borrow.clone() }
@@ -1976,7 +1984,8 @@ impl<T: Default> Default for UnsafeCell<T> {
 }
 
 #[stable(feature = "cell_from", since = "1.12.0")]
-impl<T> From<T> for UnsafeCell<T> {
+#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
+impl<T> const From<T> for UnsafeCell<T> {
     fn from(t: T) -> UnsafeCell<T> {
         UnsafeCell::new(t)
     }

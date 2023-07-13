@@ -358,7 +358,7 @@ impl File {
     ///
     /// It is equivalent to `OpenOptions::new()` but allows you to write more
     /// readable code. Instead of `OpenOptions::new().read(true).open("foo.txt")`
-    /// you can write `File::with_options().read(true).open("foo.txt")`. This
+    /// you can write `File::options().read(true).open("foo.txt")`. This
     /// also avoids the need to import `OpenOptions`.
     ///
     /// See the [`OpenOptions::new`] function for more details.
@@ -366,16 +366,16 @@ impl File {
     /// # Examples
     ///
     /// ```no_run
-    /// #![feature(with_options)]
     /// use std::fs::File;
     ///
     /// fn main() -> std::io::Result<()> {
-    ///     let mut f = File::with_options().read(true).open("foo.txt")?;
+    ///     let mut f = File::options().read(true).open("foo.txt")?;
     ///     Ok(())
     /// }
     /// ```
-    #[unstable(feature = "with_options", issue = "65439")]
-    pub fn with_options() -> OpenOptions {
+    #[must_use]
+    #[stable(feature = "with_options", since = "1.58.0")]
+    pub fn options() -> OpenOptions {
         OpenOptions::new()
     }
 
@@ -983,6 +983,7 @@ impl Metadata {
     ///     Ok(())
     /// }
     /// ```
+    #[must_use]
     #[stable(feature = "file_type", since = "1.1.0")]
     pub fn file_type(&self) -> FileType {
         FileType(self.0.file_type())
@@ -1046,7 +1047,6 @@ impl Metadata {
     ///
     #[cfg_attr(unix, doc = "```no_run")]
     #[cfg_attr(not(unix), doc = "```ignore")]
-    /// #![feature(is_symlink)]
     /// use std::fs;
     /// use std::path::Path;
     /// use std::os::unix::fs::symlink;
@@ -1062,7 +1062,7 @@ impl Metadata {
     /// }
     /// ```
     #[must_use]
-    #[unstable(feature = "is_symlink", issue = "85748")]
+    #[stable(feature = "is_symlink", since = "1.57.0")]
     pub fn is_symlink(&self) -> bool {
         self.file_type().is_symlink()
     }
@@ -1081,6 +1081,7 @@ impl Metadata {
     ///     Ok(())
     /// }
     /// ```
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn len(&self) -> u64 {
         self.0.size()
@@ -1100,6 +1101,7 @@ impl Metadata {
     ///     Ok(())
     /// }
     /// ```
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn permissions(&self) -> Permissions {
         Permissions(self.0.perm())
@@ -1247,6 +1249,7 @@ impl Permissions {
     ///     Ok(())
     /// }
     /// ```
+    #[must_use = "call `set_readonly` to modify the readonly flag"]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn readonly(&self) -> bool {
         self.0.readonly()
@@ -1441,6 +1444,7 @@ impl DirEntry {
     /// ```
     ///
     /// The exact text, of course, depends on what files you have in `.`.
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn path(&self) -> PathBuf {
         self.0.path()
@@ -1536,6 +1540,7 @@ impl DirEntry {
     ///     }
     /// }
     /// ```
+    #[must_use]
     #[stable(feature = "dir_entry_ext", since = "1.1.0")]
     pub fn file_name(&self) -> OsString {
         self.0.file_name()
@@ -2040,12 +2045,16 @@ pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 ///
 /// # Platform-specific behavior
 ///
-/// This function currently corresponds to `opendir`, `lstat`, `rm` and `rmdir` functions on Unix
-/// and the `FindFirstFile`, `GetFileAttributesEx`, `DeleteFile`, and `RemoveDirectory` functions
-/// on Windows.
-/// Note that, this [may change in the future][changes].
+/// This function currently corresponds to `openat`, `fdopendir`, `unlinkat` and `lstat` functions
+/// on Unix (except for macOS before version 10.10 and REDOX) and the `CreateFileW`,
+/// `GetFileInformationByHandleEx`, `SetFileInformationByHandle`, and `NtOpenFile` functions on
+/// Windows. Note that, this [may change in the future][changes].
 ///
 /// [changes]: io#platform-specific-behavior
+///
+/// On macOS before version 10.10 and REDOX this function is not protected against time-of-check to
+/// time-of-use (TOCTOU) race conditions, and should not be used in security-sensitive code on
+/// those platforms. All other platforms are protected.
 ///
 /// # Errors
 ///

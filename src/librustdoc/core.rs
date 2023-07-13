@@ -56,14 +56,10 @@ crate struct DocContext<'tcx> {
     /// Used while populating `external_traits` to ensure we don't process the same trait twice at
     /// the same time.
     crate active_extern_traits: FxHashSet<DefId>,
-    // The current set of type and lifetime substitutions,
+    // The current set of parameter substitutions,
     // for expanding type aliases at the HIR level:
-    /// Table `DefId` of type parameter -> substituted type
-    crate ty_substs: FxHashMap<DefId, clean::Type>,
-    /// Table `DefId` of lifetime parameter -> substituted lifetime
-    crate lt_substs: FxHashMap<DefId, clean::Lifetime>,
-    /// Table `DefId` of const parameter -> substituted const
-    crate ct_substs: FxHashMap<DefId, clean::Constant>,
+    /// Table `DefId` of type, lifetime, or const parameter -> substituted type, lifetime, or const
+    crate substs: FxHashMap<DefId, clean::SubstParam>,
     /// Table synthetic type parameter for `impl Trait` in argument position -> bounds
     crate impl_trait_bounds: FxHashMap<ImplTraitParam, Vec<clean::GenericBound>>,
     /// Auto-trait or blanket impls processed so far, as `(self_ty, trait_def_id)`.
@@ -87,7 +83,7 @@ crate struct DocContext<'tcx> {
 
 impl<'tcx> DocContext<'tcx> {
     crate fn sess(&self) -> &'tcx Session {
-        &self.tcx.sess
+        self.tcx.sess
     }
 
     crate fn with_param_env<T, F: FnOnce(&mut Self) -> T>(&mut self, def_id: DefId, f: F) -> T {
@@ -106,25 +102,13 @@ impl<'tcx> DocContext<'tcx> {
 
     /// Call the closure with the given parameters set as
     /// the substitutions for a type alias' RHS.
-    crate fn enter_alias<F, R>(
-        &mut self,
-        ty_substs: FxHashMap<DefId, clean::Type>,
-        lt_substs: FxHashMap<DefId, clean::Lifetime>,
-        ct_substs: FxHashMap<DefId, clean::Constant>,
-        f: F,
-    ) -> R
+    crate fn enter_alias<F, R>(&mut self, substs: FxHashMap<DefId, clean::SubstParam>, f: F) -> R
     where
         F: FnOnce(&mut Self) -> R,
     {
-        let (old_tys, old_lts, old_cts) = (
-            mem::replace(&mut self.ty_substs, ty_substs),
-            mem::replace(&mut self.lt_substs, lt_substs),
-            mem::replace(&mut self.ct_substs, ct_substs),
-        );
+        let old_substs = mem::replace(&mut self.substs, substs);
         let r = f(self);
-        self.ty_substs = old_tys;
-        self.lt_substs = old_lts;
-        self.ct_substs = old_cts;
+        self.substs = old_substs;
         r
     }
 
@@ -283,9 +267,9 @@ crate fn create_config(
                 // Closures' tables come from their outermost function,
                 // as they are part of the same "inference environment".
                 // This avoids emitting errors for the parent twice (see similar code in `typeck_with_fallback`)
-                let outer_def_id = tcx.closure_base_def_id(def_id.to_def_id()).expect_local();
-                if outer_def_id != def_id {
-                    return tcx.typeck(outer_def_id);
+                let typeck_root_def_id = tcx.typeck_root_def_id(def_id.to_def_id()).expect_local();
+                if typeck_root_def_id != def_id {
+                    return tcx.typeck(typeck_root_def_id);
                 }
 
                 let hir = tcx.hir();
@@ -382,9 +366,7 @@ crate fn run_global_ctxt(
         param_env: ParamEnv::empty(),
         external_traits: Default::default(),
         active_extern_traits: Default::default(),
-        ty_substs: Default::default(),
-        lt_substs: Default::default(),
-        ct_substs: Default::default(),
+        substs: Default::default(),
         impl_trait_bounds: Default::default(),
         generated_synthetics: Default::default(),
         auto_traits: tcx
@@ -496,7 +478,7 @@ crate fn run_global_ctxt(
                 _ => continue,
             };
             for name in value.as_str().split_whitespace() {
-                let span = attr.name_value_literal_span().unwrap_or(attr.span());
+                let span = attr.name_value_literal_span().unwrap_or_else(|| attr.span());
                 manual_passes.extend(parse_pass(name, Some(span)));
             }
         }
@@ -518,20 +500,20 @@ crate fn run_global_ctxt(
         };
         if run {
             debug!("running pass {}", p.pass.name);
-            krate = ctxt.tcx.sess.time(p.pass.name, || (p.pass.run)(krate, &mut ctxt));
+            krate = tcx.sess.time(p.pass.name, || (p.pass.run)(krate, &mut ctxt));
         }
     }
 
-    ctxt.sess().abort_if_errors();
+    if tcx.sess.diagnostic().has_errors_or_lint_errors() {
+        rustc_errors::FatalError.raise();
+    }
 
-    let render_options = ctxt.render_options;
-    let mut cache = ctxt.cache;
-    krate = tcx.sess.time("create_format_cache", || cache.populate(krate, tcx, &render_options));
+    krate = tcx.sess.time("create_format_cache", || Cache::populate(&mut ctxt, krate));
 
     // The main crate doc comments are always collapsed.
     krate.collapsed = true;
 
-    (krate, render_options, cache)
+    (krate, ctxt.render_options, ctxt.cache)
 }
 
 /// Due to <https://github.com/rust-lang/rust/pull/73566>,

@@ -1,16 +1,15 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::higher::FormatExpn;
-use clippy_utils::last_path_segment;
 use clippy_utils::source::{snippet_opt, snippet_with_applicability};
 use clippy_utils::sugg::Sugg;
 use if_chain::if_chain;
 use rustc_errors::Applicability;
-use rustc_hir::{BorrowKind, Expr, ExprKind, QPath};
+use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::symbol::kw;
-use rustc_span::{sym, Span};
+use rustc_span::{sym, BytePos, Span};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -50,15 +49,19 @@ impl<'tcx> LateLintPass<'tcx> for UselessFormat {
 
         let mut applicability = Applicability::MachineApplicable;
         if format_args.value_args.is_empty() {
-            if_chain! {
-                if let [e] = &*format_args.format_string_parts;
-                if let ExprKind::Lit(lit) = &e.kind;
-                if let Some(s_src) = snippet_opt(cx, lit.span);
-                then {
-                    // Simulate macro expansion, converting {{ and }} to { and }.
-                    let s_expand = s_src.replace("{{", "{").replace("}}", "}");
-                    let sugg = format!("{}.to_string()", s_expand);
-                    span_useless_format(cx, call_site, sugg, applicability);
+            if format_args.format_string_parts.is_empty() {
+                span_useless_format_empty(cx, call_site, "String::new()".to_owned(), applicability);
+            } else {
+                if_chain! {
+                    if let [e] = &*format_args.format_string_parts;
+                    if let ExprKind::Lit(lit) = &e.kind;
+                    if let Some(s_src) = snippet_opt(cx, lit.span);
+                    then {
+                        // Simulate macro expansion, converting {{ and }} to { and }.
+                        let s_expand = s_src.replace("{{", "{").replace("}}", "}");
+                        let sugg = format!("{}.to_string()", s_expand);
+                        span_useless_format(cx, call_site, sugg, applicability);
+                    }
                 }
             }
         } else if let [value] = *format_args.value_args {
@@ -69,15 +72,30 @@ impl<'tcx> LateLintPass<'tcx> for UselessFormat {
                     ty::Str => true,
                     _ => false,
                 };
-                if format_args.args.iter().all(is_display_arg);
-                if format_args.fmt_expr.map_or(true, check_unformatted);
+                if let Some(args) = format_args.args();
+                if args.iter().all(|arg| arg.is_display() && !arg.has_string_formatting());
                 then {
                     let is_new_string = match value.kind {
                         ExprKind::Binary(..) => true,
                         ExprKind::MethodCall(path, ..) => path.ident.name.as_str() == "to_string",
                         _ => false,
                     };
-                    let sugg = if is_new_string {
+                    let sugg = if format_args.format_string_span.contains(value.span) {
+                        // Implicit argument. e.g. `format!("{x}")` span points to `{x}`
+                        let spdata = value.span.data();
+                        let span = Span::new(
+                            spdata.lo + BytePos(1),
+                            spdata.hi - BytePos(1),
+                            spdata.ctxt,
+                            spdata.parent
+                        );
+                        let snip = snippet_with_applicability(cx, span, "..", &mut applicability);
+                        if is_new_string {
+                            snip.into()
+                        } else {
+                            format!("{}.to_string()", snip)
+                        }
+                    } else if is_new_string {
                         snippet_with_applicability(cx, value.span, "..", &mut applicability).into_owned()
                     } else {
                         let sugg = Sugg::hir_with_applicability(cx, value, "<arg>", &mut applicability);
@@ -90,6 +108,18 @@ impl<'tcx> LateLintPass<'tcx> for UselessFormat {
     }
 }
 
+fn span_useless_format_empty(cx: &LateContext<'_>, span: Span, sugg: String, applicability: Applicability) {
+    span_lint_and_sugg(
+        cx,
+        USELESS_FORMAT,
+        span,
+        "useless use of `format!`",
+        "consider using `String::new()`",
+        sugg,
+        applicability,
+    );
+}
+
 fn span_useless_format(cx: &LateContext<'_>, span: Span, sugg: String, applicability: Applicability) {
     span_lint_and_sugg(
         cx,
@@ -100,48 +130,4 @@ fn span_useless_format(cx: &LateContext<'_>, span: Span, sugg: String, applicabi
         sugg,
         applicability,
     );
-}
-
-fn is_display_arg(expr: &Expr<'_>) -> bool {
-    if_chain! {
-        if let ExprKind::Call(_, [_, fmt]) = expr.kind;
-        if let ExprKind::Path(QPath::Resolved(_, path)) = fmt.kind;
-        if let [.., t, _] = path.segments;
-        if t.ident.name == sym::Display;
-        then { true } else { false }
-    }
-}
-
-/// Checks if the expression matches
-/// ```rust,ignore
-/// &[_ {
-///    format: _ {
-///         width: _::Implied,
-///         precision: _::Implied,
-///         ...
-///    },
-///    ...,
-/// }]
-/// ```
-fn check_unformatted(expr: &Expr<'_>) -> bool {
-    if_chain! {
-        if let ExprKind::AddrOf(BorrowKind::Ref, _, expr) = expr.kind;
-        if let ExprKind::Array([expr]) = expr.kind;
-        // struct `core::fmt::rt::v1::Argument`
-        if let ExprKind::Struct(_, fields, _) = expr.kind;
-        if let Some(format_field) = fields.iter().find(|f| f.ident.name == sym::format);
-        // struct `core::fmt::rt::v1::FormatSpec`
-        if let ExprKind::Struct(_, fields, _) = format_field.expr.kind;
-        if let Some(precision_field) = fields.iter().find(|f| f.ident.name == sym::precision);
-        if let ExprKind::Path(ref precision_path) = precision_field.expr.kind;
-        if last_path_segment(precision_path).ident.name == sym::Implied;
-        if let Some(width_field) = fields.iter().find(|f| f.ident.name == sym::width);
-        if let ExprKind::Path(ref width_qpath) = width_field.expr.kind;
-        if last_path_segment(width_qpath).ident.name == sym::Implied;
-        then {
-            return true;
-        }
-    }
-
-    false
 }

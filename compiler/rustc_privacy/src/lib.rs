@@ -23,7 +23,7 @@ use rustc_middle::span_bug;
 use rustc_middle::thir::abstract_const::Node as ACNode;
 use rustc_middle::ty::fold::TypeVisitor;
 use rustc_middle::ty::query::Providers;
-use rustc_middle::ty::subst::{InternalSubsts, Subst};
+use rustc_middle::ty::subst::InternalSubsts;
 use rustc_middle::ty::{self, Const, GenericParamDefKind, TraitRef, Ty, TyCtxt, TypeFoldable};
 use rustc_session::lint;
 use rustc_span::hygiene::Transparency;
@@ -124,9 +124,11 @@ where
 
     fn visit_predicate(&mut self, predicate: ty::Predicate<'tcx>) -> ControlFlow<V::BreakTy> {
         match predicate.kind().skip_binder() {
-            ty::PredicateKind::Trait(ty::TraitPredicate { trait_ref, constness: _ }) => {
-                self.visit_trait(trait_ref)
-            }
+            ty::PredicateKind::Trait(ty::TraitPredicate {
+                trait_ref,
+                constness: _,
+                polarity: _,
+            }) => self.visit_trait(trait_ref),
             ty::PredicateKind::Projection(ty::ProjectionPredicate { projection_ty, ty }) => {
                 ty.visit_with(self)?;
                 self.visit_projection_ty(projection_ty)
@@ -153,11 +155,8 @@ where
         tcx: TyCtxt<'tcx>,
         ct: AbstractConst<'tcx>,
     ) -> ControlFlow<V::BreakTy> {
-        const_evaluatable::walk_abstract_const(tcx, ct, |node| match node.root() {
-            ACNode::Leaf(leaf) => {
-                let leaf = leaf.subst(tcx, ct.substs);
-                self.visit_const(leaf)
-            }
+        const_evaluatable::walk_abstract_const(tcx, ct, |node| match node.root(tcx) {
+            ACNode::Leaf(leaf) => self.visit_const(leaf),
             ACNode::Cast(_, _, ty) => self.visit_ty(ty),
             ACNode::Binop(..) | ACNode::UnaryOp(..) | ACNode::FunctionCall(_, _) => {
                 ControlFlow::CONTINUE
@@ -544,7 +543,7 @@ impl EmbargoVisitor<'tcx> {
         module: LocalDefId,
     ) {
         let level = Some(AccessLevel::Reachable);
-        if let ty::Visibility::Public = vis {
+        if vis.is_public() {
             self.update(def_id, level);
         }
         match def_kind {
@@ -581,7 +580,7 @@ impl EmbargoVisitor<'tcx> {
 
             DefKind::Struct | DefKind::Union => {
                 // While structs and unions have type privacy, their fields do not.
-                if let ty::Visibility::Public = vis {
+                if vis.is_public() {
                     let item =
                         self.tcx.hir().expect_item(self.tcx.hir().local_def_id_to_hir_id(def_id));
                     if let hir::ItemKind::Struct(ref struct_def, _)
@@ -619,6 +618,7 @@ impl EmbargoVisitor<'tcx> {
             | DefKind::Use
             | DefKind::ForeignMod
             | DefKind::AnonConst
+            | DefKind::InlineConst
             | DefKind::Field
             | DefKind::GlobalAsm
             | DefKind::Impl
@@ -933,7 +933,7 @@ impl Visitor<'tcx> for EmbargoVisitor<'tcx> {
             let def_id = self.tcx.hir().local_def_id(id);
             if let Some(exports) = self.tcx.module_exports(def_id) {
                 for export in exports.iter() {
-                    if export.vis == ty::Visibility::Public {
+                    if export.vis.is_public() {
                         if let Some(def_id) = export.res.opt_def_id() {
                             if let Some(def_id) = def_id.as_local() {
                                 self.update(def_id, Some(AccessLevel::Exported));
@@ -1918,8 +1918,7 @@ impl SearchInterfaceForPrivateItemsVisitor<'tcx> {
     /// 1. It's contained within a public type
     /// 2. It comes from a private crate
     fn leaks_private_dep(&self, item_id: DefId) -> bool {
-        let ret = self.required_visibility == ty::Visibility::Public
-            && self.tcx.is_private_dep(item_id.krate);
+        let ret = self.required_visibility.is_public() && self.tcx.is_private_dep(item_id.krate);
 
         tracing::debug!("leaks_private_dep(item_id={:?})={}", item_id, ret);
         ret

@@ -104,7 +104,10 @@ fn extern_flags() -> String {
 }
 
 fn default_config() -> compiletest::Config {
-    let mut config = compiletest::Config::default();
+    let mut config = compiletest::Config {
+        edition: Some("2021".into()),
+        ..compiletest::Config::default()
+    };
 
     if let Ok(filters) = env::var("TESTNAME") {
         config.filters = filters.split(',').map(std::string::ToString::to_string).collect();
@@ -147,6 +150,19 @@ fn run_ui(cfg: &mut compiletest::Config) {
     // use tests/clippy.toml
     let _g = VarGuard::set("CARGO_MANIFEST_DIR", std::fs::canonicalize("tests").unwrap());
     compiletest::run_tests(cfg);
+}
+
+fn run_ui_test(cfg: &mut compiletest::Config) {
+    cfg.mode = TestMode::Ui;
+    cfg.src_base = Path::new("tests").join("ui_test");
+    let _g = VarGuard::set("CARGO_MANIFEST_DIR", std::fs::canonicalize("tests").unwrap());
+    let rustcflags = cfg.target_rustcflags.get_or_insert_with(Default::default);
+    let len = rustcflags.len();
+    rustcflags.push_str(" --test");
+    compiletest::run_tests(cfg);
+    if let Some(ref mut flags) = &mut cfg.target_rustcflags {
+        flags.truncate(len);
+    }
 }
 
 fn run_internal_tests(cfg: &mut compiletest::Config) {
@@ -312,6 +328,7 @@ fn compile_test() {
     prepare_env();
     let mut config = default_config();
     run_ui(&mut config);
+    run_ui_test(&mut config);
     run_ui_toml(&mut config);
     run_ui_cargo(&mut config);
     run_internal_tests(&mut config);

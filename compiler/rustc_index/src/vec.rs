@@ -118,38 +118,54 @@ macro_rules! newtype_index {
         }
 
         impl $type {
+            /// Maximum value the index can take, as a `u32`.
             $v const MAX_AS_U32: u32 = $max;
 
+            /// Maximum value the index can take.
             $v const MAX: Self = Self::from_u32($max);
 
+            /// Creates a new index from a given `usize`.
+            ///
+            /// # Panics
+            ///
+            /// Will panic if `value` exceeds `MAX`.
             #[inline]
             $v const fn from_usize(value: usize) -> Self {
-                #[cfg(not(bootstrap))]
                 assert!(value <= ($max as usize));
-                #[cfg(bootstrap)]
-                [()][(value > ($max as usize)) as usize];
+                // SAFETY: We just checked that `value <= max`.
                 unsafe {
                     Self::from_u32_unchecked(value as u32)
                 }
             }
 
+            /// Creates a new index from a given `u32`.
+            ///
+            /// # Panics
+            ///
+            /// Will panic if `value` exceeds `MAX`.
             #[inline]
             $v const fn from_u32(value: u32) -> Self {
-                #[cfg(not(bootstrap))]
                 assert!(value <= $max);
-                #[cfg(bootstrap)]
-                [()][(value > $max) as usize];
+                // SAFETY: We just checked that `value <= max`.
                 unsafe {
                     Self::from_u32_unchecked(value)
                 }
             }
 
+            /// Creates a new index from a given `u32`.
+            ///
+            /// # Safety
+            ///
+            /// The provided value must be less than or equal to the maximum value for the newtype.
+            /// Providing a value outside this range is undefined due to layout restrictions.
+            ///
+            /// Prefer using `from_u32`.
             #[inline]
             $v const unsafe fn from_u32_unchecked(value: u32) -> Self {
                 Self { private: value }
             }
 
-            /// Extracts the value of this index as an integer.
+            /// Extracts the value of this index as a `usize`.
             #[inline]
             $v const fn index(self) -> usize {
                 self.as_usize()
@@ -634,15 +650,18 @@ impl<I: Idx, T> IndexVec<I, T> {
     }
 
     #[inline]
-    pub fn drain<R: RangeBounds<usize>>(&mut self, range: R) -> impl Iterator<Item = T> + '_ {
+    pub fn drain<'a, R: RangeBounds<usize>>(
+        &'a mut self,
+        range: R,
+    ) -> impl Iterator<Item = T> + 'a {
         self.raw.drain(range)
     }
 
     #[inline]
-    pub fn drain_enumerated<R: RangeBounds<usize>>(
-        &mut self,
+    pub fn drain_enumerated<'a, R: RangeBounds<usize>>(
+        &'a mut self,
         range: R,
-    ) -> impl Iterator<Item = (I, T)> + '_ {
+    ) -> impl Iterator<Item = (I, T)> + 'a {
         self.raw.drain(range).enumerate().map(|(n, t)| (I::new(n), t))
     }
 

@@ -42,7 +42,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 return_ty
             };
 
-        self.check_lhs_assignable(lhs, "E0067", &op.span);
+        self.check_lhs_assignable(lhs, "E0067", op.span);
 
         ty
     }
@@ -399,12 +399,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                 };
                 if let Ref(_, rty, _) = lhs_ty.kind() {
-                    if {
-                        self.infcx.type_is_copy_modulo_regions(self.param_env, rty, lhs_expr.span)
-                            && self
-                                .lookup_op_method(rty, &[rhs_ty], Op::Binary(op, is_assign))
-                                .is_ok()
-                    } {
+                    if self.infcx.type_is_copy_modulo_regions(self.param_env, rty, lhs_expr.span)
+                        && self.lookup_op_method(rty, &[rhs_ty], Op::Binary(op, is_assign)).is_ok()
+                    {
                         if let Ok(lstring) = source_map.span_to_snippet(lhs_expr.span) {
                             let msg = &format!(
                                 "`{}{}` can be used on `{}`, you can dereference `{}`",
@@ -492,7 +489,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         other_ty: Ty<'tcx>,
         op: hir::BinOp,
         is_assign: IsAssign,
-    ) -> bool /* did we suggest to call a function because of missing parenthesis? */ {
+    ) -> bool /* did we suggest to call a function because of missing parentheses? */ {
         err.span_label(span, ty.to_string());
         if let FnDef(def_id, _) = *ty.kind() {
             let source_map = self.tcx.sess.source_map();
@@ -502,9 +499,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // FIXME: Instead of exiting early when encountering bound vars in
             // the function signature, consider keeping the binder here and
             // propagating it downwards.
-            let fn_sig = if let Some(fn_sig) = self.tcx.fn_sig(def_id).no_bound_vars() {
-                fn_sig
-            } else {
+            let Some(fn_sig) = self.tcx.fn_sig(def_id).no_bound_vars() else {
                 return false;
             };
 
@@ -831,10 +826,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     self.obligation_for_method(span, trait_did, lhs_ty, Some(other_tys));
                 let mut fulfill = <dyn TraitEngine<'_>>::new(self.tcx);
                 fulfill.register_predicate_obligation(self, obligation);
-                Err(match fulfill.select_where_possible(&self.infcx) {
-                    Err(errors) => errors,
-                    _ => vec![],
-                })
+                Err(fulfill.select_where_possible(&self.infcx))
             }
         }
     }

@@ -45,12 +45,12 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         let item_msg;
         let reason;
         let mut opt_source = None;
-        let access_place_desc = self.describe_place(access_place.as_ref());
+        let access_place_desc = self.describe_any_place(access_place.as_ref());
         debug!("report_mutability_error: access_place_desc={:?}", access_place_desc);
 
         match the_place_err {
             PlaceRef { local, projection: [] } => {
-                item_msg = format!("`{}`", access_place_desc.unwrap());
+                item_msg = access_place_desc;
                 if access_place.as_local().is_some() {
                     reason = ", as it is not declared as mutable".to_string();
                 } else {
@@ -83,7 +83,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     // If we deref an immutable ref then the suggestion here doesn't help.
                     return;
                 } else {
-                    item_msg = format!("`{}`", access_place_desc.unwrap());
+                    item_msg = access_place_desc;
                     if self.is_upvar_field_projection(access_place.as_ref()).is_some() {
                         reason = ", as it is not declared as mutable".to_string();
                     } else {
@@ -96,17 +96,17 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             PlaceRef { local, projection: [ProjectionElem::Deref] }
                 if self.body.local_decls[local].is_ref_for_guard() =>
             {
-                item_msg = format!("`{}`", access_place_desc.unwrap());
+                item_msg = access_place_desc;
                 reason = ", as it is immutable for the pattern guard".to_string();
             }
             PlaceRef { local, projection: [ProjectionElem::Deref] }
                 if self.body.local_decls[local].is_ref_to_static() =>
             {
                 if access_place.projection.len() == 1 {
-                    item_msg = format!("immutable static item `{}`", access_place_desc.unwrap());
+                    item_msg = format!("immutable static item {}", access_place_desc);
                     reason = String::new();
                 } else {
-                    item_msg = format!("`{}`", access_place_desc.unwrap());
+                    item_msg = access_place_desc;
                     let local_info = &self.body.local_decls[local].local_info;
                     if let Some(box LocalInfo::StaticRef { def_id, .. }) = *local_info {
                         let static_name = &self.infcx.tcx.item_name(def_id);
@@ -121,7 +121,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     && proj_base.is_empty()
                     && !self.upvars.is_empty()
                 {
-                    item_msg = format!("`{}`", access_place_desc.unwrap());
+                    item_msg = access_place_desc;
                     debug_assert!(
                         self.body.local_decls[ty::CAPTURE_STRUCT_LOCAL].ty.is_region_ptr()
                     );
@@ -147,7 +147,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     });
                     let pointer_type = source.describe_for_immutable_place(self.infcx.tcx);
                     opt_source = Some(source);
-                    if let Some(desc) = access_place_desc {
+                    if let Some(desc) = self.describe_place(access_place.as_ref()) {
                         item_msg = format!("`{}`", desc);
                         reason = match error_access {
                             AccessKind::Mutate => format!(", which is behind {}", pointer_type),
@@ -445,15 +445,27 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                                 },
                             ))) => {
                                 // check if the RHS is from desugaring
-                                let locations = self.body.find_assignments(local);
-                                let opt_assignment_rhs_span = locations
-                                    .first()
-                                    .map(|&location| self.body.source_info(location).span);
-                                let opt_desugaring_kind =
-                                    opt_assignment_rhs_span.and_then(|span| span.desugaring_kind());
-                                match opt_desugaring_kind {
+                                let opt_assignment_rhs_span =
+                                    self.body.find_assignments(local).first().map(|&location| {
+                                        if let Some(mir::Statement {
+                                            source_info: _,
+                                            kind:
+                                                mir::StatementKind::Assign(box (
+                                                    _,
+                                                    mir::Rvalue::Use(mir::Operand::Copy(place)),
+                                                )),
+                                        }) = self.body[location.block]
+                                            .statements
+                                            .get(location.statement_index)
+                                        {
+                                            self.body.local_decls[place.local].source_info.span
+                                        } else {
+                                            self.body.source_info(location).span
+                                        }
+                                    });
+                                match opt_assignment_rhs_span.and_then(|s| s.desugaring_kind()) {
                                     // on for loops, RHS points to the iterator part
-                                    Some(DesugaringKind::ForLoop(_)) => {
+                                    Some(DesugaringKind::ForLoop) => {
                                         self.suggest_similar_mut_method_for_for_loop(&mut err);
                                         Some((
                                             false,
