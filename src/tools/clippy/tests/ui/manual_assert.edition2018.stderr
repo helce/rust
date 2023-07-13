@@ -1,9 +1,5 @@
 error: only a `panic!` in `if`-then statement
-<<<<<<< HEAD:src/tools/clippy/tests/ui/manual_assert.stderr
-  --> $DIR/manual_assert.rs:19:5
-=======
   --> $DIR/manual_assert.rs:22:5
->>>>>>> 1.58.1:src/tools/clippy/tests/ui/manual_assert.edition2018.stderr
    |
 LL | /     if !a.is_empty() {
 LL | |         panic!("qaqaq{:?}", a);
@@ -13,11 +9,7 @@ LL | |     }
    = note: `-D clippy::manual-assert` implied by `-D warnings`
 
 error: only a `panic!` in `if`-then statement
-<<<<<<< HEAD:src/tools/clippy/tests/ui/manual_assert.stderr
-  --> $DIR/manual_assert.rs:22:5
-=======
   --> $DIR/manual_assert.rs:25:5
->>>>>>> 1.58.1:src/tools/clippy/tests/ui/manual_assert.edition2018.stderr
    |
 LL | /     if !a.is_empty() {
 LL | |         panic!("qwqwq");
@@ -25,11 +17,7 @@ LL | |     }
    | |_____^ help: try: `assert!(a.is_empty(), "qwqwq");`
 
 error: only a `panic!` in `if`-then statement
-<<<<<<< HEAD:src/tools/clippy/tests/ui/manual_assert.stderr
-  --> $DIR/manual_assert.rs:39:5
-=======
   --> $DIR/manual_assert.rs:42:5
->>>>>>> 1.58.1:src/tools/clippy/tests/ui/manual_assert.edition2018.stderr
    |
 LL | /     if b.is_empty() {
 LL | |         panic!("panic1");
@@ -37,11 +25,7 @@ LL | |     }
    | |_____^ help: try: `assert!(!b.is_empty(), "panic1");`
 
 error: only a `panic!` in `if`-then statement
-<<<<<<< HEAD:src/tools/clippy/tests/ui/manual_assert.stderr
-  --> $DIR/manual_assert.rs:42:5
-=======
   --> $DIR/manual_assert.rs:45:5
->>>>>>> 1.58.1:src/tools/clippy/tests/ui/manual_assert.edition2018.stderr
    |
 LL | /     if b.is_empty() && a.is_empty() {
 LL | |         panic!("panic2");
@@ -49,11 +33,7 @@ LL | |     }
    | |_____^ help: try: `assert!(!(b.is_empty() && a.is_empty()), "panic2");`
 
 error: only a `panic!` in `if`-then statement
-<<<<<<< HEAD:src/tools/clippy/tests/ui/manual_assert.stderr
-  --> $DIR/manual_assert.rs:45:5
-=======
   --> $DIR/manual_assert.rs:48:5
->>>>>>> 1.58.1:src/tools/clippy/tests/ui/manual_assert.edition2018.stderr
    |
 LL | /     if a.is_empty() && !b.is_empty() {
 LL | |         panic!("panic3");
@@ -61,11 +41,7 @@ LL | |     }
    | |_____^ help: try: `assert!(!(a.is_empty() && !b.is_empty()), "panic3");`
 
 error: only a `panic!` in `if`-then statement
-<<<<<<< HEAD:src/tools/clippy/tests/ui/manual_assert.stderr
-  --> $DIR/manual_assert.rs:48:5
-=======
   --> $DIR/manual_assert.rs:51:5
->>>>>>> 1.58.1:src/tools/clippy/tests/ui/manual_assert.edition2018.stderr
    |
 LL | /     if b.is_empty() || a.is_empty() {
 LL | |         panic!("panic4");
@@ -73,11 +49,7 @@ LL | |     }
    | |_____^ help: try: `assert!(!(b.is_empty() || a.is_empty()), "panic4");`
 
 error: only a `panic!` in `if`-then statement
-<<<<<<< HEAD:src/tools/clippy/tests/ui/manual_assert.stderr
-  --> $DIR/manual_assert.rs:51:5
-=======
   --> $DIR/manual_assert.rs:54:5
->>>>>>> 1.58.1:src/tools/clippy/tests/ui/manual_assert.edition2018.stderr
    |
 LL | /     if a.is_empty() || !b.is_empty() {
 LL | |         panic!("panic5");

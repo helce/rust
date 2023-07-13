@@ -540,9 +540,6 @@ declare_features! (
     // Features are listed in alphabetical order. Tidy will fail if you don't keep it this way.
     // !!!!    !!!!    !!!!    !!!!   !!!!    !!!!    !!!!    !!!!    !!!!    !!!!    !!!!
 
-    /// Tells rustdoc to automatically generate `#[doc(cfg(...))]`.
-    (active, doc_auto_cfg, "1.57.0", Some(43781), None),
-
     // -------------------------------------------------------------------------
     // feature-group-end: actual feature gates
     // -------------------------------------------------------------------------
