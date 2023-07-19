@@ -1,7 +1,7 @@
 // build-pass
 // ignore-tidy-filelength
 // ignore-compare-mode-chalk
-// ignore-e2k64 we have another stackoverflow on this, currently ignored
+// ignore-e2k64 segfault on stack overflow
 #![crate_type = "rlib"]
 
 fn banana(v: &str) -> u32 {

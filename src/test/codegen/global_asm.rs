@@ -37,6 +37,7 @@
 // ignore-wasm32
 // ignore-wasm64
 // ignore-emscripten
+// ignore-e2k64
 // compile-flags: -C no-prepopulate-passes
 
 #![feature(global_asm)]

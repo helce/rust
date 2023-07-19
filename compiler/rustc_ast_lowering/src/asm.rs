@@ -30,6 +30,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     | asm::InlineAsmArch::AArch64
                     | asm::InlineAsmArch::RiscV32
                     | asm::InlineAsmArch::RiscV64
+                    | asm::InlineAsmArch::E2k64
             );
             if !is_stable && !self.sess.features_untracked().asm_experimental_arch {
                 feature_err(
