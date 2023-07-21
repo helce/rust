@@ -2,7 +2,7 @@
 
 use crate::mir;
 use crate::ty::codec::{TyDecoder, TyEncoder};
-use crate::ty::fold::{TypeFoldable, TypeFolder, TypeVisitor};
+use crate::ty::fold::{FallibleTypeFolder, TypeFoldable, TypeFolder, TypeVisitor};
 use crate::ty::sty::{ClosureSubsts, GeneratorSubsts, InlineConstSubsts};
 use crate::ty::{self, Lift, List, ParamConst, Ty, TyCtxt};
 
@@ -67,7 +67,7 @@ impl<'tcx> GenericArgKind<'tcx> {
     }
 }
 
-impl fmt::Debug for GenericArg<'tcx> {
+impl<'tcx> fmt::Debug for GenericArg<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.unpack() {
             GenericArgKind::Lifetime(lt) => lt.fmt(f),
@@ -153,11 +153,14 @@ impl<'a, 'tcx> Lift<'tcx> for GenericArg<'a> {
 }
 
 impl<'tcx> TypeFoldable<'tcx> for GenericArg<'tcx> {
-    fn super_fold_with<F: TypeFolder<'tcx>>(self, folder: &mut F) -> Self {
+    fn try_super_fold_with<F: FallibleTypeFolder<'tcx>>(
+        self,
+        folder: &mut F,
+    ) -> Result<Self, F::Error> {
         match self.unpack() {
-            GenericArgKind::Lifetime(lt) => lt.fold_with(folder).into(),
-            GenericArgKind::Type(ty) => ty.fold_with(folder).into(),
-            GenericArgKind::Const(ct) => ct.fold_with(folder).into(),
+            GenericArgKind::Lifetime(lt) => lt.try_fold_with(folder).map(Into::into),
+            GenericArgKind::Type(ty) => ty.try_fold_with(folder).map(Into::into),
+            GenericArgKind::Const(ct) => ct.try_fold_with(folder).map(Into::into),
         }
     }
 
@@ -372,7 +375,10 @@ impl<'a, 'tcx> InternalSubsts<'tcx> {
 }
 
 impl<'tcx> TypeFoldable<'tcx> for SubstsRef<'tcx> {
-    fn super_fold_with<F: TypeFolder<'tcx>>(self, folder: &mut F) -> Self {
+    fn try_super_fold_with<F: FallibleTypeFolder<'tcx>>(
+        self,
+        folder: &mut F,
+    ) -> Result<Self, F::Error> {
         // This code is hot enough that it's worth specializing for the most
         // common length lists, to avoid the overhead of `SmallVec` creation.
         // The match arms are in order of frequency. The 1, 2, and 0 cases are
@@ -381,22 +387,27 @@ impl<'tcx> TypeFoldable<'tcx> for SubstsRef<'tcx> {
         // calling `intern_substs`.
         match self.len() {
             1 => {
-                let param0 = self[0].fold_with(folder);
-                if param0 == self[0] { self } else { folder.tcx().intern_substs(&[param0]) }
+                let param0 = self[0].try_fold_with(folder)?;
+                if param0 == self[0] { Ok(self) } else { Ok(folder.tcx().intern_substs(&[param0])) }
             }
             2 => {
-                let param0 = self[0].fold_with(folder);
-                let param1 = self[1].fold_with(folder);
+                let param0 = self[0].try_fold_with(folder)?;
+                let param1 = self[1].try_fold_with(folder)?;
                 if param0 == self[0] && param1 == self[1] {
-                    self
+                    Ok(self)
                 } else {
-                    folder.tcx().intern_substs(&[param0, param1])
+                    Ok(folder.tcx().intern_substs(&[param0, param1]))
                 }
             }
-            0 => self,
+            0 => Ok(self),
             _ => {
-                let params: SmallVec<[_; 8]> = self.iter().map(|k| k.fold_with(folder)).collect();
-                if params[..] == self[..] { self } else { folder.tcx().intern_substs(&params) }
+                let params: SmallVec<[_; 8]> =
+                    self.iter().map(|k| k.try_fold_with(folder)).collect::<Result<_, _>>()?;
+                if params[..] == self[..] {
+                    Ok(self)
+                } else {
+                    Ok(folder.tcx().intern_substs(&params))
+                }
             }
         }
     }

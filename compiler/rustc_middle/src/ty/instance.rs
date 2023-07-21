@@ -7,6 +7,7 @@ use rustc_hir::def::Namespace;
 use rustc_hir::def_id::{CrateNum, DefId};
 use rustc_hir::lang_items::LangItem;
 use rustc_macros::HashStable;
+use rustc_middle::ty::normalize_erasing_regions::NormalizationError;
 
 use std::fmt;
 
@@ -575,6 +576,23 @@ impl<'tcx> Instance<'tcx> {
         }
     }
 
+    #[inline(always)]
+    pub fn try_subst_mir_and_normalize_erasing_regions<T>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        param_env: ty::ParamEnv<'tcx>,
+        v: T,
+    ) -> Result<T, NormalizationError<'tcx>>
+    where
+        T: TypeFoldable<'tcx> + Clone,
+    {
+        if let Some(substs) = self.substs_for_mir_body() {
+            tcx.try_subst_and_normalize_erasing_regions(substs, param_env, v)
+        } else {
+            tcx.try_normalize_erasing_regions(param_env, v)
+        }
+    }
+
     /// Returns a new `Instance` where generic parameters in `instance.substs` are replaced by
     /// identity parameters if they are determined to be unused in `instance.def`.
     pub fn polymorphize(self, tcx: TyCtxt<'tcx>) -> Self {
@@ -617,7 +635,7 @@ fn polymorphize<'tcx>(
         tcx: TyCtxt<'tcx>,
     }
 
-    impl ty::TypeFolder<'tcx> for PolymorphizationFolder<'tcx> {
+    impl<'tcx> ty::TypeFolder<'tcx> for PolymorphizationFolder<'tcx> {
         fn tcx<'a>(&'a self) -> TyCtxt<'tcx> {
             self.tcx
         }

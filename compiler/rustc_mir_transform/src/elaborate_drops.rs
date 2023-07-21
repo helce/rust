@@ -19,6 +19,10 @@ use std::fmt;
 pub struct ElaborateDrops;
 
 impl<'tcx> MirPass<'tcx> for ElaborateDrops {
+    fn phase_change(&self) -> Option<MirPhase> {
+        Some(MirPhase::DropLowering)
+    }
+
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         debug!("elaborate_drops({:?} @ {:?})", body.source, body.span);
 
@@ -145,13 +149,13 @@ struct Elaborator<'a, 'b, 'tcx> {
     ctxt: &'a mut ElaborateDropsCtxt<'b, 'tcx>,
 }
 
-impl<'a, 'b, 'tcx> fmt::Debug for Elaborator<'a, 'b, 'tcx> {
+impl fmt::Debug for Elaborator<'_, '_, '_> {
     fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Ok(())
     }
 }
 
-impl<'a, 'b, 'tcx> DropElaborator<'a, 'tcx> for Elaborator<'a, 'b, 'tcx> {
+impl<'a, 'tcx> DropElaborator<'a, 'tcx> for Elaborator<'a, '_, 'tcx> {
     type Path = MovePathIndex;
 
     fn patch(&mut self) -> &mut MirPatch<'tcx> {
@@ -312,12 +316,12 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
                 LookupResult::Parent(Some(parent)) => {
                     let (_maybe_live, maybe_dead) = self.init_data.maybe_live_dead(parent);
                     if maybe_dead {
-                        span_bug!(
+                        self.tcx.sess.delay_span_bug(
                             terminator.source_info.span,
-                            "drop of untracked, uninitialized value {:?}, place {:?} ({:?})",
-                            bb,
-                            place,
-                            path
+                            &format!(
+                                "drop of untracked, uninitialized value {:?}, place {:?} ({:?})",
+                                bb, place, path,
+                            ),
                         );
                     }
                     continue;
@@ -364,10 +368,9 @@ impl<'b, 'tcx> ElaborateDropsCtxt<'b, 'tcx> {
                             bb,
                         ),
                         LookupResult::Parent(..) => {
-                            span_bug!(
+                            self.tcx.sess.delay_span_bug(
                                 terminator.source_info.span,
-                                "drop of untracked value {:?}",
-                                bb
+                                &format!("drop of untracked value {:?}", bb),
                             );
                         }
                     }

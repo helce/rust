@@ -69,6 +69,7 @@ declare_clippy_lint! {
     /// STATIC_ATOM.store(9, SeqCst);
     /// assert_eq!(STATIC_ATOM.load(SeqCst), 9); // use a `static` item to refer to the same instance
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub DECLARE_INTERIOR_MUTABLE_CONST,
     style,
     "declaring `const` with interior mutability"
@@ -113,6 +114,7 @@ declare_clippy_lint! {
     /// STATIC_ATOM.store(9, SeqCst);
     /// assert_eq!(STATIC_ATOM.load(SeqCst), 9); // use a `static` item to refer to the same instance
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub BORROW_INTERIOR_MUTABLE_CONST,
     style,
     "referencing `const` with interior mutability"
@@ -279,8 +281,8 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
 
     fn check_impl_item(&mut self, cx: &LateContext<'tcx>, impl_item: &'tcx ImplItem<'_>) {
         if let ImplItemKind::Const(hir_ty, body_id) = &impl_item.kind {
-            let item_hir_id = cx.tcx.hir().get_parent_node(impl_item.hir_id());
-            let item = cx.tcx.hir().expect_item(item_hir_id);
+            let item_def_id = cx.tcx.hir().get_parent_did(impl_item.hir_id());
+            let item = cx.tcx.hir().expect_item(item_def_id);
 
             match &item.kind {
                 ItemKind::Impl(Impl {

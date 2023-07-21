@@ -1,7 +1,7 @@
 //! Miscellaneous type-system utilities that are too small to deserve their own modules.
 
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
-use crate::ty::fold::TypeFolder;
+use crate::ty::fold::{FallibleTypeFolder, TypeFolder};
 use crate::ty::layout::IntegerExt;
 use crate::ty::query::TyCtxtAt;
 use crate::ty::subst::{GenericArgKind, Subst, SubstsRef};
@@ -788,10 +788,14 @@ impl<'tcx> ty::TyS<'tcx> {
                     [component_ty] => component_ty,
                     _ => self,
                 };
+
                 // This doesn't depend on regions, so try to minimize distinct
                 // query keys used.
-                let erased = tcx.normalize_erasing_regions(param_env, query_ty);
-                tcx.needs_drop_raw(param_env.and(erased))
+                // If normalization fails, we just use `query_ty`.
+                let query_ty =
+                    tcx.try_normalize_erasing_regions(param_env, query_ty).unwrap_or(query_ty);
+
+                tcx.needs_drop_raw(param_env.and(query_ty))
             }
         }
     }
@@ -977,7 +981,7 @@ impl<'tcx> ExplicitSelf<'tcx> {
 /// Returns a list of types such that the given type needs drop if and only if
 /// *any* of the returned types need drop. Returns `Err(AlwaysRequiresDrop)` if
 /// this type always needs drop.
-pub fn needs_drop_components(
+pub fn needs_drop_components<'tcx>(
     ty: Ty<'tcx>,
     target_layout: &TargetDataLayout,
 ) -> Result<SmallVec<[Ty<'tcx>; 2]>, AlwaysRequiresDrop> {
@@ -1046,25 +1050,31 @@ pub fn fold_list<'tcx, F, T>(
     list: &'tcx ty::List<T>,
     folder: &mut F,
     intern: impl FnOnce(TyCtxt<'tcx>, &[T]) -> &'tcx ty::List<T>,
-) -> &'tcx ty::List<T>
+) -> Result<&'tcx ty::List<T>, F::Error>
 where
-    F: TypeFolder<'tcx>,
+    F: FallibleTypeFolder<'tcx>,
     T: TypeFoldable<'tcx> + PartialEq + Copy,
 {
     let mut iter = list.iter();
     // Look for the first element that changed
-    if let Some((i, new_t)) = iter.by_ref().enumerate().find_map(|(i, t)| {
-        let new_t = t.fold_with(folder);
-        if new_t == t { None } else { Some((i, new_t)) }
+    match iter.by_ref().enumerate().find_map(|(i, t)| match t.try_fold_with(folder) {
+        Ok(new_t) if new_t == t => None,
+        new_t => Some((i, new_t)),
     }) {
-        // An element changed, prepare to intern the resulting list
-        let mut new_list = SmallVec::<[_; 8]>::with_capacity(list.len());
-        new_list.extend_from_slice(&list[..i]);
-        new_list.push(new_t);
-        new_list.extend(iter.map(|t| t.fold_with(folder)));
-        intern(folder.tcx(), &new_list)
-    } else {
-        list
+        Some((i, Ok(new_t))) => {
+            // An element changed, prepare to intern the resulting list
+            let mut new_list = SmallVec::<[_; 8]>::with_capacity(list.len());
+            new_list.extend_from_slice(&list[..i]);
+            new_list.push(new_t);
+            for t in iter {
+                new_list.push(t.try_fold_with(folder)?)
+            }
+            Ok(intern(folder.tcx(), &new_list))
+        }
+        Some((_, Err(err))) => {
+            return Err(err);
+        }
+        None => Ok(list),
     }
 }
 
@@ -1073,7 +1083,7 @@ pub struct AlwaysRequiresDrop;
 
 /// Normalizes all opaque types in the given value, replacing them
 /// with their underlying types.
-pub fn normalize_opaque_types(
+pub fn normalize_opaque_types<'tcx>(
     tcx: TyCtxt<'tcx>,
     val: &'tcx List<ty::Predicate<'tcx>>,
 ) -> &'tcx List<ty::Predicate<'tcx>> {

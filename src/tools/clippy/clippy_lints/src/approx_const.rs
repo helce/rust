@@ -33,6 +33,7 @@ declare_clippy_lint! {
     /// let x = std::f32::consts::PI;
     /// let y = std::f64::consts::FRAC_1_PI;
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub APPROX_CONSTANT,
     correctness,
     "the approximate of a known float constant (in `std::fXX::consts`)"
@@ -86,7 +87,7 @@ impl ApproxConstant {
         let s = s.as_str();
         if s.parse::<f64>().is_ok() {
             for &(constant, name, min_digits, msrv) in &KNOWN_CONSTS {
-                if is_approx_const(constant, &s, min_digits)
+                if is_approx_const(constant, s, min_digits)
                     && msrv.as_ref().map_or(true, |msrv| meets_msrv(self.msrv.as_ref(), msrv))
                 {
                     span_lint_and_help(

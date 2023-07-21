@@ -204,13 +204,6 @@ pub use self::local::os::Key as __OsLocalKeyInner;
 #[doc(hidden)]
 pub use self::local::statik::Key as __StaticLocalKeyInner;
 
-// This is only used to make thread locals with `const { .. }` initialization
-// expressions unstable. If and/or when that syntax is stabilized with thread
-// locals this will simply be removed.
-#[doc(hidden)]
-#[unstable(feature = "thread_local_const_init", issue = "84223")]
-pub const fn require_unstable_const_init_thread_local() {}
-
 ////////////////////////////////////////////////////////////////////////////////
 // Builder
 ////////////////////////////////////////////////////////////////////////////////
@@ -979,10 +972,13 @@ pub fn park_timeout(dur: Duration) {
 
 /// A unique identifier for a running thread.
 ///
-/// A `ThreadId` is an opaque object that has a unique value for each thread
-/// that creates one. `ThreadId`s are not guaranteed to correspond to a thread's
-/// system-designated identifier. A `ThreadId` can be retrieved from the [`id`]
-/// method on a [`Thread`].
+/// A `ThreadId` is an opaque object that uniquely identifies each thread
+/// created during the lifetime of a process. `ThreadId`s are guaranteed not to
+/// be reused, even when a thread terminates. `ThreadId`s are under the control
+/// of Rust's standard library and there may not be any relationship between
+/// `ThreadId` and the underlying platform's notion of a thread identifier --
+/// the two concepts cannot, therefore, be used interchangeably. A `ThreadId`
+/// can be retrieved from the [`id`] method on a [`Thread`].
 ///
 /// # Examples
 ///
@@ -1280,7 +1276,7 @@ impl<T> JoinInner<T> {
 /// An owned permission to join on a thread (block on its termination).
 ///
 /// A `JoinHandle` *detaches* the associated thread when it is dropped, which
-/// means that there is no longer any handle to thread and no way to `join`
+/// means that there is no longer any handle to the thread and no way to `join`
 /// on it.
 ///
 /// Due to platform restrictions, it is not possible to [`Clone`] this
@@ -1460,9 +1456,12 @@ fn _assert_sync_and_send() {
 /// The purpose of this API is to provide an easy and portable way to query
 /// the default amount of parallelism the program should use. Among other things it
 /// does not expose information on NUMA regions, does not account for
-/// differences in (co)processor capabilities, and will not modify the program's
-/// global state in order to more accurately query the amount of available
-/// parallelism.
+/// differences in (co)processor capabilities or current system load,
+/// and will not modify the program's global state in order to more accurately
+/// query the amount of available parallelism.
+///
+/// Where both fixed steady-state and burst limits are available the steady-state
+/// capacity will be used to ensure more predictable latencies.
 ///
 /// Resource limits can be changed during the runtime of a program, therefore the value is
 /// not cached and instead recomputed every time this function is called. It should not be
@@ -1505,7 +1504,6 @@ fn _assert_sync_and_send() {
 ///
 /// ```
 /// # #![allow(dead_code)]
-/// #![feature(available_parallelism)]
 /// use std::{io, thread};
 ///
 /// fn main() -> io::Result<()> {
@@ -1517,7 +1515,7 @@ fn _assert_sync_and_send() {
 #[doc(alias = "available_concurrency")] // Alias for a previous name we gave this API on unstable.
 #[doc(alias = "hardware_concurrency")] // Alias for C++ `std::thread::hardware_concurrency`.
 #[doc(alias = "num_cpus")] // Alias for a popular ecosystem crate which provides similar functionality.
-#[unstable(feature = "available_parallelism", issue = "74479")]
+#[stable(feature = "available_parallelism", since = "1.59.0")]
 pub fn available_parallelism() -> io::Result<NonZeroUsize> {
     imp::available_parallelism()
 }

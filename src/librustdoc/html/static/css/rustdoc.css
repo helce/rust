@@ -108,10 +108,9 @@ html {
 /* General structure and fonts */
 
 body {
-	font: 16px/1.4 "Source Serif 4", NanumBarunGothic, serif;
+	font: 1rem/1.4 "Source Serif 4", NanumBarunGothic, serif;
 	margin: 0;
 	position: relative;
-	padding: 10px 15px 20px 15px;
 
 	-webkit-font-feature-settings: "kern", "liga";
 	-moz-font-feature-settings: "kern", "liga";
@@ -119,13 +118,13 @@ body {
 }
 
 h1 {
-	font-size: 1.5em;
+	font-size: 1.5rem;
 }
 h2 {
-	font-size: 1.4em;
+	font-size: 1.4rem;
 }
 h3 {
-	font-size: 1.3em;
+	font-size: 1.3rem;
 }
 h1, h2, h3, h4, h5, h6 {
 	font-weight: 500;
@@ -161,10 +160,10 @@ h2,
 	border-bottom: 1px solid;
 }
 h3.code-header {
-	font-size: 1.1em;
+	font-size: 1.1rem;
 }
 h4.code-header {
-	font-size: 1em;
+	font-size: 1rem;
 }
 h3.code-header, h4.code-header {
 	font-weight: 600;
@@ -202,12 +201,12 @@ details.rustdoc-toggle > summary::before,
 div.impl-items > div:not(.docblock):not(.item-info),
 .content ul.crate a.crate, a.srclink,
 /* This selector is for the items listed in the "all items" page. */
-#main > ul.docblock > li > a {
+#main-content > ul.docblock > li > a {
 	font-family: "Fira Sans", Arial, NanumBarunGothic, sans-serif;
 }
 
 .content ul.crate a.crate {
-	font-size: 16px/1.6;
+	font-size: 1rem/1.6;
 }
 
 ol, ul {
@@ -248,6 +247,32 @@ textarea {
 
 /* end tweaks for normalize.css 8 */
 
+.rustdoc {
+	display: flex;
+	flex-direction: row;
+	flex-wrap: nowrap;
+}
+
+main {
+	position: relative;
+	flex-grow: 1;
+	padding: 10px 15px 40px 45px;
+	min-width: 0;
+}
+
+.source main {
+	padding: 15px;
+}
+
+.width-limiter {
+	max-width: 960px;
+	margin-right: auto;
+}
+
+.source .width-limiter {
+	max-width: unset;
+}
+
 details:not(.rustdoc-toggle) summary {
 	margin-bottom: .6em;
 }
@@ -285,28 +310,74 @@ li {
 }
 
 .source .content {
-	margin-top: 50px;
 	max-width: none;
 	overflow: visible;
 	margin-left: 0px;
 }
 
 nav.sub {
-	font-size: 16px;
+	position: relative;
+	font-size: 1rem;
 	text-transform: uppercase;
+}
+
+.sub-container {
+	display: flex;
+	flex-direction: row;
+	flex-wrap: nowrap;
+}
+
+.sub-logo-container {
+	display: none;
+	margin-right: 20px;
+}
+
+.source .sub-logo-container {
+	display: block;
+}
+
+.source .sub-logo-container > img {
+	height: 60px;
+	width: 60px;
+	object-fit: contain;
 }
 
 .sidebar {
 	width: 200px;
-	position: fixed;
-	left: 0;
-	top: 0;
-	bottom: 0;
 	overflow-y: scroll;
+	position: sticky;
+	min-width: 200px;
+	height: 100vh;
+	top: 0;
+	left: 0;
 }
 
 .rustdoc.source .sidebar {
+	width: 50px;
+	min-width: 0px;
+	max-width: 300px;
+	flex-grow: 0;
+	flex-shrink: 0;
+	flex-basis: auto;
+	border-right: 1px solid;
+	overflow-x: hidden;
+	/* The sidebar is by default hidden  */
+	overflow-y: hidden;
+}
+
+.source .sidebar > *:not(:first-child) {
+	transition: opacity 0.5s, visibility 0.2s;
+	opacity: 0;
+	visibility: hidden;
+}
+
+.source .sidebar.expanded {
 	overflow-y: auto;
+}
+
+.source .sidebar.expanded > * {
+	opacity: 1;
+	visibility: visible;
 }
 
 /* Improve the scrollbar display on firefox */
@@ -332,10 +403,6 @@ nav.sub {
 	margin-right: -10px;
 }
 
-.content, nav {
-	max-width: 960px;
-}
-
 /* Everything else */
 
 .hidden {
@@ -343,28 +410,20 @@ nav.sub {
 }
 
 .logo-container {
-	height: 100px;
-	width: 100px;
-	position: relative;
-	margin: 20px auto;
-	display: block;
+	display: flex;
 	margin-top: 10px;
+	margin-bottom: 10px;
+	justify-content: center;
 }
 
 .logo-container > img {
-	max-width: 100px;
-	max-height: 100px;
-	height: 100%;
-	position: absolute;
-	left: 50%;
-	top: 50%;
-	transform: translate(-50%, -50%);
-	display: block;
+	height: 100px;
+	width: 100px;
 }
 
 .sidebar .location {
 	border: 1px solid;
-	font-size: 17px;
+	font-size: 1.0625rem;
 	margin: 30px 10px 20px 10px;
 	text-align: center;
 	word-wrap: break-word;
@@ -373,7 +432,7 @@ nav.sub {
 }
 
 .sidebar .version {
-	font-size: 15px;
+	font-size: 0.9375rem;
 	text-align: center;
 	border-bottom: 1px solid;
 	overflow-wrap: break-word;
@@ -411,7 +470,7 @@ nav.sub {
 	overflow: hidden;
 	line-height: 15px;
 	padding: 7px 5px;
-	font-size: 14px;
+	font-size: 0.875rem;
 	font-weight: 300;
 	transition: border 500ms ease-out;
 }
@@ -420,7 +479,7 @@ nav.sub {
 	border-top: 1px solid;
 	border-bottom: 1px solid;
 	text-align: center;
-	font-size: 17px;
+	font-size: 1.0625rem;
 	margin-bottom: 5px;
 	font-weight: inherit;
 	padding: 0;
@@ -437,10 +496,6 @@ nav.sub {
 
 .sidebar-menu {
 	display: none;
-}
-
-.content {
-	padding: 15px 0;
 }
 
 .source .content pre.rust {
@@ -487,8 +542,11 @@ nav.sub {
 }
 
 #search {
-	margin-left: 230px;
 	position: relative;
+}
+
+.search-loading {
+	text-align: center;
 }
 
 #results > table {
@@ -525,18 +583,18 @@ nav.sub {
 	white-space: pre-wrap;
 }
 
-.top-doc .docblock h2 { font-size: 1.3em; }
-.top-doc .docblock h3 { font-size: 1.15em; }
+.top-doc .docblock h2 { font-size: 1.3rem; }
+.top-doc .docblock h3 { font-size: 1.15rem; }
 .top-doc .docblock h4,
 .top-doc .docblock h5 {
-	font-size: 1.1em;
+	font-size: 1.1rem;
 }
 .top-doc .docblock h6 {
-	font-size: 1em;
+	font-size: 1rem;
 }
 
-.docblock h5 { font-size: 1em; }
-.docblock h6 { font-size: 0.95em; }
+.docblock h5 { font-size: 1rem; }
+.docblock h6 { font-size: 0.95rem; }
 
 .docblock {
 	margin-left: 24px;
@@ -551,7 +609,7 @@ nav.sub {
 .content .out-of-band {
 	flex-grow: 0;
 	text-align: right;
-	font-size: 23px;
+	font-size: 1.4375rem;
 	margin: 0px;
 	padding: 0 0 0 12px;
 	font-weight: normal;
@@ -578,10 +636,10 @@ nav.sub {
 	display: inline-block;
 }
 
-#main {
+#main-content {
 	position: relative;
 }
-#main > .since {
+#main-content > .since {
 	top: inherit;
 	font-family: "Fira Sans", Arial, sans-serif;
 }
@@ -592,7 +650,7 @@ nav.sub {
 .content td { vertical-align: top; }
 .content td:first-child { padding-right: 20px; }
 .content td p:first-child { margin-top: 0; }
-.content td h1, .content td h2 { margin-left: 0; font-size: 1.1em; }
+.content td h1, .content td h2 { margin-left: 0; font-size: 1.1rem; }
 .content tr:first-child td { border-top: 0; }
 
 .docblock table {
@@ -633,7 +691,7 @@ nav.sub {
 .content .multi-column li { width: 100%; display: inline-block; }
 
 .content > .methods > .method {
-	font-size: 1em;
+	font-size: 1rem;
 	position: relative;
 }
 /* Shift "where ..." part of method or fn definition down a line */
@@ -641,7 +699,7 @@ nav.sub {
 .content .fn .where,
 .content .where.fmt-newline {
 	display: block;
-	font-size: 0.8em;
+	font-size: 0.8rem;
 }
 
 .content .methods > div:not(.notable-traits):not(.method) {
@@ -664,7 +722,7 @@ nav.sub {
 }
 
 .content .item-info code {
-	font-size: 90%;
+	font-size: 0.81rem;
 }
 
 .content .item-info {
@@ -678,7 +736,7 @@ nav.sub {
 
 .content .item-info::before {
 	content: '⬑';
-	font-size: 25px;
+	font-size: 1.5625rem;
 	position: absolute;
 	top: -6px;
 	left: -19px;
@@ -700,14 +758,18 @@ nav.sub {
 	flex-basis: 100%;
 }
 
-#main > .item-info {
+#main-content > .item-info {
 	margin-top: 0;
 }
 
 nav:not(.sidebar) {
+	flex-grow: 1;
 	border-bottom: 1px solid;
 	padding-bottom: 10px;
-	margin-bottom: 10px;
+	margin-bottom: 25px;
+}
+.source nav:not(.sidebar).sub {
+	margin-left: 32px;
 }
 nav.main {
 	padding: 20px 0;
@@ -725,10 +787,6 @@ nav.main .separator {
 }
 nav.sum { text-align: right; }
 nav.sub form { display: inline; }
-
-nav.sub, .content {
-	margin-left: 230px;
-}
 
 a {
 	text-decoration: none;
@@ -781,7 +839,7 @@ h2.small-section-header > .anchor {
 	position: absolute;
 	top: 0;
 	right: 0;
-	font-size: 17px;
+	font-size: 1.0625rem;
 	font-weight: normal;
 }
 
@@ -802,6 +860,7 @@ h2.small-section-header > .anchor {
 
 .search-container {
 	position: relative;
+	max-width: 960px;
 }
 .search-container > div {
 	display: inline-flex;
@@ -828,6 +887,7 @@ h2.small-section-header > .anchor {
 	background-color: transparent;
 	background-size: 20px;
 	background-position: calc(100% - 1px) 56%;
+	background-image: /* AUTOREPLACE: */url("down-arrow.svg");
 }
 .search-container > .top-button {
 	position: absolute;
@@ -835,6 +895,10 @@ h2.small-section-header > .anchor {
 	top: 10px;
 }
 .search-input {
+	/* Override Normalize.css: it has a rule that sets
+	   -webkit-appearance: textfield for search inputs. That
+	   causes rounded corners and no border on iOS Safari. */
+	-webkit-appearance: none;
 	/* Override Normalize.css: we have margins and do
 	 not want to overflow - the `moz` attribute is necessary
 	 until Firefox 29, too early to drop at this point */
@@ -845,7 +909,7 @@ h2.small-section-header > .anchor {
 	border-radius: 1px;
 	margin-top: 5px;
 	padding: 10px 16px;
-	font-size: 17px;
+	font-size: 1.0625rem;
 	transition: border-color 300ms ease;
 	transition: border-radius 300ms ease-in-out;
 	transition: box-shadow 300ms ease-in-out;
@@ -940,7 +1004,7 @@ body.blur > :not(#help) {
 #help span.top, #help span.bottom {
 	text-align: center;
 	display: block;
-	font-size: 18px;
+	font-size: 1.125rem;
 
 }
 #help span.top {
@@ -970,7 +1034,7 @@ body.blur > :not(#help) {
 .stab {
 	padding: 3px;
 	margin-bottom: 5px;
-	font-size: 90%;
+	font-size: 0.9rem;
 	font-weight: normal;
 }
 .stab p {
@@ -978,7 +1042,7 @@ body.blur > :not(#help) {
 }
 
 .stab .emoji {
-	font-size: 1.2em;
+	font-size: 1.2rem;
 }
 
 /* Black one-pixel outline around emoji shapes */
@@ -994,7 +1058,7 @@ body.blur > :not(#help) {
 .import-item .stab {
 	border-radius: 3px;
 	display: inline-block;
-	font-size: 80%;
+	font-size: 0.8rem;
 	line-height: 1.2;
 	margin-bottom: 0;
 	margin-left: .3em;
@@ -1020,8 +1084,11 @@ body.blur > :not(#help) {
 
 .impl-items .srclink, .impl .srclink, .methods .srclink {
 	/* Override header settings otherwise it's too bold */
-	font-size: 17px;
 	font-weight: normal;
+	font-size: 1rem;
+}
+.impl .srclink {
+	font-size: 1.0625rem;
 }
 
 .rightside {
@@ -1029,7 +1096,7 @@ body.blur > :not(#help) {
 }
 
 .has-srclink {
-	font-size: 16px;
+	font-size: 1rem;
 	margin-bottom: 12px;
 	/* Push the src link out to the right edge consistently */
 	justify-content: space-between;
@@ -1057,18 +1124,21 @@ pre.rust .question-mark {
 
 a.test-arrow {
 	display: inline-block;
+	visibility: hidden;
 	position: absolute;
 	padding: 5px 10px 5px 10px;
 	border-radius: 5px;
-	font-size: 130%;
+	font-size: 1.3rem;
 	top: 5px;
 	right: 5px;
 	z-index: 1;
 }
+.example-wrap:hover .test-arrow {
+	visibility: visible;
+}
 a.test-arrow:hover{
 	text-decoration: none;
 }
-
 .section-header:hover a:before {
 	position: absolute;
 	left: -25px;
@@ -1095,19 +1165,19 @@ a.test-arrow:hover{
 
 .out-of-band > span.since {
 	position: initial;
-	font-size: 20px;
+	font-size: 1.25rem;
 	margin-right: 5px;
 }
 
 h3.variant {
 	font-weight: 600;
-	font-size: 1.1em;
+	font-size: 1.1rem;
 	margin-bottom: 10px;
 	border-bottom: none;
 }
 
 .sub-variant h4 {
-	font-size: 1em;
+	font-size: 1rem;
 	font-weight: 400;
 	border-bottom: none;
 	margin-top: 0;
@@ -1167,7 +1237,7 @@ h3.variant {
 	padding: 5px 3px 3px 3px;
 	border-radius: 6px;
 	margin-left: 5px;
-	font-size: 16px;
+	font-size: 1rem;
 }
 
 .tooltip.ignore::after {
@@ -1200,7 +1270,7 @@ h3.variant {
 
 .tooltip.compile_fail, .tooltip.should_panic, .tooltip.ignore {
 	font-weight: bold;
-	font-size: 20px;
+	font-size: 1.25rem;
 }
 
 .notable-traits-tooltip {
@@ -1219,7 +1289,7 @@ h3.variant {
 	border-radius: 6px;
 	margin-left: 5px;
 	z-index: 10;
-	font-size: 16px;
+	font-size: 1rem;
 	cursor: default;
 	position: absolute;
 	border: 1px solid;
@@ -1239,14 +1309,14 @@ h3.variant {
 .notable-traits .notable {
 	margin: 0;
 	margin-bottom: 13px;
-	font-size: 19px;
+	font-size: 1.1875rem;
 	font-weight: 600;
 }
 
 .notable-traits .docblock code.content{
 	margin: 0;
 	padding: 0;
-	font-size: 20px;
+	font-size: 1.25rem;
 }
 
 /* Example code has the "Run" button that needs to be positioned relative to the pre */
@@ -1284,7 +1354,7 @@ pre.rust {
 	float: left;
 	width: 33.3%;
 	text-align: center;
-	font-size: 18px;
+	font-size: 1.125rem;
 	cursor: pointer;
 	border: 0;
 	border-top: 2px solid;
@@ -1297,7 +1367,7 @@ pre.rust {
 
 #titles > button > div.count {
 	display: inline-block;
-	font-size: 16px;
+	font-size: 1rem;
 }
 
 .notable-traits {
@@ -1319,33 +1389,26 @@ pre.rust {
 }
 
 #sidebar-toggle {
-	position: fixed;
-	top: 30px;
-	left: 300px;
-	z-index: 10;
-	padding: 3px;
-	border-top-right-radius: 3px;
-	border-bottom-right-radius: 3px;
+	position: sticky;
+	top: 0;
+	left: 0;
 	cursor: pointer;
 	font-weight: bold;
-	transition: left .5s;
-	font-size: 1.2em;
-	border: 1px solid;
-	border-left: 0;
+	font-size: 1.2rem;
+	border-bottom: 1px solid;
+	display: flex;
+	height: 40px;
+	justify-content: center;
+	align-items: center;
+	z-index: 10;
 }
 #source-sidebar {
-	position: fixed;
-	top: 0;
-	bottom: 0;
-	left: 0;
-	width: 300px;
+	width: 100%;
 	z-index: 1;
 	overflow: auto;
-	transition: left .5s;
-	border-right: 1px solid;
 }
 #source-sidebar > .title {
-	font-size: 1.5em;
+	font-size: 1.5rem;
 	text-align: center;
 	border-bottom: 1px solid;
 	margin-bottom: 6px;
@@ -1353,8 +1416,8 @@ pre.rust {
 
 .theme-picker {
 	position: absolute;
-	left: 211px;
-	top: 19px;
+	left: -34px;
+	top: 9px;
 }
 
 .theme-picker button {
@@ -1373,6 +1436,9 @@ pre.rust {
 
 #theme-picker, #settings-menu, #help-button, #copy-path {
 	padding: 4px;
+	/* Rare exception to specifying font sizes in rem. Since these are acting
+	   as icons, it's okay to specify their sizes in pixels. */
+	font-size: 16px;
 	width: 27px;
 	height: 29px;
 	border: 1px solid;
@@ -1384,7 +1450,9 @@ pre.rust {
 	right: 30px;
 	font-family: "Fira Sans", Arial, sans-serif;
 	text-align: center;
-	font-size: 17px;
+	/* Rare exception to specifying font sizes in rem. Since this is acting
+	   as an icon, it's okay to specify their sizes in pixels. */
+	font-size: 16px;
 	padding-top: 2px;
 }
 
@@ -1446,7 +1514,7 @@ kbd {
 	border: 0;
 	border-collapse: collapse;
 	border-spacing: 0;
-	font-size: 16px;
+	font-size: 1rem;
 }
 
 .table-display tr td:first-child {
@@ -1458,11 +1526,11 @@ kbd {
 }
 .table-display .out-of-band {
 	position: relative;
-	font-size: 19px;
+	font-size: 1.1875rem;
 	display: block;
 }
 #implementors-list > .impl-items .table-display .out-of-band {
-	font-size: 17px;
+	font-size: 1.0625rem;
 }
 
 .table-display td:hover .anchor {
@@ -1471,10 +1539,10 @@ kbd {
 	left: -5px;
 }
 
-#main > ul {
+#main-content > ul {
 	padding-left: 10px;
 }
-#main > ul > li {
+#main-content > ul > li {
 	list-style: none;
 }
 
@@ -1504,7 +1572,7 @@ div.name.expand + .children {
 div.name::before {
 	content: "\25B6";
 	padding-left: 4px;
-	font-size: 0.7em;
+	font-size: 0.7rem;
 	position: absolute;
 	left: -16px;
 	top: 4px;
@@ -1571,7 +1639,7 @@ details.rustdoc-toggle.top-doc > summary::before,
 details.rustdoc-toggle.non-exhaustive > summary,
 details.rustdoc-toggle.non-exhaustive > summary::before {
 	font-family: 'Fira Sans';
-	font-size: 16px;
+	font-size: 1rem;
 }
 
 details.non-exhaustive {
@@ -1610,6 +1678,16 @@ details.rustdoc-toggle[open] > summary.hideme > span {
 	display: none;
 }
 
+details.undocumented[open] > summary::before,
+details.rustdoc-toggle[open] > summary::before,
+details.rustdoc-toggle[open] > summary.hideme::before {
+	background-image: /* AUTOREPLACE: */url("toggle-minus.svg");
+}
+
+details.undocumented > summary::before, details.rustdoc-toggle > summary::before {
+	background-image: /* AUTOREPLACE: */url("toggle-plus.svg");
+}
+
 details.rustdoc-toggle[open] > summary::before,
 details.rustdoc-toggle[open] > summary.hideme::before {
 	width: 17px;
@@ -1635,6 +1713,22 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 	.docblock > .information:first-child > .tooltip {
 		margin-top: 16px;
 	}
+
+	/* When we expand the sidebar on the source code page, we hide the logo on the left of the
+	search bar to have more space. */
+	.sidebar.expanded + main .width-limiter .sub-logo-container.rust-logo {
+		display: none;
+	}
+
+	/* It doesn't render well on mobile because of the layout, so better only have the transition
+	on desktop. */
+	.rustdoc.source .sidebar {
+		transition: width .5s;
+	}
+
+	.source .sidebar.expanded {
+		width: 300px;
+	}
 }
 
 @media (max-width: 700px) {
@@ -1642,14 +1736,43 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 		padding-top: 0px;
 	}
 
-	.rustdoc > .sidebar {
+	main {
+		padding-left: 15px;
+		padding-top: 0px;
+	}
+
+	.rustdoc {
+		flex-direction: column;
+	}
+
+	.rustdoc:not(.source) > .sidebar {
+		width: 100%;
 		height: 45px;
 		min-height: 40px;
+		max-height: 45px;
 		margin: 0;
-		margin-left: -15px;
 		padding: 0 15px;
 		position: static;
 		z-index: 11;
+		overflow-y: hidden;
+	}
+
+	.rustdoc.source > .sidebar {
+		position: fixed;
+		top: 0;
+		left: 0;
+		margin: 0;
+		z-index: 11;
+		width: 0;
+	}
+
+	.sidebar.mobile {
+		position: sticky !important;
+		top: 0;
+		left: 0;
+		width: 100%;
+		margin-left: 0;
+		background-color: rgba(0,0,0,0);
 	}
 
 	.sidebar > .location {
@@ -1660,14 +1783,14 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 		min-height: 39px;
 		background: inherit;
 		text-align: left;
-		font-size: 24px;
+		font-size: 1.5rem;
 	}
 
 	.sidebar .location:empty {
 		padding: 0;
 	}
 
-	.sidebar .logo-container {
+	.rustdoc:not(.source) .sidebar .logo-container {
 		width: 35px;
 		height: 35px;
 		margin-top: 5px;
@@ -1688,6 +1811,7 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 		cursor: pointer;
 		width: 45px;
 		left: 0;
+		top: 0;
 		text-align: center;
 		display: block;
 		border-bottom: 1px solid;
@@ -1737,20 +1861,25 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 
 	nav.sub {
 		width: calc(100% - 32px);
-		float: right;
+		margin-left: 32px;
+		margin-bottom: 10px;
+	}
+
+	.source nav:not(.sidebar).sub {
+		margin-left: 32px;
 	}
 
 	.content {
 		margin-left: 0px;
 	}
 
-	#main, #search {
-		margin-top: 45px;
-		padding: 0;
+	.source .content {
+		margin-top: 10px;
 	}
 
 	#search {
 		margin-left: 0;
+		padding: 0;
 	}
 
 	.anchor {
@@ -1758,8 +1887,6 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 	}
 
 	.theme-picker {
-		left: 10px;
-		top: 54px;
 		z-index: 1;
 	}
 
@@ -1776,25 +1903,6 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 
 	#titles {
 		height: 50px;
-	}
-
-	.sidebar.mobile {
-		position: fixed;
-		width: 100%;
-		margin-left: 0;
-		background-color: rgba(0,0,0,0);
-		height: 100%;
-	}
-	/*
-	This allows to prevent the version text to overflow the sidebar title on mobile mode when the
-	sidebar is displayed (after clicking on the "hamburger" button).
-	*/
-	.sidebar.mobile > div.version {
-		overflow: hidden;
-		max-height: 33px;
-	}
-	.sidebar {
-		width: calc(100% + 30px);
 	}
 
 	.show-it, .sidebar-elems:focus-within {
@@ -1816,7 +1924,7 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 	}
 
 	.show-it > .block.items > ul > li > a {
-		font-size: 21px;
+		font-size: 1.3125rem;
 	}
 
 	/* Because of ios, we need to actually have a full height sidebar title so the
@@ -1834,8 +1942,8 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 		border-bottom: 1px solid;
 	}
 
-	#main > details.rustdoc-toggle > summary::before,
-	#main > div > details.rustdoc-toggle > summary::before {
+	#main-content > details.rustdoc-toggle > summary::before,
+	#main-content > div > details.rustdoc-toggle > summary::before {
 		left: -11px;
 	}
 
@@ -1843,19 +1951,32 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 		margin: 10px;
 	}
 
-	#sidebar-toggle {
+	.sidebar.expanded #sidebar-toggle {
+		font-size: 1.5rem;
+	}
+
+	.sidebar:not(.expanded) #sidebar-toggle {
+		position: fixed;
+		left: 1px;
 		top: 100px;
 		width: 30px;
 		font-size: 1.5rem;
 		text-align: center;
 		padding: 0;
+		z-index: 10;
+		border-top-right-radius: 3px;
+		border-bottom-right-radius: 3px;
+		cursor: pointer;
+		font-weight: bold;
+		border: 1px solid;
+		border-left: 0;
 	}
 
 	#source-sidebar {
 		z-index: 11;
 	}
 
-	#main > .line-numbers {
+	#main-content > .line-numbers {
 		margin-top: 0;
 	}
 
@@ -1896,6 +2017,21 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 	.search-results div.desc, .search-results .result-description, .item-right {
 		padding-left: 2em;
 	}
+
+	.source .sidebar.expanded {
+		max-width: 100vw;
+		width: 100vw;
+	}
+
+	/* Position of the "[-]" element. */
+	details.rustdoc-toggle:not(.top-doc) > summary {
+		margin-left: 10px;
+	}
+	.impl-items > details.rustdoc-toggle > summary:not(.hideme)::before,
+	#main-content > details.rustdoc-toggle:not(.top-doc) > summary::before,
+	#main-content > div > details.rustdoc-toggle > summary::before {
+		left: -11px;
+	}
 }
 
 @media print {
@@ -1909,14 +2045,7 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 		height: 73px;
 	}
 
-	/* This is to prevent the search bar from being underneath the <section>
-	 * element following it.
-	 */
-	#main, #search {
-		margin-top: 100px;
-	}
-
-	#main > table:not(.table-display) td {
+	#main-content > table:not(.table-display) td {
 		word-break: break-word;
 		width: 50%;
 	}
@@ -1957,6 +2086,23 @@ details.rustdoc-toggle[open] > summary.hideme::after {
 
 	.docblock code {
 		overflow-wrap: anywhere;
+	}
+
+	.sub-container {
+		flex-direction: column;
+	}
+
+	.sub-logo-container {
+		align-self: center;
+	}
+
+	.source .sub-logo-container > img {
+		height: 35px;
+		width: 35px;
+	}
+
+	.sidebar:not(.expanded) #sidebar-toggle {
+		top: 10px;
 	}
 }
 

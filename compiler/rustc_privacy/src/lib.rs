@@ -1,5 +1,4 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![feature(in_band_lifetimes)]
 #![feature(nll)]
 #![feature(control_flow_enum)]
 #![feature(try_blocks)]
@@ -310,7 +309,7 @@ struct PubRestrictedVisitor<'tcx> {
     has_pub_restricted: bool,
 }
 
-impl Visitor<'tcx> for PubRestrictedVisitor<'tcx> {
+impl<'tcx> Visitor<'tcx> for PubRestrictedVisitor<'tcx> {
     type Map = Map<'tcx>;
 
     fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
@@ -432,7 +431,7 @@ struct ReachEverythingInTheInterfaceVisitor<'a, 'tcx> {
     ev: &'a mut EmbargoVisitor<'tcx>,
 }
 
-impl EmbargoVisitor<'tcx> {
+impl<'tcx> EmbargoVisitor<'tcx> {
     fn get(&self, def_id: LocalDefId) -> Option<AccessLevel> {
         self.access_levels.map.get(&def_id).copied()
     }
@@ -559,8 +558,7 @@ impl EmbargoVisitor<'tcx> {
             // have normal  hygine, so we can treat them like other items without type
             // privacy and mark them reachable.
             DefKind::Macro(_) => {
-                let hir_id = self.tcx.hir().local_def_id_to_hir_id(def_id);
-                let item = self.tcx.hir().expect_item(hir_id);
+                let item = self.tcx.hir().expect_item(def_id);
                 if let hir::ItemKind::Macro(MacroDef { macro_rules: false, .. }) = item.kind {
                     if vis.is_accessible_from(module.to_def_id(), self.tcx) {
                         self.update(def_id, level);
@@ -581,8 +579,7 @@ impl EmbargoVisitor<'tcx> {
             DefKind::Struct | DefKind::Union => {
                 // While structs and unions have type privacy, their fields do not.
                 if vis.is_public() {
-                    let item =
-                        self.tcx.hir().expect_item(self.tcx.hir().local_def_id_to_hir_id(def_id));
+                    let item = self.tcx.hir().expect_item(def_id);
                     if let hir::ItemKind::Struct(ref struct_def, _)
                     | hir::ItemKind::Union(ref struct_def, _) = item.kind
                     {
@@ -653,9 +650,7 @@ impl EmbargoVisitor<'tcx> {
                 // If the module is `self`, i.e. the current crate,
                 // there will be no corresponding item.
                 .filter(|def_id| def_id.index != CRATE_DEF_INDEX || def_id.krate != LOCAL_CRATE)
-                .and_then(|def_id| {
-                    def_id.as_local().map(|def_id| self.tcx.hir().local_def_id_to_hir_id(def_id))
-                })
+                .and_then(|def_id| def_id.as_local())
                 .map(|module_hir_id| self.tcx.hir().expect_item(module_hir_id))
             {
                 if let hir::ItemKind::Mod(m) = &item.kind {
@@ -678,7 +673,7 @@ impl EmbargoVisitor<'tcx> {
     }
 }
 
-impl Visitor<'tcx> for EmbargoVisitor<'tcx> {
+impl<'tcx> Visitor<'tcx> for EmbargoVisitor<'tcx> {
     type Map = Map<'tcx>;
 
     /// We want to visit items in the context of their containing
@@ -948,7 +943,7 @@ impl Visitor<'tcx> for EmbargoVisitor<'tcx> {
     }
 }
 
-impl ReachEverythingInTheInterfaceVisitor<'_, 'tcx> {
+impl ReachEverythingInTheInterfaceVisitor<'_, '_> {
     fn generics(&mut self) -> &mut Self {
         for param in &self.ev.tcx.generics_of(self.item_def_id).params {
             match param.kind {
@@ -987,7 +982,7 @@ impl ReachEverythingInTheInterfaceVisitor<'_, 'tcx> {
     }
 }
 
-impl DefIdVisitor<'tcx> for ReachEverythingInTheInterfaceVisitor<'_, 'tcx> {
+impl<'tcx> DefIdVisitor<'tcx> for ReachEverythingInTheInterfaceVisitor<'_, 'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.ev.tcx
     }
@@ -1417,7 +1412,7 @@ impl<'tcx> Visitor<'tcx> for TypePrivacyVisitor<'tcx> {
     }
 }
 
-impl DefIdVisitor<'tcx> for TypePrivacyVisitor<'tcx> {
+impl<'tcx> DefIdVisitor<'tcx> for TypePrivacyVisitor<'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
@@ -1804,7 +1799,7 @@ struct SearchInterfaceForPrivateItemsVisitor<'tcx> {
     in_assoc_ty: bool,
 }
 
-impl SearchInterfaceForPrivateItemsVisitor<'tcx> {
+impl SearchInterfaceForPrivateItemsVisitor<'_> {
     fn generics(&mut self) -> &mut Self {
         for param in &self.tcx.generics_of(self.item_def_id).params {
             match param.kind {
@@ -1925,7 +1920,7 @@ impl SearchInterfaceForPrivateItemsVisitor<'tcx> {
     }
 }
 
-impl DefIdVisitor<'tcx> for SearchInterfaceForPrivateItemsVisitor<'tcx> {
+impl<'tcx> DefIdVisitor<'tcx> for SearchInterfaceForPrivateItemsVisitor<'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
@@ -2069,7 +2064,11 @@ impl<'tcx> Visitor<'tcx> for PrivateItemsInPublicInterfacesVisitor<'tcx> {
             // Subitems of trait impls have inherited publicity.
             hir::ItemKind::Impl(ref impl_) => {
                 let impl_vis = ty::Visibility::of_impl(item.def_id, tcx, &Default::default());
-                self.check(item.def_id, impl_vis).generics().predicates();
+                // check that private components do not appear in the generics or predicates of inherent impls
+                // this check is intentionally NOT performed for impls of traits, per #90586
+                if impl_.of_trait.is_none() {
+                    self.check(item.def_id, impl_vis).generics().predicates();
+                }
                 for impl_item_ref in impl_.items {
                     let impl_item_vis = if impl_.of_trait.is_none() {
                         min(tcx.visibility(impl_item_ref.id.def_id), impl_vis, tcx)

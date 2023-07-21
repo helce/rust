@@ -33,6 +33,7 @@ declare_clippy_lint! {
     /// // Good
     /// foo.to_owned();
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub USELESS_FORMAT,
     complexity,
     "useless use of `format!`"
@@ -93,7 +94,7 @@ impl<'tcx> LateLintPass<'tcx> for UselessFormat {
                         if is_new_string {
                             snip.into()
                         } else {
-                            format!("{}.to_string()", snip)
+                            format!("{snip}.to_string()")
                         }
                     } else if is_new_string {
                         snippet_with_applicability(cx, value.span, "..", &mut applicability).into_owned()

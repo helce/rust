@@ -108,9 +108,21 @@ pub(crate) fn format_expr(
         ast::ExprKind::Unary(op, ref subexpr) => rewrite_unary_op(context, op, subexpr, shape),
         ast::ExprKind::Struct(ref struct_expr) => {
             let ast::StructExpr {
-                fields, path, rest, ..
+                qself,
+                fields,
+                path,
+                rest,
             } = &**struct_expr;
-            rewrite_struct_lit(context, path, fields, rest, &expr.attrs, expr.span, shape)
+            rewrite_struct_lit(
+                context,
+                path,
+                qself.as_ref(),
+                fields,
+                rest,
+                &expr.attrs,
+                expr.span,
+                shape,
+            )
         }
         ast::ExprKind::Tup(ref items) => {
             rewrite_tuple(context, items.iter(), expr.span, shape, items.len() == 1)
@@ -196,9 +208,10 @@ pub(crate) fn format_expr(
                 capture, is_async, movability, fn_decl, body, expr.span, context, shape,
             )
         }
-        ast::ExprKind::Try(..) | ast::ExprKind::Field(..) | ast::ExprKind::MethodCall(..) => {
-            rewrite_chain(expr, context, shape)
-        }
+        ast::ExprKind::Try(..)
+        | ast::ExprKind::Field(..)
+        | ast::ExprKind::MethodCall(..)
+        | ast::ExprKind::Await(_) => rewrite_chain(expr, context, shape),
         ast::ExprKind::MacCall(ref mac) => {
             rewrite_macro(mac, None, context, shape, MacroPosition::Expression).or_else(|| {
                 wrap_str(
@@ -377,7 +390,6 @@ pub(crate) fn format_expr(
                 ))
             }
         }
-        ast::ExprKind::Await(_) => rewrite_chain(expr, context, shape),
         ast::ExprKind::Underscore => Some("_".to_owned()),
         ast::ExprKind::Err => None,
     };
@@ -829,6 +841,7 @@ impl<'a> ControlFlow<'a> {
                 &format!("{}{}{}", matcher, pat_string, self.connector),
                 expr,
                 cond_shape,
+                &RhsAssignKind::Expr(&expr.kind, expr.span),
                 RhsTactics::Default,
                 comments_span,
                 true,
@@ -1510,6 +1523,7 @@ fn struct_lit_can_be_aligned(fields: &[ast::ExprField], has_base: bool) -> bool 
 fn rewrite_struct_lit<'a>(
     context: &RewriteContext<'_>,
     path: &ast::Path,
+    qself: Option<&ast::QSelf>,
     fields: &'a [ast::ExprField],
     struct_rest: &ast::StructRest,
     attrs: &[ast::Attribute],
@@ -1526,7 +1540,7 @@ fn rewrite_struct_lit<'a>(
 
     // 2 = " {".len()
     let path_shape = shape.sub_width(2)?;
-    let path_str = rewrite_path(context, PathContext::Expr, None, path, path_shape)?;
+    let path_str = rewrite_path(context, PathContext::Expr, qself, path, path_shape)?;
 
     let has_base_or_rest = match struct_rest {
         ast::StructRest::None if fields.is_empty() => return Some(format!("{} {{}}", path_str)),
@@ -1839,6 +1853,34 @@ fn rewrite_unary_op(
     rewrite_unary_prefix(context, ast::UnOp::to_string(op), expr, shape)
 }
 
+pub(crate) enum RhsAssignKind<'ast> {
+    Expr(&'ast ast::ExprKind, Span),
+    Bounds,
+    Ty,
+}
+
+impl<'ast> RhsAssignKind<'ast> {
+    // TODO(calebcartwright)
+    // Preemptive addition for handling RHS with chains, not yet utilized.
+    // It may make more sense to construct the chain first and then check
+    // whether there are actually chain elements.
+    #[allow(dead_code)]
+    fn is_chain(&self) -> bool {
+        match self {
+            RhsAssignKind::Expr(kind, _) => {
+                matches!(
+                    kind,
+                    ast::ExprKind::Try(..)
+                        | ast::ExprKind::Field(..)
+                        | ast::ExprKind::MethodCall(..)
+                        | ast::ExprKind::Await(_)
+                )
+            }
+            _ => false,
+        }
+    }
+}
+
 fn rewrite_assignment(
     context: &RewriteContext<'_>,
     lhs: &ast::Expr,
@@ -1855,7 +1897,13 @@ fn rewrite_assignment(
     let lhs_shape = shape.sub_width(operator_str.len() + 1)?;
     let lhs_str = format!("{} {}", lhs.rewrite(context, lhs_shape)?, operator_str);
 
-    rewrite_assign_rhs(context, lhs_str, rhs, shape)
+    rewrite_assign_rhs(
+        context,
+        lhs_str,
+        rhs,
+        &RhsAssignKind::Expr(&rhs.kind, rhs.span),
+        shape,
+    )
 }
 
 /// Controls where to put the rhs.
@@ -1876,9 +1924,10 @@ pub(crate) fn rewrite_assign_rhs<S: Into<String>, R: Rewrite>(
     context: &RewriteContext<'_>,
     lhs: S,
     ex: &R,
+    rhs_kind: &RhsAssignKind<'_>,
     shape: Shape,
 ) -> Option<String> {
-    rewrite_assign_rhs_with(context, lhs, ex, shape, RhsTactics::Default)
+    rewrite_assign_rhs_with(context, lhs, ex, shape, rhs_kind, RhsTactics::Default)
 }
 
 pub(crate) fn rewrite_assign_rhs_expr<R: Rewrite>(
@@ -1886,6 +1935,7 @@ pub(crate) fn rewrite_assign_rhs_expr<R: Rewrite>(
     lhs: &str,
     ex: &R,
     shape: Shape,
+    rhs_kind: &RhsAssignKind<'_>,
     rhs_tactics: RhsTactics,
 ) -> Option<String> {
     let last_line_width = last_line_width(lhs).saturating_sub(if lhs.contains('\n') {
@@ -1910,6 +1960,7 @@ pub(crate) fn rewrite_assign_rhs_expr<R: Rewrite>(
         ex,
         orig_shape,
         ex.rewrite(context, orig_shape),
+        rhs_kind,
         rhs_tactics,
         has_rhs_comment,
     )
@@ -1920,10 +1971,11 @@ pub(crate) fn rewrite_assign_rhs_with<S: Into<String>, R: Rewrite>(
     lhs: S,
     ex: &R,
     shape: Shape,
+    rhs_kind: &RhsAssignKind<'_>,
     rhs_tactics: RhsTactics,
 ) -> Option<String> {
     let lhs = lhs.into();
-    let rhs = rewrite_assign_rhs_expr(context, &lhs, ex, shape, rhs_tactics)?;
+    let rhs = rewrite_assign_rhs_expr(context, &lhs, ex, shape, rhs_kind, rhs_tactics)?;
     Some(lhs + &rhs)
 }
 
@@ -1932,6 +1984,7 @@ pub(crate) fn rewrite_assign_rhs_with_comments<S: Into<String>, R: Rewrite>(
     lhs: S,
     ex: &R,
     shape: Shape,
+    rhs_kind: &RhsAssignKind<'_>,
     rhs_tactics: RhsTactics,
     between_span: Span,
     allow_extend: bool,
@@ -1943,7 +1996,7 @@ pub(crate) fn rewrite_assign_rhs_with_comments<S: Into<String>, R: Rewrite>(
     } else {
         shape
     };
-    let rhs = rewrite_assign_rhs_expr(context, &lhs, ex, shape, rhs_tactics)?;
+    let rhs = rewrite_assign_rhs_expr(context, &lhs, ex, shape, rhs_kind, rhs_tactics)?;
 
     if contains_comment {
         let rhs = rhs.trim_start();
@@ -1958,13 +2011,12 @@ fn choose_rhs<R: Rewrite>(
     expr: &R,
     shape: Shape,
     orig_rhs: Option<String>,
+    _rhs_kind: &RhsAssignKind<'_>,
     rhs_tactics: RhsTactics,
     has_rhs_comment: bool,
 ) -> Option<String> {
     match orig_rhs {
-        Some(ref new_str) if new_str.is_empty() => {
-            return Some(String::new());
-        }
+        Some(ref new_str) if new_str.is_empty() => Some(String::new()),
         Some(ref new_str)
             if !new_str.contains('\n') && unicode_str_width(new_str) <= shape.width =>
         {

@@ -2,7 +2,7 @@ use crate::os::unix::prelude::*;
 
 use crate::ffi::{CStr, CString, OsStr, OsString};
 use crate::fmt;
-use crate::io::{self, Error, IoSlice, IoSliceMut, SeekFrom};
+use crate::io::{self, Error, IoSlice, IoSliceMut, ReadBuf, SeekFrom};
 use crate::mem;
 use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd};
 use crate::path::{Path, PathBuf};
@@ -46,8 +46,8 @@ use libc::fstatat64;
 use libc::readdir_r as readdir64_r;
 #[cfg(target_os = "android")]
 use libc::{
-    dirent as dirent64, fstat as fstat64, fstatat as fstatat64, lseek64, lstat as lstat64,
-    open as open64, stat as stat64,
+    dirent as dirent64, fstat as fstat64, fstatat as fstatat64, ftruncate64, lseek64,
+    lstat as lstat64, off64_t, open as open64, stat as stat64,
 };
 #[cfg(not(any(
     target_os = "linux",
@@ -843,16 +843,10 @@ impl File {
     }
 
     pub fn truncate(&self, size: u64) -> io::Result<()> {
-        #[cfg(target_os = "android")]
-        return crate::sys::android::ftruncate64(self.as_raw_fd(), size);
-
-        #[cfg(not(target_os = "android"))]
-        {
-            use crate::convert::TryInto;
-            let size: off64_t =
-                size.try_into().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            cvt_r(|| unsafe { ftruncate64(self.as_raw_fd(), size) }).map(drop)
-        }
+        use crate::convert::TryInto;
+        let size: off64_t =
+            size.try_into().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        cvt_r(|| unsafe { ftruncate64(self.as_raw_fd(), size) }).map(drop)
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -870,6 +864,10 @@ impl File {
 
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         self.0.read_at(buf, offset)
+    }
+
+    pub fn read_buf(&self, buf: &mut ReadBuf<'_>) -> io::Result<()> {
+        self.0.read_buf(buf)
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
@@ -1162,7 +1160,7 @@ pub fn link(original: &Path, link: &Path) -> io::Result<()> {
         } else if #[cfg(target_os = "macos")] {
             // On MacOS, older versions (<=10.9) lack support for linkat while newer
             // versions have it. We want to use linkat if it is available, so we use weak!
-            // to check. `linkat` is preferable to `link` ecause it gives us a flag to
+            // to check. `linkat` is preferable to `link` because it gives us a flag to
             // specify how symlinks should be handled. We pass 0 as the flags argument,
             // meaning it shouldn't follow symlinks.
             weak!(fn linkat(c_int, *const c_char, c_int, *const c_char, c_int) -> c_int);

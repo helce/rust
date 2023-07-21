@@ -47,6 +47,8 @@ fn syntax() {
     let _ = |[x]: [u32; 1]| {
         let x = 1;
     };
+    let y = Some(1);
+    if let Some(y) = y {}
 }
 
 fn negative() {
@@ -77,6 +79,12 @@ fn question_mark() -> Option<()> {
     // `?` expands with a `val` binding
     None?;
     None
+}
+
+pub async fn foo1(_a: i32) {}
+
+pub async fn foo2(_a: i32, _b: i64) {
+    let _b = _a;
 }
 
 fn main() {}

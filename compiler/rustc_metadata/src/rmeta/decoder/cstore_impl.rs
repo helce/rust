@@ -17,7 +17,7 @@ use rustc_session::utils::NativeLibKind;
 use rustc_session::{Session, StableCrateId};
 use rustc_span::hygiene::{ExpnHash, ExpnId};
 use rustc_span::source_map::{Span, Spanned};
-use rustc_span::symbol::Symbol;
+use rustc_span::symbol::{kw, Symbol};
 
 use rustc_data_structures::sync::Lrc;
 use smallvec::SmallVec;
@@ -83,7 +83,7 @@ impl IntoArgs for (CrateNum, DefId) {
     }
 }
 
-impl IntoArgs for ty::InstanceDef<'tcx> {
+impl<'tcx> IntoArgs for ty::InstanceDef<'tcx> {
     fn into_args(self) -> (DefId, DefId) {
         (self.def_id(), self.def_id())
     }
@@ -133,9 +133,7 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     generator_kind => { cdata.generator_kind(def_id.index) }
     opt_def_kind => { Some(cdata.def_kind(def_id.index)) }
     def_span => { cdata.get_span(def_id.index, &tcx.sess) }
-    def_ident_span => {
-        cdata.try_item_ident(def_id.index, &tcx.sess).ok().map(|ident| ident.span)
-    }
+    def_ident_span => { cdata.opt_item_ident(def_id.index, &tcx.sess).map(|ident| ident.span) }
     lookup_stability => {
         cdata.get_stability(def_id.index).map(|s| tcx.intern_stability(s))
     }
@@ -145,9 +143,7 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     lookup_deprecation_entry => {
         cdata.get_deprecation(def_id.index).map(DeprecationEntry::external)
     }
-    item_attrs => { tcx.arena.alloc_from_iter(
-        cdata.get_item_attrs(def_id.index, tcx.sess)
-    ) }
+    item_attrs => { tcx.arena.alloc_from_iter(cdata.get_item_attrs(def_id.index, tcx.sess)) }
     fn_arg_names => { cdata.get_fn_param_names(tcx, def_id.index) }
     rendered_const => { cdata.get_rendered_const(def_id.index) }
     impl_parent => { cdata.get_parent_impl(def_id.index) }
@@ -195,13 +191,10 @@ provide! { <'tcx> tcx, def_id, other, cdata,
 
     extra_filename => { cdata.root.extra_filename.clone() }
 
-    implementations_of_trait => {
-        cdata.get_implementations_for_trait(tcx, Some(other))
-    }
+    traits_in_crate => { tcx.arena.alloc_from_iter(cdata.get_traits()) }
+    all_trait_implementations => { tcx.arena.alloc_from_iter(cdata.get_trait_impls()) }
 
-    all_trait_implementations => {
-        cdata.get_implementations_for_trait(tcx, None)
-    }
+    implementations_of_trait => { cdata.get_implementations_of_trait(tcx, other) }
 
     visibility => { cdata.get_visibility(def_id.index) }
     dep_kind => {
@@ -239,7 +232,7 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     expn_that_defined => { cdata.get_expn_that_defined(def_id.index, tcx.sess) }
 }
 
-pub fn provide(providers: &mut Providers) {
+pub(in crate::rmeta) fn provide(providers: &mut Providers) {
     // FIXME(#44234) - almost all of these queries have no sub-queries and
     // therefore no actual inputs, they're just reading tables calculated in
     // resolve! Does this work? Unsure! That's what the issue is about
@@ -295,6 +288,10 @@ pub fn provide(providers: &mut Providers) {
             use std::collections::vec_deque::VecDeque;
 
             let mut visible_parent_map: DefIdMap<DefId> = Default::default();
+            // This is a secondary visible_parent_map, storing the DefId of parents that re-export
+            // the child as `_`. Since we prefer parents that don't do this, merge this map at the
+            // end, only if we're missing any keys from the former.
+            let mut fallback_map: DefIdMap<DefId> = Default::default();
 
             // Issue 46112: We want the map to prefer the shortest
             // paths when reporting the path to an item. Therefore we
@@ -317,12 +314,17 @@ pub fn provide(providers: &mut Providers) {
                 bfs_queue.push_back(DefId { krate: cnum, index: CRATE_DEF_INDEX });
             }
 
-            let mut add_child = |bfs_queue: &mut VecDeque<_>, child: &Export, parent: DefId| {
-                if !child.vis.is_public() {
+            let mut add_child = |bfs_queue: &mut VecDeque<_>, export: &Export, parent: DefId| {
+                if !export.vis.is_public() {
                     return;
                 }
 
-                if let Some(child) = child.res.opt_def_id() {
+                if let Some(child) = export.res.opt_def_id() {
+                    if export.ident.name == kw::Underscore {
+                        fallback_map.insert(child, parent);
+                        return;
+                    }
+
                     match visible_parent_map.entry(child) {
                         Entry::Occupied(mut entry) => {
                             // If `child` is defined in crate `cnum`, ensure
@@ -345,6 +347,12 @@ pub fn provide(providers: &mut Providers) {
                 }
             }
 
+            // Fill in any missing entries with the (less preferable) path ending in `::_`.
+            // We still use this path in a diagnostic that suggests importing `::*`.
+            for (child, parent) in fallback_map {
+                visible_parent_map.entry(child).or_insert(parent);
+            }
+
             visible_parent_map
         },
 
@@ -357,7 +365,7 @@ pub fn provide(providers: &mut Providers) {
             tcx.arena
                 .alloc_slice(&CStore::from_tcx(tcx).crate_dependencies_in_postorder(LOCAL_CRATE))
         },
-        crates: |tcx, ()| tcx.arena.alloc_slice(&CStore::from_tcx(tcx).crates_untracked()),
+        crates: |tcx, ()| tcx.arena.alloc_from_iter(CStore::from_tcx(tcx).crates_untracked()),
 
         ..*providers
     };
@@ -373,9 +381,7 @@ impl CStore {
     }
 
     pub fn ctor_def_id_and_kind_untracked(&self, def: DefId) -> Option<(DefId, CtorKind)> {
-        self.get_crate_data(def.krate).get_ctor_def_id(def.index).map(|ctor_def_id| {
-            (ctor_def_id, self.get_crate_data(def.krate).get_ctor_kind(def.index))
-        })
+        self.get_crate_data(def.krate).get_ctor_def_id_and_kind(def.index)
     }
 
     pub fn visibility_untracked(&self, def: DefId) -> Visibility {
@@ -402,16 +408,12 @@ impl CStore {
 
         let span = data.get_span(id.index, sess);
 
-        let attrs = data.get_item_attrs(id.index, sess).collect();
-
-        let ident = data.item_ident(id.index, sess);
-
         LoadedMacro::MacroDef(
             ast::Item {
-                ident,
+                ident: data.item_ident(id.index, sess),
                 id: ast::DUMMY_NODE_ID,
                 span,
-                attrs,
+                attrs: data.get_item_attrs(id.index, sess).collect(),
                 kind: ast::ItemKind::MacroDef(data.get_macro(id.index, sess)),
                 vis: ast::Visibility {
                     span: span.shrink_to_lo(),
@@ -424,8 +426,8 @@ impl CStore {
         )
     }
 
-    pub fn associated_item_cloned_untracked(&self, def: DefId, sess: &Session) -> ty::AssocItem {
-        self.get_crate_data(def.krate).get_associated_item(def.index, sess)
+    pub fn fn_has_self_parameter_untracked(&self, def: DefId) -> bool {
+        self.get_crate_data(def.krate).get_fn_has_self_parameter(def.index)
     }
 
     pub fn crate_source_untracked(&self, cnum: CrateNum) -> CrateSource {
@@ -440,10 +442,8 @@ impl CStore {
         self.get_crate_data(def.krate).def_kind(def.index)
     }
 
-    pub fn crates_untracked(&self) -> Vec<CrateNum> {
-        let mut result = vec![];
-        self.iter_crate_data(|cnum, _| result.push(cnum));
-        result
+    pub fn crates_untracked(&self) -> impl Iterator<Item = CrateNum> + '_ {
+        self.iter_crate_data().map(|(cnum, _)| cnum)
     }
 
     pub fn item_generics_num_lifetimes(&self, def_id: DefId, sess: &Session) -> usize {
@@ -461,7 +461,7 @@ impl CStore {
         self.get_crate_data(cnum).num_def_ids()
     }
 
-    pub fn item_attrs(&self, def_id: DefId, sess: &Session) -> Vec<ast::Attribute> {
+    pub fn item_attrs_untracked(&self, def_id: DefId, sess: &Session) -> Vec<ast::Attribute> {
         self.get_crate_data(def_id.krate).get_item_attrs(def_id.index, sess).collect()
     }
 
@@ -520,5 +520,9 @@ impl CrateStore for CStore {
         hash: ExpnHash,
     ) -> ExpnId {
         self.get_crate_data(cnum).expn_hash_to_expn_id(sess, index_guess, hash)
+    }
+
+    fn import_source_files(&self, sess: &Session, cnum: CrateNum) {
+        self.get_crate_data(cnum).imported_source_files(sess);
     }
 }

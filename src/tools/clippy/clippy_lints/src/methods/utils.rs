@@ -57,7 +57,7 @@ pub(super) fn get_hint_if_single_char_arg(
         let string = r.as_str();
         if string.chars().count() == 1;
         then {
-            let snip = snippet_with_applicability(cx, arg.span, &string, applicability);
+            let snip = snippet_with_applicability(cx, arg.span, string, applicability);
             let ch = if let ast::StrStyle::Raw(nhash) = style {
                 let nhash = nhash as usize;
                 // for raw string: r##"a"##
@@ -66,7 +66,13 @@ pub(super) fn get_hint_if_single_char_arg(
                 // for regular string: "a"
                 &snip[1..(snip.len() - 1)]
             };
-            let hint = format!("'{}'", if ch == "'" { "\\'" } else { ch });
+
+            let hint = format!("'{}'", match ch {
+                "'" => "\\'" ,
+                r"\" => "\\\\",
+                _ => ch,
+            });
+
             Some(hint)
         } else {
             None

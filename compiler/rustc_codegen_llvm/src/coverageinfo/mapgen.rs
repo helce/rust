@@ -9,6 +9,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
 use rustc_hir::def_id::{DefId, DefIdSet};
 use rustc_llvm::RustString;
 use rustc_middle::mir::coverage::CodeRegion;
+use rustc_middle::ty::TyCtxt;
 use rustc_span::Symbol;
 
 use std::ffi::CString;
@@ -17,10 +18,11 @@ use tracing::debug;
 
 /// Generates and exports the Coverage Map.
 ///
-/// This Coverage Map complies with Coverage Mapping Format version 4 (zero-based encoded as 3),
-/// as defined at [LLVM Code Coverage Mapping Format](https://github.com/rust-lang/llvm-project/blob/rustc/11.0-2020-10-12/llvm/docs/CoverageMappingFormat.rst#llvm-code-coverage-mapping-format)
-/// and published in Rust's November 2020 fork of LLVM. This version is supported by the LLVM
-/// coverage tools (`llvm-profdata` and `llvm-cov`) bundled with Rust's fork of LLVM.
+/// Rust Coverage Map generation supports LLVM Coverage Mapping Format versions
+/// 5 (LLVM 12, only) and 6 (zero-based encoded as 4 and 5, respectively), as defined at
+/// [LLVM Code Coverage Mapping Format](https://github.com/rust-lang/llvm-project/blob/rustc/13.0-2021-09-30/llvm/docs/CoverageMappingFormat.rst#llvm-code-coverage-mapping-format).
+/// These versions are supported by the LLVM coverage tools (`llvm-profdata` and `llvm-cov`)
+/// bundled with Rust's fork of LLVM.
 ///
 /// Consequently, Rust's bundled version of Clang also generates Coverage Maps compliant with
 /// the same version. Clang's implementation of Coverage Map generation was referenced when
@@ -30,11 +32,12 @@ use tracing::debug;
 pub fn finalize<'ll, 'tcx>(cx: &CodegenCx<'ll, 'tcx>) {
     let tcx = cx.tcx;
 
-    // Ensure LLVM supports Coverage Map Version 4 (encoded as a zero-based value: 3).
-    // If not, the LLVM Version must be less than 11.
+    // Ensure the installed version of LLVM supports at least Coverage Map
+    // Version 5 (encoded as a zero-based value: 4), which was introduced with
+    // LLVM 12.
     let version = coverageinfo::mapping_version();
-    if version != 3 {
-        tcx.sess.fatal("rustc option `-Z instrument-coverage` requires LLVM 11 or higher.");
+    if version < 4 {
+        tcx.sess.fatal("rustc option `-Z instrument-coverage` requires LLVM 12 or higher.");
     }
 
     debug!("Generating coverage map for CodegenUnit: `{}`", cx.codegen_unit.name());
@@ -57,7 +60,7 @@ pub fn finalize<'ll, 'tcx>(cx: &CodegenCx<'ll, 'tcx>) {
         return;
     }
 
-    let mut mapgen = CoverageMapGenerator::new();
+    let mut mapgen = CoverageMapGenerator::new(tcx, version);
 
     // Encode coverage mappings and generate function records
     let mut function_data = Vec::new();
@@ -86,7 +89,7 @@ pub fn finalize<'ll, 'tcx>(cx: &CodegenCx<'ll, 'tcx>) {
     });
 
     let filenames_size = filenames_buffer.len();
-    let filenames_val = cx.const_bytes(&filenames_buffer[..]);
+    let filenames_val = cx.const_bytes(&filenames_buffer);
     let filenames_ref = coverageinfo::hash_bytes(filenames_buffer);
 
     // Generate the LLVM IR representation of the coverage map and store it in a well-known global
@@ -112,15 +115,33 @@ struct CoverageMapGenerator {
 }
 
 impl CoverageMapGenerator {
-    fn new() -> Self {
-        Self { filenames: FxIndexSet::default() }
+    fn new(tcx: TyCtxt<'_>, version: u32) -> Self {
+        let mut filenames = FxIndexSet::default();
+        if version >= 5 {
+            // LLVM Coverage Mapping Format version 6 (zero-based encoded as 5)
+            // requires setting the first filename to the compilation directory.
+            // Since rustc generates coverage maps with relative paths, the
+            // compilation directory can be combined with the the relative paths
+            // to get absolute paths, if needed.
+            let working_dir = tcx
+                .sess
+                .opts
+                .working_dir
+                .remapped_path_if_available()
+                .to_string_lossy()
+                .to_string();
+            let c_filename =
+                CString::new(working_dir).expect("null error converting filename to C string");
+            filenames.insert(c_filename);
+        }
+        Self { filenames }
     }
 
     /// Using the `expressions` and `counter_regions` collected for the current function, generate
     /// the `mapping_regions` and `virtual_file_mapping`, and capture any new filenames. Then use
     /// LLVM APIs to encode the `virtual_file_mapping`, `expressions`, and `mapping_regions` into
     /// the given `coverage_mapping` byte buffer, compliant with the LLVM Coverage Mapping format.
-    fn write_coverage_mapping(
+    fn write_coverage_mapping<'a>(
         &mut self,
         expressions: Vec<CounterExpression>,
         counter_regions: impl Iterator<Item = (Counter, &'a CodeRegion)>,
@@ -179,9 +200,9 @@ impl CoverageMapGenerator {
     /// Construct coverage map header and the array of function records, and combine them into the
     /// coverage map. Save the coverage map data into the LLVM IR as a static global using a
     /// specific, well-known section and name.
-    fn generate_coverage_map(
+    fn generate_coverage_map<'ll>(
         self,
-        cx: &CodegenCx<'ll, 'tcx>,
+        cx: &CodegenCx<'ll, '_>,
         version: u32,
         filenames_size: usize,
         filenames_val: &'ll llvm::Value,
@@ -208,7 +229,7 @@ impl CoverageMapGenerator {
 /// Save the function record into the LLVM IR as a static global using a
 /// specific, well-known section and name.
 fn save_function_record(
-    cx: &CodegenCx<'ll, 'tcx>,
+    cx: &CodegenCx<'_, '_>,
     mangled_function_name: String,
     source_hash: u64,
     filenames_ref: u64,
@@ -217,7 +238,7 @@ fn save_function_record(
 ) {
     // Concatenate the encoded coverage mappings
     let coverage_mapping_size = coverage_mapping_buffer.len();
-    let coverage_mapping_val = cx.const_bytes(&coverage_mapping_buffer[..]);
+    let coverage_mapping_val = cx.const_bytes(&coverage_mapping_buffer);
 
     let func_name_hash = coverageinfo::hash_str(&mangled_function_name);
     let func_name_hash_val = cx.const_u64(func_name_hash);

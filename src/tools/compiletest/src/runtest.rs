@@ -130,6 +130,15 @@ pub fn run(config: Config, testpaths: &TestPaths, revision: Option<&str>) {
     }
     debug!("running {:?}", testpaths.file.display());
     let mut props = TestProps::from_file(&testpaths.file, revision, &config);
+
+    // Currently, incremental is soft disabled unless this environment
+    // variable is set. A bunch of our tests assume it's enabled, though - so
+    // just enable it for our tests.
+    //
+    // This is deemed preferable to ignoring those tests; we still want to test
+    // incremental somewhat, as users can opt in to it.
+    props.rustc_env.push((String::from("RUSTC_FORCE_INCREMENTAL"), String::from("1")));
+
     if props.incremental {
         props.incremental_dir = Some(incremental_dir(&config, testpaths));
     }
@@ -146,6 +155,12 @@ pub fn run(config: Config, testpaths: &TestPaths, revision: Option<&str>) {
         assert!(!props.revisions.is_empty(), "Incremental tests require revisions.");
         for revision in &props.revisions {
             let mut revision_props = TestProps::from_file(&testpaths.file, Some(revision), &config);
+
+            // See above - need to enable it explicitly for now.
+            revision_props
+                .rustc_env
+                .push((String::from("RUSTC_FORCE_INCREMENTAL"), String::from("1")));
+
             revision_props.incremental_dir = props.incremental_dir.clone();
             let rev_cx = TestCx {
                 config: &config,
@@ -1452,6 +1467,8 @@ impl<'test> TestCx<'test> {
             .arg(aux_dir)
             .arg("-o")
             .arg(out_dir)
+            .arg("--deny")
+            .arg("warnings")
             .arg(&self.testpaths.file)
             .args(&self.props.compile_flags);
 
@@ -1628,7 +1645,17 @@ impl<'test> TestCx<'test> {
     /// Returns whether or not it is a dylib.
     fn build_auxiliary(&self, source_path: &str, aux_dir: &Path) -> bool {
         let aux_testpaths = self.compute_aux_test_paths(source_path);
-        let aux_props = self.props.from_aux_file(&aux_testpaths.file, self.revision, self.config);
+        let mut aux_props =
+            self.props.from_aux_file(&aux_testpaths.file, self.revision, self.config);
+
+        // Currently, incremental is soft disabled unless this environment
+        // variable is set. A bunch of our tests assume it's enabled, though - so
+        // just enable it for our tests.
+        //
+        // This is deemed preferable to ignoring those tests; we still want to test
+        // incremental somewhat, as users can opt in to it.
+        aux_props.rustc_env.push((String::from("RUSTC_FORCE_INCREMENTAL"), String::from("1")));
+
         let aux_output = TargetLocation::ThisDirectory(self.aux_output_dir_name());
         let aux_cx = TestCx {
             config: self.config,
@@ -1800,6 +1827,7 @@ impl<'test> TestCx<'test> {
                 // patterns still match the raw compiler output.
                 if self.props.error_patterns.is_empty() {
                     rustc.args(&["--error-format", "json"]);
+                    rustc.args(&["--json", "future-incompat"]);
                 }
                 rustc.arg("-Zui-testing");
                 rustc.arg("-Zdeduplicate-diagnostics=no");
@@ -1807,11 +1835,11 @@ impl<'test> TestCx<'test> {
             Ui => {
                 if !self.props.compile_flags.iter().any(|s| s.starts_with("--error-format")) {
                     rustc.args(&["--error-format", "json"]);
+                    rustc.args(&["--json", "future-incompat"]);
                 }
                 rustc.arg("-Ccodegen-units=1");
                 rustc.arg("-Zui-testing");
                 rustc.arg("-Zdeduplicate-diagnostics=no");
-                rustc.arg("-Zemit-future-incompat-report");
             }
             MirOpt => {
                 rustc.args(&[
@@ -2217,12 +2245,12 @@ impl<'test> TestCx<'test> {
             self.check_rustdoc_test_option(proc_res);
         } else {
             let root = self.config.find_rust_src_root().unwrap();
-            let res = self.cmd2procres(
-                Command::new(&self.config.docck_python)
-                    .arg(root.join("src/etc/htmldocck.py"))
-                    .arg(&out_dir)
-                    .arg(&self.testpaths.file),
-            );
+            let mut cmd = Command::new(&self.config.docck_python);
+            cmd.arg(root.join("src/etc/htmldocck.py")).arg(&out_dir).arg(&self.testpaths.file);
+            if self.config.bless {
+                cmd.arg("--bless");
+            }
+            let res = self.cmd2procres(&mut cmd);
             if !res.status.success() {
                 self.fatal_proc_rec_with_ctx("htmldocck failed!", &res, |mut this| {
                     this.compare_to_default_rustdoc(&out_dir)
@@ -3502,6 +3530,72 @@ impl<'test> TestCx<'test> {
         normalized =
             Regex::new("\\s*//(\\[.*\\])?~.*").unwrap().replace_all(&normalized, "").into_owned();
 
+        // This code normalizes various hashes in both
+        // v0 and legacy symbol names that are emitted in
+        // the ui and mir-opt tests.
+        //
+        // Some tests still require normalization with headers.
+        const DEFID_HASH_REGEX: &str = r"\[[0-9a-z]{4}\]";
+        const DEFID_HASH_PLACEHOLDER: &str = r"[HASH]";
+        const V0_DEMANGLING_HASH_REGEX: &str = r"\[[0-9a-z]+\]";
+        const V0_DEMANGLING_HASH_PLACEHOLDER: &str = r"[HASH]";
+        const V0_CRATE_HASH_PREFIX_REGEX: &str = r"_R.*?Cs[0-9a-zA-Z]+_";
+        const V0_CRATE_HASH_REGEX: &str = r"Cs[0-9a-zA-Z]+_";
+        const V0_CRATE_HASH_PLACEHOLDER: &str = r"CsCRATE_HASH_";
+        const V0_BACK_REF_PREFIX_REGEX: &str = r"\(_R.*?B[0-9a-zA-Z]_";
+        const V0_BACK_REF_REGEX: &str = r"B[0-9a-zA-Z]_";
+        const V0_BACK_REF_PLACEHOLDER: &str = r"B<REF>_";
+        const LEGACY_SYMBOL_HASH_REGEX: &str = r"h[\w]{16}E?\)";
+        const LEGACY_SYMBOL_HASH_PLACEHOLDER: &str = r"h<SYMBOL_HASH>)";
+        let test_name = self
+            .output_testname_unique()
+            .into_os_string()
+            .into_string()
+            .unwrap()
+            .split('.')
+            .next()
+            .unwrap()
+            .replace("-", "_");
+        // Normalize `DefId` hashes
+        let defid_regex = format!("{}{}", test_name, DEFID_HASH_REGEX);
+        let defid_placeholder = format!("{}{}", test_name, DEFID_HASH_PLACEHOLDER);
+        normalized = Regex::new(&defid_regex)
+            .unwrap()
+            .replace_all(&normalized, defid_placeholder)
+            .into_owned();
+        // Normalize v0 demangling hashes
+        let demangling_regex = format!("{}{}", test_name, V0_DEMANGLING_HASH_REGEX);
+        let demangling_placeholder = format!("{}{}", test_name, V0_DEMANGLING_HASH_PLACEHOLDER);
+        normalized = Regex::new(&demangling_regex)
+            .unwrap()
+            .replace_all(&normalized, demangling_placeholder)
+            .into_owned();
+        // Normalize v0 crate hashes (see RFC 2603)
+        let symbol_mangle_prefix_re = Regex::new(V0_CRATE_HASH_PREFIX_REGEX).unwrap();
+        if symbol_mangle_prefix_re.is_match(&normalized) {
+            // Normalize crate hash
+            normalized = Regex::new(V0_CRATE_HASH_REGEX)
+                .unwrap()
+                .replace_all(&normalized, V0_CRATE_HASH_PLACEHOLDER)
+                .into_owned();
+        }
+        let back_ref_prefix_re = Regex::new(V0_BACK_REF_PREFIX_REGEX).unwrap();
+        if back_ref_prefix_re.is_match(&normalized) {
+            // Normalize back references (see RFC 2603)
+            let back_ref_regex = format!("{}", V0_BACK_REF_REGEX);
+            let back_ref_placeholder = format!("{}", V0_BACK_REF_PLACEHOLDER);
+            normalized = Regex::new(&back_ref_regex)
+                .unwrap()
+                .replace_all(&normalized, back_ref_placeholder)
+                .into_owned();
+        }
+        // Normalize legacy mangled symbols
+        normalized = Regex::new(LEGACY_SYMBOL_HASH_REGEX)
+            .unwrap()
+            .replace_all(&normalized, LEGACY_SYMBOL_HASH_PLACEHOLDER)
+            .into_owned();
+
+        // Custom normalization rules
         for rule in custom_rules {
             let re = Regex::new(&rule.0).expect("bad regex in custom normalization rule");
             normalized = re.replace_all(&normalized, &rule.1[..]).into_owned();

@@ -46,6 +46,13 @@ pub fn placeholder(
         || P(ast::Pat { id, kind: ast::PatKind::MacCall(mac_placeholder()), span, tokens: None });
 
     match kind {
+        AstFragmentKind::Crate => AstFragment::Crate(ast::Crate {
+            attrs: Default::default(),
+            items: Default::default(),
+            span,
+            id,
+            is_placeholder: true,
+        }),
         AstFragmentKind::Expr => AstFragment::Expr(expr_placeholder()),
         AstFragmentKind::OptExpr => AstFragment::OptExpr(Some(expr_placeholder())),
         AstFragmentKind::Items => AstFragment::Items(smallvec![P(ast::Item {
@@ -352,6 +359,14 @@ impl MutVisitor for PlaceholderExpander {
         match ty.kind {
             ast::TyKind::MacCall(_) => *ty = self.remove(ty.id).make_ty(),
             _ => noop_visit_ty(ty, self),
+        }
+    }
+
+    fn visit_crate(&mut self, krate: &mut ast::Crate) {
+        if krate.is_placeholder {
+            *krate = self.remove(krate.id).make_crate();
+        } else {
+            noop_visit_crate(krate, self)
         }
     }
 }

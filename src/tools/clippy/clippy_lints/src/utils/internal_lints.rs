@@ -1,13 +1,13 @@
 use clippy_utils::consts::{constant_simple, Constant};
 use clippy_utils::diagnostics::{span_lint, span_lint_and_help, span_lint_and_sugg, span_lint_and_then};
-use clippy_utils::higher;
 use clippy_utils::source::snippet;
 use clippy_utils::ty::match_type;
 use clippy_utils::{
-    is_else_clause, is_expn_of, is_expr_path_def_path, is_lint_allowed, match_def_path, method_calls, path_to_res,
-    paths, SpanlessEq,
+    higher, is_else_clause, is_expn_of, is_expr_path_def_path, is_lint_allowed, match_def_path, method_calls,
+    path_to_res, paths, peel_blocks_with_stmt, SpanlessEq,
 };
 use if_chain::if_chain;
+use rustc_ast as ast;
 use rustc_ast::ast::{Crate, ItemKind, LitKind, ModKind, NodeId};
 use rustc_ast::visit::FnKind;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
@@ -25,10 +25,11 @@ use rustc_lint::{EarlyContext, EarlyLintPass, LateContext, LateLintPass, LintCon
 use rustc_middle::hir::map::Map;
 use rustc_middle::mir::interpret::ConstValue;
 use rustc_middle::ty;
+use rustc_semver::RustcVersion;
 use rustc_session::{declare_lint_pass, declare_tool_lint, impl_lint_pass};
 use rustc_span::source_map::Spanned;
-use rustc_span::symbol::{Symbol, SymbolStr};
-use rustc_span::{BytePos, Span};
+use rustc_span::symbol::Symbol;
+use rustc_span::{sym, BytePos, Span};
 use rustc_typeck::hir_ty_to_ty;
 
 use std::borrow::{Borrow, Cow};
@@ -314,6 +315,27 @@ declare_clippy_lint! {
     "non-idiomatic `if_chain!` usage"
 }
 
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for invalid `clippy::version` attributes.
+    ///
+    /// Valid values are:
+    /// * "pre 1.29.0"
+    /// * any valid semantic version
+    pub INVALID_CLIPPY_VERSION_ATTRIBUTE,
+    internal,
+    "found an invalid `clippy::version` attribute"
+}
+
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for declared clippy lints without the `clippy::version` attribute.
+    ///
+    pub MISSING_CLIPPY_VERSION_ATTRIBUTE,
+    internal,
+    "found clippy lint without `clippy::version` attribute"
+}
+
 declare_lint_pass!(ClippyLintsInternal => [CLIPPY_LINTS_INTERNAL]);
 
 impl EarlyLintPass for ClippyLintsInternal {
@@ -322,11 +344,11 @@ impl EarlyLintPass for ClippyLintsInternal {
             if let ItemKind::Mod(_, ModKind::Loaded(ref items, ..)) = utils.kind {
                 if let Some(paths) = items.iter().find(|item| item.ident.name.as_str() == "paths") {
                     if let ItemKind::Mod(_, ModKind::Loaded(ref items, ..)) = paths.kind {
-                        let mut last_name: Option<SymbolStr> = None;
+                        let mut last_name: Option<&str> = None;
                         for item in items {
                             let name = item.ident.as_str();
-                            if let Some(ref last_name) = last_name {
-                                if **last_name > *name {
+                            if let Some(last_name) = last_name {
+                                if *last_name > *name {
                                     span_lint(
                                         cx,
                                         CLIPPY_LINTS_INTERNAL,
@@ -351,7 +373,7 @@ pub struct LintWithoutLintPass {
     registered_lints: FxHashSet<Symbol>,
 }
 
-impl_lint_pass!(LintWithoutLintPass => [DEFAULT_LINT, LINT_WITHOUT_LINT_PASS]);
+impl_lint_pass!(LintWithoutLintPass => [DEFAULT_LINT, LINT_WITHOUT_LINT_PASS, INVALID_CLIPPY_VERSION_ATTRIBUTE, MISSING_CLIPPY_VERSION_ATTRIBUTE]);
 
 impl<'tcx> LateLintPass<'tcx> for LintWithoutLintPass {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'_>) {
@@ -361,6 +383,8 @@ impl<'tcx> LateLintPass<'tcx> for LintWithoutLintPass {
 
         if let hir::ItemKind::Static(ty, Mutability::Not, body_id) = item.kind {
             if is_lint_ref_type(cx, ty) {
+                check_invalid_clippy_version_attribute(cx, item);
+
                 let expr = &cx.tcx.hir().body(body_id).value;
                 if_chain! {
                     if let ExprKind::AddrOf(_, _, inner_exp) = expr.kind;
@@ -458,6 +482,57 @@ fn is_lint_ref_type<'tcx>(cx: &LateContext<'tcx>, ty: &Ty<'_>) -> bool {
     false
 }
 
+fn check_invalid_clippy_version_attribute(cx: &LateContext<'_>, item: &'_ Item<'_>) {
+    if let Some(value) = extract_clippy_version_value(cx, item) {
+        // The `sym!` macro doesn't work as it only expects a single token.
+        // It's better to keep it this way and have a direct `Symbol::intern` call here.
+        if value == Symbol::intern("pre 1.29.0") {
+            return;
+        }
+
+        if RustcVersion::parse(&*value.as_str()).is_err() {
+            span_lint_and_help(
+                cx,
+                INVALID_CLIPPY_VERSION_ATTRIBUTE,
+                item.span,
+                "this item has an invalid `clippy::version` attribute",
+                None,
+                "please use a valid sematic version, see `doc/adding_lints.md`",
+            );
+        }
+    } else {
+        span_lint_and_help(
+            cx,
+            MISSING_CLIPPY_VERSION_ATTRIBUTE,
+            item.span,
+            "this lint is missing the `clippy::version` attribute or version value",
+            None,
+            "please use a `clippy::version` attribute, see `doc/adding_lints.md`",
+        );
+    }
+}
+
+/// This function extracts the version value of a `clippy::version` attribute if the given value has
+/// one
+fn extract_clippy_version_value(cx: &LateContext<'_>, item: &'_ Item<'_>) -> Option<Symbol> {
+    let attrs = cx.tcx.hir().attrs(item.hir_id());
+    attrs.iter().find_map(|attr| {
+        if_chain! {
+            // Identify attribute
+            if let ast::AttrKind::Normal(ref attr_kind, _) = &attr.kind;
+            if let [tool_name, attr_name] = &attr_kind.path.segments[..];
+            if tool_name.ident.name == sym::clippy;
+            if attr_name.ident.name == sym::version;
+            if let Some(version) = attr.value_str();
+            then {
+                Some(version)
+            } else {
+                None
+            }
+        }
+    })
+}
+
 struct LintCollector<'a, 'tcx> {
     output: &'a mut FxHashSet<Symbol>,
     cx: &'a LateContext<'tcx>,
@@ -533,8 +608,7 @@ impl<'tcx> LateLintPass<'tcx> for OuterExpnDataPass {
         }
 
         let (method_names, arg_lists, spans) = method_calls(expr, 2);
-        let method_names: Vec<SymbolStr> = method_names.iter().map(|s| s.as_str()).collect();
-        let method_names: Vec<&str> = method_names.iter().map(|s| &**s).collect();
+        let method_names: Vec<&str> = method_names.iter().map(Symbol::as_str).collect();
         if_chain! {
             if let ["expn_data", "outer_expn"] = method_names.as_slice();
             let args = arg_lists[1];
@@ -586,10 +660,7 @@ impl<'tcx> LateLintPass<'tcx> for CollapsibleCalls {
             if and_then_args.len() == 5;
             if let ExprKind::Closure(_, _, body_id, _, _) = &and_then_args[4].kind;
             let body = cx.tcx.hir().body(*body_id);
-            if let ExprKind::Block(block, _) = &body.value.kind;
-            let stmts = &block.stmts;
-            if stmts.len() == 1 && block.expr.is_none();
-            if let StmtKind::Semi(only_expr) = &stmts[0].kind;
+            let only_expr = peel_blocks_with_stmt(&body.value);
             if let ExprKind::MethodCall(ps, _, span_call_args, _) = &only_expr.kind;
             then {
                 let and_then_snippets = get_and_then_snippets(cx, and_then_args);
@@ -767,7 +838,7 @@ impl<'tcx> LateLintPass<'tcx> for MatchTypeOnDiagItem {
             if is_expr_path_def_path(cx, fn_path, &["clippy_utils", "ty", "match_type"]);
             // Extract the path to the matched type
             if let Some(segments) = path_to_matched_type(cx, ty_path);
-            let segments: Vec<&str> = segments.iter().map(|sym| &**sym).collect();
+            let segments: Vec<&str> = segments.iter().map(Symbol::as_str).collect();
             if let Some(ty_did) = path_to_res(cx, &segments[..]).opt_def_id();
             // Check if the matched type is a diagnostic item
             if let Some(item_name) = cx.tcx.get_diagnostic_name(ty_did);
@@ -790,7 +861,7 @@ impl<'tcx> LateLintPass<'tcx> for MatchTypeOnDiagItem {
     }
 }
 
-fn path_to_matched_type(cx: &LateContext<'_>, expr: &hir::Expr<'_>) -> Option<Vec<SymbolStr>> {
+fn path_to_matched_type(cx: &LateContext<'_>, expr: &hir::Expr<'_>) -> Option<Vec<Symbol>> {
     use rustc_hir::ItemKind;
 
     match &expr.kind {
@@ -815,12 +886,12 @@ fn path_to_matched_type(cx: &LateContext<'_>, expr: &hir::Expr<'_>) -> Option<Ve
             _ => {},
         },
         ExprKind::Array(exprs) => {
-            let segments: Vec<SymbolStr> = exprs
+            let segments: Vec<Symbol> = exprs
                 .iter()
                 .filter_map(|expr| {
                     if let ExprKind::Lit(lit) = &expr.kind {
                         if let LitKind::Str(sym, _) = lit.node {
-                            return Some(sym.as_str());
+                            return Some(sym);
                         }
                     }
 
@@ -1004,7 +1075,6 @@ impl InterningDefinedSymbol {
             &paths::SYMBOL_TO_IDENT_STRING,
             &paths::TO_STRING_METHOD,
         ];
-        // SymbolStr might be de-referenced: `&*symbol.as_str()`
         let call = if_chain! {
             if let ExprKind::AddrOf(_, _, e) = expr.kind;
             if let ExprKind::Unary(UnOp::Deref, e) = e.kind;

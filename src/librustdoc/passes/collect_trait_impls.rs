@@ -1,3 +1,6 @@
+//! Collects trait impls for each item in the crate. For example, if a crate
+//! defines a struct that implements a trait, this pass will note that the
+//! struct implements that trait.
 use super::Pass;
 use crate::clean::*;
 use crate::core::DocContext;
@@ -44,7 +47,7 @@ crate fn collect_trait_impls(mut krate: Crate, cx: &mut DocContext<'_>) -> Crate
                 inline::build_impl(cx, None, def_id, None, &mut new_items);
 
                 // FIXME(eddyb) is this `doc(hidden)` check needed?
-                if !cx.tcx.get_attrs(def_id).lists(sym::doc).has_word(sym::hidden) {
+                if !cx.tcx.is_doc_hidden(def_id) {
                     let impls = get_auto_trait_and_blanket_impls(cx, def_id);
                     new_items.extend(impls.filter(|i| cx.inlined.insert(i.def_id)));
                 }
@@ -126,7 +129,7 @@ crate fn collect_trait_impls(mut krate: Crate, cx: &mut DocContext<'_>) -> Crate
     // `tcx.crates(())` doesn't include the local crate, and `tcx.all_trait_implementations`
     // doesn't work with it anyway, so pull them from the HIR map instead
     let mut extra_attrs = Vec::new();
-    for &trait_did in cx.tcx.all_traits(()).iter() {
+    for trait_did in cx.tcx.all_traits() {
         for &impl_did in cx.tcx.hir().trait_impls(trait_did) {
             let impl_did = impl_did.to_def_id();
             cx.tcx.sess.prof.generic_activity("build_local_trait_impl").run(|| {
@@ -173,13 +176,7 @@ impl<'a, 'tcx> DocVisitor for SyntheticImplCollector<'a, 'tcx> {
     fn visit_item(&mut self, i: &Item) {
         if i.is_struct() || i.is_enum() || i.is_union() {
             // FIXME(eddyb) is this `doc(hidden)` check needed?
-            if !self
-                .cx
-                .tcx
-                .get_attrs(i.def_id.expect_def_id())
-                .lists(sym::doc)
-                .has_word(sym::hidden)
-            {
+            if !self.cx.tcx.is_doc_hidden(i.def_id.expect_def_id()) {
                 self.impls
                     .extend(get_auto_trait_and_blanket_impls(self.cx, i.def_id.expect_def_id()));
             }

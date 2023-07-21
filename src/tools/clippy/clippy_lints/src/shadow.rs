@@ -5,7 +5,7 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def::Res;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::hir_id::ItemLocalId;
-use rustc_hir::{Block, Body, BodyOwnerKind, Expr, ExprKind, HirId, Node, Pat, PatKind, QPath, UnOp};
+use rustc_hir::{Block, Body, BodyOwnerKind, Expr, ExprKind, HirId, Let, Node, Pat, PatKind, QPath, UnOp};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::{Span, Symbol};
@@ -29,6 +29,7 @@ declare_clippy_lint! {
     /// // Good
     /// let y = &x; // use different variable name
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub SHADOW_SAME,
     restriction,
     "rebinding a name to itself, e.g., `let mut x = &mut x`"
@@ -55,6 +56,7 @@ declare_clippy_lint! {
     /// let x = 2;
     /// let y = x + 1;
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub SHADOW_REUSE,
     restriction,
     "rebinding a name to an expression that re-uses the original value, e.g., `let x = x + 1`"
@@ -84,6 +86,7 @@ declare_clippy_lint! {
     /// // Good
     /// let w = z; // use different variable name
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub SHADOW_UNRELATED,
     restriction,
     "rebinding a name without even using the original value"
@@ -102,11 +105,16 @@ impl<'tcx> LateLintPass<'tcx> for Shadow {
             PatKind::Binding(_, hir_id, ident, _) => (hir_id, ident),
             _ => return,
         };
+
+        if pat.span.desugaring_kind().is_some() {
+            return;
+        }
+
         if ident.span.from_expansion() || ident.span.is_dummy() {
             return;
         }
-        let HirId { owner, local_id } = id;
 
+        let HirId { owner, local_id } = id;
         // get (or insert) the list of items for this owner and symbol
         let data = self.bindings.last_mut().unwrap();
         let items_with_name = data.entry(ident.name).or_default();
@@ -212,14 +220,14 @@ fn is_self_shadow(cx: &LateContext<'_>, pat: &Pat<'_>, mut expr: &Expr<'_>, hir_
     }
 }
 
-/// Finds the "init" expression for a pattern: `let <pat> = <init>;` or
+/// Finds the "init" expression for a pattern: `let <pat> = <init>;` (or `if let`) or
 /// `match <init> { .., <pat> => .., .. }`
 fn find_init<'tcx>(cx: &LateContext<'tcx>, hir_id: HirId) -> Option<&'tcx Expr<'tcx>> {
     for (_, node) in cx.tcx.hir().parent_iter(hir_id) {
         let init = match node {
             Node::Arm(_) | Node::Pat(_) => continue,
             Node::Expr(expr) => match expr.kind {
-                ExprKind::Match(e, _, _) => Some(e),
+                ExprKind::Match(e, _, _) | ExprKind::Let(&Let { init: e, .. }) => Some(e),
                 _ => None,
             },
             Node::Local(local) => local.init,

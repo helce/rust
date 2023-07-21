@@ -110,7 +110,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
-use std::slice;
 use std::str;
 
 #[cfg(unix)]
@@ -470,10 +469,6 @@ impl Build {
         metadata::build(&mut build);
 
         build
-    }
-
-    pub fn build_triple(&self) -> &[Interned<String>] {
-        slice::from_ref(&self.build.triple)
     }
 
     // modified from `check_submodule` and `update_submodule` in bootstrap.py
@@ -1043,7 +1038,7 @@ impl Build {
             options[1] = Some(format!("-Clink-arg=-Wl,{}", threads));
         }
 
-        std::array::IntoIter::new(options).flatten()
+        IntoIterator::into_iter(options).flatten()
     }
 
     /// Returns if this target should statically link the C runtime, if specified

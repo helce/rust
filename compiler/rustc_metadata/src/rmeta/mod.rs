@@ -16,6 +16,8 @@ use rustc_middle::hir::exports::Export;
 use rustc_middle::middle::exported_symbols::{ExportedSymbol, SymbolExportLevel};
 use rustc_middle::mir;
 use rustc_middle::thir;
+use rustc_middle::ty::fast_reject::SimplifiedType;
+use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::{self, ReprOptions, Ty};
 use rustc_serialize::opaque::Encoder;
 use rustc_session::config::SymbolManglingVersion;
@@ -29,8 +31,8 @@ use rustc_target::spec::{PanicStrategy, TargetTriple};
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 
+pub use decoder::provide_extern;
 use decoder::DecodeContext;
-pub use decoder::{provide, provide_extern};
 crate use decoder::{CrateMetadata, CrateNumMap, MetadataBlob};
 use encoder::EncodeContext;
 pub use encoder::{encode_metadata, EncodedMetadata};
@@ -48,7 +50,7 @@ crate fn rustc_version() -> String {
 /// Metadata encoding version.
 /// N.B., increment this if you change the format of metadata such that
 /// the rustc version can't be found to compare with `rustc_version()`.
-const METADATA_VERSION: u8 = 5;
+const METADATA_VERSION: u8 = 6;
 
 /// Metadata header which includes `METADATA_VERSION`.
 ///
@@ -222,6 +224,7 @@ crate struct CrateRoot<'tcx> {
     diagnostic_items: Lazy<[(Symbol, DefIndex)]>,
     native_libraries: Lazy<[NativeLib]>,
     foreign_modules: Lazy<[ForeignModule]>,
+    traits: Lazy<[DefIndex]>,
     impls: Lazy<[TraitImpls]>,
     interpret_alloc_index: Lazy<[u32]>,
     proc_macro_data: Option<ProcMacroData>,
@@ -259,7 +262,7 @@ crate struct CrateDep {
 #[derive(MetadataEncodable, MetadataDecodable)]
 crate struct TraitImpls {
     trait_id: (u32, DefIndex),
-    impls: Lazy<[(DefIndex, Option<ty::fast_reject::SimplifiedType>)]>,
+    impls: Lazy<[(DefIndex, Option<SimplifiedType>)]>,
 }
 
 /// Define `LazyTables` and `TableBuilders` at the same time.
@@ -275,7 +278,7 @@ macro_rules! define_tables {
             $($name: TableBuilder<$IDX, $T>),+
         }
 
-        impl TableBuilders<'tcx> {
+        impl<'tcx> TableBuilders<'tcx> {
             fn encode(&self, buf: &mut Encoder) -> LazyTables<'tcx> {
                 LazyTables {
                     $($name: self.$name.encode(buf)),+
@@ -453,3 +456,8 @@ struct GeneratorData<'tcx> {
 const TAG_VALID_SPAN_LOCAL: u8 = 0;
 const TAG_VALID_SPAN_FOREIGN: u8 = 1;
 const TAG_PARTIAL_SPAN: u8 = 2;
+
+pub fn provide(providers: &mut Providers) {
+    encoder::provide(providers);
+    decoder::provide(providers);
+}

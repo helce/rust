@@ -113,6 +113,7 @@ pub struct ModuleConfig {
     pub inline_threshold: Option<u32>,
     pub new_llvm_pass_manager: Option<bool>,
     pub emit_lifetime_markers: bool,
+    pub llvm_plugins: Vec<String>,
 }
 
 impl ModuleConfig {
@@ -260,6 +261,7 @@ impl ModuleConfig {
             inline_threshold: sess.opts.cg.inline_threshold,
             new_llvm_pass_manager: sess.opts.debugging_opts.new_llvm_pass_manager,
             emit_lifetime_markers: sess.emit_lifetime_markers(),
+            llvm_plugins: if_regular!(sess.opts.debugging_opts.llvm_plugins.clone(), vec![]),
         }
     }
 
@@ -284,7 +286,11 @@ impl TargetMachineFactoryConfig {
         module_name: &str,
     ) -> TargetMachineFactoryConfig {
         let split_dwarf_file = if cgcx.target_can_use_split_dwarf {
-            cgcx.output_filenames.split_dwarf_path(cgcx.split_debuginfo, Some(module_name))
+            cgcx.output_filenames.split_dwarf_path(
+                cgcx.split_debuginfo,
+                cgcx.split_dwarf_kind,
+                Some(module_name),
+            )
         } else {
             None
         };
@@ -327,6 +333,7 @@ pub struct CodegenContext<B: WriteBackendMethods> {
     pub target_arch: String,
     pub debuginfo: config::DebugInfo,
     pub split_debuginfo: rustc_target::spec::SplitDebuginfo,
+    pub split_dwarf_kind: rustc_session::config::SplitDwarfKind,
 
     // Number of cgus excluding the allocator/metadata modules
     pub total_cgus: usize,
@@ -397,7 +404,6 @@ fn generate_lto_work<B: ExtraBackendMethods>(
 
 pub struct CompiledModules {
     pub modules: Vec<CompiledModule>,
-    pub metadata_module: Option<CompiledModule>,
     pub allocator_module: Option<CompiledModule>,
 }
 
@@ -425,6 +431,7 @@ pub fn start_async_codegen<B: ExtraBackendMethods>(
     tcx: TyCtxt<'_>,
     target_cpu: String,
     metadata: EncodedMetadata,
+    metadata_module: Option<CompiledModule>,
     total_cgus: usize,
 ) -> OngoingCodegen<B> {
     let (coordinator_send, coordinator_receive) = channel();
@@ -464,6 +471,7 @@ pub fn start_async_codegen<B: ExtraBackendMethods>(
     OngoingCodegen {
         backend,
         metadata,
+        metadata_module,
         crate_info,
 
         coordinator_send,
@@ -640,12 +648,6 @@ fn produce_final_output_artifacts(
         }
 
         if !user_wants_bitcode {
-            if let Some(ref metadata_module) = compiled_modules.metadata_module {
-                if let Some(ref path) = metadata_module.bytecode {
-                    ensure_removed(sess.diagnostic(), &path);
-                }
-            }
-
             if let Some(ref allocator_module) = compiled_modules.allocator_module {
                 if let Some(ref path) = allocator_module.bytecode {
                     ensure_removed(sess.diagnostic(), path);
@@ -682,11 +684,11 @@ impl<B: WriteBackendMethods> WorkItem<B> {
     fn start_profiling<'a>(&self, cgcx: &'a CodegenContext<B>) -> TimingGuard<'a> {
         match *self {
             WorkItem::Optimize(ref m) => {
-                cgcx.prof.generic_activity_with_arg("codegen_module_optimize", &m.name[..])
+                cgcx.prof.generic_activity_with_arg("codegen_module_optimize", &*m.name)
             }
             WorkItem::CopyPostLtoArtifacts(ref m) => cgcx
                 .prof
-                .generic_activity_with_arg("codegen_copy_artifacts_from_incr_cache", &m.name[..]),
+                .generic_activity_with_arg("codegen_copy_artifacts_from_incr_cache", &*m.name),
             WorkItem::LTO(ref m) => {
                 cgcx.prof.generic_activity_with_arg("codegen_module_perform_lto", m.name())
             }
@@ -1063,6 +1065,7 @@ fn start_executing_work<B: ExtraBackendMethods>(
         target_arch: tcx.sess.target.arch.clone(),
         debuginfo: tcx.sess.opts.debuginfo,
         split_debuginfo: tcx.sess.split_debuginfo(),
+        split_dwarf_kind: tcx.sess.opts.debugging_opts.split_dwarf_kind,
     };
 
     // This is the "main loop" of parallel work happening for parallel codegen.
@@ -1216,7 +1219,6 @@ fn start_executing_work<B: ExtraBackendMethods>(
         // This is where we collect codegen units that have gone all the way
         // through codegen and LLVM.
         let mut compiled_modules = vec![];
-        let mut compiled_metadata_module = None;
         let mut compiled_allocator_module = None;
         let mut needs_link = Vec::new();
         let mut needs_fat_lto = Vec::new();
@@ -1475,14 +1477,11 @@ fn start_executing_work<B: ExtraBackendMethods>(
                         ModuleKind::Regular => {
                             compiled_modules.push(compiled_module);
                         }
-                        ModuleKind::Metadata => {
-                            assert!(compiled_metadata_module.is_none());
-                            compiled_metadata_module = Some(compiled_module);
-                        }
                         ModuleKind::Allocator => {
                             assert!(compiled_allocator_module.is_none());
                             compiled_allocator_module = Some(compiled_module);
                         }
+                        ModuleKind::Metadata => bug!("Should be handled separately"),
                     }
                 }
                 Message::NeedsLink { module, worker_id } => {
@@ -1539,7 +1538,6 @@ fn start_executing_work<B: ExtraBackendMethods>(
 
         Ok(CompiledModules {
             modules: compiled_modules,
-            metadata_module: compiled_metadata_module,
             allocator_module: compiled_allocator_module,
         })
     });
@@ -1800,6 +1798,7 @@ impl SharedEmitterMain {
 pub struct OngoingCodegen<B: ExtraBackendMethods> {
     pub backend: B,
     pub metadata: EncodedMetadata,
+    pub metadata_module: Option<CompiledModule>,
     pub crate_info: CrateInfo,
     pub coordinator_send: Sender<Box<dyn Any + Send>>,
     pub codegen_worker_receive: Receiver<Message<B>>,
@@ -1846,7 +1845,7 @@ impl<B: ExtraBackendMethods> OngoingCodegen<B> {
 
                 modules: compiled_modules.modules,
                 allocator_module: compiled_modules.allocator_module,
-                metadata_module: compiled_modules.metadata_module,
+                metadata_module: self.metadata_module,
             },
             work_products,
         )

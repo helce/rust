@@ -570,10 +570,29 @@ impl Display for Arguments<'_> {
 /// There are a number of helper methods on the [`Formatter`] struct to help you with manual
 /// implementations, such as [`debug_struct`].
 ///
+/// [`debug_struct`]: Formatter::debug_struct
+///
+/// Types that do not wish to use the standard suite of debug representations
+/// provided by the `Formatter` trait (`debug_struct`, `debug_tuple`,
+/// `debut_list`, `debug_set`, `debug_map`) can do something totally custom by
+/// manually writing an arbitrary representation to the `Formatter`.
+///
+/// ```
+/// # use std::fmt;
+/// # struct Point {
+/// #     x: i32,
+/// #     y: i32,
+/// # }
+/// #
+/// impl fmt::Debug for Point {
+///     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+///         write!(f, "Point [{} {}]", self.x, self.y)
+///     }
+/// }
+/// ```
+///
 /// `Debug` implementations using either `derive` or the debug builder API
 /// on [`Formatter`] support pretty-printing using the alternate flag: `{:#?}`.
-///
-/// [`debug_struct`]: Formatter::debug_struct
 ///
 /// Pretty-printing with `#?`:
 ///
@@ -2186,28 +2205,34 @@ impl Display for char {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized> Pointer for *const T {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        let old_width = f.width;
-        let old_flags = f.flags;
+        /// Since the formatting will be identical for all pointer types, use a non-monomorphized
+        /// implementation for the actual formatting to reduce the amount of codegen work needed
+        fn inner(ptr: *const (), f: &mut Formatter<'_>) -> Result {
+            let old_width = f.width;
+            let old_flags = f.flags;
 
-        // The alternate flag is already treated by LowerHex as being special-
-        // it denotes whether to prefix with 0x. We use it to work out whether
-        // or not to zero extend, and then unconditionally set it to get the
-        // prefix.
-        if f.alternate() {
-            f.flags |= 1 << (FlagV1::SignAwareZeroPad as u32);
+            // The alternate flag is already treated by LowerHex as being special-
+            // it denotes whether to prefix with 0x. We use it to work out whether
+            // or not to zero extend, and then unconditionally set it to get the
+            // prefix.
+            if f.alternate() {
+                f.flags |= 1 << (FlagV1::SignAwareZeroPad as u32);
 
-            if f.width.is_none() {
-                f.width = Some((usize::BITS / 4) as usize + 2);
+                if f.width.is_none() {
+                    f.width = Some((usize::BITS / 4) as usize + 2);
+                }
             }
+            f.flags |= 1 << (FlagV1::Alternate as u32);
+
+            let ret = LowerHex::fmt(&(ptr as usize), f);
+
+            f.width = old_width;
+            f.flags = old_flags;
+
+            ret
         }
-        f.flags |= 1 << (FlagV1::Alternate as u32);
 
-        let ret = LowerHex::fmt(&(*self as *const () as usize), f);
-
-        f.width = old_width;
-        f.flags = old_flags;
-
-        ret
+        inner(*self as *const (), f)
     }
 }
 

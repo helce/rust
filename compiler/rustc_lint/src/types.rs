@@ -1337,14 +1337,15 @@ impl<'tcx> LateLintPass<'tcx> for VariantSizeDifferences {
             let layout = match cx.layout_of(ty) {
                 Ok(layout) => layout,
                 Err(
-                    ty::layout::LayoutError::Unknown(_) | ty::layout::LayoutError::SizeOverflow(_),
+                    ty::layout::LayoutError::Unknown(_)
+                    | ty::layout::LayoutError::SizeOverflow(_)
+                    | ty::layout::LayoutError::NormalizationFailure(_, _),
                 ) => return,
             };
-            let (variants, tag) = match layout.variants {
-                Variants::Multiple {
+            let Variants::Multiple {
                     tag_encoding: TagEncoding::Direct, tag, ref variants, ..
-                } => (variants, tag),
-                _ => return,
+                } = &layout.variants else {
+                return
             };
 
             let tag_size = tag.value.size(&cx.tcx).bytes();

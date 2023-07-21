@@ -1,14 +1,13 @@
 //! Validates the MIR to ensure that invariants are upheld.
 
-use super::MirPass;
 use rustc_index::bit_set::BitSet;
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::mir::traversal;
 use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::mir::{
-    AggregateKind, BasicBlock, Body, BorrowKind, Local, Location, MirPhase, Operand, PlaceElem,
-    PlaceRef, ProjectionElem, Rvalue, SourceScope, Statement, StatementKind, Terminator,
+    AggregateKind, BasicBlock, Body, BorrowKind, Local, Location, MirPass, MirPhase, Operand,
+    PlaceElem, PlaceRef, ProjectionElem, Rvalue, SourceScope, Statement, StatementKind, Terminator,
     TerminatorKind, START_BLOCK,
 };
 use rustc_middle::ty::fold::BottomUpFolder;
@@ -67,7 +66,7 @@ impl<'tcx> MirPass<'tcx> for Validator {
 ///
 /// The point of this function is to approximate "equal up to subtyping".  However,
 /// the approximation is incorrect as variance is ignored.
-pub fn equal_up_to_regions(
+pub fn equal_up_to_regions<'tcx>(
     tcx: TyCtxt<'tcx>,
     param_env: ParamEnv<'tcx>,
     src: Ty<'tcx>,
@@ -496,9 +495,12 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                     self.check_edge(location, *unwind, EdgeKind::Unwind);
                 }
             }
-            TerminatorKind::InlineAsm { destination, .. } => {
+            TerminatorKind::InlineAsm { destination, cleanup, .. } => {
                 if let Some(destination) = destination {
                     self.check_edge(location, *destination, EdgeKind::Normal);
+                }
+                if let Some(cleanup) = cleanup {
+                    self.check_edge(location, *cleanup, EdgeKind::Unwind);
                 }
             }
             // Nothing to validate for these.

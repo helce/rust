@@ -37,14 +37,29 @@ if (!DOMTokenList.prototype.remove) {
     };
 }
 
-(function () {
-    var rustdocVars = document.getElementById("rustdoc-vars");
-    if (rustdocVars) {
-        window.rootPath = rustdocVars.attributes["data-root-path"].value;
-        window.currentCrate = rustdocVars.attributes["data-current-crate"].value;
-        window.searchJS = rustdocVars.attributes["data-search-js"].value;
-        window.searchIndexJS = rustdocVars.attributes["data-search-index-js"].value;
+// Get a value from the rustdoc-vars div, which is used to convey data from
+// Rust to the JS. If there is no such element, return null.
+function getVar(name) {
+    var el = document.getElementById("rustdoc-vars");
+    if (el) {
+        return el.attributes["data-" + name].value;
+    } else {
+        return null;
     }
+}
+
+// Given a basename (e.g. "storage") and an extension (e.g. ".js"), return a URL
+// for a resource under the root-path, with the resource-suffix.
+function resourcePath(basename, extension) {
+    return getVar("root-path") + basename + getVar("resource-suffix") + extension;
+}
+
+
+(function () {
+    window.rootPath = getVar("root-path");
+    window.currentCrate = getVar("current-crate");
+    window.searchJS =  resourcePath("search", ".js");
+    window.searchIndexJS = resourcePath("search-index", ".js");
     var sidebarVars = document.getElementById("sidebar-vars");
     if (sidebarVars) {
         window.sidebarCurrent = {
@@ -79,6 +94,7 @@ function getVirtualKey(ev) {
 
 var THEME_PICKER_ELEMENT_ID = "theme-picker";
 var THEMES_ELEMENT_ID = "theme-choices";
+var MAIN_ID = "main-content";
 
 function getThemesElement() {
     return document.getElementById(THEMES_ELEMENT_ID);
@@ -115,7 +131,7 @@ function hideThemeButtonState() {
 (function () {
     var themeChoices = getThemesElement();
     var themePicker = getThemePickerElement();
-    var availableThemes/* INSERT THEMES HERE */;
+    var availableThemes = getVar("themes").split(",");
 
     function switchThemeButtonState() {
         if (themeChoices.style.display === "block") {
@@ -273,8 +289,8 @@ function hideThemeButtonState() {
             var params = searchState.getQueryStringParams();
             if (params.search !== undefined) {
                 var search = searchState.outputElement();
-                search.innerHTML = "<h3 style=\"text-align: center;\">" +
-                   searchState.loadingText + "</h3>";
+                search.innerHTML = "<h3 class=\"search-loading\">" +
+                    searchState.loadingText + "</h3>";
                 searchState.showResults(search);
                 loadSearch();
             }
@@ -347,7 +363,7 @@ function hideThemeButtonState() {
     }
 
     var toggleAllDocsId = "toggle-all-docs";
-    var main = document.getElementById("main");
+    var main = document.getElementById(MAIN_ID);
     var savedHash = "";
 
     function handleHashes(ev) {
@@ -404,6 +420,13 @@ function hideThemeButtonState() {
         return document.getElementById("help");
     }
 
+    /**
+     * Show the help popup.
+     *
+     * @param {boolean} display    - Whether to show or hide the popup
+     * @param {Event}   ev         - The event that triggered this call
+     * @param {Element} [help]     - The help element if it already exists
+     */
     function displayHelp(display, ev, help) {
         if (display) {
             help = help ? help : getHelpElement(true);
@@ -772,7 +795,7 @@ function hideThemeButtonState() {
         } else {
             addClass(innerToggle, "will-expand");
             onEachLazy(document.getElementsByClassName("rustdoc-toggle"), function(e) {
-                if (e.parentNode.id !== "main" ||
+                if (e.parentNode.id !== MAIN_ID ||
                     (!hasClass(e, "implementors-toggle") &&
                      !hasClass(e, "type-contents-toggle")))
                 {
@@ -980,13 +1003,13 @@ function hideThemeButtonState() {
         var rustdoc_version = document.createElement("span");
         rustdoc_version.className = "bottom";
         var rustdoc_version_code = document.createElement("code");
-        rustdoc_version_code.innerText = "/* INSERT RUSTDOC_VERSION HERE */";
+        rustdoc_version_code.innerText = "rustdoc " + getVar("rustdoc-version");
         rustdoc_version.appendChild(rustdoc_version_code);
 
         container.appendChild(rustdoc_version);
 
         popup.appendChild(container);
-        insertAfter(popup, searchState.outputElement());
+        insertAfter(popup, document.querySelector("main"));
         // So that it's only built once and then it'll do nothing when called!
         buildHelperPopup = function() {};
     };

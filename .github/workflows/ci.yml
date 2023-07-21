@@ -41,15 +41,15 @@ jobs:
       matrix:
         include:
           - name: mingw-check
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: x86_64-gnu-llvm-12
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: x86_64-gnu-tools
             env:
               CI_ONLY_WHEN_SUBMODULES_CHANGED: 1
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
     timeout-minutes: 600
     runs-on: "${{ matrix.os }}"
     steps:
@@ -128,6 +128,9 @@ jobs:
       - name: ensure backported commits are in upstream branches
         run: src/ci/scripts/verify-backported-commits.sh
         if: success() && !env.SKIP_JOB
+      - name: ensure the stable version number is correct
+        run: src/ci/scripts/verify-stable-version-number.sh
+        if: success() && !env.SKIP_JOB
       - name: run the build
         run: src/ci/scripts/run-build-from-ci.sh
         env:
@@ -163,128 +166,128 @@ jobs:
               - ARM64
               - linux
           - name: arm-android
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: armhf-gnu
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-aarch64-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-android
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-arm-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-armhf-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-armv7-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-i586-gnu-i586-i686-musl
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-i686-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-mips-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-mips64-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-mips64el-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-mipsel-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-powerpc-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-powerpc64-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-powerpc64le-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-riscv64-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-s390x-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-various-1
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-various-2
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-x86_64-freebsd
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-x86_64-illumos
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-x86_64-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-x86_64-linux-alt
             env:
               IMAGE: dist-x86_64-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
           - name: dist-x86_64-musl
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: dist-x86_64-netbsd
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: i686-gnu
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: i686-gnu-nopt
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: mingw-check
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: test-various
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: wasm32
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: x86_64-gnu
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: x86_64-gnu-stable
             env:
               IMAGE: x86_64-gnu
               RUST_CI_OVERRIDE_RELEASE_CHANNEL: stable
               CI_ONLY_WHEN_CHANNEL: nightly
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
           - name: x86_64-gnu-aux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: x86_64-gnu-debug
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: x86_64-gnu-distcheck
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: x86_64-gnu-llvm-12
             env:
               RUST_BACKTRACE: 1
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
           - name: x86_64-gnu-nopt
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
           - name: x86_64-gnu-tools
             env:
               DEPLOY_TOOLSTATES_JSON: toolstates-linux.json
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
           - name: dist-x86_64-apple
             env:
               SCRIPT: "./x.py dist --exclude rust-docs --exclude extended && ./x.py dist --target=x86_64-apple-darwin rust-docs && ./x.py dist extended"
@@ -355,7 +358,6 @@ jobs:
             env:
               SCRIPT: python x.py --stage 2 test src/tools/cargotest src/tools/cargo
               RUST_CONFIGURE_ARGS: "--build=x86_64-pc-windows-msvc --enable-lld"
-              VCVARS_BAT: vcvars64.bat
             os: windows-latest-xl
           - name: x86_64-msvc-tools
             env:
@@ -503,6 +505,9 @@ jobs:
       - name: ensure backported commits are in upstream branches
         run: src/ci/scripts/verify-backported-commits.sh
         if: success() && !env.SKIP_JOB
+      - name: ensure the stable version number is correct
+        run: src/ci/scripts/verify-stable-version-number.sh
+        if: success() && !env.SKIP_JOB
       - name: run the build
         run: src/ci/scripts/run-build-from-ci.sh
         env:
@@ -533,7 +538,7 @@ jobs:
       matrix:
         include:
           - name: dist-x86_64-linux
-            os: ubuntu-latest-xl
+            os: ubuntu-20.04-xl
             env: {}
     timeout-minutes: 600
     runs-on: "${{ matrix.os }}"
@@ -612,6 +617,9 @@ jobs:
         if: success() && !env.SKIP_JOB
       - name: ensure backported commits are in upstream branches
         run: src/ci/scripts/verify-backported-commits.sh
+        if: success() && !env.SKIP_JOB
+      - name: ensure the stable version number is correct
+        run: src/ci/scripts/verify-stable-version-number.sh
         if: success() && !env.SKIP_JOB
       - name: run the build
         run: src/ci/scripts/run-build-from-ci.sh

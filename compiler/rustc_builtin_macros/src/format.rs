@@ -23,6 +23,7 @@ enum ArgumentType {
 
 enum Position {
     Exact(usize),
+    Capture(usize),
     Named(Symbol),
 }
 
@@ -47,6 +48,8 @@ struct Context<'a, 'b> {
     /// * `arg_unique_types` (in simplified JSON): `[["o", "x"], ["o", "x"], ["o", "x"]]`
     /// * `names` (in JSON): `{"foo": 2}`
     args: Vec<P<ast::Expr>>,
+    /// The number of arguments that were added by implicit capturing.
+    num_captured_args: usize,
     /// Placeholder slot numbers indexed by argument.
     arg_types: Vec<Vec<usize>>,
     /// Unique format specs seen for each argument.
@@ -88,8 +91,8 @@ struct Context<'a, 'b> {
     /// * Implicit argument resolution: `"{1:.0$} {2:.foo$} {1:.3$} {4:.0$}"`
     /// * Name resolution: `"{1:.0$} {2:.5$} {1:.3$} {4:.0$}"`
     /// * `count_positions` (in JSON): `{0: 0, 5: 1, 3: 2}`
-    /// * `count_args`: `vec![Exact(0), Exact(5), Exact(3)]`
-    count_args: Vec<Position>,
+    /// * `count_args`: `vec![0, 5, 3]`
+    count_args: Vec<usize>,
     /// Relative slot numbers for count arguments.
     count_positions: FxHashMap<usize, usize>,
     /// Number of count slots assigned.
@@ -229,6 +232,11 @@ fn parse_args<'a>(
 }
 
 impl<'a, 'b> Context<'a, 'b> {
+    /// The number of arguments that were explicitly given.
+    fn num_args(&self) -> usize {
+        self.args.len() - self.num_captured_args
+    }
+
     fn resolve_name_inplace(&self, p: &mut parse::Piece<'_>) {
         // NOTE: the `unwrap_or` branch is needed in case of invalid format
         // arguments, e.g., `format_args!("{foo}")`.
@@ -343,7 +351,7 @@ impl<'a, 'b> Context<'a, 'b> {
     }
 
     fn describe_num_args(&self) -> Cow<'_, str> {
-        match self.args.len() {
+        match self.num_args() {
             0 => "no arguments were given".into(),
             1 => "there is 1 argument".into(),
             x => format!("there are {} arguments", x).into(),
@@ -369,7 +377,7 @@ impl<'a, 'b> Context<'a, 'b> {
 
         let count = self.pieces.len()
             + self.arg_with_formatting.iter().filter(|fmt| fmt.precision_span.is_some()).count();
-        if self.names.is_empty() && !numbered_position_args && count != self.args.len() {
+        if self.names.is_empty() && !numbered_position_args && count != self.num_args() {
             e = self.ecx.struct_span_err(
                 sp,
                 &format!(
@@ -417,7 +425,7 @@ impl<'a, 'b> Context<'a, 'b> {
             if let Some(span) = fmt.precision_span {
                 let span = self.fmtsp.from_inner(span);
                 match fmt.precision {
-                    parse::CountIsParam(pos) if pos > self.args.len() => {
+                    parse::CountIsParam(pos) if pos > self.num_args() => {
                         e.span_label(
                             span,
                             &format!(
@@ -460,7 +468,7 @@ impl<'a, 'b> Context<'a, 'b> {
             if let Some(span) = fmt.width_span {
                 let span = self.fmtsp.from_inner(span);
                 match fmt.width {
-                    parse::CountIsParam(pos) if pos > self.args.len() => {
+                    parse::CountIsParam(pos) if pos > self.num_args() => {
                         e.span_label(
                             span,
                             &format!(
@@ -492,12 +500,15 @@ impl<'a, 'b> Context<'a, 'b> {
     /// Actually verifies and tracks a given format placeholder
     /// (a.k.a. argument).
     fn verify_arg_type(&mut self, arg: Position, ty: ArgumentType) {
+        if let Exact(arg) = arg {
+            if arg >= self.num_args() {
+                self.invalid_refs.push((arg, self.curpiece));
+                return;
+            }
+        }
+
         match arg {
-            Exact(arg) => {
-                if self.args.len() <= arg {
-                    self.invalid_refs.push((arg, self.curpiece));
-                    return;
-                }
+            Exact(arg) | Capture(arg) => {
                 match ty {
                     Placeholder(_) => {
                         // record every (position, type) combination only once
@@ -513,7 +524,7 @@ impl<'a, 'b> Context<'a, 'b> {
                         if let Entry::Vacant(e) = self.count_positions.entry(arg) {
                             let i = self.count_positions_count;
                             e.insert(i);
-                            self.count_args.push(Exact(arg));
+                            self.count_args.push(arg);
                             self.count_positions_count += 1;
                         }
                     }
@@ -524,7 +535,7 @@ impl<'a, 'b> Context<'a, 'b> {
                 match self.names.get(&name) {
                     Some(&idx) => {
                         // Treat as positional arg.
-                        self.verify_arg_type(Exact(idx), ty)
+                        self.verify_arg_type(Capture(idx), ty)
                     }
                     None => {
                         // For the moment capturing variables from format strings expanded from macros is
@@ -539,9 +550,10 @@ impl<'a, 'b> Context<'a, 'b> {
                             } else {
                                 self.fmtsp
                             };
+                            self.num_captured_args += 1;
                             self.args.push(self.ecx.expr_ident(span, Ident::new(name, span)));
                             self.names.insert(name, idx);
-                            self.verify_arg_type(Exact(idx), ty)
+                            self.verify_arg_type(Capture(idx), ty)
                         } else {
                             let msg = format!("there is no argument named `{}`", name);
                             let sp = if self.is_literal {
@@ -549,7 +561,7 @@ impl<'a, 'b> Context<'a, 'b> {
                             } else {
                                 self.fmtsp
                             };
-                            let mut err = self.ecx.struct_span_err(sp, &msg[..]);
+                            let mut err = self.ecx.struct_span_err(sp, &msg);
 
                             err.note(&format!(
                                 "did you intend to capture a variable `{}` from \
@@ -769,13 +781,12 @@ impl<'a, 'b> Context<'a, 'b> {
             for arg_ty in self.arg_unique_types[i].iter() {
                 args.push(Context::format_arg(self.ecx, self.macsp, e.span, arg_ty, i));
             }
-            heads.push(self.ecx.expr_addr_of(e.span, e));
+            // use the arg span for `&arg` so that borrowck errors
+            // point to the specific expression passed to the macro
+            // (the span is otherwise unavailable in MIR)
+            heads.push(self.ecx.expr_addr_of(e.span.with_ctxt(self.macsp.ctxt()), e));
         }
-        for pos in self.count_args {
-            let index = match pos {
-                Exact(i) => i,
-                _ => panic!("should never happen"),
-            };
+        for index in self.count_args {
             let span = spans_pos[index];
             args.push(Context::format_arg(self.ecx, self.macsp, span, &Count, index));
         }
@@ -956,7 +967,7 @@ pub fn expand_preparsed_format_args(
         ast::StrStyle::Raw(raw) => Some(raw as usize),
     };
 
-    let fmt_str = &fmt_str.as_str(); // for the suggestions below
+    let fmt_str = fmt_str.as_str(); // for the suggestions below
     let fmt_snippet = ecx.source_map().span_to_snippet(fmt_sp).ok();
     let mut parser = parse::Parser::new(
         fmt_str,
@@ -996,8 +1007,9 @@ pub fn expand_preparsed_format_args(
             e.note(&note);
         }
         if let Some((label, span)) = err.secondary_label {
-            let sp = fmt_span.from_inner(span);
-            e.span_label(sp, label);
+            if efmt_kind_is_lit {
+                e.span_label(fmt_span.from_inner(span), label);
+            }
         }
         e.emit();
         return DummyResult::raw_expr(sp, true);
@@ -1010,6 +1022,7 @@ pub fn expand_preparsed_format_args(
     let mut cx = Context {
         ecx,
         args,
+        num_captured_args: 0,
         arg_types,
         arg_unique_types,
         names,

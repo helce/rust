@@ -101,6 +101,29 @@ macro_rules! top_level_options {
     );
 }
 
+impl Options {
+    pub fn mir_opt_level(&self) -> usize {
+        self.debugging_opts
+            .mir_opt_level
+            .unwrap_or_else(|| if self.optimize != OptLevel::No { 2 } else { 1 })
+    }
+
+    pub fn instrument_coverage(&self) -> bool {
+        self.debugging_opts.instrument_coverage.unwrap_or(InstrumentCoverage::Off)
+            != InstrumentCoverage::Off
+    }
+
+    pub fn instrument_coverage_except_unused_generics(&self) -> bool {
+        self.debugging_opts.instrument_coverage.unwrap_or(InstrumentCoverage::Off)
+            == InstrumentCoverage::ExceptUnusedGenerics
+    }
+
+    pub fn instrument_coverage_except_unused_functions(&self) -> bool {
+        self.debugging_opts.instrument_coverage.unwrap_or(InstrumentCoverage::Off)
+            == InstrumentCoverage::ExceptUnusedFunctions
+    }
+}
+
 top_level_options!(
     /// The top-level command-line options struct.
     ///
@@ -204,6 +227,9 @@ top_level_options!(
 
         /// `true` if we're emitting a JSON blob containing the unused externs
         json_unused_externs: bool [UNTRACKED],
+
+        /// `true` if we're emitting a JSON job containg a future-incompat report for lints
+        json_future_incompat: bool [TRACKED],
 
         pretty: Option<PpMode> [UNTRACKED],
 
@@ -309,7 +335,7 @@ fn build_options<O: Default>(
             Some((k, v)) => (k.to_string(), Some(v)),
         };
 
-        let option_to_lookup = key.replace("-", "_");
+        let option_to_lookup = key.replace('-', "_");
         match descrs.iter().find(|(name, ..)| *name == option_to_lookup) {
             Some((_, setter, type_desc, _)) => {
                 if !setter(&mut op, value) {
@@ -386,6 +412,8 @@ mod desc {
     pub const parse_wasi_exec_model: &str = "either `command` or `reactor`";
     pub const parse_split_debuginfo: &str =
         "one of supported split-debuginfo modes (`off`, `packed`, or `unpacked`)";
+    pub const parse_split_dwarf_kind: &str =
+        "one of supported split dwarf modes (`split` or `single`)";
     pub const parse_gcc_ld: &str = "one of: no value, `lld`";
     pub const parse_stack_protector: &str =
         "one of (`none` (default), `basic`, `strong`, or `all`)";
@@ -567,7 +595,7 @@ mod parse {
             v => {
                 let mut passes = vec![];
                 if parse_list(&mut passes, v) {
-                    *slot = Passes::Some(passes);
+                    slot.extend(passes);
                     true
                 } else {
                     false
@@ -913,6 +941,14 @@ mod parse {
         true
     }
 
+    crate fn parse_split_dwarf_kind(slot: &mut SplitDwarfKind, v: Option<&str>) -> bool {
+        match v.and_then(|s| SplitDwarfKind::from_str(s).ok()) {
+            Some(e) => *slot = e,
+            _ => return false,
+        }
+        true
+    }
+
     crate fn parse_gcc_ld(slot: &mut Option<LdImpl>, v: Option<&str>) -> bool {
         match v {
             None => *slot = None,
@@ -1029,6 +1065,9 @@ options! {
         "how to handle split-debuginfo, a platform-specific option"),
     strip: Strip = (Strip::None, parse_strip, [UNTRACKED],
         "tell the linker which information to strip (`none` (default), `debuginfo` or `symbols`)"),
+    symbol_mangling_version: Option<SymbolManglingVersion> = (None,
+        parse_symbol_mangling_version, [TRACKED],
+        "which mangling version to use for symbol names ('legacy' (default) or 'v0')"),
     target_cpu: Option<String> = (None, parse_opt_string, [TRACKED],
         "select target processor (`rustc --print target-cpus` for details)"),
     target_feature: String = (String::new(), parse_target_feature, [TRACKED],
@@ -1124,8 +1163,6 @@ options! {
         computed `block` spans (one span encompassing a block's terminator and \
         all statements). If `-Z instrument-coverage` is also enabled, create \
         an additional `.html` file showing the computed coverage spans."),
-    emit_future_incompat_report: bool = (false, parse_bool, [UNTRACKED],
-        "emits a future-incompatibility report for lints (RFC 2834)"),
     emit_stack_sizes: bool = (false, parse_bool, [UNTRACKED],
         "emit a section containing stack size metadata (default: no)"),
     fewer_names: Option<bool> = (None, parse_opt_bool, [TRACKED],
@@ -1173,7 +1210,7 @@ options! {
     instrument_coverage: Option<InstrumentCoverage> = (None, parse_instrument_coverage, [TRACKED],
         "instrument the generated code to support LLVM source-based code coverage \
         reports (note, the compiler build config must include `profiler = true`); \
-        implies `-Z symbol-mangling-version=v0`. Optional values are:
+        implies `-C symbol-mangling-version=v0`. Optional values are:
         `=all` (implicit value)
         `=except-unused-generics`
         `=except-unused-functions`
@@ -1297,6 +1334,8 @@ options! {
         "print some statistics about the query system (default: no)"),
     randomize_layout: bool = (false, parse_bool, [TRACKED],
         "randomize the layout of types (default: no)"),
+    layout_seed: Option<u64> = (None, parse_opt_number, [TRACKED],
+        "seed layout randomization"),
     relax_elf_relocations: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "whether ELF relocations can be relaxed"),
     relro_level: Option<RelroLevel> = (None, parse_relro_level, [TRACKED],
@@ -1344,6 +1383,14 @@ options! {
         "control stack smash protection strategy (`rustc --print stack-protector-strategies` for details)"),
     strip: Strip = (Strip::None, parse_strip, [UNTRACKED],
         "tell the linker which information to strip (`none` (default), `debuginfo` or `symbols`)"),
+    split_dwarf_kind: SplitDwarfKind = (SplitDwarfKind::Split, parse_split_dwarf_kind, [UNTRACKED],
+        "split dwarf variant (only if -Csplit-debuginfo is enabled and on relevant platform)
+        (default: `split`)
+
+        `split`: sections which do not require relocation are written into a DWARF object (`.dwo`)
+                 file which is ignored by the linker
+        `single`: sections which do not require relocation are written into object file but ignored
+                  by the linker"),
     split_dwarf_inlining: bool = (true, parse_bool, [UNTRACKED],
         "provide minimal debug info in the object/executable to facilitate online \
          symbolication/stack traces in the absence of .dwo/.dwp files when using Split DWARF"),

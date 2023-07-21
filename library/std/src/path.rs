@@ -12,6 +12,13 @@
 //! [`PathBuf`]; note that the paths may differ syntactically by the
 //! normalization described in the documentation for the [`components`] method.
 //!
+//! ## Case sensitivity
+//!
+//! Unless otherwise indicated path methods that do not access the filesystem,
+//! such as [`Path::starts_with`] and [`Path::ends_with`], are case sensitive no
+//! matter the platform or filesystem. An exception to this is made for Windows
+//! drive letters.
+//!
 //! ## Simple usage
 //!
 //! Path manipulation includes both parsing components from slices and building
@@ -2810,7 +2817,7 @@ impl Path {
     /// check errors, call [`fs::symlink_metadata`] and handle its [`Result`]. Then call
     /// [`fs::Metadata::is_symlink`] if it was [`Ok`].
     #[must_use]
-    #[stable(feature = "is_symlink", since = "1.57.0")]
+    #[stable(feature = "is_symlink", since = "1.58.0")]
     pub fn is_symlink(&self) -> bool {
         fs::symlink_metadata(self).map(|m| m.is_symlink()).unwrap_or(false)
     }
@@ -2892,12 +2899,12 @@ impl cmp::PartialEq for Path {
 impl Hash for Path {
     fn hash<H: Hasher>(&self, h: &mut H) {
         let bytes = self.as_u8_slice();
-        let prefix_len = match parse_prefix(&self.inner) {
+        let (prefix_len, verbatim) = match parse_prefix(&self.inner) {
             Some(prefix) => {
                 prefix.hash(h);
-                prefix.len()
+                (prefix.len(), prefix.is_verbatim())
             }
-            None => 0,
+            None => (0, false),
         };
         let bytes = &bytes[prefix_len..];
 
@@ -2905,7 +2912,8 @@ impl Hash for Path {
         let mut bytes_hashed = 0;
 
         for i in 0..bytes.len() {
-            if is_sep_byte(bytes[i]) {
+            let is_sep = if verbatim { is_verbatim_sep(bytes[i]) } else { is_sep_byte(bytes[i]) };
+            if is_sep {
                 if i > component_start {
                     let to_hash = &bytes[component_start..i];
                     h.write(to_hash);
@@ -2913,11 +2921,18 @@ impl Hash for Path {
                 }
 
                 // skip over separator and optionally a following CurDir item
-                // since components() would normalize these away
-                component_start = i + match bytes[i..] {
-                    [_, b'.', b'/', ..] | [_, b'.'] => 2,
-                    _ => 1,
-                };
+                // since components() would normalize these away.
+                component_start = i + 1;
+
+                let tail = &bytes[component_start..];
+
+                if !verbatim {
+                    component_start += match tail {
+                        [b'.'] => 1,
+                        [b'.', sep @ _, ..] if is_sep_byte(*sep) => 1,
+                        _ => 0,
+                    };
+                }
             }
         }
 

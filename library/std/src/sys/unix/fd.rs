@@ -4,7 +4,7 @@
 mod tests;
 
 use crate::cmp;
-use crate::io::{self, Initializer, IoSlice, IoSliceMut, Read};
+use crate::io::{self, IoSlice, IoSliceMut, Read, ReadBuf};
 use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use crate::sys::cvt;
 use crate::sys_common::{AsInner, FromInner, IntoInner};
@@ -99,32 +99,37 @@ impl FileDesc {
     }
 
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        #[cfg(target_os = "android")]
-        use super::android::cvt_pread64;
-
-        #[cfg(not(target_os = "android"))]
-        unsafe fn cvt_pread64(
-            fd: c_int,
-            buf: *mut c_void,
-            count: usize,
-            offset: i64,
-        ) -> io::Result<isize> {
-            #[cfg(not(target_os = "linux"))]
-            use libc::pread as pread64;
-            #[cfg(target_os = "linux")]
-            use libc::pread64;
-            cvt(pread64(fd, buf, count, offset))
-        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        use libc::pread as pread64;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        use libc::pread64;
 
         unsafe {
-            cvt_pread64(
+            cvt(pread64(
                 self.as_raw_fd(),
                 buf.as_mut_ptr() as *mut c_void,
                 cmp::min(buf.len(), READ_LIMIT),
                 offset as i64,
-            )
+            ))
             .map(|n| n as usize)
         }
+    }
+
+    pub fn read_buf(&self, buf: &mut ReadBuf<'_>) -> io::Result<()> {
+        let ret = cvt(unsafe {
+            libc::read(
+                self.as_raw_fd(),
+                buf.unfilled_mut().as_mut_ptr() as *mut c_void,
+                cmp::min(buf.remaining(), READ_LIMIT),
+            )
+        })?;
+
+        // Safety: `ret` bytes were written to the initialized portion of the buffer
+        unsafe {
+            buf.assume_init(ret as usize);
+        }
+        buf.add_filled(ret as usize);
+        Ok(())
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
@@ -161,30 +166,18 @@ impl FileDesc {
     }
 
     pub fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
-        #[cfg(target_os = "android")]
-        use super::android::cvt_pwrite64;
-
-        #[cfg(not(target_os = "android"))]
-        unsafe fn cvt_pwrite64(
-            fd: c_int,
-            buf: *const c_void,
-            count: usize,
-            offset: i64,
-        ) -> io::Result<isize> {
-            #[cfg(not(target_os = "linux"))]
-            use libc::pwrite as pwrite64;
-            #[cfg(target_os = "linux")]
-            use libc::pwrite64;
-            cvt(pwrite64(fd, buf, count, offset))
-        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        use libc::pwrite as pwrite64;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        use libc::pwrite64;
 
         unsafe {
-            cvt_pwrite64(
+            cvt(pwrite64(
                 self.as_raw_fd(),
                 buf.as_ptr() as *const c_void,
                 cmp::min(buf.len(), READ_LIMIT),
                 offset as i64,
-            )
+            ))
             .map(|n| n as usize)
         }
     }
@@ -288,11 +281,6 @@ impl FileDesc {
 impl<'a> Read for &'a FileDesc {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         (**self).read(buf)
-    }
-
-    #[inline]
-    unsafe fn initializer(&self) -> Initializer {
-        Initializer::nop()
     }
 }
 

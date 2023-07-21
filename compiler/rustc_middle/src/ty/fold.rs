@@ -46,9 +46,30 @@ use std::ops::ControlFlow;
 ///
 /// To implement this conveniently, use the derive macro located in `rustc_macros`.
 pub trait TypeFoldable<'tcx>: fmt::Debug + Clone {
-    fn super_fold_with<F: TypeFolder<'tcx>>(self, folder: &mut F) -> Self;
-    fn fold_with<F: TypeFolder<'tcx>>(self, folder: &mut F) -> Self {
-        self.super_fold_with(folder)
+    /// Consumers may find this more convenient to use with infallible folders than
+    /// [`try_super_fold_with`][`TypeFoldable::try_super_fold_with`], to which the
+    /// provided default definition delegates.  Implementors **should not** override
+    /// this provided default definition, to ensure that the two methods are coherent
+    /// (provide a definition of `try_super_fold_with` instead).
+    fn super_fold_with<F: TypeFolder<'tcx, Error = !>>(self, folder: &mut F) -> Self {
+        self.try_super_fold_with(folder).into_ok()
+    }
+    /// Consumers may find this more convenient to use with infallible folders than
+    /// [`try_fold_with`][`TypeFoldable::try_fold_with`], to which the provided
+    /// default definition delegates.  Implementors **should not** override this
+    /// provided default definition, to ensure that the two methods are coherent
+    /// (provide a definition of `try_fold_with` instead).
+    fn fold_with<F: TypeFolder<'tcx, Error = !>>(self, folder: &mut F) -> Self {
+        self.try_fold_with(folder).into_ok()
+    }
+
+    fn try_super_fold_with<F: FallibleTypeFolder<'tcx>>(
+        self,
+        folder: &mut F,
+    ) -> Result<Self, F::Error>;
+
+    fn try_fold_with<F: FallibleTypeFolder<'tcx>>(self, folder: &mut F) -> Result<Self, F::Error> {
+        self.try_super_fold_with(folder)
     }
 
     fn super_visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> ControlFlow<V::BreakTy>;
@@ -178,9 +199,9 @@ pub trait TypeFoldable<'tcx>: fmt::Debug + Clone {
     }
 }
 
-impl TypeFoldable<'tcx> for hir::Constness {
-    fn super_fold_with<F: TypeFolder<'tcx>>(self, _: &mut F) -> Self {
-        self
+impl<'tcx> TypeFoldable<'tcx> for hir::Constness {
+    fn try_super_fold_with<F: TypeFolder<'tcx>>(self, _: &mut F) -> Result<Self, F::Error> {
+        Ok(self)
     }
     fn super_visit_with<V: TypeVisitor<'tcx>>(&self, _: &mut V) -> ControlFlow<V::BreakTy> {
         ControlFlow::CONTINUE
@@ -192,34 +213,149 @@ impl TypeFoldable<'tcx> for hir::Constness {
 /// default implementation that does an "identity" fold. Within each
 /// identity fold, it should invoke `foo.fold_with(self)` to fold each
 /// sub-item.
+///
+/// If this folder is fallible (and therefore its [`Error`][`TypeFolder::Error`]
+/// associated type is something other than the default, never),
+/// [`FallibleTypeFolder`] should be implemented manually; otherwise,
+/// a blanket implementation of [`FallibleTypeFolder`] will defer to
+/// the infallible methods of this trait to ensure that the two APIs
+/// are coherent.
 pub trait TypeFolder<'tcx>: Sized {
+    type Error = !;
+
     fn tcx<'a>(&'a self) -> TyCtxt<'tcx>;
 
     fn fold_binder<T>(&mut self, t: Binder<'tcx, T>) -> Binder<'tcx, T>
     where
         T: TypeFoldable<'tcx>,
+        Self: TypeFolder<'tcx, Error = !>,
     {
         t.super_fold_with(self)
     }
 
-    fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
+    fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx>
+    where
+        Self: TypeFolder<'tcx, Error = !>,
+    {
         t.super_fold_with(self)
     }
 
-    fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
+    fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx>
+    where
+        Self: TypeFolder<'tcx, Error = !>,
+    {
         r.super_fold_with(self)
     }
 
-    fn fold_const(&mut self, c: &'tcx ty::Const<'tcx>) -> &'tcx ty::Const<'tcx> {
+    fn fold_const(&mut self, c: &'tcx ty::Const<'tcx>) -> &'tcx ty::Const<'tcx>
+    where
+        Self: TypeFolder<'tcx, Error = !>,
+    {
         c.super_fold_with(self)
     }
 
-    fn fold_predicate(&mut self, p: ty::Predicate<'tcx>) -> ty::Predicate<'tcx> {
+    fn fold_predicate(&mut self, p: ty::Predicate<'tcx>) -> ty::Predicate<'tcx>
+    where
+        Self: TypeFolder<'tcx, Error = !>,
+    {
         p.super_fold_with(self)
     }
 
-    fn fold_mir_const(&mut self, c: mir::ConstantKind<'tcx>) -> mir::ConstantKind<'tcx> {
+    fn fold_mir_const(&mut self, c: mir::ConstantKind<'tcx>) -> mir::ConstantKind<'tcx>
+    where
+        Self: TypeFolder<'tcx, Error = !>,
+    {
         bug!("most type folders should not be folding MIR datastructures: {:?}", c)
+    }
+}
+
+/// The `FallibleTypeFolder` trait defines the actual *folding*. There is a
+/// method defined for every foldable type. Each of these has a
+/// default implementation that does an "identity" fold. Within each
+/// identity fold, it should invoke `foo.try_fold_with(self)` to fold each
+/// sub-item.
+///
+/// A blanket implementation of this trait (that defers to the relevant
+/// method of [`TypeFolder`]) is provided for all infallible folders in
+/// order to ensure the two APIs are coherent.
+pub trait FallibleTypeFolder<'tcx>: TypeFolder<'tcx> {
+    fn try_fold_binder<T>(&mut self, t: Binder<'tcx, T>) -> Result<Binder<'tcx, T>, Self::Error>
+    where
+        T: TypeFoldable<'tcx>,
+    {
+        t.try_super_fold_with(self)
+    }
+
+    fn try_fold_ty(&mut self, t: Ty<'tcx>) -> Result<Ty<'tcx>, Self::Error> {
+        t.try_super_fold_with(self)
+    }
+
+    fn try_fold_region(&mut self, r: ty::Region<'tcx>) -> Result<ty::Region<'tcx>, Self::Error> {
+        r.try_super_fold_with(self)
+    }
+
+    fn try_fold_const(
+        &mut self,
+        c: &'tcx ty::Const<'tcx>,
+    ) -> Result<&'tcx ty::Const<'tcx>, Self::Error> {
+        c.try_super_fold_with(self)
+    }
+
+    fn try_fold_predicate(
+        &mut self,
+        p: ty::Predicate<'tcx>,
+    ) -> Result<ty::Predicate<'tcx>, Self::Error> {
+        p.try_super_fold_with(self)
+    }
+
+    fn try_fold_mir_const(
+        &mut self,
+        c: mir::ConstantKind<'tcx>,
+    ) -> Result<mir::ConstantKind<'tcx>, Self::Error> {
+        bug!("most type folders should not be folding MIR datastructures: {:?}", c)
+    }
+}
+
+// Blanket implementation of fallible trait for infallible folders
+// delegates to infallible methods to prevent incoherence
+impl<'tcx, F> FallibleTypeFolder<'tcx> for F
+where
+    F: TypeFolder<'tcx, Error = !>,
+{
+    fn try_fold_binder<T>(&mut self, t: Binder<'tcx, T>) -> Result<Binder<'tcx, T>, Self::Error>
+    where
+        T: TypeFoldable<'tcx>,
+    {
+        Ok(self.fold_binder(t))
+    }
+
+    fn try_fold_ty(&mut self, t: Ty<'tcx>) -> Result<Ty<'tcx>, Self::Error> {
+        Ok(self.fold_ty(t))
+    }
+
+    fn try_fold_region(&mut self, r: ty::Region<'tcx>) -> Result<ty::Region<'tcx>, Self::Error> {
+        Ok(self.fold_region(r))
+    }
+
+    fn try_fold_const(
+        &mut self,
+        c: &'tcx ty::Const<'tcx>,
+    ) -> Result<&'tcx ty::Const<'tcx>, Self::Error> {
+        Ok(self.fold_const(c))
+    }
+
+    fn try_fold_predicate(
+        &mut self,
+        p: ty::Predicate<'tcx>,
+    ) -> Result<ty::Predicate<'tcx>, Self::Error> {
+        Ok(self.fold_predicate(p))
+    }
+
+    fn try_fold_mir_const(
+        &mut self,
+        c: mir::ConstantKind<'tcx>,
+    ) -> Result<mir::ConstantKind<'tcx>, Self::Error> {
+        Ok(self.fold_mir_const(c))
     }
 }
 
@@ -924,13 +1060,13 @@ struct Shifter<'tcx> {
     amount: u32,
 }
 
-impl Shifter<'tcx> {
+impl<'tcx> Shifter<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>, amount: u32) -> Self {
         Shifter { tcx, current_index: ty::INNERMOST, amount }
     }
 }
 
-impl TypeFolder<'tcx> for Shifter<'tcx> {
+impl<'tcx> TypeFolder<'tcx> for Shifter<'tcx> {
     fn tcx<'b>(&'b self) -> TyCtxt<'tcx> {
         self.tcx
     }
@@ -1121,7 +1257,7 @@ struct HasTypeFlagsVisitor<'tcx> {
     flags: ty::TypeFlags,
 }
 
-impl std::fmt::Debug for HasTypeFlagsVisitor<'tcx> {
+impl<'tcx> std::fmt::Debug for HasTypeFlagsVisitor<'tcx> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.flags.fmt(fmt)
     }
@@ -1318,7 +1454,7 @@ struct LateBoundRegionsCollector<'tcx> {
     just_constrained: bool,
 }
 
-impl LateBoundRegionsCollector<'tcx> {
+impl<'tcx> LateBoundRegionsCollector<'tcx> {
     fn new(tcx: TyCtxt<'tcx>, just_constrained: bool) -> Self {
         LateBoundRegionsCollector {
             tcx,

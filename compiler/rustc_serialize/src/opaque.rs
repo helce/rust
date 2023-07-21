@@ -55,6 +55,13 @@ macro_rules! write_leb128 {
     }};
 }
 
+/// A byte that [cannot occur in UTF8 sequences][utf8]. Used to mark the end of a string.
+/// This way we can skip validation and still be relatively sure that deserialization
+/// did not desynchronize.
+///
+/// [utf8]: https://en.wikipedia.org/w/index.php?title=UTF-8&oldid=1058865525#Codepage_layout
+const STR_SENTINEL: u8 = 0xC1;
+
 impl serialize::Encoder for Encoder {
     type Error = !;
 
@@ -85,7 +92,8 @@ impl serialize::Encoder for Encoder {
 
     #[inline]
     fn emit_u16(&mut self, v: u16) -> EncodeResult {
-        write_leb128!(self, v, u16, write_u16_leb128)
+        self.data.extend_from_slice(&v.to_le_bytes());
+        Ok(())
     }
 
     #[inline]
@@ -116,7 +124,8 @@ impl serialize::Encoder for Encoder {
 
     #[inline]
     fn emit_i16(&mut self, v: i16) -> EncodeResult {
-        write_leb128!(self, v, i16, write_i16_leb128)
+        self.data.extend_from_slice(&v.to_le_bytes());
+        Ok(())
     }
 
     #[inline]
@@ -150,7 +159,8 @@ impl serialize::Encoder for Encoder {
     #[inline]
     fn emit_str(&mut self, v: &str) -> EncodeResult {
         self.emit_usize(v.len())?;
-        self.emit_raw_bytes(v.as_bytes())
+        self.emit_raw_bytes(v.as_bytes())?;
+        self.emit_u8(STR_SENTINEL)
     }
 
     #[inline]
@@ -438,7 +448,7 @@ impl serialize::Encoder for FileEncoder {
 
     #[inline]
     fn emit_u16(&mut self, v: u16) -> FileEncodeResult {
-        file_encoder_write_leb128!(self, v, u16, write_u16_leb128)
+        self.write_all(&v.to_le_bytes())
     }
 
     #[inline]
@@ -468,13 +478,12 @@ impl serialize::Encoder for FileEncoder {
 
     #[inline]
     fn emit_i16(&mut self, v: i16) -> FileEncodeResult {
-        file_encoder_write_leb128!(self, v, i16, write_i16_leb128)
+        self.write_all(&v.to_le_bytes())
     }
 
     #[inline]
     fn emit_i8(&mut self, v: i8) -> FileEncodeResult {
-        let as_u8: u8 = unsafe { std::mem::transmute(v) };
-        self.emit_u8(as_u8)
+        self.emit_u8(v as u8)
     }
 
     #[inline]
@@ -502,7 +511,8 @@ impl serialize::Encoder for FileEncoder {
     #[inline]
     fn emit_str(&mut self, v: &str) -> FileEncodeResult {
         self.emit_usize(v.len())?;
-        self.emit_raw_bytes(v.as_bytes())
+        self.emit_raw_bytes(v.as_bytes())?;
+        self.emit_u8(STR_SENTINEL)
     }
 
     #[inline]
@@ -582,7 +592,10 @@ impl<'a> serialize::Decoder for Decoder<'a> {
 
     #[inline]
     fn read_u16(&mut self) -> Result<u16, Self::Error> {
-        read_leb128!(self, read_u16_leb128)
+        let bytes = [self.data[self.position], self.data[self.position + 1]];
+        let value = u16::from_le_bytes(bytes);
+        self.position += 2;
+        Ok(value)
     }
 
     #[inline]
@@ -614,7 +627,10 @@ impl<'a> serialize::Decoder for Decoder<'a> {
 
     #[inline]
     fn read_i16(&mut self) -> Result<i16, Self::Error> {
-        read_leb128!(self, read_i16_leb128)
+        let bytes = [self.data[self.position], self.data[self.position + 1]];
+        let value = i16::from_le_bytes(bytes);
+        self.position += 2;
+        Ok(value)
     }
 
     #[inline]
@@ -656,8 +672,12 @@ impl<'a> serialize::Decoder for Decoder<'a> {
     #[inline]
     fn read_str(&mut self) -> Result<Cow<'_, str>, Self::Error> {
         let len = self.read_usize()?;
-        let s = std::str::from_utf8(&self.data[self.position..self.position + len]).unwrap();
-        self.position += len;
+        let sentinel = self.data[self.position + len];
+        assert!(sentinel == STR_SENTINEL);
+        let s = unsafe {
+            std::str::from_utf8_unchecked(&self.data[self.position..self.position + len])
+        };
+        self.position += len + 1;
         Ok(Cow::Borrowed(s))
     }
 

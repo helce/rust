@@ -104,7 +104,7 @@ impl FdMeta {
 
     fn potential_sendfile_source(&self) -> bool {
         match self {
-            // procfs erronously shows 0 length on non-empty readable files.
+            // procfs erroneously shows 0 length on non-empty readable files.
             // and if a file is truly empty then a `read` syscall will determine that and skip the write syscall
             // thus there would be benefit from attempting sendfile
             FdMeta::Metadata(meta)
@@ -614,6 +614,9 @@ fn sendfile_splice(mode: SpliceMode, reader: RawFd, writer: RawFd, len: u64) -> 
     static HAS_SENDFILE: AtomicBool = AtomicBool::new(true);
     static HAS_SPLICE: AtomicBool = AtomicBool::new(true);
 
+    // Android builds use feature level 14, but the libc wrapper for splice is
+    // gated on feature level 21+, so we have to invoke the syscall directly.
+    #[cfg(target_os = "android")]
     syscall! {
         fn splice(
             srcfd: libc::c_int,
@@ -624,6 +627,9 @@ fn sendfile_splice(mode: SpliceMode, reader: RawFd, writer: RawFd, len: u64) -> 
             flags: libc::c_int
         ) -> libc::ssize_t
     }
+
+    #[cfg(target_os = "linux")]
+    use libc::splice;
 
     match mode {
         SpliceMode::Sendfile if !HAS_SENDFILE.load(Ordering::Relaxed) => {

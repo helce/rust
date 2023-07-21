@@ -101,8 +101,9 @@
 #![feature(const_align_of_val)]
 #![feature(const_alloc_layout)]
 #![feature(const_arguments_as_str)]
-#![feature(const_assert_type)]
+#![feature(const_array_into_iter_constructors)]
 #![feature(const_bigint_helper_methods)]
+#![feature(const_black_box)]
 #![feature(const_caller_location)]
 #![feature(const_cell_into_inner)]
 #![feature(const_char_convert)]
@@ -112,18 +113,21 @@
 #![feature(const_float_classify)]
 #![feature(const_fmt_arguments_new)]
 #![feature(const_heap)]
+#![feature(const_convert)]
 #![feature(const_inherent_unchecked_arith)]
 #![feature(const_int_unchecked_arith)]
 #![feature(const_intrinsic_copy)]
 #![feature(const_intrinsic_forget)]
 #![feature(const_likely)]
-#![feature(const_maybe_uninit_as_ptr)]
+#![feature(const_maybe_uninit_as_mut_ptr)]
 #![feature(const_maybe_uninit_assume_init)]
 #![feature(const_num_from_num)]
 #![feature(const_ops)]
 #![feature(const_option)]
+#![feature(const_option_ext)]
 #![feature(const_pin)]
 #![feature(const_replace)]
+#![feature(const_ptr_is_null)]
 #![feature(const_ptr_offset)]
 #![feature(const_ptr_offset_from)]
 #![feature(const_ptr_read)]
@@ -138,7 +142,9 @@
 #![feature(const_type_id)]
 #![feature(const_type_name)]
 #![feature(const_default_impls)]
+#![feature(core_panic)]
 #![feature(duration_consts_float)]
+#![feature(maybe_uninit_uninit_array)]
 #![feature(ptr_metadata)]
 #![feature(slice_ptr_get)]
 #![feature(str_internals)]
@@ -150,7 +156,6 @@
 #![feature(abi_unadjusted)]
 #![feature(allow_internal_unsafe)]
 #![feature(allow_internal_unstable)]
-#![feature(asm)]
 #![feature(associated_type_bounds)]
 #![feature(auto_traits)]
 #![feature(cfg_target_has_atomic)]
@@ -160,14 +165,12 @@
 #![feature(const_impl_trait)]
 #![feature(const_mut_refs)]
 #![feature(const_precise_live_drops)]
-#![cfg_attr(bootstrap, feature(const_raw_ptr_deref))]
 #![feature(const_refs_to_cell)]
 #![feature(decl_macro)]
 #![feature(derive_default_enum)]
 #![feature(doc_cfg)]
 #![feature(doc_notable_trait)]
-#![cfg_attr(bootstrap, feature(doc_primitive))]
-#![cfg_attr(not(bootstrap), feature(rustdoc_internals))]
+#![feature(rustdoc_internals)]
 #![feature(exhaustive_patterns)]
 #![feature(doc_cfg_hide)]
 #![feature(extern_types)]
@@ -199,7 +202,7 @@
 #![feature(try_blocks)]
 #![feature(unboxed_closures)]
 #![feature(unsized_fn_params)]
-#![cfg_attr(not(bootstrap), feature(asm_const))]
+#![feature(asm_const)]
 //
 // Target features:
 #![feature(aarch64_target_feature)]
@@ -373,29 +376,50 @@ pub mod arch {
 
     /// Inline assembly.
     ///
-    /// Read the [unstable book] for the usage.
+    /// Refer to [rust by example] for a usage guide and the [reference] for
+    /// detailed information about the syntax and available options.
     ///
-    /// [unstable book]: ../../unstable-book/library-features/asm.html
-    #[unstable(
-        feature = "asm",
-        issue = "72016",
-        reason = "inline assembly is not stable enough for use and is subject to change"
-    )]
+    /// [rust by example]: https://doc.rust-lang.org/nightly/rust-by-example/unsafe/asm.html
+    /// [reference]: https://doc.rust-lang.org/nightly/reference/inline-assembly.html
+    #[stable(feature = "asm", since = "1.59.0")]
     #[rustc_builtin_macro]
     pub macro asm("assembly template", $(operands,)* $(options($(option),*))?) {
         /* compiler built-in */
     }
 
     /// Module-level inline assembly.
-    #[unstable(
-        feature = "global_asm",
-        issue = "35119",
-        reason = "`global_asm!` is not stable enough for use and is subject to change"
-    )]
+    ///
+    /// Refer to [rust by example] for a usage guide and the [reference] for
+    /// detailed information about the syntax and available options.
+    ///
+    /// [rust by example]: https://doc.rust-lang.org/nightly/rust-by-example/unsafe/asm.html
+    /// [reference]: https://doc.rust-lang.org/nightly/reference/inline-assembly.html
+    #[stable(feature = "global_asm", since = "1.59.0")]
     #[rustc_builtin_macro]
     pub macro global_asm("assembly template", $(operands,)* $(options($(option),*))?) {
         /* compiler built-in */
     }
+}
+
+// Pull in the `core_simd` crate directly into libcore. The contents of
+// `core_simd` are in a different repository: rust-lang/portable-simd.
+//
+// `core_simd` depends on libcore, but the contents of this module are
+// set up in such a way that directly pulling it here works such that the
+// crate uses this crate as its libcore.
+#[path = "../../portable-simd/crates/core_simd/src/mod.rs"]
+#[allow(missing_debug_implementations, dead_code, unsafe_op_in_unsafe_fn, unused_unsafe)]
+#[allow(rustdoc::bare_urls)]
+#[unstable(feature = "portable_simd", issue = "86656")]
+#[cfg(not(all(miri, doctest)))] // Miri does not support all SIMD intrinsics
+mod core_simd;
+
+#[doc = include_str!("../../portable-simd/crates/core_simd/src/core_simd_docs.md")]
+#[unstable(feature = "portable_simd", issue = "86656")]
+#[cfg(not(all(miri, doctest)))] // Miri does not support all SIMD intrinsics
+pub mod simd {
+    #[unstable(feature = "portable_simd", issue = "86656")]
+    pub use crate::core_simd::simd::*;
 }
 
 include!("primitive_docs.rs");

@@ -8,27 +8,28 @@ use std::sync::atomic::Ordering;
 
 crate fn provide(p: &mut Providers) {
     *p = Providers {
-        normalize_generic_arg_after_erasing_regions: |tcx, goal| {
-            debug!("normalize_generic_arg_after_erasing_regions(goal={:#?})", goal);
+        try_normalize_generic_arg_after_erasing_regions: |tcx, goal| {
+            debug!("try_normalize_generic_arg_after_erasing_regions(goal={:#?}", goal);
 
             tcx.sess
                 .perf_stats
                 .normalize_generic_arg_after_erasing_regions
                 .fetch_add(1, Ordering::Relaxed);
-            normalize_after_erasing_regions(tcx, goal)
+
+            try_normalize_after_erasing_regions(tcx, goal)
         },
-        normalize_mir_const_after_erasing_regions: |tcx, goal| {
-            normalize_after_erasing_regions(tcx, goal)
+        try_normalize_mir_const_after_erasing_regions: |tcx, goal| {
+            try_normalize_after_erasing_regions(tcx, goal)
         },
         ..*p
     };
 }
 
 #[instrument(level = "debug", skip(tcx))]
-fn normalize_after_erasing_regions<'tcx, T: TypeFoldable<'tcx> + PartialEq + Copy>(
+fn try_normalize_after_erasing_regions<'tcx, T: TypeFoldable<'tcx> + PartialEq + Copy>(
     tcx: TyCtxt<'tcx>,
     goal: ParamEnvAnd<'tcx, T>,
-) -> T {
+) -> Result<T, NoSolution> {
     let ParamEnvAnd { param_env, value } = goal;
     tcx.infer_ctxt().enter(|infcx| {
         let cause = ObligationCause::dummy();
@@ -49,14 +50,14 @@ fn normalize_after_erasing_regions<'tcx, T: TypeFoldable<'tcx> + PartialEq + Cop
                 debug_assert_eq!(normalized_value, resolved_value);
                 let erased = infcx.tcx.erase_regions(resolved_value);
                 debug_assert!(!erased.needs_infer(), "{:?}", erased);
-                erased
+                Ok(erased)
             }
-            Err(NoSolution) => bug!("could not fully normalize `{:?}`", value),
+            Err(NoSolution) => Err(NoSolution),
         }
     })
 }
 
-fn not_outlives_predicate(p: &ty::Predicate<'tcx>) -> bool {
+fn not_outlives_predicate<'tcx>(p: &ty::Predicate<'tcx>) -> bool {
     match p.kind().skip_binder() {
         ty::PredicateKind::RegionOutlives(..) | ty::PredicateKind::TypeOutlives(..) => false,
         ty::PredicateKind::Trait(..)

@@ -1,5 +1,5 @@
 //! A `MutVisitor` represents an AST modification; it accepts an AST piece and
-//! and mutates it in place. So, for instance, macro expansion is a `MutVisitor`
+//! mutates it in place. So, for instance, macro expansion is a `MutVisitor`
 //! that walks over an AST and modifies it.
 //!
 //! Note: using a `MutVisitor` (other than the `MacroExpander` `MutVisitor`) on
@@ -14,13 +14,14 @@ use crate::tokenstream::*;
 
 use rustc_data_structures::map_in_place::MapInPlace;
 use rustc_data_structures::sync::Lrc;
+use rustc_data_structures::thin_vec::ThinVec;
 use rustc_span::source_map::Spanned;
 use rustc_span::symbol::Ident;
 use rustc_span::Span;
 
 use smallvec::{smallvec, Array, SmallVec};
 use std::ops::DerefMut;
-use std::{panic, process, ptr};
+use std::{panic, ptr};
 
 pub trait ExpectOne<A: Array> {
     fn expect_one(self, err: &'static str) -> A::Item;
@@ -283,19 +284,21 @@ pub trait MutVisitor: Sized {
 
 /// Use a map-style function (`FnOnce(T) -> T`) to overwrite a `&mut T`. Useful
 /// when using a `flat_map_*` or `filter_map_*` method within a `visit_`
-/// method. Abort the program if the closure panics.
+/// method.
 //
 // No `noop_` prefix because there isn't a corresponding method in `MutVisitor`.
-pub fn visit_clobber<T, F>(t: &mut T, f: F)
-where
-    F: FnOnce(T) -> T,
-{
+pub fn visit_clobber<T: DummyAstNode>(t: &mut T, f: impl FnOnce(T) -> T) {
     unsafe {
         // Safe because `t` is used in a read-only fashion by `read()` before
         // being overwritten by `write()`.
         let old_t = ptr::read(t);
-        let new_t = panic::catch_unwind(panic::AssertUnwindSafe(|| f(old_t)))
-            .unwrap_or_else(|_| process::abort());
+        let new_t =
+            panic::catch_unwind(panic::AssertUnwindSafe(|| f(old_t))).unwrap_or_else(|err| {
+                // Set `t` to some valid but possible meaningless value,
+                // and pass the fatal error further.
+                ptr::write(t, T::dummy());
+                panic::resume_unwind(err);
+            });
         ptr::write(t, new_t);
     }
 }
@@ -1105,36 +1108,12 @@ pub fn noop_visit_fn_header<T: MutVisitor>(header: &mut FnHeader, vis: &mut T) {
     visit_unsafety(unsafety, vis);
 }
 
-// FIXME: Avoid visiting the crate as a `Mod` item, flat map only the inner items if possible,
-// or make crate visiting first class if necessary.
 pub fn noop_visit_crate<T: MutVisitor>(krate: &mut Crate, vis: &mut T) {
-    visit_clobber(krate, |Crate { attrs, items, span }| {
-        let item_vis =
-            Visibility { kind: VisibilityKind::Public, span: span.shrink_to_lo(), tokens: None };
-        let item = P(Item {
-            ident: Ident::empty(),
-            attrs,
-            id: DUMMY_NODE_ID,
-            vis: item_vis,
-            span,
-            kind: ItemKind::Mod(Unsafe::No, ModKind::Loaded(items, Inline::Yes, span)),
-            tokens: None,
-        });
-        let items = vis.flat_map_item(item);
-
-        let len = items.len();
-        if len == 0 {
-            Crate { attrs: vec![], items: vec![], span }
-        } else if len == 1 {
-            let Item { attrs, span, kind, .. } = items.into_iter().next().unwrap().into_inner();
-            match kind {
-                ItemKind::Mod(_, ModKind::Loaded(items, ..)) => Crate { attrs, items, span },
-                _ => panic!("visitor converted a module to not a module"),
-            }
-        } else {
-            panic!("a crate cannot expand to more than one item");
-        }
-    });
+    let Crate { attrs, items, span, id, is_placeholder: _ } = krate;
+    vis.visit_id(id);
+    visit_attrs(attrs, vis);
+    items.flat_map_in_place(|item| vis.flat_map_item(item));
+    vis.visit_span(span);
 }
 
 // Mutates one item into possibly many items.
@@ -1474,4 +1453,110 @@ pub fn noop_visit_vis<T: MutVisitor>(visibility: &mut Visibility, vis: &mut T) {
         }
     }
     vis.visit_span(&mut visibility.span);
+}
+
+/// Some value for the AST node that is valid but possibly meaningless.
+pub trait DummyAstNode {
+    fn dummy() -> Self;
+}
+
+impl<T> DummyAstNode for Option<T> {
+    fn dummy() -> Self {
+        Default::default()
+    }
+}
+
+impl<T: DummyAstNode + 'static> DummyAstNode for P<T> {
+    fn dummy() -> Self {
+        P(DummyAstNode::dummy())
+    }
+}
+
+impl<T> DummyAstNode for ThinVec<T> {
+    fn dummy() -> Self {
+        Default::default()
+    }
+}
+
+impl DummyAstNode for Item {
+    fn dummy() -> Self {
+        Item {
+            attrs: Default::default(),
+            id: DUMMY_NODE_ID,
+            span: Default::default(),
+            vis: Visibility {
+                kind: VisibilityKind::Public,
+                span: Default::default(),
+                tokens: Default::default(),
+            },
+            ident: Ident::empty(),
+            kind: ItemKind::ExternCrate(None),
+            tokens: Default::default(),
+        }
+    }
+}
+
+impl DummyAstNode for Expr {
+    fn dummy() -> Self {
+        Expr {
+            id: DUMMY_NODE_ID,
+            kind: ExprKind::Err,
+            span: Default::default(),
+            attrs: Default::default(),
+            tokens: Default::default(),
+        }
+    }
+}
+
+impl DummyAstNode for Ty {
+    fn dummy() -> Self {
+        Ty {
+            id: DUMMY_NODE_ID,
+            kind: TyKind::Err,
+            span: Default::default(),
+            tokens: Default::default(),
+        }
+    }
+}
+
+impl DummyAstNode for Pat {
+    fn dummy() -> Self {
+        Pat {
+            id: DUMMY_NODE_ID,
+            kind: PatKind::Wild,
+            span: Default::default(),
+            tokens: Default::default(),
+        }
+    }
+}
+
+impl DummyAstNode for Stmt {
+    fn dummy() -> Self {
+        Stmt { id: DUMMY_NODE_ID, kind: StmtKind::Empty, span: Default::default() }
+    }
+}
+
+impl DummyAstNode for Block {
+    fn dummy() -> Self {
+        Block {
+            stmts: Default::default(),
+            id: DUMMY_NODE_ID,
+            rules: BlockCheckMode::Default,
+            span: Default::default(),
+            tokens: Default::default(),
+            could_be_bare_literal: Default::default(),
+        }
+    }
+}
+
+impl DummyAstNode for Crate {
+    fn dummy() -> Self {
+        Crate {
+            attrs: Default::default(),
+            items: Default::default(),
+            span: Default::default(),
+            id: DUMMY_NODE_ID,
+            is_placeholder: Default::default(),
+        }
+    }
 }

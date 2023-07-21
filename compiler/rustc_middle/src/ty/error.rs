@@ -118,8 +118,7 @@ impl<'tcx> fmt::Display for TypeError<'tcx> {
             ArgumentMutability(_) | Mutability => write!(f, "types differ in mutability"),
             TupleSize(values) => write!(
                 f,
-                "expected a tuple with {} element{}, \
-                           found one with {} element{}",
+                "expected a tuple with {} element{}, found one with {} element{}",
                 values.expected,
                 pluralize!(values.expected),
                 values.found,
@@ -127,8 +126,7 @@ impl<'tcx> fmt::Display for TypeError<'tcx> {
             ),
             FixedArraySize(values) => write!(
                 f,
-                "expected an array with a fixed size of {} element{}, \
-                           found one with {} element{}",
+                "expected an array with a fixed size of {} element{}, found one with {} element{}",
                 values.expected,
                 pluralize!(values.expected),
                 values.found,
@@ -521,7 +519,7 @@ impl<T> Trait<T> for X {
                             proj_ty,
                             values,
                             body_owner_def_id,
-                            &cause.code,
+                            cause.code(),
                         );
                     }
                     (_, ty::Projection(proj_ty)) => {
@@ -777,9 +775,7 @@ fn foo(&self) -> Self::T { String::new() }
         if let ty::Opaque(def_id, _) = *proj_ty.self_ty().kind() {
             let opaque_local_def_id = def_id.as_local();
             let opaque_hir_ty = if let Some(opaque_local_def_id) = opaque_local_def_id {
-                let hir = self.hir();
-                let opaque_hir_id = hir.local_def_id_to_hir_id(opaque_local_def_id);
-                match &hir.expect_item(opaque_hir_id).kind {
+                match &self.hir().expect_item(opaque_local_def_id).kind {
                     hir::ItemKind::OpaqueTy(opaque_hir_ty) => opaque_hir_ty,
                     _ => bug!("The HirId comes from a `ty::Opaque`"),
                 }

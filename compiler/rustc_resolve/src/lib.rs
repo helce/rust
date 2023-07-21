@@ -13,8 +13,6 @@
 #![feature(drain_filter)]
 #![feature(bool_to_option)]
 #![feature(crate_visibility_modifier)]
-#![cfg_attr(bootstrap, feature(format_args_capture))]
-#![feature(iter_zip)]
 #![feature(let_else)]
 #![feature(never_type)]
 #![feature(nll)]
@@ -70,7 +68,7 @@ use smallvec::{smallvec, SmallVec};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::ControlFlow;
-use std::{cmp, fmt, iter, ptr};
+use std::{cmp, fmt, iter, mem, ptr};
 use tracing::debug;
 
 use diagnostics::{extend_span_to_previous_binding, find_span_of_binding_until_next_binding};
@@ -1396,7 +1394,7 @@ impl<'a> Resolver<'a> {
                 .chain(features.declared_lang_features.iter().map(|(feat, ..)| *feat))
                 .collect(),
             lint_buffer: LintBuffer::default(),
-            next_node_id: NodeId::from_u32(1),
+            next_node_id: CRATE_NODE_ID,
             node_id_to_def_id,
             def_id_to_node_id,
             placeholder_field_indices: Default::default(),
@@ -1430,13 +1428,9 @@ impl<'a> Resolver<'a> {
     }
 
     pub fn next_node_id(&mut self) -> NodeId {
-        let next = self
-            .next_node_id
-            .as_usize()
-            .checked_add(1)
-            .expect("input too large; ran out of NodeIds");
-        self.next_node_id = ast::NodeId::from_usize(next);
-        self.next_node_id
+        let next =
+            self.next_node_id.as_u32().checked_add(1).expect("input too large; ran out of NodeIds");
+        mem::replace(&mut self.next_node_id, ast::NodeId::from_u32(next))
     }
 
     pub fn lint_buffer(&mut self) -> &mut LintBuffer {
@@ -3288,7 +3282,9 @@ impl<'a> Resolver<'a> {
                 Some(binding)
             } else {
                 let crate_id = if !speculative {
-                    self.crate_loader.process_path_extern(ident.name, ident.span)
+                    let Some(crate_id) =
+                        self.crate_loader.process_path_extern(ident.name, ident.span) else { return Some(self.dummy_binding); };
+                    crate_id
                 } else {
                     self.crate_loader.maybe_process_path_extern(ident.name)?
                 };
@@ -3422,27 +3418,21 @@ impl<'a> Resolver<'a> {
                     return v.clone();
                 }
 
-                let parse_attrs = || {
-                    let attrs = self.cstore().item_attrs(def_id, self.session);
-                    let attr =
-                        attrs.iter().find(|a| a.has_name(sym::rustc_legacy_const_generics))?;
-                    let mut ret = vec![];
-                    for meta in attr.meta_item_list()? {
-                        match meta.literal()?.kind {
-                            LitKind::Int(a, _) => {
-                                ret.push(a as usize);
-                            }
-                            _ => panic!("invalid arg index"),
-                        }
+                let attr = self
+                    .cstore()
+                    .item_attrs_untracked(def_id, self.session)
+                    .into_iter()
+                    .find(|a| a.has_name(sym::rustc_legacy_const_generics))?;
+                let mut ret = Vec::new();
+                for meta in attr.meta_item_list()? {
+                    match meta.literal()?.kind {
+                        LitKind::Int(a, _) => ret.push(a as usize),
+                        _ => panic!("invalid arg index"),
                     }
-                    Some(ret)
-                };
-
-                // Cache the lookup to avoid parsing attributes for an iterm
-                // multiple times.
-                let ret = parse_attrs();
-                self.legacy_const_generic_args.insert(def_id, ret.clone());
-                return ret;
+                }
+                // Cache the lookup to avoid parsing attributes for an iterm multiple times.
+                self.legacy_const_generic_args.insert(def_id, Some(ret.clone()));
+                return Some(ret);
             }
         }
         None
@@ -3484,7 +3474,7 @@ fn names_to_string(names: &[Symbol]) -> String {
         if Ident::with_dummy_span(*name).is_raw_guess() {
             result.push_str("r#");
         }
-        result.push_str(&name.as_str());
+        result.push_str(name.as_str());
     }
     result
 }

@@ -498,7 +498,7 @@ fn record_accesses<'a, 'tcx: 'a>(
 /// the user's terminal with thousands of lines of type-name.
 ///
 /// If the type name is longer than before+after, it will be written to a file.
-fn shrunk_instance_name(
+fn shrunk_instance_name<'tcx>(
     tcx: TyCtxt<'tcx>,
     instance: &Instance<'tcx>,
     before: usize,
@@ -686,15 +686,6 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirNeighborCollector<'a, 'tcx> {
                         }
                     }
                     _ => bug!(),
-                }
-            }
-            mir::Rvalue::NullaryOp(mir::NullOp::Box, _) => {
-                let tcx = self.tcx;
-                let exchange_malloc_fn_def_id =
-                    tcx.require_lang_item(LangItem::ExchangeMalloc, None);
-                let instance = Instance::mono(tcx, exchange_malloc_fn_def_id);
-                if should_codegen_locally(tcx, &instance) {
-                    self.output.push(create_fn_mono_item(self.tcx, instance, span));
                 }
             }
             mir::Rvalue::ThreadLocalRef(def_id) => {
@@ -1145,7 +1136,7 @@ struct RootCollector<'a, 'tcx> {
     entry_fn: Option<(DefId, EntryFnType)>,
 }
 
-impl ItemLikeVisitor<'v> for RootCollector<'_, 'v> {
+impl<'v> ItemLikeVisitor<'v> for RootCollector<'_, 'v> {
     fn visit_item(&mut self, item: &'v hir::Item<'v>) {
         match item.kind {
             hir::ItemKind::ExternCrate(..)
@@ -1225,7 +1216,7 @@ impl ItemLikeVisitor<'v> for RootCollector<'_, 'v> {
     fn visit_foreign_item(&mut self, _foreign_item: &'v hir::ForeignItem<'v>) {}
 }
 
-impl RootCollector<'_, 'v> {
+impl<'v> RootCollector<'_, 'v> {
     fn is_root(&self, def_id: LocalDefId) -> bool {
         !item_requires_monomorphization(self.tcx, def_id)
             && match self.mode {

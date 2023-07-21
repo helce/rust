@@ -29,6 +29,7 @@ declare_clippy_lint! {
     ///     fn method() {}
     /// }
     /// ```
+    #[clippy::version = "1.40.0"]
     pub UNUSED_SELF,
     pedantic,
     "methods that contain a `self` argument but don't use it"
@@ -41,7 +42,7 @@ impl<'tcx> LateLintPass<'tcx> for UnusedSelf {
         if impl_item.span.from_expansion() {
             return;
         }
-        let parent = cx.tcx.hir().get_parent_item(impl_item.hir_id());
+        let parent = cx.tcx.hir().get_parent_did(impl_item.hir_id());
         let parent_item = cx.tcx.hir().expect_item(parent);
         let assoc_item = cx.tcx.associated_item(impl_item.def_id);
         if_chain! {

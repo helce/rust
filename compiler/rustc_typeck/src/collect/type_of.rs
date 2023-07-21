@@ -13,7 +13,7 @@ use rustc_span::symbol::Ident;
 use rustc_span::{Span, DUMMY_SP};
 
 use super::ItemCtxt;
-use super::{bad_placeholder_type, is_suggestable_infer_ty};
+use super::{bad_placeholder, is_suggestable_infer_ty};
 
 /// Computes the relevant generic parameter for a potential generic const argument.
 ///
@@ -172,7 +172,7 @@ pub(super) fn opt_const_param_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<
                 // We've encountered an `AnonConst` in some path, so we need to
                 // figure out which generic parameter it corresponds to and return
                 // the relevant type.
-                let (arg_index, segment) = path
+                let filtered = path
                     .segments
                     .iter()
                     .filter_map(|seg| seg.args.map(|args| (args.args, seg)))
@@ -181,10 +181,17 @@ pub(super) fn opt_const_param_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<
                             .filter(|arg| arg.is_const())
                             .position(|arg| arg.id() == hir_id)
                             .map(|index| (index, seg))
-                    })
-                    .unwrap_or_else(|| {
-                        bug!("no arg matching AnonConst in path");
                     });
+                let (arg_index, segment) = match filtered {
+                    None => {
+                        tcx.sess.delay_span_bug(
+                            tcx.def_span(def_id),
+                            "no arg matching AnonConst in path",
+                        );
+                        return None;
+                    }
+                    Some(inner) => inner,
+                };
 
                 // Try to use the segment resolution if it is valid, otherwise we
                 // default to the path resolution.
@@ -387,13 +394,13 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                     let substs = InternalSubsts::identity_for_item(tcx, def_id.to_def_id());
                     tcx.mk_adt(def, substs)
                 }
-                ItemKind::OpaqueTy(OpaqueTy { impl_trait_fn: None, .. }) => {
+                ItemKind::OpaqueTy(OpaqueTy { origin: hir::OpaqueTyOrigin::TyAlias, .. }) => {
                     find_opaque_ty_constraints(tcx, def_id)
                 }
                 // Opaque types desugared from `impl Trait`.
-                ItemKind::OpaqueTy(OpaqueTy { impl_trait_fn: Some(owner), .. }) => {
+                ItemKind::OpaqueTy(OpaqueTy { origin: hir::OpaqueTyOrigin::FnReturn(owner) | hir::OpaqueTyOrigin::AsyncFn(owner), .. }) => {
                     let concrete_ty = tcx
-                        .mir_borrowck(owner.expect_local())
+                        .mir_borrowck(owner)
                         .concrete_opaque_types
                         .get_value_matching(|(key, _)| key.def_id == def_id.to_def_id())
                         .copied()
@@ -406,7 +413,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                                 ),
                             );
                             if let Some(ErrorReported) =
-                                tcx.typeck(owner.expect_local()).tainted_by_errors
+                                tcx.typeck(owner).tainted_by_errors
                             {
                                 // Some error in the
                                 // owner fn prevented us from populating
@@ -463,14 +470,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
 
         Node::Field(field) => icx.to_ty(field.ty),
 
-        Node::Expr(&Expr { kind: ExprKind::Closure(.., gen), .. }) => {
-            let substs = InternalSubsts::identity_for_item(tcx, def_id.to_def_id());
-            if let Some(movability) = gen {
-                tcx.mk_generator(def_id.to_def_id(), substs, movability)
-            } else {
-                tcx.mk_closure(def_id.to_def_id(), substs)
-            }
-        }
+        Node::Expr(&Expr { kind: ExprKind::Closure(..), .. }) => tcx.typeck(def_id).node_type(hir_id),
 
         Node::AnonConst(_) if let Some(param) = tcx.opt_const_param_of(def_id) => {
             // We defer to `type_of` of the corresponding parameter
@@ -483,7 +483,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
             match parent_node {
                 Node::Ty(&Ty { kind: TyKind::Array(_, ref constant), .. })
                 | Node::Expr(&Expr { kind: ExprKind::Repeat(_, ref constant), .. })
-                    if constant.hir_id == hir_id =>
+                    if constant.hir_id() == hir_id =>
                 {
                     tcx.types.usize
                 }
@@ -724,7 +724,7 @@ fn infer_placeholder_type<'a>(
         }
     }
 
-    impl TypeFolder<'tcx> for MakeNameable<'tcx> {
+    impl<'tcx> TypeFolder<'tcx> for MakeNameable<'tcx> {
         fn tcx(&self) -> TyCtxt<'tcx> {
             self.tcx
         }
@@ -781,7 +781,7 @@ fn infer_placeholder_type<'a>(
             err.emit();
         }
         None => {
-            let mut diag = bad_placeholder_type(tcx, vec![span], kind);
+            let mut diag = bad_placeholder(tcx, "type", vec![span], kind);
 
             if !ty.references_error() {
                 let mut mk_nameable = MakeNameable::new(tcx);
