@@ -165,8 +165,6 @@ fn windows_exe_resolver() {
         io::ErrorKind::InvalidInput
     );
 
-    /* FIXME: fix and re-enable these tests before making changes to the resolver.
-
     /*
     Some of the following tests may need to be changed if you are deliberately
     changing the behaviour of `resolve_exe`.

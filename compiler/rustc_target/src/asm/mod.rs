@@ -338,11 +338,11 @@ impl InlineAsmReg {
             InlineAsmArch::Bpf => {
                 Self::Bpf(BpfInlineAsmReg::parse(arch, has_feature, target, name)?)
             }
+            InlineAsmArch::E2k64 => {
+                Self::E2k64(E2k64InlineAsmReg::parse(arch, has_feature, target, name)?)
+            }
             InlineAsmArch::Avr => {
                 Self::Avr(AvrInlineAsmReg::parse(arch, has_feature, target, name)?)
-            }
-            InlineAsmArch::E2k64 => {
-                Self::E2k64(E2k64InlineAsmReg::parse(arch, has_feature, target, &name)?)
             }
         })
     }
