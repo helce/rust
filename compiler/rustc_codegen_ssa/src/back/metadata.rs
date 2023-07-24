@@ -119,6 +119,7 @@ fn create_object_file(sess: &Session) -> Option<write::Object> {
         "riscv32" => Architecture::Riscv32,
         "riscv64" => Architecture::Riscv64,
         "sparc64" => Architecture::Sparc64,
+        "e2k64" => Architecture::E2k64,
         // Unsupported architecture.
         _ => return None,
     };
@@ -148,6 +149,11 @@ fn create_object_file(sess: &Session) -> Option<write::Object> {
             // that the `+d` target feature represents whether the double
             // float abi is enabled.
             let e_flags = elf::EF_RISCV_RVC | elf::EF_RISCV_FLOAT_ABI_DOUBLE;
+            file.flags = FileFlags::Elf { e_flags };
+        }
+        Architecture::E2k64 => {
+            // elbrus-v1(generic) was blocked in binutils, so set flag for elbrus-v2
+            let e_flags = elf::EF_E2K_MACH_EV2;
             file.flags = FileFlags::Elf { e_flags };
         }
         _ => {}
