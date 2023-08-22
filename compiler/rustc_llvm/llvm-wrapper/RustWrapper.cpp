@@ -76,6 +76,10 @@ extern "C" void LLVMRustInstallFatalErrorHandler() {
   install_fatal_error_handler(FatalErrorHandler);
 }
 
+extern "C" void LLVMRustDisableSystemDialogsOnCrash() {
+  sys::DisableSystemDialogsOnCrash();
+}
+
 extern "C" char *LLVMRustGetLastError(void) {
   char *Ret = LastError;
   LastError = nullptr;
@@ -220,6 +224,10 @@ static Attribute::AttrKind fromRust(LLVMRustAttribute Kind) {
     return Attribute::StackProtectStrong;
   case StackProtect:
     return Attribute::StackProtect;
+  case NoUndef:
+    return Attribute::NoUndef;
+  case SanitizeMemTag:
+    return Attribute::SanitizeMemTag;
   }
   report_fatal_error("bad AttributeKind");
 }
@@ -326,6 +334,17 @@ extern "C" void LLVMRustAddStructRetAttr(LLVMValueRef Fn, unsigned Index,
   Function *F = unwrap<Function>(Fn);
   Attribute Attr = Attribute::getWithStructRetType(F->getContext(), unwrap(Ty));
   AddAttribute(F, Index, Attr);
+}
+
+extern "C" void LLVMRustEmitUWTableAttr(LLVMValueRef Fn, bool Async) {
+  Function *F = unwrap<Function>(Fn);
+#if LLVM_VERSION_LT(15, 0)
+  Attribute Attr = Attribute::get(F->getContext(), Attribute::UWTable);
+#else
+  Attribute Attr = Attribute::getWithUWTableKind(
+      F->getContext(), Async ? UWTableKind::Async : UWTableKind::Sync);
+#endif
+  AddAttribute(F, AttributeList::AttrIndex::FunctionIndex, Attr);
 }
 
 extern "C" void LLVMRustAddFunctionAttrStringValue(LLVMValueRef Fn,
@@ -722,9 +741,12 @@ extern "C" bool LLVMRustIsRustLLVM() {
 #endif
 }
 
-extern "C" void LLVMRustAddModuleFlag(LLVMModuleRef M, const char *Name,
-                                      uint32_t Value) {
-  unwrap(M)->addModuleFlag(Module::Warning, Name, Value);
+extern "C" void LLVMRustAddModuleFlag(
+    LLVMModuleRef M,
+    Module::ModFlagBehavior MergeBehavior,
+    const char *Name,
+    uint32_t Value) {
+  unwrap(M)->addModuleFlag(MergeBehavior, Name, Value);
 }
 
 extern "C" LLVMValueRef LLVMRustMetadataAsValue(LLVMContextRef C, LLVMMetadataRef MD) {

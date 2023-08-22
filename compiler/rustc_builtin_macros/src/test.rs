@@ -6,6 +6,7 @@ use rustc_ast as ast;
 use rustc_ast::attr;
 use rustc_ast::ptr::P;
 use rustc_ast_pretty::pprust;
+use rustc_errors::Applicability;
 use rustc_expand::base::*;
 use rustc_session::Session;
 use rustc_span::symbol::{sym, Ident, Symbol};
@@ -102,11 +103,21 @@ pub fn expand_test_or_bench(
         }
     };
 
-    if let ast::ItemKind::MacCall(_) = item.kind {
-        cx.sess.parse_sess.span_diagnostic.span_warn(
-            item.span,
-            "`#[test]` attribute should not be used on macros. Use `#[cfg(test)]` instead.",
-        );
+    // Note: non-associated fn items are already handled by `expand_test_or_bench`
+    if !matches!(item.kind, ast::ItemKind::Fn(_)) {
+        let diag = &cx.sess.parse_sess.span_diagnostic;
+        let msg = "the `#[test]` attribute may only be used on a non-associated function";
+        let mut err = match item.kind {
+            // These were a warning before #92959 and need to continue being that to avoid breaking
+            // stable user code (#94508).
+            ast::ItemKind::MacCall(_) => diag.struct_span_warn(attr_sp, msg),
+            _ => diag.struct_span_err(attr_sp, msg),
+        };
+        err.span_label(attr_sp, "the `#[test]` macro causes a a function to be run on a test and has no effect on non-functions")
+            .span_label(item.span, format!("expected a non-associated function, found {} {}", item.kind.article(), item.kind.descr()))
+            .span_suggestion(attr_sp, "replace with conditional compilation to make the item only exist when tests are being run", String::from("#[cfg(test)]"), Applicability::MaybeIncorrect)
+            .emit();
+
         return vec![Annotatable::Item(item)];
     }
 
@@ -252,11 +263,6 @@ pub fn expand_test_or_bench(
                                         "ignore",
                                         cx.expr_bool(sp, should_ignore(&cx.sess, &item)),
                                     ),
-                                    // allow_fail: true | false
-                                    field(
-                                        "allow_fail",
-                                        cx.expr_bool(sp, should_fail(&cx.sess, &item)),
-                                    ),
                                     // compile_fail: true | false
                                     field("compile_fail", cx.expr_bool(sp, false)),
                                     // no_run: true | false
@@ -357,10 +363,6 @@ enum ShouldPanic {
 
 fn should_ignore(sess: &Session, i: &ast::Item) -> bool {
     sess.contains_name(&i.attrs, sym::ignore)
-}
-
-fn should_fail(sess: &Session, i: &ast::Item) -> bool {
-    sess.contains_name(&i.attrs, sym::allow_fail)
 }
 
 fn should_panic(cx: &ExtCtxt<'_>, i: &ast::Item) -> ShouldPanic {
@@ -475,7 +477,7 @@ fn has_test_signature(cx: &ExtCtxt<'_>, i: &ast::Item) -> bool {
             (false, _) => true,
         }
     } else {
-        sd.span_err(i.span, "only functions may be used as tests");
+        // should be unreachable because `is_test_fn_item` should catch all non-fn items
         false
     }
 }

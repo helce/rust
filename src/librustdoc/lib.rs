@@ -5,6 +5,7 @@
 #![feature(rustc_private)]
 #![feature(array_methods)]
 #![feature(assert_matches)]
+#![feature(bool_to_option)]
 #![feature(box_patterns)]
 #![feature(control_flow_enum)]
 #![feature(box_syntax)]
@@ -16,8 +17,11 @@
 #![feature(once_cell)]
 #![feature(type_ascription)]
 #![feature(iter_intersperse)]
+#![feature(type_alias_impl_trait)]
+#![feature(generic_associated_types)]
 #![recursion_limit = "256"]
 #![warn(rustc::internal)]
+#![allow(clippy::collapsible_if, clippy::collapsible_else_if)]
 
 #[macro_use]
 extern crate tracing;
@@ -70,7 +74,8 @@ extern crate tikv_jemalloc_sys;
 use tikv_jemalloc_sys as jemalloc_sys;
 
 use std::default::Default;
-use std::env;
+use std::env::{self, VarError};
+use std::io;
 use std::process;
 
 use rustc_driver::{abort_on_err, describe_lints};
@@ -82,6 +87,7 @@ use rustc_session::getopts;
 use rustc_session::{early_error, early_warn};
 
 use crate::clean::utils::DOC_RUST_LANG_ORG_CHANNEL;
+use crate::passes::collect_intra_doc_links;
 
 /// A macro to create a FxHashMap.
 ///
@@ -177,47 +183,20 @@ pub fn main() {
 }
 
 fn init_logging() {
-    use std::io;
-
-    // FIXME remove these and use winapi 0.3 instead
-    // Duplicates: bootstrap/compile.rs, librustc_errors/emitter.rs, rustc_driver/lib.rs
-    #[cfg(unix)]
-    fn stdout_isatty() -> bool {
-        extern crate libc;
-        unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
-    }
-
-    #[cfg(windows)]
-    fn stdout_isatty() -> bool {
-        extern crate winapi;
-        use winapi::um::consoleapi::GetConsoleMode;
-        use winapi::um::processenv::GetStdHandle;
-        use winapi::um::winbase::STD_OUTPUT_HANDLE;
-
-        unsafe {
-            let handle = GetStdHandle(STD_OUTPUT_HANDLE);
-            let mut out = 0;
-            GetConsoleMode(handle, &mut out) != 0
-        }
-    }
-
-    let color_logs = match std::env::var("RUSTDOC_LOG_COLOR") {
-        Ok(value) => match value.as_ref() {
-            "always" => true,
-            "never" => false,
-            "auto" => stdout_isatty(),
-            _ => early_error(
-                ErrorOutputType::default(),
-                &format!(
-                    "invalid log color value '{}': expected one of always, never, or auto",
-                    value
-                ),
-            ),
-        },
-        Err(std::env::VarError::NotPresent) => stdout_isatty(),
-        Err(std::env::VarError::NotUnicode(_value)) => early_error(
+    let color_logs = match std::env::var("RUSTDOC_LOG_COLOR").as_deref() {
+        Ok("always") => true,
+        Ok("never") => false,
+        Ok("auto") | Err(VarError::NotPresent) => atty::is(atty::Stream::Stdout),
+        Ok(value) => early_error(
             ErrorOutputType::default(),
-            "non-Unicode log color value: expected one of always, never, or auto",
+            &format!("invalid log color value '{}': expected one of always, never, or auto", value),
+        ),
+        Err(VarError::NotUnicode(value)) => early_error(
+            ErrorOutputType::default(),
+            &format!(
+                "invalid log color value '{}': expected one of always, never, or auto",
+                value.to_string_lossy()
+            ),
         ),
     };
     let filter = tracing_subscriber::EnvFilter::from_env("RUSTDOC_LOG");
@@ -617,6 +596,9 @@ fn opts() -> Vec<RustcOptGroup> {
                 "collect function call information for functions from the target crate",
             )
         }),
+        unstable("scrape-tests", |o| {
+            o.optflag("", "scrape-tests", "Include test code when scraping examples")
+        }),
         unstable("with-examples", |o| {
             o.optmulti(
                 "",
@@ -709,10 +691,9 @@ fn main_args(at_args: &[String]) -> MainResult {
         Ok(opts) => opts,
         Err(code) => return if code == 0 { Ok(()) } else { Err(ErrorReported) },
     };
-    rustc_interface::util::setup_callbacks_and_run_in_thread_pool_with_globals(
+    rustc_interface::util::run_in_thread_pool_with_globals(
         options.edition,
         1, // this runs single-threaded, even in a parallel compiler
-        &None,
         move || main_options(options),
     )
 }
@@ -798,7 +779,15 @@ fn main_options(options: config::Options) -> MainResult {
             // We need to hold on to the complete resolver, so we cause everything to be
             // cloned for the analysis passes to use. Suboptimal, but necessary in the
             // current architecture.
-            let resolver = core::create_resolver(externs, queries, sess);
+            // FIXME(#83761): Resolver cloning can lead to inconsistencies between data in the
+            // two copies because one of the copies can be modified after `TyCtxt` construction.
+            let (resolver, resolver_caches) = {
+                let (krate, resolver, _) = &*abort_on_err(queries.expansion(), sess).peek();
+                let resolver_caches = resolver.borrow_mut().access(|resolver| {
+                    collect_intra_doc_links::early_resolve_intra_doc_links(resolver, krate, externs)
+                });
+                (resolver.clone(), resolver_caches)
+            };
 
             if sess.diagnostic().has_errors_or_lint_errors() {
                 sess.fatal("Compilation failed, aborting rustdoc");
@@ -811,6 +800,7 @@ fn main_options(options: config::Options) -> MainResult {
                     core::run_global_ctxt(
                         tcx,
                         resolver,
+                        resolver_caches,
                         show_coverage,
                         render_options,
                         output_format,

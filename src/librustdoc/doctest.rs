@@ -8,6 +8,7 @@ use rustc_hir::intravisit;
 use rustc_hir::{HirId, CRATE_HIR_ID};
 use rustc_interface::interface;
 use rustc_middle::hir::map::Map;
+use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::config::{self, CrateType, ErrorOutputType};
 use rustc_session::{lint, DiagnosticOutput, Session};
@@ -90,13 +91,13 @@ crate fn run(options: RustdocOptions) -> Result<(), ErrorReported> {
     let config = interface::Config {
         opts: sessopts,
         crate_cfg: interface::parse_cfgspecs(cfgs),
+        crate_check_cfg: interface::parse_check_cfg(vec![]),
         input,
         input_path: None,
         output_file: None,
         output_dir: None,
         file_loader: None,
         diagnostic_output: DiagnosticOutput::Default,
-        stderr: None,
         lint_caps,
         parse_sess_created: None,
         register_lints: Some(box crate::lint::register_lints),
@@ -658,7 +659,7 @@ crate fn make_test(
     } else {
         let returns_result = everything_else.trim_end().ends_with("(())");
         // Give each doctest main function a unique name.
-        // This is for example needed for the tooling around `-Z instrument-coverage`.
+        // This is for example needed for the tooling around `-C instrument-coverage`.
         let inner_fn_name = if let Some(test_id) = test_id {
             format!("_doctest_main_{}", test_id)
         } else {
@@ -683,7 +684,7 @@ crate fn make_test(
         };
         // Note on newlines: We insert a line/newline *before*, and *after*
         // the doctest and adjust the `line_offset` accordingly.
-        // In the case of `-Z instrument-coverage`, this means that the generated
+        // In the case of `-C instrument-coverage`, this means that the generated
         // inner `main` function spans from the doctest opening codeblock to the
         // closing one. For example
         // /// ``` <- start of the inner main
@@ -950,10 +951,11 @@ impl Tester for Collector {
                 },
                 // compiler failures are test failures
                 should_panic: test::ShouldPanic::No,
-                allow_fail: config.allow_fail,
                 compile_fail: config.compile_fail,
                 no_run,
                 test_type: test::TestType::DocTest,
+                #[cfg(bootstrap)]
+                allow_fail: false,
             },
             testfn: test::DynTestFn(box move || {
                 let report_unused_externs = |uext| {
@@ -1154,10 +1156,10 @@ impl<'a, 'hir, 'tcx> HirCollector<'a, 'hir, 'tcx> {
 }
 
 impl<'a, 'hir, 'tcx> intravisit::Visitor<'hir> for HirCollector<'a, 'hir, 'tcx> {
-    type Map = Map<'hir>;
+    type NestedFilter = nested_filter::All;
 
-    fn nested_visit_map(&mut self) -> intravisit::NestedVisitorMap<Self::Map> {
-        intravisit::NestedVisitorMap::All(self.map)
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.map
     }
 
     fn visit_item(&mut self, item: &'hir hir::Item<'_>) {

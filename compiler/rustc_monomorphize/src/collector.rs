@@ -573,7 +573,7 @@ fn check_type_length_limit<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) {
     let type_length = instance
         .substs
         .iter()
-        .flat_map(|arg| arg.walk(tcx))
+        .flat_map(|arg| arg.walk())
         .filter(|arg| match arg.unpack() {
             GenericArgKind::Type(_) | GenericArgKind::Const(_) => true,
             GenericArgKind::Lifetime(_) => false,
@@ -709,7 +709,7 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirNeighborCollector<'a, 'tcx> {
         let literal = self.monomorphize(constant.literal);
         let val = match literal {
             mir::ConstantKind::Val(val, _) => val,
-            mir::ConstantKind::Ty(ct) => match ct.val {
+            mir::ConstantKind::Ty(ct) => match ct.val() {
                 ty::ConstKind::Value(val) => val,
                 ty::ConstKind::Unevaluated(ct) => {
                     let param_env = ty::ParamEnv::reveal_all();
@@ -731,13 +731,13 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirNeighborCollector<'a, 'tcx> {
         self.visit_ty(literal.ty(), TyContext::Location(location));
     }
 
-    fn visit_const(&mut self, constant: &&'tcx ty::Const<'tcx>, location: Location) {
-        debug!("visiting const {:?} @ {:?}", *constant, location);
+    fn visit_const(&mut self, constant: ty::Const<'tcx>, location: Location) {
+        debug!("visiting const {:?} @ {:?}", constant, location);
 
-        let substituted_constant = self.monomorphize(*constant);
+        let substituted_constant = self.monomorphize(constant);
         let param_env = ty::ParamEnv::reveal_all();
 
-        match substituted_constant.val {
+        match substituted_constant.val() {
             ty::ConstKind::Value(val) => collect_const_value(self.tcx, val, self.output),
             ty::ConstKind::Unevaluated(unevaluated) => {
                 match self.tcx.const_eval_resolve(param_env, unevaluated, None) {
@@ -807,10 +807,18 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirNeighborCollector<'a, 'tcx> {
                     self.output.push(create_fn_mono_item(tcx, instance, source));
                 }
             }
+            mir::TerminatorKind::Abort { .. } => {
+                let instance = Instance::mono(
+                    tcx,
+                    tcx.require_lang_item(LangItem::PanicNoUnwind, Some(source)),
+                );
+                if should_codegen_locally(tcx, &instance) {
+                    self.output.push(create_fn_mono_item(tcx, instance, source));
+                }
+            }
             mir::TerminatorKind::Goto { .. }
             | mir::TerminatorKind::SwitchInt { .. }
             | mir::TerminatorKind::Resume
-            | mir::TerminatorKind::Abort
             | mir::TerminatorKind::Return
             | mir::TerminatorKind::Unreachable => {}
             mir::TerminatorKind::GeneratorDrop
@@ -939,9 +947,7 @@ fn visit_instance_use<'tcx>(
 /// Returns `true` if we should codegen an instance in the local crate, or returns `false` if we
 /// can just link to the upstream crate and therefore don't need a mono item.
 fn should_codegen_locally<'tcx>(tcx: TyCtxt<'tcx>, instance: &Instance<'tcx>) -> bool {
-    let def_id = if let Some(def_id) = instance.def.def_id_if_not_guaranteed_local_codegen() {
-        def_id
-    } else {
+    let Some(def_id) = instance.def.def_id_if_not_guaranteed_local_codegen() else {
         return true;
     };
 
@@ -1034,7 +1040,7 @@ fn find_vtable_types_for_unsizing<'tcx>(
     match (&source_ty.kind(), &target_ty.kind()) {
         (&ty::Ref(_, a, _), &ty::Ref(_, b, _) | &ty::RawPtr(ty::TypeAndMut { ty: b, .. }))
         | (&ty::RawPtr(ty::TypeAndMut { ty: a, .. }), &ty::RawPtr(ty::TypeAndMut { ty: b, .. })) => {
-            ptr_vtable(a, b)
+            ptr_vtable(*a, *b)
         }
         (&ty::Adt(def_a, _), &ty::Adt(def_b, _)) if def_a.is_box() && def_b.is_box() => {
             ptr_vtable(source_ty.boxed_ty(), target_ty.boxed_ty())
@@ -1310,10 +1316,9 @@ fn create_mono_items_for_default_impls<'tcx>(
             if let Some(trait_ref) = tcx.impl_trait_ref(item.def_id) {
                 let param_env = ty::ParamEnv::reveal_all();
                 let trait_ref = tcx.normalize_erasing_regions(param_env, trait_ref);
-                let overridden_methods: FxHashSet<_> =
-                    impl_.items.iter().map(|iiref| iiref.ident.normalize_to_macros_2_0()).collect();
+                let overridden_methods = tcx.impl_item_implementor_ids(item.def_id);
                 for method in tcx.provided_trait_methods(trait_ref.def_id) {
-                    if overridden_methods.contains(&method.ident.normalize_to_macros_2_0()) {
+                    if overridden_methods.contains_key(&method.def_id) {
                         continue;
                     }
 

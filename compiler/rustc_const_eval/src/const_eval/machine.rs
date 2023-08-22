@@ -1,3 +1,5 @@
+use rustc_errors::ErrorReported;
+use rustc_hir::def::DefKind;
 use rustc_middle::mir;
 use rustc_middle::ty::{self, Ty};
 use std::borrow::Borrow;
@@ -243,6 +245,12 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir,
             ty::InstanceDef::Item(def) => {
                 if ecx.tcx.is_ctfe_mir_available(def.did) {
                     Ok(ecx.tcx.mir_for_ctfe_opt_const_arg(def))
+                } else if ecx.tcx.def_kind(def.did) == DefKind::AssocConst {
+                    ecx.tcx.sess.delay_span_bug(
+                        rustc_span::DUMMY_SP,
+                        "This is likely a const item that is missing from its impl",
+                    );
+                    throw_inval!(AlreadyReported(ErrorReported {}));
                 } else {
                     let path = ecx.tcx.def_path_str(def.did);
                     Err(ConstEvalErrKind::NeedsRfc(format!("calling extern function `{}`", path))
@@ -346,6 +354,33 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir,
                     interpret::MemoryKind::Machine(MemoryKind::Heap),
                 )?;
                 ecx.write_pointer(ptr, dest)?;
+            }
+            sym::const_deallocate => {
+                let ptr = ecx.read_pointer(&args[0])?;
+                let size = ecx.read_scalar(&args[1])?.to_machine_usize(ecx)?;
+                let align = ecx.read_scalar(&args[2])?.to_machine_usize(ecx)?;
+
+                let size = Size::from_bytes(size);
+                let align = match Align::from_bytes(align) {
+                    Ok(a) => a,
+                    Err(err) => throw_ub_format!("align has to be a power of 2, {}", err),
+                };
+
+                // If an allocation is created in an another const,
+                // we don't deallocate it.
+                let (alloc_id, _, _) = ecx.memory.ptr_get_alloc(ptr)?;
+                let is_allocated_in_another_const = matches!(
+                    ecx.tcx.get_global_alloc(alloc_id),
+                    Some(interpret::GlobalAlloc::Memory(_))
+                );
+
+                if !is_allocated_in_another_const {
+                    ecx.memory.deallocate(
+                        ptr,
+                        Some((size, align)),
+                        interpret::MemoryKind::Machine(MemoryKind::Heap),
+                    )?;
+                }
             }
             _ => {
                 return Err(ConstEvalErrKind::NeedsRfc(format!(

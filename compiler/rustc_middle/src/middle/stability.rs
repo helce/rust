@@ -29,7 +29,7 @@ pub enum StabilityLevel {
 }
 
 /// An entry in the `depr_map`.
-#[derive(Clone, HashStable, Debug)]
+#[derive(Copy, Clone, HashStable, Debug)]
 pub struct DeprecationEntry {
     /// The metadata of the attribute associated with this entry.
     pub attr: Deprecation,
@@ -198,7 +198,7 @@ fn deprecation_message(
     } else {
         let since = since.as_ref().map(Symbol::as_str);
 
-        if since.as_deref() == Some("TBD") {
+        if since == Some("TBD") {
             format!("use of {} `{}` that will be deprecated in a future Rust version", kind, path)
         } else {
             format!(
@@ -348,7 +348,7 @@ impl<'tcx> TyCtxt<'tcx> {
         // Deprecated attributes apply in-crate and cross-crate.
         if let Some(id) = id {
             if let Some(depr_entry) = self.lookup_deprecation_entry(def_id) {
-                let parent_def_id = self.hir().local_def_id(self.hir().get_parent_item(id));
+                let parent_def_id = self.hir().get_parent_item(id);
                 let skip = self
                     .lookup_deprecation_entry(parent_def_id.to_def_id())
                     .map_or(false, |parent_depr| parent_depr.same_origin(&depr_entry));

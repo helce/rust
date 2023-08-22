@@ -109,17 +109,16 @@ impl Options {
     }
 
     pub fn instrument_coverage(&self) -> bool {
-        self.debugging_opts.instrument_coverage.unwrap_or(InstrumentCoverage::Off)
-            != InstrumentCoverage::Off
+        self.cg.instrument_coverage.unwrap_or(InstrumentCoverage::Off) != InstrumentCoverage::Off
     }
 
     pub fn instrument_coverage_except_unused_generics(&self) -> bool {
-        self.debugging_opts.instrument_coverage.unwrap_or(InstrumentCoverage::Off)
+        self.cg.instrument_coverage.unwrap_or(InstrumentCoverage::Off)
             == InstrumentCoverage::ExceptUnusedGenerics
     }
 
     pub fn instrument_coverage_except_unused_functions(&self) -> bool {
-        self.debugging_opts.instrument_coverage.unwrap_or(InstrumentCoverage::Off)
+        self.cg.instrument_coverage.unwrap_or(InstrumentCoverage::Off)
             == InstrumentCoverage::ExceptUnusedFunctions
     }
 }
@@ -185,10 +184,6 @@ top_level_options!(
         externs: Externs [UNTRACKED],
         extern_dep_specs: ExternDepSpecs [UNTRACKED],
         crate_name: Option<String> [TRACKED],
-        /// An optional name to use as the crate for std during std injection,
-        /// written `extern crate name as std`. Defaults to `std`. Used by
-        /// out-of-tree drivers.
-        alt_std_name: Option<String> [TRACKED],
         /// Indicates how the compiler should treat unstable features.
         unstable_features: UnstableFeatures [TRACKED],
 
@@ -381,10 +376,11 @@ mod desc {
     pub const parse_panic_strategy: &str = "either `unwind` or `abort`";
     pub const parse_opt_panic_strategy: &str = parse_panic_strategy;
     pub const parse_relro_level: &str = "one of: `full`, `partial`, or `off`";
-    pub const parse_sanitizers: &str = "comma separated list of sanitizers: `address`, `cfi`, `hwaddress`, `leak`, `memory` or `thread`";
+    pub const parse_sanitizers: &str = "comma separated list of sanitizers: `address`, `cfi`, `hwaddress`, `leak`, `memory`, `memtag`, or `thread`";
     pub const parse_sanitizer_memory_track_origins: &str = "0, 1, or 2";
     pub const parse_cfguard: &str =
         "either a boolean (`yes`, `no`, `on`, `off`, etc), `checks`, or `nochecks`";
+    pub const parse_cfprotection: &str = "`none`|`no`|`n` (default), `branch`, `return`, or `full`|`yes`|`y` (equivalent to `branch` and `return`)";
     pub const parse_strip: &str = "either `none`, `debuginfo`, or `symbols`";
     pub const parse_linker_flavor: &str = ::rustc_target::spec::LinkerFlavor::one_of();
     pub const parse_optimization_fuel: &str = "crate=integer";
@@ -641,6 +637,7 @@ mod parse {
                     "cfi" => SanitizerSet::CFI,
                     "leak" => SanitizerSet::LEAK,
                     "memory" => SanitizerSet::MEMORY,
+                    "memtag" => SanitizerSet::MEMTAG,
                     "thread" => SanitizerSet::THREAD,
                     "hwaddress" => SanitizerSet::HWADDRESS,
                     _ => return false,
@@ -693,6 +690,25 @@ mod parse {
             None => CFGuard::Checks,
             Some("checks") => CFGuard::Checks,
             Some("nochecks") => CFGuard::NoChecks,
+            Some(_) => return false,
+        };
+        true
+    }
+
+    crate fn parse_cfprotection(slot: &mut CFProtection, v: Option<&str>) -> bool {
+        if v.is_some() {
+            let mut bool_arg = None;
+            if parse_opt_bool(&mut bool_arg, v) {
+                *slot = if bool_arg.unwrap() { CFProtection::Full } else { CFProtection::None };
+                return true;
+            }
+        }
+
+        *slot = match v {
+            None | Some("none") => CFProtection::None,
+            Some("branch") => CFProtection::Branch,
+            Some("return") => CFProtection::Return,
+            Some("full") => CFProtection::Full,
             Some(_) => return false,
         };
         true
@@ -965,6 +981,33 @@ mod parse {
         }
         true
     }
+
+    crate fn parse_branch_protection(slot: &mut Option<BranchProtection>, v: Option<&str>) -> bool {
+        match v {
+            Some(s) => {
+                let slot = slot.get_or_insert_default();
+                for opt in s.split(',') {
+                    match opt {
+                        "bti" => slot.bti = true,
+                        "pac-ret" if slot.pac_ret.is_none() => {
+                            slot.pac_ret = Some(PacRet { leaf: false, key: PAuthKey::A })
+                        }
+                        "leaf" => match slot.pac_ret.as_mut() {
+                            Some(pac) => pac.leaf = true,
+                            _ => return false,
+                        },
+                        "b-key" => match slot.pac_ret.as_mut() {
+                            Some(pac) => pac.key = PAuthKey::B,
+                            _ => return false,
+                        },
+                        _ => return false,
+                    };
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
 }
 
 options! {
@@ -1003,6 +1046,14 @@ options! {
         "enable incremental compilation"),
     inline_threshold: Option<u32> = (None, parse_opt_number, [TRACKED],
         "set the threshold for inlining a function"),
+    instrument_coverage: Option<InstrumentCoverage> = (None, parse_instrument_coverage, [TRACKED],
+        "instrument the generated code to support LLVM source-based code coverage \
+        reports (note, the compiler build config must include `profiler = true`); \
+        implies `-C symbol-mangling-version=v0`. Optional values are:
+        `=all` (implicit value)
+        `=except-unused-generics`
+        `=except-unused-functions`
+        `=off` (default)"),
     link_arg: (/* redirected to link_args */) = ((), parse_string_push, [UNTRACKED],
         "a single extra argument to append to the linker invocation (can be used several times)"),
     link_args: Vec<String> = (Vec::new(), parse_list, [UNTRACKED],
@@ -1109,6 +1160,10 @@ options! {
         (default: no)"),
     borrowck: String = ("migrate".to_string(), parse_string, [UNTRACKED],
         "select which borrowck is used (`mir` or `migrate`) (default: `migrate`)"),
+    branch_protection: Option<BranchProtection> = (None, parse_branch_protection, [TRACKED],
+        "set options for branch target identification and pointer authentication on AArch64"),
+    cf_protection: CFProtection = (CFProtection::None, parse_cfprotection, [TRACKED],
+        "instrument control-flow architecture protection"),
     cgu_partitioning_strategy: Option<String> = (None, parse_opt_string, [TRACKED],
         "the codegen unit partitioning strategy to use"),
     chalk: bool = (false, parse_bool, [TRACKED],
@@ -1131,9 +1186,13 @@ options! {
     dep_tasks: bool = (false, parse_bool, [UNTRACKED],
         "print tasks that execute and the color their dep node gets (requires debug build) \
         (default: no)"),
+    dlltool: Option<PathBuf> = (None, parse_opt_pathbuf, [UNTRACKED],
+        "import library generation tool (windows-gnu only)"),
     dont_buffer_diagnostics: bool = (false, parse_bool, [UNTRACKED],
         "emit diagnostics rather than buffering (breaks NLL error downgrading, sorting) \
         (default: no)"),
+    drop_tracking: bool = (false, parse_bool, [TRACKED],
+        "enables drop tracking in generators (default: no)"),
     dual_proc_macros: bool = (false, parse_bool, [TRACKED],
         "load proc macros for both target and host, but only link to the target (default: no)"),
     dump_dep_graph: bool = (false, parse_bool, [UNTRACKED],
@@ -1307,8 +1366,6 @@ options! {
         See #77382 and #74551."),
     print_fuel: Option<String> = (None, parse_opt_string, [TRACKED],
         "make rustc print the total optimization fuel used by a crate"),
-    print_link_args: bool = (false, parse_bool, [UNTRACKED],
-        "print the arguments passed to the linker (default: no)"),
     print_llvm_passes: bool = (false, parse_bool, [UNTRACKED],
         "print the LLVM optimization passes being run (default: no)"),
     print_mono_items: Option<String> = (None, parse_opt_string, [UNTRACKED],
@@ -1330,8 +1387,6 @@ options! {
         "use the given `.prof` file for sampled profile-guided optimization (also known as AutoFDO)"),
     query_dep_graph: bool = (false, parse_bool, [UNTRACKED],
         "enable queries of the dependency graph for regression testing (default: no)"),
-    query_stats: bool = (false, parse_bool, [UNTRACKED],
-        "print some statistics about the query system (default: no)"),
     randomize_layout: bool = (false, parse_bool, [TRACKED],
         "randomize the layout of types (default: no)"),
     layout_seed: Option<u64> = (None, parse_opt_number, [TRACKED],

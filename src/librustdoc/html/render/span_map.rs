@@ -4,8 +4,9 @@ use crate::html::sources;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
-use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
+use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{ExprKind, GenericParam, GenericParamKind, HirId, Mod, Node};
+use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::Span;
 
@@ -93,10 +94,10 @@ impl<'tcx> SpanMapVisitor<'tcx> {
 }
 
 impl<'tcx> Visitor<'tcx> for SpanMapVisitor<'tcx> {
-    type Map = rustc_middle::hir::map::Map<'tcx>;
+    type NestedFilter = nested_filter::All;
 
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::All(self.tcx.hir())
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
     }
 
     fn visit_generic_param(&mut self, p: &'tcx GenericParam<'tcx>) {
@@ -129,18 +130,20 @@ impl<'tcx> Visitor<'tcx> for SpanMapVisitor<'tcx> {
     }
 
     fn visit_expr(&mut self, expr: &'tcx rustc_hir::Expr<'tcx>) {
-        if let ExprKind::MethodCall(segment, method_span, _, _) = expr.kind {
+        if let ExprKind::MethodCall(segment, ..) = expr.kind {
             if let Some(hir_id) = segment.hir_id {
                 let hir = self.tcx.hir();
                 let body_id = hir.enclosing_body_owner(hir_id);
-                let typeck_results = self.tcx.sess.with_disabled_diagnostic(|| {
-                    self.tcx.typeck_body(
-                        hir.maybe_body_owned_by(body_id).expect("a body which isn't a body"),
-                    )
-                });
+                // FIXME: this is showing error messages for parts of the code that are not
+                // compiled (because of cfg)!
+                //
+                // See discussion in https://github.com/rust-lang/rust/issues/69426#issuecomment-1019412352
+                let typeck_results = self.tcx.typeck_body(
+                    hir.maybe_body_owned_by(body_id).expect("a body which isn't a body"),
+                );
                 if let Some(def_id) = typeck_results.type_dependent_def_id(expr.hir_id) {
                     self.matches.insert(
-                        method_span,
+                        segment.ident.span,
                         match hir.span_if_local(def_id) {
                             Some(span) => LinkFromSrc::Local(clean::Span::new(span)),
                             None => LinkFromSrc::External(def_id),

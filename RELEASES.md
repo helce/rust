@@ -1,10 +1,165 @@
+Version 1.60.0 (2022-04-07)
+==========================
+
+Language
+--------
+- [Stabilize `#[cfg(panic = "...")]` for either `"unwind"` or `"abort"`.][93658]
+- [Stabilize `#[cfg(target_has_atomic = "...")]` for each integer size and `"ptr"`.][93824]
+
+Compiler
+--------
+- [Enable combining `+crt-static` and `relocation-model=pic` on `x86_64-unknown-linux-gnu`][86374]
+- [Fixes wrong `unreachable_pub` lints on nested and glob public reexport][87487]
+- [Stabilize `-Z instrument-coverage` as `-C instrument-coverage`][90132]
+- [Stabilize `-Z print-link-args` as `--print link-args`][91606]
+- [Add new Tier 3 target `mips64-openwrt-linux-musl`\*][92300]
+- [Add new Tier 3 target `armv7-unknown-linux-uclibceabi` (softfloat)\*][92383]
+- [Fix invalid removal of newlines from doc comments][92357]
+- [Add kernel target for RustyHermit][92670]
+- [Deny mixing bin crate type with lib crate types][92933]
+- [Make rustc use `RUST_BACKTRACE=full` by default][93566]
+- [Upgrade to LLVM 14][93577]
+
+\* Refer to Rust's [platform support page][platform-support-doc] for more
+   information on Rust's tiered platform support.
+
+Libraries
+---------
+- [Guarantee call order for `sort_by_cached_key`][89621]
+- [Improve `Duration::try_from_secs_f32`/`f64` accuracy by directly processing exponent and mantissa][90247]
+- [Make `Instant::{duration_since, elapsed, sub}` saturating][89926]
+- [Remove non-monotonic clocks workarounds in `Instant::now`][89926]
+- [Make `BuildHasherDefault`, `iter::Empty` and `future::Pending` covariant][92630]
+
+Stabilized APIs
+---------------
+- [`Arc::new_cyclic`][arc_new_cyclic]
+- [`Rc::new_cyclic`][rc_new_cyclic]
+- [`slice::EscapeAscii`][slice_escape_ascii]
+- [`<[u8]>::escape_ascii`][slice_u8_escape_ascii]
+- [`u8::escape_ascii`][u8_escape_ascii]
+- [`Vec::spare_capacity_mut`][vec_spare_capacity_mut]
+- [`MaybeUninit::assume_init_drop`][assume_init_drop]
+- [`MaybeUninit::assume_init_read`][assume_init_read]
+- [`i8::abs_diff`][i8_abs_diff]
+- [`i16::abs_diff`][i16_abs_diff]
+- [`i32::abs_diff`][i32_abs_diff]
+- [`i64::abs_diff`][i64_abs_diff]
+- [`i128::abs_diff`][i128_abs_diff]
+- [`isize::abs_diff`][isize_abs_diff]
+- [`u8::abs_diff`][u8_abs_diff]
+- [`u16::abs_diff`][u16_abs_diff]
+- [`u32::abs_diff`][u32_abs_diff]
+- [`u64::abs_diff`][u64_abs_diff]
+- [`u128::abs_diff`][u128_abs_diff]
+- [`usize::abs_diff`][usize_abs_diff]
+- [`Display for io::ErrorKind`][display_error_kind]
+- [`From<u8> for ExitCode`][from_u8_exit_code]
+- [`Not for !` (the "never" type)][not_never]
+- [_Op_`Assign<$t> for Wrapping<$t>`][wrapping_assign_ops]
+- [`arch::is_aarch64_feature_detected!`][is_aarch64_feature_detected]
+
+Cargo
+-----
+- [Port cargo from `toml-rs` to `toml_edit`][cargo/10086]
+- [Stabilize `-Ztimings` as `--timings`][cargo/10245]
+- [Stabilize namespaced and weak dependency features.][cargo/10269]
+- [Accept more `cargo:rustc-link-arg-*` types from build script output.][cargo/10274]
+- [cargo-new should not add ignore rule on Cargo.lock inside subdirs][cargo/10379]
+
+Misc
+----
+- [Ship docs on Tier 2 platforms by reusing the closest Tier 1 platform docs][92800]
+- [Drop rustc-docs from complete profile][93742]
+- [bootstrap: tidy up flag handling for llvm build][93918]
+
+Compatibility Notes
+-------------------
+- [Remove compiler-rt linking hack on Android][83822]
+- [Mitigations for platforms with non-monotonic clocks have been removed from
+  `Instant::now`][89926]. On platforms that don't provide monotonic clocks, an
+  instant is not guaranteed to be greater than an earlier instant anymore.
+- [`Instant::{duration_since, elapsed, sub}` do not panic anymore on underflow,
+  saturating to `0` instead][89926]. In the real world the panic happened mostly
+  on platforms with buggy monotonic clock implementations rather than catching
+  programming errors like reversing the start and end times. Such programming
+  errors will now results in `0` rather than a panic.
+- In a future release we're planning to increase the baseline requirements for
+  the Linux kernel to version 3.2, and for glibc to version 2.17. We'd love
+  your feedback in [PR #95026][95026].
+
+Internal Changes
+----------------
+
+These changes provide no direct user facing benefits, but represent significant
+improvements to the internals and overall performance of rustc
+and related tools.
+
+- [Switch all libraries to the 2021 edition][92068]
+
+[83822]: https://github.com/rust-lang/rust/pull/83822
+[86374]: https://github.com/rust-lang/rust/pull/86374
+[87487]: https://github.com/rust-lang/rust/pull/87487
+[89621]: https://github.com/rust-lang/rust/pull/89621
+[89926]: https://github.com/rust-lang/rust/pull/89926
+[90132]: https://github.com/rust-lang/rust/pull/90132
+[90247]: https://github.com/rust-lang/rust/pull/90247
+[91606]: https://github.com/rust-lang/rust/pull/91606
+[92068]: https://github.com/rust-lang/rust/pull/92068
+[92300]: https://github.com/rust-lang/rust/pull/92300
+[92357]: https://github.com/rust-lang/rust/pull/92357
+[92383]: https://github.com/rust-lang/rust/pull/92383
+[92630]: https://github.com/rust-lang/rust/pull/92630
+[92670]: https://github.com/rust-lang/rust/pull/92670
+[92800]: https://github.com/rust-lang/rust/pull/92800
+[92933]: https://github.com/rust-lang/rust/pull/92933
+[93566]: https://github.com/rust-lang/rust/pull/93566
+[93577]: https://github.com/rust-lang/rust/pull/93577
+[93658]: https://github.com/rust-lang/rust/pull/93658
+[93742]: https://github.com/rust-lang/rust/pull/93742
+[93824]: https://github.com/rust-lang/rust/pull/93824
+[93918]: https://github.com/rust-lang/rust/pull/93918
+[95026]: https://github.com/rust-lang/rust/pull/95026
+
+[cargo/10086]: https://github.com/rust-lang/cargo/pull/10086
+[cargo/10245]: https://github.com/rust-lang/cargo/pull/10245
+[cargo/10269]: https://github.com/rust-lang/cargo/pull/10269
+[cargo/10274]: https://github.com/rust-lang/cargo/pull/10274
+[cargo/10379]: https://github.com/rust-lang/cargo/pull/10379
+
+[arc_new_cyclic]: https://doc.rust-lang.org/stable/std/sync/struct.Arc.html#method.new_cyclic
+[rc_new_cyclic]: https://doc.rust-lang.org/stable/std/rc/struct.Rc.html#method.new_cyclic
+[slice_escape_ascii]: https://doc.rust-lang.org/stable/std/slice/struct.EscapeAscii.html
+[slice_u8_escape_ascii]: https://doc.rust-lang.org/stable/std/primitive.slice.html#method.escape_ascii
+[u8_escape_ascii]: https://doc.rust-lang.org/stable/std/primitive.u8.html#method.escape_ascii
+[vec_spare_capacity_mut]: https://doc.rust-lang.org/stable/std/vec/struct.Vec.html#method.spare_capacity_mut
+[assume_init_drop]: https://doc.rust-lang.org/stable/std/mem/union.MaybeUninit.html#method.assume_init_drop
+[assume_init_read]: https://doc.rust-lang.org/stable/std/mem/union.MaybeUninit.html#method.assume_init_read
+[i8_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.i8.html#method.abs_diff
+[i16_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.i16.html#method.abs_diff
+[i32_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.i32.html#method.abs_diff
+[i64_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.i64.html#method.abs_diff
+[i128_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.i128.html#method.abs_diff
+[isize_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.isize.html#method.abs_diff
+[u8_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.u8.html#method.abs_diff
+[u16_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.u16.html#method.abs_diff
+[u32_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.u32.html#method.abs_diff
+[u64_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.u64.html#method.abs_diff
+[u128_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.u128.html#method.abs_diff
+[usize_abs_diff]: https://doc.rust-lang.org/stable/std/primitive.usize.html#method.abs_diff
+[display_error_kind]: https://doc.rust-lang.org/stable/std/io/enum.ErrorKind.html#impl-Display
+[from_u8_exit_code]: https://doc.rust-lang.org/stable/std/process/struct.ExitCode.html#impl-From%3Cu8%3E
+[not_never]: https://doc.rust-lang.org/stable/std/primitive.never.html#impl-Not
+[wrapping_assign_ops]: https://doc.rust-lang.org/stable/std/num/struct.Wrapping.html#trait-implementations
+[is_aarch64_feature_detected]: https://doc.rust-lang.org/stable/std/arch/macro.is_aarch64_feature_detected.html
+
 Version 1.59.0 (2022-02-24)
 ==========================
 
 Language
 --------
 
-- [Stabilize default arguments for const generics][90207]
+- [Stabilize default arguments for const parameters and remove the ordering restriction for type and const parameters][90207]
 - [Stabilize destructuring assignment][90521]
 - [Relax private in public lint on generic bounds and where clauses of trait impls][90586]
 - [Stabilize asm! and global_asm! for x86, x86_64, ARM, Aarch64, and RISC-V][91728]
@@ -58,6 +213,7 @@ Stabilized APIs
 - [`NonZeroU32::is_power_of_two`][is_power_of_two32]
 - [`NonZeroU64::is_power_of_two`][is_power_of_two64]
 - [`NonZeroU128::is_power_of_two`][is_power_of_two128]
+- [`NonZeroUsize::is_power_of_two`][is_power_of_two_usize]
 - [`DoubleEndedIterator for ToLowercase`][lowercase]
 - [`DoubleEndedIterator for ToUppercase`][uppercase]
 - [`TryFrom<&mut [T]> for [T; N]`][tryfrom_ref_arr]
@@ -143,6 +299,7 @@ and related tools.
 [91984]: https://github.com/rust-lang/rust/pull/91984/
 [92020]: https://github.com/rust-lang/rust/pull/92020/
 [92034]: https://github.com/rust-lang/rust/pull/92034/
+[92137]: https://github.com/rust-lang/rust/pull/92137/
 [92483]: https://github.com/rust-lang/rust/pull/92483/
 [cargo/10088]: https://github.com/rust-lang/cargo/pull/10088/
 [cargo/10133]: https://github.com/rust-lang/cargo/pull/10133/
@@ -177,6 +334,7 @@ and related tools.
 [is_power_of_two32]: https://doc.rust-lang.org/stable/core/num/struct.NonZeroU32.html#method.is_power_of_two
 [is_power_of_two64]: https://doc.rust-lang.org/stable/core/num/struct.NonZeroU64.html#method.is_power_of_two
 [is_power_of_two128]: https://doc.rust-lang.org/stable/core/num/struct.NonZeroU128.html#method.is_power_of_two
+[is_power_of_two_usize]: https://doc.rust-lang.org/stable/core/num/struct.NonZeroUsize.html#method.is_power_of_two
 [stdarch/1266]: https://github.com/rust-lang/stdarch/pull/1266
 
 Version 1.58.1 (2022-01-19)
@@ -1057,7 +1215,7 @@ Version 1.52.1 (2021-05-10)
 This release disables incremental compilation, unless the user has explicitly
 opted in via the newly added RUSTC_FORCE_INCREMENTAL=1 environment variable.
 
-This is due to the widespread, and frequently occuring, breakage encountered by
+This is due to the widespread, and frequently occurring, breakage encountered by
 Rust users due to newly enabled incremental verification in 1.52.0. Notably,
 Rust users **should** upgrade to 1.52.0 or 1.52.1: the bugs that are detected by
 newly added incremental verification are still present in past stable versions,

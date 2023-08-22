@@ -402,9 +402,9 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                 self.expr(func);
                 self.slice(args, |e| self.expr(e));
             },
-            ExprKind::MethodCall(method_name, _, args, _) => {
+            ExprKind::MethodCall(method_name, args, _) => {
                 bind!(self, method_name, args);
-                kind!("MethodCall({method_name}, _, {args}, _)");
+                kind!("MethodCall({method_name}, {args}, _)");
                 self.ident(field!(method_name.ident));
                 self.slice(args, |e| self.expr(e));
             },
@@ -547,10 +547,6 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                 kind!("InlineAsm(_)");
                 out!("// unimplemented: `ExprKind::InlineAsm` is not further destructured at the moment");
             },
-            ExprKind::LlvmInlineAsm(_) => {
-                kind!("LlvmInlineAsm(_)");
-                out!("// unimplemented: `ExprKind::LlvmInlineAsm` is not further destructured at the moment");
-            },
             ExprKind::Struct(qpath, fields, base) => {
                 bind!(self, qpath, fields);
                 opt_bind!(self, base);
@@ -573,7 +569,7 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                         bind!(self, anon_const);
                         out!("if let ArrayLen::Body({anon_const}) = {length};");
                         self.body(field!(anon_const.body));
-                    }
+                    },
                 }
             },
             ExprKind::Err => kind!("Err"),

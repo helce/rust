@@ -81,14 +81,15 @@ macro_rules! def_regs {
 
             pub fn parse(
                 _arch: super::InlineAsmArch,
-                mut _has_feature: impl FnMut(&str) -> bool,
+                _target_features: &rustc_data_structures::fx::FxHashSet<Symbol>,
                 _target: &crate::spec::Target,
+                _is_clobber: bool,
                 name: &str,
             ) -> Result<Self, &'static str> {
                 match name {
                     $(
                         $($alias)|* | $reg_name => {
-                            $($filter(_arch, &mut _has_feature, _target)?;)?
+                            $($filter(_arch, _target_features, _target, _is_clobber)?;)?
                             Ok(Self::$reg)
                         }
                     )*
@@ -102,7 +103,7 @@ macro_rules! def_regs {
 
         pub(super) fn fill_reg_map(
             _arch: super::InlineAsmArch,
-            mut _has_feature: impl FnMut(&str) -> bool,
+            _target_features: &rustc_data_structures::fx::FxHashSet<Symbol>,
             _target: &crate::spec::Target,
             _map: &mut rustc_data_structures::fx::FxHashMap<
                 super::InlineAsmRegClass,
@@ -112,7 +113,7 @@ macro_rules! def_regs {
             #[allow(unused_imports)]
             use super::{InlineAsmReg, InlineAsmRegClass};
             $(
-                if $($filter(_arch, &mut _has_feature, _target).is_ok() &&)? true {
+                if $($filter(_arch, _target_features, _target, false).is_ok() &&)? true {
                     if let Some(set) = _map.get_mut(&InlineAsmRegClass::$arch($arch_regclass::$class)) {
                         set.insert(InlineAsmReg::$arch($arch_reg::$reg));
                     }
@@ -130,7 +131,7 @@ macro_rules! def_regs {
 macro_rules! types {
     (
         $(_ : $($ty:expr),+;)?
-        $($feature:literal: $($ty2:expr),+;)*
+        $($feature:ident: $($ty2:expr),+;)*
     ) => {
         {
             use super::InlineAsmType::*;
@@ -139,7 +140,7 @@ macro_rules! types {
                     ($ty, None),
                 )*)?
                 $($(
-                    ($ty2, Some($feature)),
+                    ($ty2, Some(rustc_span::sym::$feature)),
                 )*)*
             ]
         }
@@ -153,6 +154,7 @@ mod bpf;
 mod e2k64;
 mod hexagon;
 mod mips;
+mod msp430;
 mod nvptx;
 mod powerpc;
 mod riscv;
@@ -168,6 +170,7 @@ pub use bpf::{BpfInlineAsmReg, BpfInlineAsmRegClass};
 pub use e2k64::{E2k64InlineAsmReg, E2k64InlineAsmRegClass};
 pub use hexagon::{HexagonInlineAsmReg, HexagonInlineAsmRegClass};
 pub use mips::{MipsInlineAsmReg, MipsInlineAsmRegClass};
+pub use msp430::{Msp430InlineAsmReg, Msp430InlineAsmRegClass};
 pub use nvptx::{NvptxInlineAsmReg, NvptxInlineAsmRegClass};
 pub use powerpc::{PowerPCInlineAsmReg, PowerPCInlineAsmRegClass};
 pub use riscv::{RiscVInlineAsmReg, RiscVInlineAsmRegClass};
@@ -197,6 +200,7 @@ pub enum InlineAsmArch {
     Bpf,
     E2k64,
     Avr,
+    Msp430,
 }
 
 impl FromStr for InlineAsmArch {
@@ -223,6 +227,7 @@ impl FromStr for InlineAsmArch {
             "bpf" => Ok(Self::Bpf),
             "e2k64" => Ok(Self::E2k64),
             "avr" => Ok(Self::Avr),
+            "msp430" => Ok(Self::Msp430),
             _ => Err(()),
         }
     }
@@ -255,6 +260,7 @@ pub enum InlineAsmReg {
     Bpf(BpfInlineAsmReg),
     E2k64(E2k64InlineAsmReg),
     Avr(AvrInlineAsmReg),
+    Msp430(Msp430InlineAsmReg),
     // Placeholder for invalid register constraints for the current target
     Err,
 }
@@ -272,6 +278,7 @@ impl InlineAsmReg {
             Self::S390x(r) => r.name(),
             Self::Bpf(r) => r.name(),
             Self::Avr(r) => r.name(),
+            Self::Msp430(r) => r.name(),
             Self::Err => "<reg>",
         }
     }
@@ -288,14 +295,16 @@ impl InlineAsmReg {
             Self::S390x(r) => InlineAsmRegClass::S390x(r.reg_class()),
             Self::Bpf(r) => InlineAsmRegClass::Bpf(r.reg_class()),
             Self::Avr(r) => InlineAsmRegClass::Avr(r.reg_class()),
+            Self::Msp430(r) => InlineAsmRegClass::Msp430(r.reg_class()),
             Self::Err => InlineAsmRegClass::Err,
         }
     }
 
     pub fn parse(
         arch: InlineAsmArch,
-        has_feature: impl FnMut(&str) -> bool,
+        target_features: &FxHashSet<Symbol>,
         target: &Target,
+        is_clobber: bool,
         name: Symbol,
     ) -> Result<Self, &'static str> {
         // FIXME: use direct symbol comparison for register names
@@ -303,47 +312,82 @@ impl InlineAsmReg {
         let name = name.as_str();
         Ok(match arch {
             InlineAsmArch::X86 | InlineAsmArch::X86_64 => {
-                Self::X86(X86InlineAsmReg::parse(arch, has_feature, target, name)?)
+                Self::X86(X86InlineAsmReg::parse(arch, target_features, target, is_clobber, name)?)
             }
             InlineAsmArch::Arm => {
-                Self::Arm(ArmInlineAsmReg::parse(arch, has_feature, target, name)?)
+                Self::Arm(ArmInlineAsmReg::parse(arch, target_features, target, is_clobber, name)?)
             }
-            InlineAsmArch::AArch64 => {
-                Self::AArch64(AArch64InlineAsmReg::parse(arch, has_feature, target, name)?)
-            }
-            InlineAsmArch::RiscV32 | InlineAsmArch::RiscV64 => {
-                Self::RiscV(RiscVInlineAsmReg::parse(arch, has_feature, target, name)?)
-            }
-            InlineAsmArch::Nvptx64 => {
-                Self::Nvptx(NvptxInlineAsmReg::parse(arch, has_feature, target, name)?)
-            }
-            InlineAsmArch::PowerPC | InlineAsmArch::PowerPC64 => {
-                Self::PowerPC(PowerPCInlineAsmReg::parse(arch, has_feature, target, name)?)
-            }
-            InlineAsmArch::Hexagon => {
-                Self::Hexagon(HexagonInlineAsmReg::parse(arch, has_feature, target, name)?)
-            }
-            InlineAsmArch::Mips | InlineAsmArch::Mips64 => {
-                Self::Mips(MipsInlineAsmReg::parse(arch, has_feature, target, name)?)
-            }
-            InlineAsmArch::S390x => {
-                Self::S390x(S390xInlineAsmReg::parse(arch, has_feature, target, name)?)
-            }
-            InlineAsmArch::SpirV => {
-                Self::SpirV(SpirVInlineAsmReg::parse(arch, has_feature, target, name)?)
-            }
-            InlineAsmArch::Wasm32 | InlineAsmArch::Wasm64 => {
-                Self::Wasm(WasmInlineAsmReg::parse(arch, has_feature, target, name)?)
-            }
+            InlineAsmArch::AArch64 => Self::AArch64(AArch64InlineAsmReg::parse(
+                arch,
+                target_features,
+                target,
+                is_clobber,
+                name,
+            )?),
+            InlineAsmArch::RiscV32 | InlineAsmArch::RiscV64 => Self::RiscV(
+                RiscVInlineAsmReg::parse(arch, target_features, target, is_clobber, name)?,
+            ),
+            InlineAsmArch::Nvptx64 => Self::Nvptx(NvptxInlineAsmReg::parse(
+                arch,
+                target_features,
+                target,
+                is_clobber,
+                name,
+            )?),
+            InlineAsmArch::PowerPC | InlineAsmArch::PowerPC64 => Self::PowerPC(
+                PowerPCInlineAsmReg::parse(arch, target_features, target, is_clobber, name)?,
+            ),
+            InlineAsmArch::Hexagon => Self::Hexagon(HexagonInlineAsmReg::parse(
+                arch,
+                target_features,
+                target,
+                is_clobber,
+                name,
+            )?),
+            InlineAsmArch::Mips | InlineAsmArch::Mips64 => Self::Mips(MipsInlineAsmReg::parse(
+                arch,
+                target_features,
+                target,
+                is_clobber,
+                name,
+            )?),
+            InlineAsmArch::S390x => Self::S390x(S390xInlineAsmReg::parse(
+                arch,
+                target_features,
+                target,
+                is_clobber,
+                name,
+            )?),
+            InlineAsmArch::SpirV => Self::SpirV(SpirVInlineAsmReg::parse(
+                arch,
+                target_features,
+                target,
+                is_clobber,
+                name,
+            )?),
+            InlineAsmArch::Wasm32 | InlineAsmArch::Wasm64 => Self::Wasm(WasmInlineAsmReg::parse(
+                arch,
+                target_features,
+                target,
+                is_clobber,
+                name,
+            )?),
             InlineAsmArch::Bpf => {
-                Self::Bpf(BpfInlineAsmReg::parse(arch, has_feature, target, name)?)
+                Self::Bpf(BpfInlineAsmReg::parse(arch, target_features, target, is_clobber, name)?)
             }
             InlineAsmArch::E2k64 => {
                 Self::E2k64(E2k64InlineAsmReg::parse(arch, has_feature, target, name)?)
             }
             InlineAsmArch::Avr => {
-                Self::Avr(AvrInlineAsmReg::parse(arch, has_feature, target, name)?)
+                Self::Avr(AvrInlineAsmReg::parse(arch, target_features, target, is_clobber, name)?)
             }
+            InlineAsmArch::Msp430 => Self::Msp430(Msp430InlineAsmReg::parse(
+                arch,
+                target_features,
+                target,
+                is_clobber,
+                name,
+            )?),
         })
     }
 
@@ -366,6 +410,7 @@ impl InlineAsmReg {
             Self::S390x(r) => r.emit(out, arch, modifier),
             Self::Bpf(r) => r.emit(out, arch, modifier),
             Self::Avr(r) => r.emit(out, arch, modifier),
+            Self::Msp430(r) => r.emit(out, arch, modifier),
             Self::Err => unreachable!("Use of InlineAsmReg::Err"),
         }
     }
@@ -382,6 +427,7 @@ impl InlineAsmReg {
             Self::S390x(_) => cb(self),
             Self::Bpf(r) => r.overlapping_regs(|r| cb(Self::Bpf(r))),
             Self::Avr(r) => r.overlapping_regs(|r| cb(Self::Avr(r))),
+            Self::Msp430(_) => cb(self),
             Self::Err => unreachable!("Use of InlineAsmReg::Err"),
         }
     }
@@ -414,6 +460,7 @@ pub enum InlineAsmRegClass {
     Bpf(BpfInlineAsmRegClass),
     E2k64(E2k64InlineAsmRegClass),
     Avr(AvrInlineAsmRegClass),
+    Msp430(Msp430InlineAsmRegClass),
     // Placeholder for invalid register constraints for the current target
     Err,
 }
@@ -435,12 +482,13 @@ impl InlineAsmRegClass {
             Self::Bpf(r) => r.name(),
             Self::E2k64(r) => r.name(),
             Self::Avr(r) => r.name(),
+            Self::Msp430(r) => r.name(),
             Self::Err => rustc_span::symbol::sym::reg,
         }
     }
 
     /// Returns a suggested register class to use for this type. This is called
-    /// after type checking via `supported_types` fails to give a better error
+    /// when `supported_types` fails to give a better error
     /// message to the user.
     pub fn suggest_class(self, arch: InlineAsmArch, ty: InlineAsmType) -> Option<Self> {
         match self {
@@ -458,6 +506,7 @@ impl InlineAsmRegClass {
             Self::Bpf(r) => r.suggest_class(arch, ty).map(InlineAsmRegClass::Bpf),
             Self::E2k64(r) => r.suggest_class(arch, ty).map(InlineAsmRegClass::E2k64),
             Self::Avr(r) => r.suggest_class(arch, ty).map(InlineAsmRegClass::Avr),
+            Self::Msp430(r) => r.suggest_class(arch, ty).map(InlineAsmRegClass::Msp430),
             Self::Err => unreachable!("Use of InlineAsmRegClass::Err"),
         }
     }
@@ -488,6 +537,7 @@ impl InlineAsmRegClass {
             Self::Bpf(r) => r.suggest_modifier(arch, ty),
             Self::E2k64(r) => r.suggest_modifier(arch, ty),
             Self::Avr(r) => r.suggest_modifier(arch, ty),
+            Self::Msp430(r) => r.suggest_modifier(arch, ty),
             Self::Err => unreachable!("Use of InlineAsmRegClass::Err"),
         }
     }
@@ -514,6 +564,7 @@ impl InlineAsmRegClass {
             Self::Bpf(r) => r.default_modifier(arch),
             Self::E2k64(r) => r.default_modifier(arch),
             Self::Avr(r) => r.default_modifier(arch),
+            Self::Msp430(r) => r.default_modifier(arch),
             Self::Err => unreachable!("Use of InlineAsmRegClass::Err"),
         }
     }
@@ -523,7 +574,7 @@ impl InlineAsmRegClass {
     pub fn supported_types(
         self,
         arch: InlineAsmArch,
-    ) -> &'static [(InlineAsmType, Option<&'static str>)] {
+    ) -> &'static [(InlineAsmType, Option<Symbol>)] {
         match self {
             Self::X86(r) => r.supported_types(arch),
             Self::Arm(r) => r.supported_types(arch),
@@ -539,6 +590,7 @@ impl InlineAsmRegClass {
             Self::Bpf(r) => r.supported_types(arch),
             Self::E2k64(r) => r.supported_types(arch),
             Self::Avr(r) => r.supported_types(arch),
+            Self::Msp430(r) => r.supported_types(arch),
             Self::Err => unreachable!("Use of InlineAsmRegClass::Err"),
         }
     }
@@ -569,6 +621,7 @@ impl InlineAsmRegClass {
             InlineAsmArch::Bpf => Self::Bpf(BpfInlineAsmRegClass::parse(arch, name)?),
             InlineAsmArch::E2k64 => Self::E2k64(E2k64InlineAsmRegClass::parse(arch, name)?),
             InlineAsmArch::Avr => Self::Avr(AvrInlineAsmRegClass::parse(arch, name)?),
+            InlineAsmArch::Msp430 => Self::Msp430(Msp430InlineAsmRegClass::parse(arch, name)?),
         })
     }
 
@@ -590,6 +643,7 @@ impl InlineAsmRegClass {
             Self::Bpf(r) => r.valid_modifiers(arch),
             Self::E2k64(r) => r.valid_modifiers(arch),
             Self::Avr(r) => r.valid_modifiers(arch),
+            Self::Msp430(r) => r.valid_modifiers(arch),
             Self::Err => unreachable!("Use of InlineAsmRegClass::Err"),
         }
     }
@@ -711,68 +765,68 @@ impl fmt::Display for InlineAsmType {
 // falling back to an external assembler.
 pub fn allocatable_registers(
     arch: InlineAsmArch,
-    has_feature: impl FnMut(&str) -> bool,
+    target_features: &FxHashSet<Symbol>,
     target: &crate::spec::Target,
 ) -> FxHashMap<InlineAsmRegClass, FxHashSet<InlineAsmReg>> {
     match arch {
         InlineAsmArch::X86 | InlineAsmArch::X86_64 => {
             let mut map = x86::regclass_map();
-            x86::fill_reg_map(arch, has_feature, target, &mut map);
+            x86::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::Arm => {
             let mut map = arm::regclass_map();
-            arm::fill_reg_map(arch, has_feature, target, &mut map);
+            arm::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::AArch64 => {
             let mut map = aarch64::regclass_map();
-            aarch64::fill_reg_map(arch, has_feature, target, &mut map);
+            aarch64::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::RiscV32 | InlineAsmArch::RiscV64 => {
             let mut map = riscv::regclass_map();
-            riscv::fill_reg_map(arch, has_feature, target, &mut map);
+            riscv::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::Nvptx64 => {
             let mut map = nvptx::regclass_map();
-            nvptx::fill_reg_map(arch, has_feature, target, &mut map);
+            nvptx::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::PowerPC | InlineAsmArch::PowerPC64 => {
             let mut map = powerpc::regclass_map();
-            powerpc::fill_reg_map(arch, has_feature, target, &mut map);
+            powerpc::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::Hexagon => {
             let mut map = hexagon::regclass_map();
-            hexagon::fill_reg_map(arch, has_feature, target, &mut map);
+            hexagon::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::Mips | InlineAsmArch::Mips64 => {
             let mut map = mips::regclass_map();
-            mips::fill_reg_map(arch, has_feature, target, &mut map);
+            mips::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::S390x => {
             let mut map = s390x::regclass_map();
-            s390x::fill_reg_map(arch, has_feature, target, &mut map);
+            s390x::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::SpirV => {
             let mut map = spirv::regclass_map();
-            spirv::fill_reg_map(arch, has_feature, target, &mut map);
+            spirv::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::Wasm32 | InlineAsmArch::Wasm64 => {
             let mut map = wasm::regclass_map();
-            wasm::fill_reg_map(arch, has_feature, target, &mut map);
+            wasm::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::Bpf => {
             let mut map = bpf::regclass_map();
-            bpf::fill_reg_map(arch, has_feature, target, &mut map);
+            bpf::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::E2k64 => {
@@ -782,7 +836,12 @@ pub fn allocatable_registers(
         }
         InlineAsmArch::Avr => {
             let mut map = avr::regclass_map();
-            avr::fill_reg_map(arch, has_feature, target, &mut map);
+            avr::fill_reg_map(arch, target_features, target, &mut map);
+            map
+        }
+        InlineAsmArch::Msp430 => {
+            let mut map = msp430::regclass_map();
+            msp430::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
     }
@@ -815,7 +874,7 @@ impl InlineAsmClobberAbi {
     /// clobber ABIs for the target.
     pub fn parse(
         arch: InlineAsmArch,
-        has_feature: impl FnMut(&str) -> bool,
+        target_features: &FxHashSet<Symbol>,
         target: &Target,
         name: Symbol,
     ) -> Result<Self, &'static [&'static str]> {
@@ -840,7 +899,7 @@ impl InlineAsmClobberAbi {
             },
             InlineAsmArch::AArch64 => match name {
                 "C" | "system" | "efiapi" => {
-                    Ok(if aarch64::reserved_x18(arch, has_feature, target).is_err() {
+                    Ok(if aarch64::reserved_x18(arch, target_features, target, true).is_err() {
                         InlineAsmClobberAbi::AArch64NoX18
                     } else {
                         InlineAsmClobberAbi::AArch64

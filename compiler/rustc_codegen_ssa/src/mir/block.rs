@@ -477,6 +477,28 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         helper.do_call(self, &mut bx, fn_abi, llfn, &args, None, cleanup);
     }
 
+    fn codegen_abort_terminator(
+        &mut self,
+        helper: TerminatorCodegenHelper<'tcx>,
+        mut bx: Bx,
+        terminator: &mir::Terminator<'tcx>,
+    ) {
+        let span = terminator.source_info.span;
+        self.set_debug_loc(&mut bx, terminator.source_info);
+
+        // Get the location information.
+        let location = self.get_caller_location(&mut bx, terminator.source_info).immediate();
+
+        // Obtain the panic entry point.
+        let def_id = common::langcall(bx.tcx(), Some(span), "", LangItem::PanicNoUnwind);
+        let instance = ty::Instance::mono(bx.tcx(), def_id);
+        let fn_abi = bx.fn_abi_of_instance(instance, ty::List::empty());
+        let llfn = bx.get_fn_addr(instance);
+
+        // Codegen the actual panic invoke/call.
+        helper.do_call(self, &mut bx, fn_abi, llfn, &[location], None, None);
+    }
+
     /// Returns `true` if this is indeed a panic intrinsic and codegen is done.
     fn codegen_panic_intrinsic(
         &mut self,
@@ -1014,10 +1036,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             mir::TerminatorKind::Resume => self.codegen_resume_terminator(helper, bx),
 
             mir::TerminatorKind::Abort => {
-                bx.abort();
-                // `abort` does not terminate the block, so we still need to generate
-                // an `unreachable` terminator after it.
-                bx.unreachable();
+                self.codegen_abort_terminator(helper, bx, terminator);
             }
 
             mir::TerminatorKind::Goto { target } => {
@@ -1327,8 +1346,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     let mut cp_bx = self.new_block(&format!("cp_funclet{:?}", bb));
                     ret_llbb = cs_bx.llbb();
 
-                    let cs = cs_bx.catch_switch(None, None, 1);
-                    cs_bx.add_handler(cs, cp_bx.llbb());
+                    let cs = cs_bx.catch_switch(None, None, &[cp_bx.llbb()]);
 
                     // The "null" here is actually a RTTI type descriptor for the
                     // C++ personality function, but `catch (...)` has no type so
@@ -1355,8 +1373,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
             let llpersonality = self.cx.eh_personality();
             let llretty = self.landing_pad_type();
-            let lp = bx.landing_pad(llretty, llpersonality, 1);
-            bx.set_cleanup(lp);
+            let lp = bx.cleanup_landing_pad(llretty, llpersonality);
 
             let slot = self.get_personality_slot(&mut bx);
             slot.storage_live(&mut bx);
@@ -1477,7 +1494,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 LocalRef::UnsizedPlace(_) => bug!("transmute must not involve unsized locals"),
                 LocalRef::Operand(None) => {
                     let dst_layout = bx.layout_of(self.monomorphized_place_ty(dst.as_ref()));
-                    assert!(!dst_layout.ty.has_erasable_regions(self.cx.tcx()));
+                    assert!(!dst_layout.ty.has_erasable_regions());
                     let place = PlaceRef::alloca(bx, dst_layout);
                     place.storage_live(bx);
                     self.codegen_transmute_into(bx, src, place);

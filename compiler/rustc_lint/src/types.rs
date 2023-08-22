@@ -249,7 +249,7 @@ fn report_bin_hex_error(
             ));
         }
         if let Some(sugg_ty) =
-            get_type_suggestion(&cx.typeck_results().node_type(expr.hir_id), val, negative)
+            get_type_suggestion(cx.typeck_results().node_type(expr.hir_id), val, negative)
         {
             if let Some(pos) = repr_str.chars().position(|c| c == 'i' || c == 'u') {
                 let (sans_suffix, _) = repr_str.split_at(pos);
@@ -367,7 +367,7 @@ fn lint_int_literal<'tcx>(
                 max,
             ));
             if let Some(sugg_ty) =
-                get_type_suggestion(&cx.typeck_results().node_type(e.hir_id), v, negative)
+                get_type_suggestion(cx.typeck_results().node_type(e.hir_id), v, negative)
             {
                 err.help(&format!("consider using the type `{}` instead", sugg_ty));
             }
@@ -1095,7 +1095,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                     }
                 }
                 for arg in sig.inputs() {
-                    let r = self.check_type_for_ffi(cache, arg);
+                    let r = self.check_type_for_ffi(cache, *arg);
                     match r {
                         FfiSafe => {}
                         _ => {
@@ -1175,9 +1175,6 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
 
         impl<'a, 'tcx> ty::fold::TypeVisitor<'tcx> for ProhibitOpaqueTypes<'a, 'tcx> {
             type BreakTy = Ty<'tcx>;
-            fn tcx_for_anon_const_substs(&self) -> Option<TyCtxt<'tcx>> {
-                Some(self.cx.tcx)
-            }
 
             fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
                 match ty.kind() {
@@ -1260,7 +1257,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
         let sig = self.cx.tcx.erase_late_bound_regions(sig);
 
         for (input_ty, input_hir) in iter::zip(sig.inputs(), decl.inputs) {
-            self.check_type_for_ffi_and_report_errors(input_hir.span, input_ty, false, false);
+            self.check_type_for_ffi_and_report_errors(input_hir.span, *input_ty, false, false);
         }
 
         if let hir::FnRetTy::Return(ref ret_hir) = decl.output {
@@ -1467,7 +1464,7 @@ impl InvalidAtomicOrdering {
             sym::AtomicI128,
         ];
         if_chain! {
-            if let ExprKind::MethodCall(ref method_path, _, args, _) = &expr.kind;
+            if let ExprKind::MethodCall(ref method_path, args, _) = &expr.kind;
             if recognized_names.contains(&method_path.ident.name);
             if let Some(m_def_id) = cx.typeck_results().type_dependent_def_id(expr.hir_id);
             if let Some(impl_did) = cx.tcx.impl_of_method(m_def_id);

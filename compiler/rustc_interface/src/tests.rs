@@ -574,6 +574,7 @@ fn test_codegen_options_tracking_hash() {
     tracked!(force_frame_pointers, Some(false));
     tracked!(force_unwind_tables, Some(true));
     tracked!(inline_threshold, Some(0xf007ba11));
+    tracked!(instrument_coverage, Some(InstrumentCoverage::All));
     tracked!(linker_plugin_lto, LinkerPluginLto::LinkerPluginAuto);
     tracked!(link_dead_code, Some(true));
     tracked!(llvm_args, vec![String::from("1"), String::from("2")]);
@@ -645,6 +646,7 @@ fn test_debugging_options_tracking_hash() {
     untracked!(borrowck, String::from("other"));
     untracked!(deduplicate_diagnostics, false);
     untracked!(dep_tasks, true);
+    untracked!(dlltool, Some(PathBuf::from("custom_dlltool.exe")));
     untracked!(dont_buffer_diagnostics, true);
     untracked!(dump_dep_graph, true);
     untracked!(dump_mir, Some(String::from("abc")));
@@ -676,13 +678,11 @@ fn test_debugging_options_tracking_hash() {
     // `pre_link_arg` is omitted because it just forwards to `pre_link_args`.
     untracked!(pre_link_args, vec![String::from("abc"), String::from("def")]);
     untracked!(profile_closures, true);
-    untracked!(print_link_args, true);
     untracked!(print_llvm_passes, true);
     untracked!(print_mono_items, Some(String::from("abc")));
     untracked!(print_type_sizes, true);
     untracked!(proc_macro_backtrace, true);
     untracked!(query_dep_graph, true);
-    untracked!(query_stats, true);
     untracked!(save_analysis, true);
     untracked!(self_profile, SwitchWithOptPath::Enabled(None));
     untracked!(self_profile_events, Some(vec![String::new()]));
@@ -718,12 +718,20 @@ fn test_debugging_options_tracking_hash() {
     tracked!(asm_comments, true);
     tracked!(assume_incomplete_release, true);
     tracked!(binary_dep_depinfo, true);
+    tracked!(
+        branch_protection,
+        Some(BranchProtection {
+            bti: true,
+            pac_ret: Some(PacRet { leaf: true, key: PAuthKey::B })
+        })
+    );
     tracked!(chalk, true);
     tracked!(codegen_backend, Some("abc".to_string()));
     tracked!(crate_attr, vec!["abc".to_string()]);
     tracked!(debug_info_for_profiling, true);
     tracked!(debug_macros, true);
     tracked!(dep_info_omit_d_target, true);
+    tracked!(drop_tracking, true);
     tracked!(dual_proc_macros, true);
     tracked!(fewer_names, Some(true));
     tracked!(force_unstable_if_unmarked, true);

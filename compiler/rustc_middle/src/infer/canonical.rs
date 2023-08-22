@@ -23,7 +23,7 @@
 
 use crate::infer::MemberConstraint;
 use crate::ty::subst::GenericArg;
-use crate::ty::{self, BoundVar, List, Region, TyCtxt};
+use crate::ty::{self, BoundVar, List, Region, Ty, TyCtxt};
 use rustc_index::vec::IndexVec;
 use rustc_macros::HashStable;
 use smallvec::SmallVec;
@@ -64,9 +64,9 @@ pub struct CanonicalVarValues<'tcx> {
 /// result.
 #[derive(Clone, Debug)]
 pub struct OriginalQueryValues<'tcx> {
-    /// Map from the universes that appear in the query to the
-    /// universes in the caller context. For the time being, we only
-    /// ever put ROOT values into the query, so this map is very
+    /// Map from the universes that appear in the query to the universes in the
+    /// caller context. For all queries except `evaluate_goal` (used by Chalk),
+    /// we only ever put ROOT values into the query, so this map is very
     /// simple.
     pub universe_map: SmallVec<[ty::UniverseIndex; 4]>,
 
@@ -104,7 +104,7 @@ impl<'tcx> CanonicalVarInfo<'tcx> {
             CanonicalVarKind::PlaceholderTy(_) => false,
             CanonicalVarKind::Region(_) => true,
             CanonicalVarKind::PlaceholderRegion(..) => false,
-            CanonicalVarKind::Const(_) => true,
+            CanonicalVarKind::Const(..) => true,
             CanonicalVarKind::PlaceholderConst(_) => false,
         }
     }
@@ -130,7 +130,7 @@ pub enum CanonicalVarKind<'tcx> {
     PlaceholderRegion(ty::PlaceholderRegion),
 
     /// Some kind of const inference variable.
-    Const(ty::UniverseIndex),
+    Const(ty::UniverseIndex, Ty<'tcx>),
 
     /// A "placeholder" that represents "any const".
     PlaceholderConst(ty::PlaceholderConst<'tcx>),
@@ -147,7 +147,7 @@ impl<'tcx> CanonicalVarKind<'tcx> {
             CanonicalVarKind::PlaceholderTy(placeholder) => placeholder.universe,
             CanonicalVarKind::Region(ui) => ui,
             CanonicalVarKind::PlaceholderRegion(placeholder) => placeholder.universe,
-            CanonicalVarKind::Const(ui) => ui,
+            CanonicalVarKind::Const(ui, _) => ui,
             CanonicalVarKind::PlaceholderConst(placeholder) => placeholder.universe,
         }
     }
@@ -328,8 +328,8 @@ impl<'tcx> CanonicalVarValues<'tcx> {
                         tcx.mk_region(ty::ReLateBound(ty::INNERMOST, br)).into()
                     }
                     GenericArgKind::Const(ct) => tcx
-                        .mk_const(ty::Const {
-                            ty: ct.ty,
+                        .mk_const(ty::ConstS {
+                            ty: ct.ty(),
                             val: ty::ConstKind::Bound(ty::INNERMOST, ty::BoundVar::from_u32(i)),
                         })
                         .into(),

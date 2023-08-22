@@ -10,7 +10,7 @@ use rustc_hir::{
     ItemKind, Mutability, Node, TraitItemRef, TyKind,
 };
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::ty::{self, AssocKind, FnSig, Ty, TyS};
+use rustc_middle::ty::{self, AssocKind, FnSig, Ty};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::{
     source_map::{Span, Spanned, Symbol},
@@ -214,14 +214,14 @@ fn check_trait_items(cx: &LateContext<'_>, visited_trait: &Item<'_>, trait_items
     {
         let mut current_and_super_traits = DefIdSet::default();
         fill_trait_set(visited_trait.def_id.to_def_id(), &mut current_and_super_traits, cx);
+        let is_empty = sym!(is_empty);
 
         let is_empty_method_found = current_and_super_traits
             .iter()
-            .flat_map(|&i| cx.tcx.associated_items(i).in_definition_order())
+            .flat_map(|&i| cx.tcx.associated_items(i).filter_by_name_unhygienic(is_empty))
             .any(|i| {
                 i.kind == ty::AssocKind::Fn
                     && i.fn_has_self_parameter
-                    && i.ident.name == sym!(is_empty)
                     && cx.tcx.fn_sig(i.def_id).inputs().skip_binder().len() == 1
             });
 
@@ -245,7 +245,7 @@ enum LenOutput<'tcx> {
     Option(DefId),
     Result(DefId, Ty<'tcx>),
 }
-fn parse_len_output(cx: &LateContext<'_>, sig: FnSig<'tcx>) -> Option<LenOutput<'tcx>> {
+fn parse_len_output<'tcx>(cx: &LateContext<'_>, sig: FnSig<'tcx>) -> Option<LenOutput<'tcx>> {
     match *sig.output().kind() {
         ty::Int(_) | ty::Uint(_) => Some(LenOutput::Integral),
         ty::Adt(adt, subs) if cx.tcx.is_diagnostic_item(sym::Option, adt.did) => {
@@ -265,7 +265,7 @@ impl LenOutput<'_> {
             (_, &ty::Bool) => true,
             (Self::Option(id), &ty::Adt(adt, subs)) if id == adt.did => subs.type_at(0).is_bool(),
             (Self::Result(id, err_ty), &ty::Adt(adt, subs)) if id == adt.did => {
-                subs.type_at(0).is_bool() && TyS::same_type(subs.type_at(1), err_ty)
+                subs.type_at(0).is_bool() && subs.type_at(1) == err_ty
             },
             _ => false,
         }
@@ -294,7 +294,7 @@ impl LenOutput<'_> {
 /// Checks if the given signature matches the expectations for `is_empty`
 fn check_is_empty_sig(sig: FnSig<'_>, self_kind: ImplicitSelfKind, len_output: LenOutput<'_>) -> bool {
     match &**sig.inputs_and_output {
-        [arg, res] if len_output.matches_is_empty_output(res) => {
+        [arg, res] if len_output.matches_is_empty_output(*res) => {
             matches!(
                 (arg.kind(), self_kind),
                 (ty::Ref(_, _, Mutability::Not), ImplicitSelfKind::ImmRef)
@@ -370,7 +370,7 @@ fn check_for_is_empty(
 }
 
 fn check_cmp(cx: &LateContext<'_>, span: Span, method: &Expr<'_>, lit: &Expr<'_>, op: &str, compare_to: u32) {
-    if let (&ExprKind::MethodCall(method_path, _, args, _), &ExprKind::Lit(ref lit)) = (&method.kind, &lit.kind) {
+    if let (&ExprKind::MethodCall(method_path, args, _), &ExprKind::Lit(ref lit)) = (&method.kind, &lit.kind) {
         // check if we are in an is_empty() method
         if let Some(name) = get_item_name(cx, method) {
             if name.as_str() == "is_empty" {
@@ -458,7 +458,7 @@ fn is_empty_array(expr: &Expr<'_>) -> bool {
 fn has_is_empty(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     /// Gets an `AssocItem` and return true if it matches `is_empty(self)`.
     fn is_is_empty(cx: &LateContext<'_>, item: &ty::AssocItem) -> bool {
-        if item.kind == ty::AssocKind::Fn && item.ident.name.as_str() == "is_empty" {
+        if item.kind == ty::AssocKind::Fn {
             let sig = cx.tcx.fn_sig(item.def_id);
             let ty = sig.skip_binder();
             ty.inputs().len() == 1
@@ -469,10 +469,11 @@ fn has_is_empty(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
 
     /// Checks the inherent impl's items for an `is_empty(self)` method.
     fn has_is_empty_impl(cx: &LateContext<'_>, id: DefId) -> bool {
+        let is_empty = sym!(is_empty);
         cx.tcx.inherent_impls(id).iter().any(|imp| {
             cx.tcx
                 .associated_items(*imp)
-                .in_definition_order()
+                .filter_by_name_unhygienic(is_empty)
                 .any(|item| is_is_empty(cx, item))
         })
     }
@@ -480,9 +481,10 @@ fn has_is_empty(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     let ty = &cx.typeck_results().expr_ty(expr).peel_refs();
     match ty.kind() {
         ty::Dynamic(tt, ..) => tt.principal().map_or(false, |principal| {
+            let is_empty = sym!(is_empty);
             cx.tcx
                 .associated_items(principal.def_id())
-                .in_definition_order()
+                .filter_by_name_unhygienic(is_empty)
                 .any(|item| is_is_empty(cx, item))
         }),
         ty::Projection(ref proj) => has_is_empty_impl(cx, proj.item_def_id),

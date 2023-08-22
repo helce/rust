@@ -9,7 +9,6 @@ use rustc_data_structures::thin_vec::ThinVec;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
-use rustc_hir::definitions::DefPathData;
 use rustc_hir::Mutability;
 use rustc_metadata::creader::{CStore, LoadedMacro};
 use rustc_middle::ty::{self, TyCtxt};
@@ -164,12 +163,10 @@ crate fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> Attrs<'hir> {
 /// These names are used later on by HTML rendering to generate things like
 /// source links back to the original item.
 crate fn record_extern_fqn(cx: &mut DocContext<'_>, did: DefId, kind: ItemType) {
-    let crate_name = cx.tcx.crate_name(did.krate).to_string();
+    let crate_name = cx.tcx.crate_name(did.krate);
 
-    let relative = cx.tcx.def_path(did).data.into_iter().filter_map(|elem| {
-        // Filter out extern blocks
-        (elem.data != DefPathData::ForeignMod).then(|| elem.data.to_string())
-    });
+    let relative =
+        cx.tcx.def_path(did).data.into_iter().filter_map(|elem| elem.data.get_opt_name());
     let fqn = if let ItemType::Macro = kind {
         // Check to see if it is a macro 2.0 or built-in macro
         if matches!(
@@ -291,6 +288,7 @@ crate fn build_impls(
     attrs: Option<Attrs<'_>>,
     ret: &mut Vec<clean::Item>,
 ) {
+    let _prof_timer = cx.tcx.sess.prof.generic_activity("build_inherent_impls");
     let tcx = cx.tcx;
 
     // for each implementation of an item represented by `did`, build the clean::Item for that impl
@@ -338,7 +336,7 @@ crate fn build_impl(
         return;
     }
 
-    let _prof_timer = cx.tcx.sess.prof.generic_activity("build_extern_trait_impl");
+    let _prof_timer = cx.tcx.sess.prof.generic_activity("build_impl");
 
     let tcx = cx.tcx;
     let associated_trait = tcx.impl_trait_ref(did);
@@ -516,7 +514,7 @@ fn build_module(
     // If we're re-exporting a re-export it may actually re-export something in
     // two namespaces, so the target may be listed twice. Make sure we only
     // visit each node at most once.
-    for &item in cx.tcx.item_children(did).iter() {
+    for &item in cx.tcx.module_children(did).iter() {
         if item.vis.is_public() {
             let res = item.res.expect_non_local();
             if let Some(def_id) = res.mod_def_id() {
@@ -566,7 +564,7 @@ crate fn print_inlined_const(tcx: TyCtxt<'_>, did: DefId) -> String {
         let hir_id = tcx.hir().local_def_id_to_hir_id(did);
         rustc_hir_pretty::id_to_string(&tcx.hir(), hir_id)
     } else {
-        tcx.rendered_const(did)
+        tcx.rendered_const(did).clone()
     }
 }
 

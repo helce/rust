@@ -20,8 +20,8 @@ use rustc_span::symbol::sym;
 use clippy_utils::consts::{constant, Constant};
 use clippy_utils::sugg::Sugg;
 use clippy_utils::{
-    expr_path_res, get_item_name, get_parent_expr, in_constant, is_diag_trait_item, is_integer_const, iter_input_pats,
-    last_path_segment, match_any_def_paths, paths, unsext, SpanlessEq,
+    get_item_name, get_parent_expr, in_constant, is_diag_trait_item, is_integer_const, iter_input_pats,
+    last_path_segment, match_any_def_paths, path_def_id, paths, unsext, SpanlessEq,
 };
 
 declare_clippy_lint! {
@@ -523,7 +523,7 @@ fn is_signum(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     }
 
     if_chain! {
-        if let ExprKind::MethodCall(method_name, _, [ref self_arg, ..], _) = expr.kind;
+        if let ExprKind::MethodCall(method_name, [ref self_arg, ..], _) = expr.kind;
         if sym!(signum) == method_name.ident.name;
         // Check that the receiver of the signum() is a float (expressions[0] is the receiver of
         // the method call)
@@ -548,6 +548,7 @@ fn is_array(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     matches!(&cx.typeck_results().expr_ty(expr).peel_refs().kind(), ty::Array(_, _))
 }
 
+#[allow(clippy::too_many_lines)]
 fn check_to_owned(cx: &LateContext<'_>, expr: &Expr<'_>, other: &Expr<'_>, left: bool) {
     #[derive(Default)]
     struct EqImpl {
@@ -582,8 +583,7 @@ fn check_to_owned(cx: &LateContext<'_>, expr: &Expr<'_>, other: &Expr<'_>, left:
             )
         },
         ExprKind::Call(path, [arg]) => {
-            if expr_path_res(cx, path)
-                .opt_def_id()
+            if path_def_id(cx, path)
                 .and_then(|id| match_any_def_paths(cx, id, &[&paths::FROM_STR_METHOD, &paths::FROM_FROM]))
                 .is_some()
             {
@@ -644,10 +644,26 @@ fn check_to_owned(cx: &LateContext<'_>, expr: &Expr<'_>, other: &Expr<'_>, left:
                 hint = expr_snip;
             } else {
                 span = expr.span.to(other.span);
-                if eq_impl.ty_eq_other {
-                    hint = format!("{} == {}", expr_snip, snippet(cx, other.span, ".."));
+
+                let cmp_span = if other.span < expr.span {
+                    other.span.between(expr.span)
                 } else {
-                    hint = format!("{} == {}", snippet(cx, other.span, ".."), expr_snip);
+                    expr.span.between(other.span)
+                };
+                if eq_impl.ty_eq_other {
+                    hint = format!(
+                        "{}{}{}",
+                        expr_snip,
+                        snippet(cx, cmp_span, ".."),
+                        snippet(cx, other.span, "..")
+                    );
+                } else {
+                    hint = format!(
+                        "{}{}{}",
+                        snippet(cx, other.span, ".."),
+                        snippet(cx, cmp_span, ".."),
+                        expr_snip
+                    );
                 }
             }
 
@@ -717,7 +733,7 @@ fn check_cast(cx: &LateContext<'_>, span: Span, e: &Expr<'_>, ty: &hir::Ty<'_>) 
     }
 }
 
-fn check_binary(
+fn check_binary<'a>(
     cx: &LateContext<'a>,
     expr: &Expr<'_>,
     cmp: &rustc_span::source_map::Spanned<rustc_hir::BinOpKind>,

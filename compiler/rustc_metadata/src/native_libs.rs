@@ -274,11 +274,6 @@ impl Collector<'_> {
                     span,
                     "`#[link(...)]` with `kind = \"raw-dylib\"` only supported on Windows",
                 );
-            } else if !self.tcx.sess.target.options.is_like_msvc {
-                self.tcx.sess.span_warn(
-                    span,
-                    "`#[link(...)]` with `kind = \"raw-dylib\"` not supported on windows-gnu",
-                );
             }
 
             if lib_name.as_str().contains('\0') {
@@ -409,11 +404,13 @@ impl Collector<'_> {
     fn build_dll_import(&self, abi: Abi, item: &hir::ForeignItemRef) -> DllImport {
         let calling_convention = if self.tcx.sess.target.arch == "x86" {
             match abi {
-                Abi::C { .. } | Abi::Cdecl => DllCallingConvention::C,
+                Abi::C { .. } | Abi::Cdecl { .. } => DllCallingConvention::C,
                 Abi::Stdcall { .. } | Abi::System { .. } => {
                     DllCallingConvention::Stdcall(self.i686_arg_list_size(item))
                 }
-                Abi::Fastcall => DllCallingConvention::Fastcall(self.i686_arg_list_size(item)),
+                Abi::Fastcall { .. } => {
+                    DllCallingConvention::Fastcall(self.i686_arg_list_size(item))
+                }
                 // Vectorcall is intentionally not supported at this time.
                 _ => {
                     self.tcx.sess.span_fatal(
@@ -424,7 +421,7 @@ impl Collector<'_> {
             }
         } else {
             match abi {
-                Abi::C { .. } | Abi::Win64 | Abi::System { .. } => DllCallingConvention::C,
+                Abi::C { .. } | Abi::Win64 { .. } | Abi::System { .. } => DllCallingConvention::C,
                 _ => {
                     self.tcx.sess.span_fatal(
                         item.span,

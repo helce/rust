@@ -32,6 +32,7 @@ use crate::{HashStableContext, Span, DUMMY_SP};
 use crate::def_id::{CrateNum, DefId, StableCrateId, CRATE_DEF_ID, LOCAL_CRATE};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::stable_hasher::HashingControls;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync::{Lock, Lrc};
 use rustc_data_structures::unhash::UnhashMap;
@@ -85,6 +86,33 @@ rustc_index::newtype_index! {
     pub struct LocalExpnId {
         ENCODABLE = custom
         DEBUG_FORMAT = "expn{}"
+    }
+}
+
+/// Assert that the provided `HashStableContext` is configured with the 'default'
+/// `HashingControls`. We should always have bailed out before getting to here
+/// with a non-default mode. With this check in place, we can avoid the need
+/// to maintain separate versions of `ExpnData` hashes for each permutation
+/// of `HashingControls` settings.
+fn assert_default_hashing_controls<CTX: HashStableContext>(ctx: &CTX, msg: &str) {
+    match ctx.hashing_controls() {
+        // Ideally, we would also check that `node_id_hashing_mode` was always
+        // `NodeIdHashingMode::HashDefPath`. However, we currently end up hashing
+        // `Span`s in this mode, and there's not an easy way to change that.
+        // All of the span-related data that we hash is pretty self-contained
+        // (in particular, we don't hash any `HirId`s), so this shouldn't result
+        // in any caching problems.
+        // FIXME: Enforce that we don't end up transitively hashing any `HirId`s,
+        // or ensure that this method is always invoked with the same
+        // `NodeIdHashingMode`
+        //
+        // Note that we require that `hash_spans` be set according to the global
+        // `-Z incremental-ignore-spans` option. Normally, this option is disabled,
+        // which will cause us to require that this method always be called with `Span` hashing
+        // enabled.
+        HashingControls { hash_spans, node_id_hashing_mode: _ }
+            if hash_spans == !ctx.debug_opts_incremental_ignore_spans() => {}
+        other => panic!("Attempted hashing of {msg} with non-default HashingControls: {:?}", other),
     }
 }
 
@@ -144,10 +172,12 @@ impl LocalExpnId {
     /// The ID of the theoretical expansion that generates freshly parsed, unexpanded AST.
     pub const ROOT: LocalExpnId = LocalExpnId::from_u32(0);
 
+    #[inline]
     pub fn from_raw(idx: ExpnIndex) -> LocalExpnId {
         LocalExpnId::from_u32(idx.as_u32())
     }
 
+    #[inline]
     pub fn as_raw(self) -> ExpnIndex {
         ExpnIndex::from_u32(self.as_u32())
     }
@@ -1286,19 +1316,16 @@ pub fn decode_expn_id(
 // to track which `SyntaxContext`s we have already decoded.
 // The provided closure will be invoked to deserialize a `SyntaxContextData`
 // if we haven't already seen the id of the `SyntaxContext` we are deserializing.
-pub fn decode_syntax_context<
-    D: Decoder,
-    F: FnOnce(&mut D, u32) -> Result<SyntaxContextData, D::Error>,
->(
+pub fn decode_syntax_context<D: Decoder, F: FnOnce(&mut D, u32) -> SyntaxContextData>(
     d: &mut D,
     context: &HygieneDecodeContext,
     decode_data: F,
-) -> Result<SyntaxContext, D::Error> {
-    let raw_id: u32 = Decodable::decode(d)?;
+) -> SyntaxContext {
+    let raw_id: u32 = Decodable::decode(d);
     if raw_id == 0 {
         debug!("decode_syntax_context: deserialized root");
         // The root is special
-        return Ok(SyntaxContext::root());
+        return SyntaxContext::root();
     }
 
     let outer_ctxts = &context.remapped_ctxts;
@@ -1306,7 +1333,7 @@ pub fn decode_syntax_context<
     // Ensure that the lock() temporary is dropped early
     {
         if let Some(ctxt) = outer_ctxts.lock().get(raw_id as usize).copied().flatten() {
-            return Ok(ctxt);
+            return ctxt;
         }
     }
 
@@ -1336,7 +1363,7 @@ pub fn decode_syntax_context<
 
     // Don't try to decode data while holding the lock, since we need to
     // be able to recursively decode a SyntaxContext
-    let mut ctxt_data = decode_data(d, raw_id)?;
+    let mut ctxt_data = decode_data(d, raw_id);
     // Reset `dollar_crate_name` so that it will be updated by `update_dollar_crate_names`
     // We don't care what the encoding crate set this to - we want to resolve it
     // from the perspective of the current compilation session
@@ -1352,7 +1379,7 @@ pub fn decode_syntax_context<
         assert_eq!(dummy.dollar_crate_name, kw::Empty);
     });
 
-    Ok(new_ctxt)
+    new_ctxt
 }
 
 fn for_all_ctxts_in<E, F: FnMut(u32, SyntaxContext, &SyntaxContextData) -> Result<(), E>>(
@@ -1394,13 +1421,13 @@ impl<E: Encoder> Encodable<E> for ExpnId {
 }
 
 impl<D: Decoder> Decodable<D> for LocalExpnId {
-    fn decode(d: &mut D) -> Result<Self, D::Error> {
-        ExpnId::decode(d).map(ExpnId::expect_local)
+    fn decode(d: &mut D) -> Self {
+        ExpnId::expect_local(ExpnId::decode(d))
     }
 }
 
 impl<D: Decoder> Decodable<D> for ExpnId {
-    default fn decode(_: &mut D) -> Result<Self, D::Error> {
+    default fn decode(_: &mut D) -> Self {
         panic!("cannot decode `ExpnId` with `{}`", std::any::type_name::<D>());
     }
 }
@@ -1423,7 +1450,7 @@ impl<E: Encoder> Encodable<E> for SyntaxContext {
 }
 
 impl<D: Decoder> Decodable<D> for SyntaxContext {
-    default fn decode(_: &mut D) -> Result<Self, D::Error> {
+    default fn decode(_: &mut D) -> Self {
         panic!("cannot decode `SyntaxContext` with `{}`", std::any::type_name::<D>());
     }
 }
@@ -1444,6 +1471,7 @@ fn update_disambiguator(expn_data: &mut ExpnData, mut ctx: impl HashStableContex
         "Already set disambiguator for ExpnData: {:?}",
         expn_data
     );
+    assert_default_hashing_controls(&ctx, "ExpnData (disambiguator)");
     let mut expn_hash = expn_data.hash_expn(&mut ctx);
 
     let disambiguator = HygieneData::with(|data| {
@@ -1493,6 +1521,7 @@ impl<CTX: HashStableContext> HashStable<CTX> for SyntaxContext {
 
 impl<CTX: HashStableContext> HashStable<CTX> for ExpnId {
     fn hash_stable(&self, ctx: &mut CTX, hasher: &mut StableHasher) {
+        assert_default_hashing_controls(ctx, "ExpnId");
         let hash = if *self == ExpnId::root() {
             // Avoid fetching TLS storage for a trivial often-used value.
             Fingerprint::ZERO

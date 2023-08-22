@@ -81,7 +81,7 @@ pub use index::SliceIndex;
 #[unstable(feature = "slice_range", issue = "76393")]
 pub use index::range;
 
-#[unstable(feature = "inherent_ascii_escape", issue = "77174")]
+#[stable(feature = "inherent_ascii_escape", since = "1.60.0")]
 pub use ascii::EscapeAscii;
 
 /// Calculates the direction and split point of a one-sided range.
@@ -2556,50 +2556,6 @@ impl<T> [T] {
         K: Ord,
     {
         sort::quicksort(self, |a, b| f(a).lt(&f(b)));
-    }
-
-    /// Reorder the slice such that the element at `index` is at its final sorted position.
-    #[unstable(feature = "slice_partition_at_index", issue = "55300")]
-    #[rustc_deprecated(since = "1.49.0", reason = "use the select_nth_unstable() instead")]
-    #[inline]
-    pub fn partition_at_index(&mut self, index: usize) -> (&mut [T], &mut T, &mut [T])
-    where
-        T: Ord,
-    {
-        self.select_nth_unstable(index)
-    }
-
-    /// Reorder the slice with a comparator function such that the element at `index` is at its
-    /// final sorted position.
-    #[unstable(feature = "slice_partition_at_index", issue = "55300")]
-    #[rustc_deprecated(since = "1.49.0", reason = "use select_nth_unstable_by() instead")]
-    #[inline]
-    pub fn partition_at_index_by<F>(
-        &mut self,
-        index: usize,
-        compare: F,
-    ) -> (&mut [T], &mut T, &mut [T])
-    where
-        F: FnMut(&T, &T) -> Ordering,
-    {
-        self.select_nth_unstable_by(index, compare)
-    }
-
-    /// Reorder the slice with a key extraction function such that the element at `index` is at its
-    /// final sorted position.
-    #[unstable(feature = "slice_partition_at_index", issue = "55300")]
-    #[rustc_deprecated(since = "1.49.0", reason = "use the select_nth_unstable_by_key() instead")]
-    #[inline]
-    pub fn partition_at_index_by_key<K, F>(
-        &mut self,
-        index: usize,
-        f: F,
-    ) -> (&mut [T], &mut T, &mut [T])
-    where
-        F: FnMut(&T) -> K,
-        K: Ord,
-    {
-        self.select_nth_unstable_by_key(index, f)
     }
 
     /// Reorder the slice such that the element at `index` is at its final sorted position.

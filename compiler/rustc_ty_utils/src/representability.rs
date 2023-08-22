@@ -92,19 +92,14 @@ fn are_inner_types_recursive<'tcx>(
             seen,
             shadow_seen,
             representable_cache,
-            ty,
+            *ty,
             force_result,
         ),
         ty::Adt(def, substs) => {
             // Find non representable fields with their spans
             fold_repr(def.all_fields().map(|field| {
                 let ty = field.ty(tcx, substs);
-                let span = match field
-                    .did
-                    .as_local()
-                    .map(|id| tcx.hir().local_def_id_to_hir_id(id))
-                    .and_then(|id| tcx.hir().find(id))
-                {
+                let span = match field.did.as_local().and_then(|id| tcx.hir().find_by_def_id(id)) {
                     Some(hir::Node::Field(field)) => field.ty.span,
                     _ => sp,
                 };
@@ -260,7 +255,7 @@ fn is_type_structurally_recursive<'tcx>(
     force_result: &mut bool,
 ) -> Representability {
     debug!("is_type_structurally_recursive: {:?} {:?}", ty, sp);
-    if let Some(representability) = representable_cache.get(ty) {
+    if let Some(representability) = representable_cache.get(&ty) {
         debug!(
             "is_type_structurally_recursive: {:?} {:?} - (cached) {:?}",
             ty, sp, representability
@@ -327,7 +322,7 @@ fn is_type_structurally_recursive_inner<'tcx>(
                 // struct Foo { Option<Option<Foo>> }
 
                 for &seen_adt in iter {
-                    if ty::TyS::same_type(ty, seen_adt) {
+                    if ty == seen_adt {
                         debug!("ContainsRecursive: {:?} contains {:?}", seen_adt, ty);
                         return Representability::ContainsRecursive;
                     }

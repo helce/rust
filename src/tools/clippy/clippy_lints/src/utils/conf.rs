@@ -23,6 +23,14 @@ pub enum DisallowedMethod {
     WithReason { path: String, reason: Option<String> },
 }
 
+impl DisallowedMethod {
+    pub fn path(&self) -> &str {
+        let (Self::Simple(path) | Self::WithReason { path, .. }) = self;
+
+        path
+    }
+}
+
 /// A single disallowed type, used by the `DISALLOWED_TYPES` lint.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
@@ -113,7 +121,7 @@ macro_rules! define_Conf {
             }
         }
 
-        #[cfg(feature = "metadata-collector-lint")]
+        #[cfg(feature = "internal")]
         pub mod metadata {
             use crate::utils::internal_lints::metadata_collector::ClippyConfiguration;
 
@@ -148,7 +156,7 @@ define_Conf! {
     ///
     /// Suppress lints whenever the suggested change would cause breakage for other crates.
     (avoid_breaking_exported_api: bool = true),
-    /// Lint: MANUAL_SPLIT_ONCE, MANUAL_STR_REPEAT, CLONED_INSTEAD_OF_COPIED, REDUNDANT_FIELD_NAMES, REDUNDANT_STATIC_LIFETIMES, FILTER_MAP_NEXT, CHECKED_CONVERSIONS, MANUAL_RANGE_CONTAINS, USE_SELF, MEM_REPLACE_WITH_DEFAULT, MANUAL_NON_EXHAUSTIVE, OPTION_AS_REF_DEREF, MAP_UNWRAP_OR, MATCH_LIKE_MATCHES_MACRO, MANUAL_STRIP, MISSING_CONST_FOR_FN, UNNESTED_OR_PATTERNS, FROM_OVER_INTO, PTR_AS_PTR, IF_THEN_SOME_ELSE_NONE, APPROX_CONSTANT, DEPRECATED_CFG_ATTR, INDEX_REFUTABLE_SLICE.
+    /// Lint: MANUAL_SPLIT_ONCE, MANUAL_STR_REPEAT, CLONED_INSTEAD_OF_COPIED, REDUNDANT_FIELD_NAMES, REDUNDANT_STATIC_LIFETIMES, FILTER_MAP_NEXT, CHECKED_CONVERSIONS, MANUAL_RANGE_CONTAINS, USE_SELF, MEM_REPLACE_WITH_DEFAULT, MANUAL_NON_EXHAUSTIVE, OPTION_AS_REF_DEREF, MAP_UNWRAP_OR, MATCH_LIKE_MATCHES_MACRO, MANUAL_STRIP, MISSING_CONST_FOR_FN, UNNESTED_OR_PATTERNS, FROM_OVER_INTO, PTR_AS_PTR, IF_THEN_SOME_ELSE_NONE, APPROX_CONSTANT, DEPRECATED_CFG_ATTR, INDEX_REFUTABLE_SLICE, MAP_CLONE, BORROW_AS_PTR, MANUAL_BITS.
     ///
     /// The minimum rust version that the project supports
     (msrv: Option<String> = None),
@@ -314,6 +322,9 @@ pub fn lookup_conf_file() -> io::Result<Option<PathBuf>> {
     let mut current = env::var_os("CLIPPY_CONF_DIR")
         .or_else(|| env::var_os("CARGO_MANIFEST_DIR"))
         .map_or_else(|| PathBuf::from("."), PathBuf::from);
+
+    let mut found_config: Option<PathBuf> = None;
+
     loop {
         for config_file_name in &CONFIG_FILE_NAMES {
             if let Ok(config_file) = current.join(config_file_name).canonicalize() {
@@ -321,9 +332,24 @@ pub fn lookup_conf_file() -> io::Result<Option<PathBuf>> {
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {},
                     Err(e) => return Err(e),
                     Ok(md) if md.is_dir() => {},
-                    Ok(_) => return Ok(Some(config_file)),
+                    Ok(_) => {
+                        // warn if we happen to find two config files #8323
+                        if let Some(ref found_config_) = found_config {
+                            eprintln!(
+                                "Using config file `{}`\nWarning: `{}` will be ignored.",
+                                found_config_.display(),
+                                config_file.display(),
+                            );
+                        } else {
+                            found_config = Some(config_file);
+                        }
+                    },
                 }
             }
+        }
+
+        if found_config.is_some() {
+            return Ok(found_config);
         }
 
         // If the current directory has no parent, we're done searching.

@@ -89,7 +89,7 @@ fn object_safety_violations_for_trait(
         .filter(|item| item.kind == ty::AssocKind::Fn)
         .filter_map(|item| {
             object_safety_violation_for_method(tcx, trait_def_id, &item)
-                .map(|(code, span)| ObjectSafetyViolation::Method(item.ident.name, code, span))
+                .map(|(code, span)| ObjectSafetyViolation::Method(item.name, code, span))
         })
         .filter(|violation| {
             if let ObjectSafetyViolation::Method(
@@ -125,7 +125,10 @@ fn object_safety_violations_for_trait(
         tcx.associated_items(trait_def_id)
             .in_definition_order()
             .filter(|item| item.kind == ty::AssocKind::Const)
-            .map(|item| ObjectSafetyViolation::AssocConst(item.ident.name, item.ident.span)),
+            .map(|item| {
+                let ident = item.ident(tcx);
+                ObjectSafetyViolation::AssocConst(ident.name, ident.span)
+            }),
     );
 
     violations.extend(
@@ -133,7 +136,10 @@ fn object_safety_violations_for_trait(
             .in_definition_order()
             .filter(|item| item.kind == ty::AssocKind::Type)
             .filter(|item| !tcx.generics_of(item.def_id).params.is_empty())
-            .map(|item| ObjectSafetyViolation::GAT(item.ident.name, item.ident.span)),
+            .map(|item| {
+                let ident = item.ident(tcx);
+                ObjectSafetyViolation::GAT(ident.name, ident.span)
+            }),
     );
 
     debug!(
@@ -274,7 +280,7 @@ fn predicate_references_self<'tcx>(
     (predicate, sp): (ty::Predicate<'tcx>, Span),
 ) -> Option<Span> {
     let self_ty = tcx.types.self_param;
-    let has_self_ty = |arg: &GenericArg<'tcx>| arg.walk(tcx).any(|arg| arg == self_ty.into());
+    let has_self_ty = |arg: &GenericArg<'_>| arg.walk().any(|arg| arg == self_ty.into());
     match predicate.kind().skip_binder() {
         ty::PredicateKind::Trait(ref data) => {
             // In the case of a trait predicate, we can skip the "self" type.
@@ -367,15 +373,15 @@ fn object_safety_violation_for_method(
             (MethodViolationCode::ReferencesSelfInput(arg), Some(node)) => node
                 .fn_decl()
                 .and_then(|decl| decl.inputs.get(arg + 1))
-                .map_or(method.ident.span, |arg| arg.span),
+                .map_or(method.ident(tcx).span, |arg| arg.span),
             (MethodViolationCode::UndispatchableReceiver, Some(node)) => node
                 .fn_decl()
                 .and_then(|decl| decl.inputs.get(0))
-                .map_or(method.ident.span, |arg| arg.span),
+                .map_or(method.ident(tcx).span, |arg| arg.span),
             (MethodViolationCode::ReferencesSelfOutput, Some(node)) => {
-                node.fn_decl().map_or(method.ident.span, |decl| decl.output.span())
+                node.fn_decl().map_or(method.ident(tcx).span, |decl| decl.output.span())
             }
-            _ => method.ident.span,
+            _ => method.ident(tcx).span,
         };
         (v, span)
     })
@@ -404,10 +410,10 @@ fn virtual_call_violation_for_method<'tcx>(
             );
         // Get the span pointing at where the `self` receiver should be.
         let sm = tcx.sess.source_map();
-        let self_span = method.ident.span.to(tcx
+        let self_span = method.ident(tcx).span.to(tcx
             .hir()
             .span_if_local(method.def_id)
-            .unwrap_or_else(|| sm.next_point(method.ident.span))
+            .unwrap_or_else(|| sm.next_point(method.ident(tcx).span))
             .shrink_to_hi());
         let self_span = sm.span_through_char(self_span, '(').shrink_to_hi();
         return Some(MethodViolationCode::StaticMethod(
@@ -571,7 +577,7 @@ fn object_ty_for_trait<'tcx>(
         // `trait MyTrait: for<'s> OtherTrait<&'s T, Output=bool>`.
         super_trait_ref.map_bound(|super_trait_ref| {
             ty::ExistentialPredicate::Projection(ty::ExistentialProjection {
-                ty: tcx.mk_projection(item.def_id, super_trait_ref.substs),
+                term: tcx.mk_projection(item.def_id, super_trait_ref.substs).into(),
                 item_def_id: item.def_id,
                 substs: super_trait_ref.substs,
             })
@@ -768,9 +774,6 @@ fn contains_illegal_self_type_reference<'tcx, T: TypeFoldable<'tcx>>(
 
     impl<'tcx> TypeVisitor<'tcx> for IllegalSelfTypeVisitor<'tcx> {
         type BreakTy = ();
-        fn tcx_for_anon_const_substs(&self) -> Option<TyCtxt<'tcx>> {
-            Some(self.tcx)
-        }
 
         fn visit_ty(&mut self, t: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
             match t.kind() {

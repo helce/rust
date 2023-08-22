@@ -51,9 +51,7 @@ crate fn where_clauses(cx: &DocContext<'_>, clauses: Vec<WP>) -> Vec<WP> {
     // Look for equality predicates on associated types that can be merged into
     // general bound predicates
     equalities.retain(|&(ref lhs, ref rhs)| {
-        let (self_, trait_did, name) = if let Some(p) = lhs.projection() {
-            p
-        } else {
+        let Some((self_, trait_did, name)) = lhs.projection() else {
             return true;
         };
         let generic = match self_ {
@@ -92,7 +90,7 @@ crate fn merge_bounds(
     bounds: &mut Vec<clean::GenericBound>,
     trait_did: DefId,
     name: Symbol,
-    rhs: &clean::Type,
+    rhs: &clean::Term,
 ) -> bool {
     !bounds.iter_mut().any(|b| {
         let trait_ref = match *b {
@@ -110,14 +108,14 @@ crate fn merge_bounds(
             PP::AngleBracketed { ref mut bindings, .. } => {
                 bindings.push(clean::TypeBinding {
                     name,
-                    kind: clean::TypeBindingKind::Equality { ty: rhs.clone() },
+                    kind: clean::TypeBindingKind::Equality { term: rhs.clone() },
                 });
             }
             PP::Parenthesized { ref mut output, .. } => match output {
-                Some(o) => assert_eq!(o.as_ref(), rhs),
+                Some(o) => assert_eq!(&clean::Term::Type(o.as_ref().clone()), rhs),
                 None => {
-                    if *rhs != clean::Type::Tuple(Vec::new()) {
-                        *output = Some(Box::new(rhs.clone()));
+                    if *rhs != clean::Term::Type(clean::Type::Tuple(Vec::new())) {
+                        *output = Some(Box::new(rhs.ty().unwrap().clone()));
                     }
                 }
             },

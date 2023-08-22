@@ -28,6 +28,11 @@ use crate::structured_errors::StructuredDiagnostic;
 use std::iter;
 use std::slice;
 
+struct FnArgsAsTuple<'hir> {
+    first: &'hir hir::Expr<'hir>,
+    last: &'hir hir::Expr<'hir>,
+}
+
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     pub(in super::super) fn check_casts(&self) {
         let mut deferred_cast_checks = self.deferred_cast_checks.borrow_mut();
@@ -127,136 +132,21 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let expected_arg_count = formal_input_tys.len();
 
-        let param_count_error = |expected_count: usize,
-                                 arg_count: usize,
-                                 error_code: &str,
-                                 c_variadic: bool,
-                                 sugg_unit: bool| {
-            let (span, start_span, args, ctor_of) = match &call_expr.kind {
-                hir::ExprKind::Call(
-                    hir::Expr {
-                        span,
-                        kind:
-                            hir::ExprKind::Path(hir::QPath::Resolved(
-                                _,
-                                hir::Path { res: Res::Def(DefKind::Ctor(of, _), _), .. },
-                            )),
-                        ..
-                    },
-                    args,
-                ) => (*span, *span, &args[..], Some(of)),
-                hir::ExprKind::Call(hir::Expr { span, .. }, args) => {
-                    (*span, *span, &args[..], None)
-                }
-                hir::ExprKind::MethodCall(path_segment, span, args, _) => (
-                    *span,
-                    // `sp` doesn't point at the whole `foo.bar()`, only at `bar`.
-                    path_segment
-                        .args
-                        .and_then(|args| args.args.iter().last())
-                        // Account for `foo.bar::<T>()`.
-                        .map(|arg| {
-                            // Skip the closing `>`.
-                            tcx.sess
-                                .source_map()
-                                .next_point(tcx.sess.source_map().next_point(arg.span()))
-                        })
-                        .unwrap_or(*span),
-                    &args[1..], // Skip the receiver.
-                    None,       // methods are never ctors
-                ),
-                k => span_bug!(call_span, "checking argument types on a non-call: `{:?}`", k),
-            };
-            let arg_spans = if provided_args.is_empty() {
-                // foo()
-                // ^^^-- supplied 0 arguments
-                // |
-                // expected 2 arguments
-                vec![tcx.sess.source_map().next_point(start_span).with_hi(call_span.hi())]
-            } else {
-                // foo(1, 2, 3)
-                // ^^^ -  -  - supplied 3 arguments
-                // |
-                // expected 2 arguments
-                args.iter().map(|arg| arg.span).collect::<Vec<Span>>()
-            };
+        // expected_count, arg_count, error_code, sugg_unit, sugg_tuple_wrap_args
+        let mut arg_count_error: Option<(usize, usize, &str, bool, Option<FnArgsAsTuple<'_>>)> =
+            None;
 
-            let mut err = tcx.sess.struct_span_err_with_code(
-                span,
-                &format!(
-                    "this {} takes {}{} but {} {} supplied",
-                    match ctor_of {
-                        Some(CtorOf::Struct) => "struct",
-                        Some(CtorOf::Variant) => "enum variant",
-                        None => "function",
-                    },
-                    if c_variadic { "at least " } else { "" },
-                    potentially_plural_count(expected_count, "argument"),
-                    potentially_plural_count(arg_count, "argument"),
-                    if arg_count == 1 { "was" } else { "were" }
-                ),
-                DiagnosticId::Error(error_code.to_owned()),
-            );
-            let label = format!("supplied {}", potentially_plural_count(arg_count, "argument"));
-            for (i, span) in arg_spans.into_iter().enumerate() {
-                err.span_label(
-                    span,
-                    if arg_count == 0 || i + 1 == arg_count { &label } else { "" },
-                );
-            }
-
-            if let Some(def_id) = fn_def_id {
-                if let Some(def_span) = tcx.def_ident_span(def_id) {
-                    let mut spans: MultiSpan = def_span.into();
-
-                    let params = tcx
-                        .hir()
-                        .get_if_local(def_id)
-                        .and_then(|node| node.body_id())
-                        .into_iter()
-                        .map(|id| tcx.hir().body(id).params)
-                        .flatten();
-
-                    for param in params {
-                        spans.push_span_label(param.span, String::new());
-                    }
-
-                    let def_kind = tcx.def_kind(def_id);
-                    err.span_note(spans, &format!("{} defined here", def_kind.descr(def_id)));
-                }
-            }
-
-            if sugg_unit {
-                let sugg_span = tcx.sess.source_map().end_point(call_expr.span);
-                // remove closing `)` from the span
-                let sugg_span = sugg_span.shrink_to_lo();
-                err.span_suggestion(
-                    sugg_span,
-                    "expected the unit value `()`; create it with empty parentheses",
-                    String::from("()"),
-                    Applicability::MachineApplicable,
-                );
-            } else {
-                err.span_label(
-                    span,
-                    format!(
-                        "expected {}{}",
-                        if c_variadic { "at least " } else { "" },
-                        potentially_plural_count(expected_count, "argument")
-                    ),
-                );
-            }
-            err.emit();
-        };
-
+        // If the arguments should be wrapped in a tuple (ex: closures), unwrap them here
         let (formal_input_tys, expected_input_tys) = if tuple_arguments == TupleArguments {
             let tuple_type = self.structurally_resolved_type(call_span, formal_input_tys[0]);
             match tuple_type.kind() {
-                ty::Tuple(arg_types) if arg_types.len() != provided_args.len() => {
-                    param_count_error(arg_types.len(), provided_args.len(), "E0057", false, false);
-                    (self.err_args(provided_args.len()), vec![])
-                }
+                // We expected a tuple and got a tuple
                 ty::Tuple(arg_types) => {
+                    // Argument length differs
+                    if arg_types.len() != provided_args.len() {
+                        arg_count_error =
+                            Some((arg_types.len(), provided_args.len(), "E0057", false, None));
+                    }
                     let expected_input_tys = match expected_input_tys.get(0) {
                         Some(&ty) => match ty.kind() {
                             ty::Tuple(ref tys) => tys.iter().map(|k| k.expect_ty()).collect(),
@@ -267,6 +157,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     (arg_types.iter().map(|k| k.expect_ty()).collect(), expected_input_tys)
                 }
                 _ => {
+                    // Otherwise, there's a mismatch, so clear out what we're expecting, and set
+                    // our input typs to err_args so we don't blow up the error messages
                     struct_span_err!(
                         tcx.sess,
                         call_span,
@@ -284,7 +176,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             if supplied_arg_count >= expected_arg_count {
                 (formal_input_tys.to_vec(), expected_input_tys)
             } else {
-                param_count_error(expected_arg_count, supplied_arg_count, "E0060", true, false);
+                arg_count_error =
+                    Some((expected_arg_count, supplied_arg_count, "E0060", false, None));
                 (self.err_args(supplied_arg_count), vec![])
             }
         } else {
@@ -296,8 +189,25 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             } else {
                 false
             };
-            param_count_error(expected_arg_count, supplied_arg_count, "E0061", false, sugg_unit);
 
+            // are we passing elements of a tuple without the tuple parentheses?
+            let expected_input_tys = if expected_input_tys.is_empty() {
+                // In most cases we can use expected_input_tys, but some callers won't have the type
+                // information, in which case we fall back to the types from the input expressions.
+                formal_input_tys
+            } else {
+                &*expected_input_tys
+            };
+
+            let sugg_tuple_wrap_args = self.suggested_tuple_wrap(expected_input_tys, provided_args);
+
+            arg_count_error = Some((
+                expected_arg_count,
+                supplied_arg_count,
+                "E0061",
+                sugg_unit,
+                sugg_tuple_wrap_args,
+            ));
             (self.err_args(supplied_arg_count), vec![])
         };
 
@@ -315,13 +225,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         assert_eq!(expected_input_tys.len(), formal_input_tys.len());
 
+        let provided_arg_count: usize = provided_args.len();
+
         // Keep track of the fully coerced argument types
-        let mut final_arg_types: Vec<(usize, Ty<'_>, Ty<'_>)> = vec![];
+        let mut final_arg_types: Vec<Option<(Ty<'_>, Ty<'_>)>> = vec![None; provided_arg_count];
 
         // We introduce a helper function to demand that a given argument satisfy a given input
         // This is more complicated than just checking type equality, as arguments could be coerced
         // This version writes those types back so further type checking uses the narrowed types
-        let demand_compatible = |idx, final_arg_types: &mut Vec<(usize, Ty<'tcx>, Ty<'tcx>)>| {
+        let demand_compatible = |idx, final_arg_types: &mut Vec<Option<(Ty<'tcx>, Ty<'tcx>)>>| {
             let formal_input_ty: Ty<'tcx> = formal_input_tys[idx];
             let expected_input_ty: Ty<'tcx> = expected_input_tys[idx];
             let provided_arg = &provided_args[idx];
@@ -340,13 +252,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let coerced_ty = expectation.only_has_type(self).unwrap_or(formal_input_ty);
 
             // Keep track of these for below
-            final_arg_types.push((idx, checked_ty, coerced_ty));
+            final_arg_types[idx] = Some((checked_ty, coerced_ty));
 
             // Cause selection errors caused by resolving a single argument to point at the
             // argument and not the call. This is otherwise redundant with the `demand_coerce`
             // call immediately after, but it lets us customize the span pointed to in the
             // fulfillment error to be more accurate.
-            let _ =
+            let coerced_ty =
                 self.resolve_vars_with_obligations_and_mutate_fulfillment(coerced_ty, |errors| {
                     self.point_at_type_arg_instead_of_call_if_possible(errors, call_expr);
                     self.point_at_arg_instead_of_call_if_possible(
@@ -357,6 +269,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         provided_args,
                     );
                 });
+
+            final_arg_types[idx] = Some((checked_ty, coerced_ty));
 
             // We're processing function arguments so we definitely want to use
             // two-phase borrows.
@@ -416,6 +330,134 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
         }
 
+        // If there was an error in parameter count, emit that here
+        if let Some((expected_count, arg_count, err_code, sugg_unit, sugg_tuple_wrap_args)) =
+            arg_count_error
+        {
+            let (span, start_span, args, ctor_of) = match &call_expr.kind {
+                hir::ExprKind::Call(
+                    hir::Expr {
+                        span,
+                        kind:
+                            hir::ExprKind::Path(hir::QPath::Resolved(
+                                _,
+                                hir::Path { res: Res::Def(DefKind::Ctor(of, _), _), .. },
+                            )),
+                        ..
+                    },
+                    args,
+                ) => (*span, *span, &args[..], Some(of)),
+                hir::ExprKind::Call(hir::Expr { span, .. }, args) => {
+                    (*span, *span, &args[..], None)
+                }
+                hir::ExprKind::MethodCall(path_segment, args, _) => (
+                    path_segment.ident.span,
+                    // `sp` doesn't point at the whole `foo.bar()`, only at `bar`.
+                    path_segment
+                        .args
+                        .and_then(|args| args.args.iter().last())
+                        // Account for `foo.bar::<T>()`.
+                        .map(|arg| {
+                            // Skip the closing `>`.
+                            tcx.sess
+                                .source_map()
+                                .next_point(tcx.sess.source_map().next_point(arg.span()))
+                        })
+                        .unwrap_or(path_segment.ident.span),
+                    &args[1..], // Skip the receiver.
+                    None,       // methods are never ctors
+                ),
+                k => span_bug!(call_span, "checking argument types on a non-call: `{:?}`", k),
+            };
+            let arg_spans = if provided_args.is_empty() {
+                // foo()
+                // ^^^-- supplied 0 arguments
+                // |
+                // expected 2 arguments
+                vec![tcx.sess.source_map().next_point(start_span).with_hi(call_span.hi())]
+            } else {
+                // foo(1, 2, 3)
+                // ^^^ -  -  - supplied 3 arguments
+                // |
+                // expected 2 arguments
+                args.iter().map(|arg| arg.span).collect::<Vec<Span>>()
+            };
+            let call_name = match ctor_of {
+                Some(CtorOf::Struct) => "struct",
+                Some(CtorOf::Variant) => "enum variant",
+                None => "function",
+            };
+            let mut err = tcx.sess.struct_span_err_with_code(
+                span,
+                &format!(
+                    "this {} takes {}{} but {} {} supplied",
+                    call_name,
+                    if c_variadic { "at least " } else { "" },
+                    potentially_plural_count(expected_count, "argument"),
+                    potentially_plural_count(arg_count, "argument"),
+                    if arg_count == 1 { "was" } else { "were" }
+                ),
+                DiagnosticId::Error(err_code.to_owned()),
+            );
+            let label = format!("supplied {}", potentially_plural_count(arg_count, "argument"));
+            for (i, span) in arg_spans.into_iter().enumerate() {
+                err.span_label(
+                    span,
+                    if arg_count == 0 || i + 1 == arg_count { &label } else { "" },
+                );
+            }
+            if let Some(def_id) = fn_def_id {
+                if let Some(def_span) = tcx.def_ident_span(def_id) {
+                    let mut spans: MultiSpan = def_span.into();
+
+                    let params = tcx
+                        .hir()
+                        .get_if_local(def_id)
+                        .and_then(|node| node.body_id())
+                        .into_iter()
+                        .map(|id| tcx.hir().body(id).params)
+                        .flatten();
+
+                    for param in params {
+                        spans.push_span_label(param.span, String::new());
+                    }
+
+                    let def_kind = tcx.def_kind(def_id);
+                    err.span_note(spans, &format!("{} defined here", def_kind.descr(def_id)));
+                }
+            }
+            if sugg_unit {
+                let sugg_span = tcx.sess.source_map().end_point(call_expr.span);
+                // remove closing `)` from the span
+                let sugg_span = sugg_span.shrink_to_lo();
+                err.span_suggestion(
+                    sugg_span,
+                    "expected the unit value `()`; create it with empty parentheses",
+                    String::from("()"),
+                    Applicability::MachineApplicable,
+                );
+            } else if let Some(FnArgsAsTuple { first, last }) = sugg_tuple_wrap_args {
+                err.multipart_suggestion(
+                    "use parentheses to construct a tuple",
+                    vec![
+                        (first.span.shrink_to_lo(), '('.to_string()),
+                        (last.span.shrink_to_hi(), ')'.to_string()),
+                    ],
+                    Applicability::MachineApplicable,
+                );
+            } else {
+                err.span_label(
+                    span,
+                    format!(
+                        "expected {}{}",
+                        if c_variadic { "at least " } else { "" },
+                        potentially_plural_count(expected_count, "argument")
+                    ),
+                );
+            }
+            err.emit();
+        }
+
         // We also need to make sure we at least write the ty of the other
         // arguments which we skipped above.
         if c_variadic {
@@ -449,6 +491,35 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     _ => {}
                 }
             }
+        }
+    }
+
+    fn suggested_tuple_wrap(
+        &self,
+        expected_input_tys: &[Ty<'tcx>],
+        provided_args: &'tcx [hir::Expr<'tcx>],
+    ) -> Option<FnArgsAsTuple<'_>> {
+        let [expected_arg_type] = &expected_input_tys[..] else { return None };
+
+        let ty::Tuple(expected_elems) = self.resolve_vars_if_possible(*expected_arg_type).kind()
+            else { return None };
+
+        let expected_types: Vec<_> = expected_elems.iter().map(|k| k.expect_ty()).collect();
+        let supplied_types: Vec<_> = provided_args.iter().map(|arg| self.check_expr(arg)).collect();
+
+        let all_match = iter::zip(expected_types, supplied_types)
+            .all(|(expected, supplied)| self.can_eq(self.param_env, expected, supplied).is_ok());
+
+        if all_match {
+            match provided_args {
+                [] => None,
+                [_] => unreachable!(
+                    "shouldn't reach here - need count mismatch between 1-tuple and 1-argument"
+                ),
+                [first, .., last] => Some(FnArgsAsTuple { first, last }),
+            }
+        } else {
+            None
         }
     }
 
@@ -511,7 +582,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 _ => bug!("unexpected type: {:?}", ty),
             },
             Res::Def(DefKind::Struct | DefKind::Union | DefKind::TyAlias | DefKind::AssocTy, _)
-            | Res::SelfTy(..) => match ty.kind() {
+            | Res::SelfTy { .. } => match ty.kind() {
                 ty::Adt(adt, substs) if !adt.is_enum() => {
                     Some((adt.non_enum_variant(), adt.did, substs))
                 }
@@ -846,7 +917,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     fn parent_item_span(&self, id: hir::HirId) -> Option<Span> {
-        let node = self.tcx.hir().get(self.tcx.hir().get_parent_item(id));
+        let node = self.tcx.hir().get_by_def_id(self.tcx.hir().get_parent_item(id));
         match node {
             Node::Item(&hir::Item { kind: hir::ItemKind::Fn(_, _, body_id), .. })
             | Node::ImplItem(&hir::ImplItem { kind: hir::ImplItemKind::Fn(_, body_id), .. }) => {
@@ -862,7 +933,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     /// Given a function block's `HirId`, returns its `FnDecl` if it exists, or `None` otherwise.
     fn get_parent_fn_decl(&self, blk_id: hir::HirId) -> Option<(&'tcx hir::FnDecl<'tcx>, Ident)> {
-        let parent = self.tcx.hir().get(self.tcx.hir().get_parent_item(blk_id));
+        let parent = self.tcx.hir().get_by_def_id(self.tcx.hir().get_parent_item(blk_id));
         self.get_node_fn_decl(parent).map(|(fn_decl, ident, _)| (fn_decl, ident))
     }
 
@@ -975,7 +1046,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     fn point_at_arg_instead_of_call_if_possible(
         &self,
         errors: &mut Vec<traits::FulfillmentError<'tcx>>,
-        final_arg_types: &[(usize, Ty<'tcx>, Ty<'tcx>)],
+        final_arg_types: &[Option<(Ty<'tcx>, Ty<'tcx>)>],
         expr: &'tcx hir::Expr<'tcx>,
         call_sp: Span,
         args: &'tcx [hir::Expr<'tcx>],
@@ -1016,7 +1087,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 ObligationCauseCode::BuiltinDerivedObligation(code) |
                 ObligationCauseCode::ImplDerivedObligation(code) |
                 ObligationCauseCode::DerivedObligation(code) => {
-                    code.parent_trait_ref.self_ty().skip_binder().into()
+                    code.parent_trait_pred.self_ty().skip_binder().into()
                 }
                 _ if let ty::PredicateKind::Trait(predicate) =
                     error.obligation.predicate.kind().skip_binder() => {
@@ -1030,13 +1101,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // `FulfillmentError`.
             let mut referenced_in = final_arg_types
                 .iter()
-                .map(|&(i, checked_ty, _)| (i, checked_ty))
-                .chain(final_arg_types.iter().map(|&(i, _, coerced_ty)| (i, coerced_ty)))
+                .enumerate()
+                .filter_map(|(i, arg)| match arg {
+                    Some((checked_ty, coerce_ty)) => Some([(i, *checked_ty), (i, *coerce_ty)]),
+                    _ => None,
+                })
+                .flatten()
                 .flat_map(|(i, ty)| {
                     let ty = self.resolve_vars_if_possible(ty);
                     // We walk the argument type because the argument's type could have
                     // been `Option<T>`, but the `FulfillmentError` references `T`.
-                    if ty.walk(self.tcx).any(|arg| arg == self_) { Some(i) } else { None }
+                    if ty.walk().any(|arg| arg == self_) { Some(i) } else { None }
                 })
                 .collect::<Vec<usize>>();
 

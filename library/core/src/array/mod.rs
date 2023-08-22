@@ -66,8 +66,6 @@ where
 ///
 /// ```rust
 /// #![feature(array_from_fn)]
-/// # // Apparently these doc tests are still on edition2018
-/// # use std::convert::TryInto;
 ///
 /// let array: Result<[u8; 5], _> = std::array::try_from_fn(|i| i.try_into());
 /// assert_eq!(array, Ok([0, 1, 2, 3, 4]));
@@ -514,6 +512,7 @@ impl<T, const N: usize> [T; N] {
 
     /// Returns a slice containing the entire array. Equivalent to `&s[..]`.
     #[stable(feature = "array_as_slice", since = "1.57.0")]
+    #[rustc_const_stable(feature = "array_as_slice", since = "1.57.0")]
     pub const fn as_slice(&self) -> &[T] {
         self
     }

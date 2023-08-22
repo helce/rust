@@ -26,6 +26,7 @@ use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::{BytePos, MultiSpan, Span, DUMMY_SP};
 
 use std::iter;
+use std::ops::Deref;
 
 use tracing::debug;
 
@@ -264,6 +265,8 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                 }
             }
         }
+
+        self.detect_assoct_type_constraint_meant_as_path(base_span, &mut err);
 
         // Emit special messages for unresolved `Self` and `self`.
         if is_self_type(path, ns) {
@@ -603,6 +606,40 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
         (err, candidates)
     }
 
+    fn detect_assoct_type_constraint_meant_as_path(
+        &self,
+        base_span: Span,
+        err: &mut DiagnosticBuilder<'_>,
+    ) {
+        let Some(ty) = self.diagnostic_metadata.current_type_path else { return; };
+        let TyKind::Path(_, path) = &ty.kind else { return; };
+        for segment in &path.segments {
+            let Some(params) = &segment.args else { continue; };
+            let ast::GenericArgs::AngleBracketed(ref params) = params.deref() else { continue; };
+            for param in &params.args {
+                let ast::AngleBracketedArg::Constraint(constraint) = param else { continue; };
+                let ast::AssocConstraintKind::Bound { bounds } = &constraint.kind else {
+                    continue;
+                };
+                for bound in bounds {
+                    let ast::GenericBound::Trait(trait_ref, ast::TraitBoundModifier::None)
+                        = bound else
+                    {
+                        continue;
+                    };
+                    if base_span == trait_ref.span {
+                        err.span_suggestion_verbose(
+                            constraint.ident.span.between(trait_ref.span),
+                            "you might have meant to write a path instead of an associated type bound",
+                            "::".to_string(),
+                            Applicability::MachineApplicable,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn get_single_associated_item(
         &mut self,
         path: &[Segment],
@@ -667,7 +704,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
         ) = &bounded_ty.kind
         {
             // use this to verify that ident is a type param.
-            let partial_res = if let Ok(Some(partial_res)) = self.resolve_qpath_anywhere(
+            let Ok(Some(partial_res)) = self.resolve_qpath_anywhere(
                 bounded_ty.id,
                 None,
                 &Segment::from_path(path),
@@ -675,9 +712,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                 span,
                 true,
                 CrateLint::No,
-            ) {
-                partial_res
-            } else {
+            ) else {
                 return false;
             };
             if !(matches!(
@@ -694,7 +729,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
 
         if let ast::TyKind::Path(None, type_param_path) = &ty.peel_refs().kind {
             // Confirm that the `SelfTy` is a type parameter.
-            let partial_res = if let Ok(Some(partial_res)) = self.resolve_qpath_anywhere(
+            let Ok(Some(partial_res)) = self.resolve_qpath_anywhere(
                 bounded_ty.id,
                 None,
                 &Segment::from_path(type_param_path),
@@ -702,9 +737,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                 span,
                 true,
                 CrateLint::No,
-            ) {
-                partial_res
-            } else {
+            ) else {
                 return false;
             };
             if !(matches!(
@@ -970,7 +1003,13 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
         };
 
         match (res, source) {
-            (Res::Def(DefKind::Macro(MacroKind::Bang), _), _) => {
+            (
+                Res::Def(DefKind::Macro(MacroKind::Bang), _),
+                PathSource::Expr(Some(Expr {
+                    kind: ExprKind::Index(..) | ExprKind::Call(..), ..
+                }))
+                | PathSource::Struct,
+            ) => {
                 err.span_label(span, fallback_label);
                 err.span_suggestion_verbose(
                     span.shrink_to_hi(),
@@ -981,6 +1020,9 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                 if path_str == "try" && span.rust_2015() {
                     err.note("if you want the `try` keyword, you need Rust 2018 or later");
                 }
+            }
+            (Res::Def(DefKind::Macro(MacroKind::Bang), _), _) => {
+                err.span_label(span, fallback_label);
             }
             (Res::Def(DefKind::TyAlias, def_id), PathSource::Trait(_)) => {
                 err.span_label(span, "type aliases cannot be used as traits");
@@ -1121,7 +1163,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                         err.span_suggestion(
                             span,
                             &"use this syntax instead",
-                            format!("{path_str}"),
+                            path_str.to_string(),
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -1143,7 +1185,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
                     Applicability::HasPlaceholders,
                 );
             }
-            (Res::SelfTy(..), _) if ns == ValueNS => {
+            (Res::SelfTy { .. }, _) if ns == ValueNS => {
                 err.span_label(span, fallback_label);
                 err.note("can't use `Self` as a constructor, you must use the implemented struct");
             }
@@ -1162,9 +1204,7 @@ impl<'a: 'ast, 'ast> LateResolutionVisitor<'a, '_, 'ast> {
         ident: Symbol,
         kind: &AssocItemKind,
     ) -> Option<Symbol> {
-        let module = if let Some((module, _)) = self.current_trait_ref {
-            module
-        } else {
+        let Some((module, _)) = &self.current_trait_ref else {
             return None;
         };
         if ident == kw::Underscore {

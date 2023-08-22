@@ -682,7 +682,7 @@ impl<'a> Parser<'a> {
         // Save the state of the parser before parsing type normally, in case there is a
         // LessThan comparison after this cast.
         let parser_snapshot_before_type = self.clone();
-        let cast_expr = match self.parse_ty_no_plus() {
+        let cast_expr = match self.parse_as_cast_ty() {
             Ok(rhs) => mk_expr(self, lhs, rhs),
             Err(mut type_err) => {
                 // Rewind to before attempting to parse the type with generics, to recover
@@ -808,7 +808,7 @@ impl<'a> Parser<'a> {
                 "casts cannot be followed by {}",
                 match with_postfix.kind {
                     ExprKind::Index(_, _) => "indexing",
-                    ExprKind::Try(_) => "?",
+                    ExprKind::Try(_) => "`?`",
                     ExprKind::Field(_, _) => "a field access",
                     ExprKind::MethodCall(_, _, _) => "a method call",
                     ExprKind::Call(_, _) => "a function call",
@@ -1443,7 +1443,7 @@ impl<'a> Parser<'a> {
         &mut self,
         label: Label,
         attrs: AttrVec,
-        consume_colon: bool,
+        mut consume_colon: bool,
     ) -> PResult<'a, P<Expr>> {
         let lo = label.ident.span;
         let label = Some(label);
@@ -1456,6 +1456,12 @@ impl<'a> Parser<'a> {
             self.parse_loop_expr(label, lo, attrs)
         } else if self.check(&token::OpenDelim(token::Brace)) || self.token.is_whole_block() {
             self.parse_block_expr(label, lo, BlockCheckMode::Default, attrs)
+        } else if !ate_colon && (self.check(&TokenKind::Comma) || self.check(&TokenKind::Gt)) {
+            // We're probably inside of a `Path<'a>` that needs a turbofish
+            let msg = "expected `while`, `for`, `loop` or `{` after a label";
+            self.struct_span_err(self.token.span, msg).span_label(self.token.span, msg).emit();
+            consume_colon = false;
+            Ok(self.mk_expr_err(lo))
         } else {
             let msg = "expected `while`, `for`, `loop` or `{` after a label";
             self.struct_span_err(self.token.span, msg).span_label(self.token.span, msg).emit();
@@ -1694,6 +1700,19 @@ impl<'a> Parser<'a> {
             s.len() > 1 && s.starts_with(first_chars) && s[1..].chars().all(|c| c.is_ascii_digit())
         }
 
+        // Try to lowercase the prefix if it's a valid base prefix.
+        fn fix_base_capitalisation(s: &str) -> Option<String> {
+            if let Some(stripped) = s.strip_prefix('B') {
+                Some(format!("0b{stripped}"))
+            } else if let Some(stripped) = s.strip_prefix('O') {
+                Some(format!("0o{stripped}"))
+            } else if let Some(stripped) = s.strip_prefix('X') {
+                Some(format!("0x{stripped}"))
+            } else {
+                None
+            }
+        }
+
         let token::Lit { kind, suffix, .. } = lit;
         match err {
             // `NotLiteral` is not an error by itself, so we don't report
@@ -1717,6 +1736,18 @@ impl<'a> Parser<'a> {
                     let msg = format!("invalid width `{}` for integer literal", &suf[1..]);
                     self.struct_span_err(span, &msg)
                         .help("valid widths are 8, 16, 32, 64 and 128")
+                        .emit();
+                } else if let Some(fixed) = fix_base_capitalisation(suf) {
+                    let msg = "invalid base prefix for number literal";
+
+                    self.struct_span_err(span, &msg)
+                        .note("base prefixes (`0xff`, `0b1010`, `0o755`) are lowercase")
+                        .span_suggestion(
+                            span,
+                            "try making the prefix lowercase",
+                            fixed,
+                            Applicability::MaybeIncorrect,
+                        )
                         .emit();
                 } else {
                     let msg = format!("invalid suffix `{}` for number literal", suf);
@@ -2377,6 +2408,17 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn parse_arm(&mut self) -> PResult<'a, Arm> {
+        fn check_let_expr(expr: &Expr) -> (bool, bool) {
+            match expr.kind {
+                ExprKind::Binary(_, ref lhs, ref rhs) => {
+                    let lhs_rslt = check_let_expr(lhs);
+                    let rhs_rslt = check_let_expr(rhs);
+                    (lhs_rslt.0 || rhs_rslt.0, false)
+                }
+                ExprKind::Let(..) => (true, true),
+                _ => (false, true),
+            }
+        }
         let attrs = self.parse_outer_attributes()?;
         self.collect_tokens_trailing_token(attrs, ForceCollect::No, |this, attrs| {
             let lo = this.token.span;
@@ -2384,9 +2426,12 @@ impl<'a> Parser<'a> {
             let guard = if this.eat_keyword(kw::If) {
                 let if_span = this.prev_token.span;
                 let cond = this.parse_expr()?;
-                if let ExprKind::Let(..) = cond.kind {
-                    // Remove the last feature gating of a `let` expression since it's stable.
-                    this.sess.gated_spans.ungate_last(sym::let_chains, cond.span);
+                let (has_let_expr, does_not_have_bin_op) = check_let_expr(&cond);
+                if has_let_expr {
+                    if does_not_have_bin_op {
+                        // Remove the last feature gating of a `let` expression since it's stable.
+                        this.sess.gated_spans.ungate_last(sym::let_chains, cond.span);
+                    }
                     let span = if_span.to(cond.span);
                     this.sess.gated_spans.gate(sym::if_let_guard, span);
                 }

@@ -14,6 +14,7 @@ use rustc_hir::{
 use rustc_interface::interface;
 use rustc_macros::{Decodable, Encodable};
 use rustc_middle::hir::map::Map;
+use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_serialize::{
     opaque::{Decoder, FileEncoder},
@@ -33,6 +34,7 @@ use std::path::PathBuf;
 crate struct ScrapeExamplesOptions {
     output_path: PathBuf,
     target_crates: Vec<String>,
+    crate scrape_tests: bool,
 }
 
 impl ScrapeExamplesOptions {
@@ -42,16 +44,22 @@ impl ScrapeExamplesOptions {
     ) -> Result<Option<Self>, i32> {
         let output_path = matches.opt_str("scrape-examples-output-path");
         let target_crates = matches.opt_strs("scrape-examples-target-crate");
-        match (output_path, !target_crates.is_empty()) {
-            (Some(output_path), true) => Ok(Some(ScrapeExamplesOptions {
+        let scrape_tests = matches.opt_present("scrape-tests");
+        match (output_path, !target_crates.is_empty(), scrape_tests) {
+            (Some(output_path), true, _) => Ok(Some(ScrapeExamplesOptions {
                 output_path: PathBuf::from(output_path),
                 target_crates,
+                scrape_tests,
             })),
-            (Some(_), false) | (None, true) => {
+            (Some(_), false, _) | (None, true, _) => {
                 diag.err("must use --scrape-examples-output-path and --scrape-examples-target-crate together");
                 Err(1)
             }
-            (None, false) => Ok(None),
+            (None, false, true) => {
+                diag.err("must use --scrape-examples-output-path and --scrape-examples-target-crate with --scrape-tests");
+                Err(1)
+            }
+            (None, false, false) => Ok(None),
         }
     }
 }
@@ -117,10 +125,10 @@ impl<'a, 'tcx> Visitor<'tcx> for FindCalls<'a, 'tcx>
 where
     'tcx: 'a,
 {
-    type Map = Map<'tcx>;
+    type NestedFilter = nested_filter::OnlyBodies;
 
-    fn nested_visit_map(&mut self) -> intravisit::NestedVisitorMap<Self::Map> {
-        intravisit::NestedVisitorMap::OnlyBodies(self.map)
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.map
     }
 
     fn visit_expr(&mut self, ex: &'tcx hir::Expr<'tcx>) {
@@ -149,11 +157,9 @@ where
                     return;
                 }
             }
-            hir::ExprKind::MethodCall(_, _, _, span) => {
+            hir::ExprKind::MethodCall(_, _, span) => {
                 let types = tcx.typeck(ex.hir_id.owner);
-                let def_id = if let Some(def_id) = types.type_dependent_def_id(ex.hir_id) {
-                    def_id
-                } else {
+                let Some(def_id) = types.type_dependent_def_id(ex.hir_id) else {
                     trace!("type_dependent_def_id({}) = None", ex.hir_id);
                     return;
                 };
@@ -173,7 +179,9 @@ where
 
         // If the enclosing item has a span coming from a proc macro, then we also don't want to include
         // the example.
-        let enclosing_item_span = tcx.hir().span_with_body(tcx.hir().get_parent_item(ex.hir_id));
+        let enclosing_item_span = tcx
+            .hir()
+            .span_with_body(tcx.hir().local_def_id_to_hir_id(tcx.hir().get_parent_item(ex.hir_id)));
         if enclosing_item_span.from_expansion() {
             trace!("Rejecting expr ({:?}) from macro item: {:?}", span, enclosing_item_span);
             return;
@@ -193,7 +201,8 @@ where
                 return;
             }
 
-            let file = tcx.sess.source_map().lookup_char_pos(span.lo()).file;
+            let source_map = tcx.sess.source_map();
+            let file = source_map.lookup_char_pos(span.lo()).file;
             let file_path = match file.name.clone() {
                 FileName::Real(real_filename) => real_filename.into_local_path(),
                 _ => None,
@@ -214,6 +223,8 @@ where
                 let fn_entries = self.calls.entry(fn_key).or_default();
 
                 trace!("Including expr: {:?}", span);
+                let enclosing_item_span =
+                    source_map.span_extend_to_prev_char(enclosing_item_span, '\n', false);
                 let location = CallLocation::new(span, enclosing_item_span, &file);
                 fn_entries.entry(abs_path).or_insert_with(mk_call_data).locations.push(location);
             }
@@ -244,8 +255,7 @@ crate fn run(
         let target_crates = options
             .target_crates
             .into_iter()
-            .map(|target| all_crates.iter().filter(move |(_, name)| name.as_str() == target))
-            .flatten()
+            .flat_map(|target| all_crates.iter().filter(move |(_, name)| name.as_str() == target))
             .map(|(crate_num, _)| **crate_num)
             .collect::<Vec<_>>();
 
@@ -289,7 +299,7 @@ crate fn load_call_locations(
         for path in with_examples {
             let bytes = fs::read(&path).map_err(|e| format!("{} (for path {})", e, path))?;
             let mut decoder = Decoder::new(&bytes, 0);
-            let calls = AllCallLocations::decode(&mut decoder)?;
+            let calls = AllCallLocations::decode(&mut decoder);
 
             for (function, fn_calls) in calls.into_iter() {
                 all_calls.entry(function).or_default().extend(fn_calls.into_iter());

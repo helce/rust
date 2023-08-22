@@ -328,16 +328,28 @@ impl<'a, 'tcx> CastCheck<'tcx> {
                 err.emit();
             }
             CastError::CastToChar => {
-                type_error_struct!(
+                let mut err = type_error_struct!(
                     fcx.tcx.sess,
                     self.span,
                     self.expr_ty,
                     E0604,
                     "only `u8` can be cast as `char`, not `{}`",
                     self.expr_ty
-                )
-                .span_label(self.span, "invalid cast")
-                .emit();
+                );
+                err.span_label(self.span, "invalid cast");
+                if self.expr_ty.is_numeric() {
+                    err.span_help(
+                        self.span,
+                        if self.expr_ty == fcx.tcx.types.i8 {
+                            "try casting from `u8` instead"
+                        } else if self.expr_ty == fcx.tcx.types.u32 {
+                            "try `char::from_u32` instead"
+                        } else {
+                            "try `char::from_u32` instead (via a `u32`)"
+                        },
+                    );
+                }
+                err.emit();
             }
             CastError::NonScalar => {
                 let mut err = type_error_struct!(
@@ -357,7 +369,7 @@ impl<'a, 'tcx> CastCheck<'tcx> {
                             .try_coerce(
                                 self.expr,
                                 fcx.tcx.mk_ref(
-                                    &ty::RegionKind::ReErased,
+                                    fcx.tcx.lifetimes.re_erased,
                                     TypeAndMut { ty: expr_ty, mutbl },
                                 ),
                                 self.cast_ty,
@@ -407,7 +419,7 @@ impl<'a, 'tcx> CastCheck<'tcx> {
                         .try_coerce(
                             self.expr,
                             fcx.tcx.mk_ref(
-                                &ty::RegionKind::ReErased,
+                                fcx.tcx.lifetimes.re_erased,
                                 TypeAndMut { ty: self.expr_ty, mutbl },
                             ),
                             self.cast_ty,
@@ -873,7 +885,7 @@ impl<'a, 'tcx> CastCheck<'tcx> {
                     });
 
                 // this will report a type mismatch if needed
-                fcx.demand_eqtype(self.span, ety, m_cast.ty);
+                fcx.demand_eqtype(self.span, *ety, m_cast.ty);
                 return Ok(CastKind::ArrayPtrCast);
             }
         }

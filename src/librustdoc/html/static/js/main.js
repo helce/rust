@@ -54,7 +54,6 @@ function resourcePath(basename, extension) {
     return getVar("root-path") + basename + getVar("resource-suffix") + extension;
 }
 
-
 (function () {
     window.rootPath = getVar("root-path");
     window.currentCrate = getVar("current-crate");
@@ -67,6 +66,13 @@ function resourcePath(basename, extension) {
             ty: sidebarVars.attributes["data-ty"].value,
             relpath: sidebarVars.attributes["data-relpath"].value,
         };
+        // FIXME: It would be nicer to generate this text content directly in HTML,
+        // but with the current code it's hard to get the right information in the right place.
+        var mobileLocationTitle = document.querySelector(".mobile-topbar h2.location");
+        var locationTitle = document.querySelector(".sidebar h2.location");
+        if (mobileLocationTitle && locationTitle) {
+            mobileLocationTitle.innerHTML = locationTitle.innerHTML;
+        }
     }
 }());
 
@@ -129,9 +135,14 @@ function hideThemeButtonState() {
 
 // Set up the theme picker list.
 (function () {
+    if (!document.location.href.startsWith("file:///")) {
+        return;
+    }
     var themeChoices = getThemesElement();
     var themePicker = getThemePickerElement();
     var availableThemes = getVar("themes").split(",");
+
+    removeClass(themeChoices.parentElement, "hidden");
 
     function switchThemeButtonState() {
         if (themeChoices.style.display === "block") {
@@ -220,7 +231,7 @@ function hideThemeButtonState() {
             document.title = searchState.titleBeforeSearch;
             // We also remove the query parameter from the URL.
             if (searchState.browserSupportsHistoryApi()) {
-                history.replaceState("", window.currentCrate + " - Rust",
+                history.replaceState(null, window.currentCrate + " - Rust",
                     getNakedUrl() + window.location.hash);
             }
         },
@@ -233,18 +244,6 @@ function hideThemeButtonState() {
                         typeof pair[1] === "undefined" ? null : decodeURIComponent(pair[1]);
                 });
             return params;
-        },
-        putBackSearch: function(search_input) {
-            var search = searchState.outputElement();
-            if (search_input.value !== "" && hasClass(search, "hidden")) {
-                searchState.showResults(search);
-                if (searchState.browserSupportsHistoryApi()) {
-                    var extra = "?search=" + encodeURIComponent(search_input.value);
-                    history.replaceState(search_input.value, "",
-                        getNakedUrl() + extra + window.location.hash);
-                }
-                document.title = searchState.title;
-            }
         },
         browserSupportsHistoryApi: function() {
             return window.history && typeof window.history.pushState === "function";
@@ -270,22 +269,15 @@ function hideThemeButtonState() {
             }
 
             search_input.addEventListener("focus", function() {
-                searchState.putBackSearch(this);
-                search_input.origPlaceholder = searchState.input.placeholder;
+                search_input.origPlaceholder = search_input.placeholder;
                 search_input.placeholder = "Type your search here.";
                 loadSearch();
-            });
-            search_input.addEventListener("blur", function() {
-                search_input.placeholder = searchState.input.origPlaceholder;
             });
 
             if (search_input.value != '') {
                 loadSearch();
             }
 
-            // `crates{version}.js` should always be loaded before this script, so we can use it
-            // safely.
-            searchState.addCrateDropdown(window.ALL_CRATES);
             var params = searchState.getQueryStringParams();
             if (params.search !== undefined) {
                 var search = searchState.outputElement();
@@ -293,30 +285,6 @@ function hideThemeButtonState() {
                     searchState.loadingText + "</h3>";
                 searchState.showResults(search);
                 loadSearch();
-            }
-        },
-        addCrateDropdown: function(crates) {
-            var elem = document.getElementById("crate-search");
-
-            if (!elem) {
-                return;
-            }
-            var savedCrate = getSettingValue("saved-filter-crate");
-            for (var i = 0, len = crates.length; i < len; ++i) {
-                var option = document.createElement("option");
-                option.value = crates[i];
-                option.innerText = crates[i];
-                elem.appendChild(option);
-                // Set the crate filter from saved storage, if the current page has the saved crate
-                // filter.
-                //
-                // If not, ignore the crate filter -- we want to support filtering for crates on
-                // sites like doc.rust-lang.org where the crates may differ from page to page while
-                // on the
-                // same domain.
-                if (crates[i] === savedCrate) {
-                    elem.value = savedCrate;
-                }
             }
         },
     };
@@ -329,37 +297,6 @@ function hideThemeButtonState() {
             }
         }
         return null;
-    }
-
-    function showSidebar() {
-        var elems = document.getElementsByClassName("sidebar-elems")[0];
-        if (elems) {
-            addClass(elems, "show-it");
-        }
-        var sidebar = document.getElementsByClassName("sidebar")[0];
-        if (sidebar) {
-            addClass(sidebar, "mobile");
-            var filler = document.getElementById("sidebar-filler");
-            if (!filler) {
-                var div = document.createElement("div");
-                div.id = "sidebar-filler";
-                sidebar.appendChild(div);
-            }
-        }
-    }
-
-    function hideSidebar() {
-        var elems = document.getElementsByClassName("sidebar-elems")[0];
-        if (elems) {
-            removeClass(elems, "show-it");
-        }
-        var sidebar = document.getElementsByClassName("sidebar")[0];
-        removeClass(sidebar, "mobile");
-        var filler = document.getElementById("sidebar-filler");
-        if (filler) {
-            filler.remove();
-        }
-        document.getElementsByTagName("body")[0].style.marginTop = "";
     }
 
     var toggleAllDocsId = "toggle-all-docs";
@@ -376,7 +313,7 @@ function hideThemeButtonState() {
             var hash = ev.newURL.slice(ev.newURL.indexOf("#") + 1);
             if (searchState.browserSupportsHistoryApi()) {
                 // `window.location.search`` contains all the query parameters, not just `search`.
-                history.replaceState(hash, "",
+                history.replaceState(null, "",
                     getNakedUrl() + window.location.search + "#" + hash);
             }
             elem = document.getElementById(hash);
@@ -396,7 +333,8 @@ function hideThemeButtonState() {
 
     function onHashChange(ev) {
         // If we're in mobile mode, we should hide the sidebar in any case.
-        hideSidebar();
+        var sidebar = document.getElementsByClassName("sidebar")[0];
+        removeClass(sidebar, "shown");
         handleHashes(ev);
     }
 
@@ -621,7 +559,15 @@ function hideThemeButtonState() {
             others.appendChild(div);
         }
 
-        function block(shortty, longty) {
+        /**
+         * Append to the sidebar a "block" of links - a heading along with a list (`<ul>`) of items.
+         *
+         * @param {string} shortty - A short type name, like "primitive", "mod", or "macro"
+         * @param {string} id - The HTML id of the corresponding section on the module page.
+         * @param {string} longty - A long, capitalized, plural name, like "Primitive Types",
+         *                          "Modules", or "Macros".
+         */
+        function block(shortty, id, longty) {
             var filtered = items[shortty];
             if (!filtered) {
                 return;
@@ -630,7 +576,7 @@ function hideThemeButtonState() {
             var div = document.createElement("div");
             div.className = "block " + shortty;
             var h3 = document.createElement("h3");
-            h3.textContent = longty;
+            h3.innerHTML = `<a href="index.html#${id}">${longty}</a>`;
             div.appendChild(h3);
             var ul = document.createElement("ul");
 
@@ -669,20 +615,20 @@ function hideThemeButtonState() {
 
             var isModule = hasClass(document.body, "mod");
             if (!isModule) {
-                block("primitive", "Primitive Types");
-                block("mod", "Modules");
-                block("macro", "Macros");
-                block("struct", "Structs");
-                block("enum", "Enums");
-                block("union", "Unions");
-                block("constant", "Constants");
-                block("static", "Statics");
-                block("trait", "Traits");
-                block("fn", "Functions");
-                block("type", "Type Definitions");
-                block("foreigntype", "Foreign Types");
-                block("keyword", "Keywords");
-                block("traitalias", "Trait Aliases");
+                block("primitive", "primitives", "Primitive Types");
+                block("mod", "modules", "Modules");
+                block("macro", "macros", "Macros");
+                block("struct", "structs", "Structs");
+                block("enum", "enums", "Enums");
+                block("union", "unions", "Unions");
+                block("constant", "constants", "Constants");
+                block("static", "static", "Statics");
+                block("trait", "traits", "Traits");
+                block("fn", "functions", "Functions");
+                block("type", "types", "Type Definitions");
+                block("foreigntype", "foreign-types", "Foreign Types");
+                block("keyword", "keywords", "Keywords");
+                block("traitalias", "trait-aliases", "Trait Aliases");
             }
 
             // `crates{version}.js` should always be loaded before this script, so we can use
@@ -888,6 +834,11 @@ function hideThemeButtonState() {
         });
     }());
 
+    function hideSidebar() {
+        var sidebar = document.getElementsByClassName("sidebar")[0];
+        removeClass(sidebar, "shown");
+    }
+
     function handleClick(id, f) {
         var elem = document.getElementById(id);
         if (elem) {
@@ -897,6 +848,9 @@ function hideThemeButtonState() {
     handleClick("help-button", function(ev) {
         displayHelp(true, ev);
     });
+    handleClick(MAIN_ID, function() {
+        hideSidebar();
+    });
 
     onEachLazy(document.getElementsByTagName("a"), function(el) {
         // For clicks on internal links (<A> tags with a hash property), we expand the section we're
@@ -905,6 +859,7 @@ function hideThemeButtonState() {
         if (el.hash) {
             el.addEventListener("click", function() {
                 expandSection(el.hash.slice(1));
+                hideSidebar();
             });
         }
     });
@@ -924,16 +879,16 @@ function hideThemeButtonState() {
         };
     });
 
-    var sidebar_menu = document.getElementsByClassName("sidebar-menu")[0];
-    if (sidebar_menu) {
-        sidebar_menu.onclick = function() {
+    var sidebar_menu_toggle = document.getElementsByClassName("sidebar-menu-toggle")[0];
+    if (sidebar_menu_toggle) {
+        sidebar_menu_toggle.addEventListener("click", function() {
             var sidebar = document.getElementsByClassName("sidebar")[0];
-            if (hasClass(sidebar, "mobile")) {
-                hideSidebar();
+            if (!hasClass(sidebar, "shown")) {
+                addClass(sidebar, "shown");
             } else {
-                showSidebar();
+                removeClass(sidebar, "shown");
             }
-        };
+        });
     }
 
     var buildHelperPopup = function() {

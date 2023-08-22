@@ -142,7 +142,7 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
     where
         F: FnOnce(Ty<'tcx>) -> Vec<Adjustment<'tcx>>,
     {
-        self.unify(&a, &b)
+        self.unify(a, b)
             .and_then(|InferOk { value: ty, obligations }| success(f(ty), ty, obligations))
     }
 
@@ -472,7 +472,7 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
             }
         };
         adjustments.push(Adjustment {
-            kind: Adjust::Borrow(AutoBorrow::Ref(r_borrow, mutbl)),
+            kind: Adjust::Borrow(AutoBorrow::Ref(*r_borrow, mutbl)),
             target: ty,
         });
 
@@ -1575,7 +1575,7 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                     expected,
                     found,
                     can_suggest,
-                    fcx.tcx.hir().get_parent_item(id),
+                    fcx.tcx.hir().local_def_id_to_hir_id(fcx.tcx.hir().get_parent_item(id)),
                 );
             }
             if !pointing_at_return_type {
@@ -1584,13 +1584,19 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
         }
 
         let parent_id = fcx.tcx.hir().get_parent_item(id);
-        let parent_item = fcx.tcx.hir().get(parent_id);
+        let parent_item = fcx.tcx.hir().get_by_def_id(parent_id);
 
         if let (Some((expr, _)), Some((fn_decl, _, _))) =
             (expression, fcx.get_node_fn_decl(parent_item))
         {
             fcx.suggest_missing_break_or_return_expr(
-                &mut err, expr, fn_decl, expected, found, id, parent_id,
+                &mut err,
+                expr,
+                fn_decl,
+                expected,
+                found,
+                id,
+                fcx.tcx.hir().local_def_id_to_hir_id(parent_id),
             );
         }
 
@@ -1667,10 +1673,10 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                     ],
                     Applicability::MachineApplicable,
                 );
-                let sugg = vec![sp, cause.span]
+                let sugg = [sp, cause.span]
                     .into_iter()
                     .flat_map(|sp| {
-                        vec![
+                        [
                             (sp.shrink_to_lo(), "Box::new(".to_string()),
                             (sp.shrink_to_hi(), ")".to_string()),
                         ]

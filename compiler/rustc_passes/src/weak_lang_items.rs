@@ -1,10 +1,9 @@
 //! Validity checking for weak lang items
 
-use rustc_ast::Attribute;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::struct_span_err;
 use rustc_hir as hir;
-use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
+use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::lang_items::{self, LangItem};
 use rustc_hir::weak_lang_items::WEAK_ITEMS_REFS;
 use rustc_middle::middle::lang_items::required;
@@ -96,16 +95,9 @@ impl<'a, 'tcx> Context<'a, 'tcx> {
 }
 
 impl<'a, 'tcx, 'v> Visitor<'v> for Context<'a, 'tcx> {
-    type Map = intravisit::ErasedMap<'v>;
-
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::None
-    }
-
     fn visit_foreign_item(&mut self, i: &hir::ForeignItem<'_>) {
-        let check_name = |attr: &Attribute, sym| attr.has_name(sym);
         let attrs = self.tcx.hir().attrs(i.hir_id());
-        if let Some((lang_item, _)) = lang_items::extract(check_name, attrs) {
+        if let Some((lang_item, _)) = lang_items::extract(attrs) {
             self.register(lang_item, i.span);
         }
         intravisit::walk_foreign_item(self, i)

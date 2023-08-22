@@ -460,7 +460,7 @@ impl File {
     }
 
     pub fn duplicate(&self) -> io::Result<File> {
-        Ok(File { handle: self.handle.duplicate(0, false, c::DUPLICATE_SAME_ACCESS)? })
+        Ok(Self { handle: self.handle.try_clone()? })
     }
 
     fn reparse_point<'a>(
@@ -511,9 +511,9 @@ impl File {
                     )
                 }
                 _ => {
-                    return Err(io::Error::new_const(
+                    return Err(io::const_io_error!(
                         io::ErrorKind::Uncategorized,
-                        &"Unsupported reparse point type",
+                        "Unsupported reparse point type",
                     ));
                 }
             };
@@ -712,11 +712,11 @@ impl<'a> Iterator for DirBuffIter<'a> {
 
 /// Open a link relative to the parent directory, ensure no symlinks are followed.
 fn open_link_no_reparse(parent: &File, name: &[u16], access: u32) -> io::Result<File> {
-    // This is implemented using the lower level `NtOpenFile` function as
+    // This is implemented using the lower level `NtCreateFile` function as
     // unfortunately opening a file relative to a parent is not supported by
     // win32 functions. It is however a fundamental feature of the NT kernel.
     //
-    // See https://docs.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntopenfile
+    // See https://docs.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile
     unsafe {
         let mut handle = ptr::null_mut();
         let mut io_status = c::IO_STATUS_BLOCK::default();
@@ -732,14 +732,19 @@ fn open_link_no_reparse(parent: &File, name: &[u16], access: u32) -> io::Result<
             Attributes: ATTRIBUTES.load(Ordering::Relaxed),
             ..c::OBJECT_ATTRIBUTES::default()
         };
-        let status = c::NtOpenFile(
+        let status = c::NtCreateFile(
             &mut handle,
             access,
             &object,
             &mut io_status,
+            crate::ptr::null_mut(),
+            0,
             c::FILE_SHARE_DELETE | c::FILE_SHARE_READ | c::FILE_SHARE_WRITE,
+            c::FILE_OPEN,
             // If `name` is a symlink then open the link rather than the target.
             c::FILE_OPEN_REPARSE_POINT,
+            crate::ptr::null_mut(),
+            0,
         );
         // Convert an NTSTATUS to the more familiar Win32 error codes (aka "DosError")
         if c::nt_success(status) {
@@ -1124,9 +1129,9 @@ pub fn link(original: &Path, link: &Path) -> io::Result<()> {
 
 #[cfg(target_vendor = "uwp")]
 pub fn link(_original: &Path, _link: &Path) -> io::Result<()> {
-    return Err(io::Error::new_const(
+    return Err(io::const_io_error!(
         io::ErrorKind::Unsupported,
-        &"hard link are not supported on UWP",
+        "hard link are not supported on UWP",
     ));
 }
 

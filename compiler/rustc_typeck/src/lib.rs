@@ -69,6 +69,7 @@ This API is completely unstable and subject to change.
 #![feature(control_flow_enum)]
 #![feature(hash_drain_filter)]
 #![recursion_limit = "256"]
+#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
 
 #[macro_use]
 extern crate tracing;
@@ -121,7 +122,7 @@ use bounds::Bounds;
 fn require_c_abi_if_c_variadic(tcx: TyCtxt<'_>, decl: &hir::FnDecl<'_>, abi: Abi, span: Span) {
     match (decl.c_variadic, abi) {
         // The function has the correct calling convention, or isn't a "C-variadic" function.
-        (false, _) | (true, Abi::C { .. }) | (true, Abi::Cdecl) => {}
+        (false, _) | (true, Abi::C { .. }) | (true, Abi::Cdecl { .. }) => {}
         // The function is a "C-variadic" function with an incorrect calling convention.
         (true, _) => {
             let mut err = struct_span_err!(
@@ -543,8 +544,7 @@ pub fn hir_ty_to_ty<'tcx>(tcx: TyCtxt<'tcx>, hir_ty: &hir::Ty<'_>) -> Ty<'tcx> {
     // In case there are any projections, etc., find the "environment"
     // def-ID that will be used to determine the traits/predicates in
     // scope.  This is derived from the enclosing item-like thing.
-    let env_node_id = tcx.hir().get_parent_item(hir_ty.hir_id);
-    let env_def_id = tcx.hir().local_def_id(env_node_id);
+    let env_def_id = tcx.hir().get_parent_item(hir_ty.hir_id);
     let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id.to_def_id());
     <dyn AstConv<'_>>::ast_ty_to_ty(&item_cx, hir_ty)
 }
@@ -557,8 +557,7 @@ pub fn hir_trait_to_predicates<'tcx>(
     // In case there are any projections, etc., find the "environment"
     // def-ID that will be used to determine the traits/predicates in
     // scope.  This is derived from the enclosing item-like thing.
-    let env_hir_id = tcx.hir().get_parent_item(hir_trait.hir_ref_id);
-    let env_def_id = tcx.hir().local_def_id(env_hir_id);
+    let env_def_id = tcx.hir().get_parent_item(hir_trait.hir_ref_id);
     let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id.to_def_id());
     let mut bounds = Bounds::default();
     let _ = <dyn AstConv<'_>>::instantiate_poly_trait_ref(

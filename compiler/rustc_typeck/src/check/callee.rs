@@ -269,7 +269,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         },
                     };
                     autoref = Some(Adjustment {
-                        kind: Adjust::Borrow(AutoBorrow::Ref(region, mutbl)),
+                        kind: Adjust::Borrow(AutoBorrow::Ref(*region, mutbl)),
                         target: method.sig.inputs()[0],
                     });
                 }
@@ -305,6 +305,36 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 Applicability::MaybeIncorrect,
             );
         }
+    }
+
+    /// Give appropriate suggestion when encountering `[("a", 0) ("b", 1)]`, where the
+    /// likely intention is to create an array containing tuples.
+    fn maybe_suggest_bad_array_definition(
+        &self,
+        err: &mut DiagnosticBuilder<'a>,
+        call_expr: &'tcx hir::Expr<'tcx>,
+        callee_expr: &'tcx hir::Expr<'tcx>,
+    ) -> bool {
+        let hir_id = self.tcx.hir().get_parent_node(call_expr.hir_id);
+        let parent_node = self.tcx.hir().get(hir_id);
+        if let (
+            hir::Node::Expr(hir::Expr { kind: hir::ExprKind::Array(_), .. }),
+            hir::ExprKind::Tup(exp),
+            hir::ExprKind::Call(_, args),
+        ) = (parent_node, &callee_expr.kind, &call_expr.kind)
+        {
+            if args.len() == exp.len() {
+                let start = callee_expr.span.shrink_to_hi();
+                err.span_suggestion(
+                    start,
+                    "consider separating array elements with a comma",
+                    ",".to_string(),
+                    Applicability::MaybeIncorrect,
+                );
+                return true;
+            }
+        }
+        false
     }
 
     fn confirm_builtin_call(
@@ -422,7 +452,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     _ => Res::Err,
                 };
 
-                err.span_label(call_expr.span, "call expression requires function");
+                if !self.maybe_suggest_bad_array_definition(&mut err, call_expr, callee_expr) {
+                    err.span_label(call_expr.span, "call expression requires function");
+                }
 
                 if let Some(span) = self.tcx.hir().res_span(def) {
                     let callee_ty = callee_ty.to_string();
@@ -596,7 +628,7 @@ impl<'a, 'tcx> DeferredCallResolution<'tcx> {
                 for (method_arg_ty, self_arg_ty) in
                     iter::zip(method_sig.inputs().iter().skip(1), self.fn_sig.inputs())
                 {
-                    fcx.demand_eqtype(self.call_expr.span, &self_arg_ty, &method_arg_ty);
+                    fcx.demand_eqtype(self.call_expr.span, *self_arg_ty, *method_arg_ty);
                 }
 
                 fcx.demand_eqtype(self.call_expr.span, method_sig.output(), self.fn_sig.output());

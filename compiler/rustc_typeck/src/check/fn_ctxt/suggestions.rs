@@ -8,8 +8,12 @@ use rustc_errors::{Applicability, DiagnosticBuilder};
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind};
 use rustc_hir::lang_items::LangItem;
-use rustc_hir::{Expr, ExprKind, ItemKind, Node, Path, QPath, Stmt, StmtKind, TyKind};
-use rustc_infer::infer;
+use rustc_hir::{
+    Expr, ExprKind, GenericBound, ItemKind, Node, Path, QPath, Stmt, StmtKind, TyKind,
+    WherePredicate,
+};
+use rustc_infer::infer::{self, TyCtxtInferExt};
+
 use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::{self, Binder, Ty};
 use rustc_span::symbol::{kw, sym};
@@ -208,7 +212,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     pub fn suggest_deref_ref_or_into(
         &self,
         err: &mut DiagnosticBuilder<'_>,
-        expr: &hir::Expr<'_>,
+        expr: &hir::Expr<'tcx>,
         expected: Ty<'tcx>,
         found: Ty<'tcx>,
         expected_ty_expr: Option<&'tcx hir::Expr<'tcx>>,
@@ -231,13 +235,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
         } else if !self.check_for_cast(err, expr, found, expected, expected_ty_expr) {
             let is_struct_pat_shorthand_field =
-                self.is_hir_id_from_struct_pattern_shorthand_field(expr.hir_id, expr.span);
+                self.maybe_get_struct_pattern_shorthand_field(expr).is_some();
             let methods = self.get_conversion_methods(expr.span, expected, found, expr.hir_id);
             if !methods.is_empty() {
                 if let Ok(expr_text) = self.sess().source_map().span_to_snippet(expr.span) {
                     let mut suggestions = iter::zip(iter::repeat(&expr_text), &methods)
                         .filter_map(|(receiver, method)| {
-                            let method_call = format!(".{}()", method.ident);
+                            let method_call = format!(".{}()", method.name);
                             if receiver.ends_with(&method_call) {
                                 None // do not suggest code that is already there (#53348)
                             } else {
@@ -559,11 +563,121 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let ty = self.tcx.erase_late_bound_regions(ty);
                 if self.can_coerce(expected, ty) {
                     err.span_label(sp, format!("expected `{}` because of return type", expected));
+                    self.try_suggest_return_impl_trait(err, expected, ty, fn_id);
                     return true;
                 }
                 false
             }
         }
+    }
+
+    /// check whether the return type is a generic type with a trait bound
+    /// only suggest this if the generic param is not present in the arguments
+    /// if this is true, hint them towards changing the return type to `impl Trait`
+    /// ```
+    /// fn cant_name_it<T: Fn() -> u32>() -> T {
+    ///     || 3
+    /// }
+    /// ```
+    fn try_suggest_return_impl_trait(
+        &self,
+        err: &mut DiagnosticBuilder<'_>,
+        expected: Ty<'tcx>,
+        found: Ty<'tcx>,
+        fn_id: hir::HirId,
+    ) {
+        // Only apply the suggestion if:
+        //  - the return type is a generic parameter
+        //  - the generic param is not used as a fn param
+        //  - the generic param has at least one bound
+        //  - the generic param doesn't appear in any other bounds where it's not the Self type
+        // Suggest:
+        //  - Changing the return type to be `impl <all bounds>`
+
+        debug!("try_suggest_return_impl_trait, expected = {:?}, found = {:?}", expected, found);
+
+        let ty::Param(expected_ty_as_param) = expected.kind() else { return };
+
+        let fn_node = self.tcx.hir().find(fn_id);
+
+        let Some(hir::Node::Item(hir::Item {
+            kind:
+                hir::ItemKind::Fn(
+                    hir::FnSig { decl: hir::FnDecl { inputs: fn_parameters, output: fn_return, .. }, .. },
+                    hir::Generics { params, where_clause, .. },
+                    _body_id,
+                ),
+            ..
+        })) = fn_node else { return };
+
+        let Some(expected_generic_param) = params.get(expected_ty_as_param.index as usize) else { return };
+
+        // get all where BoundPredicates here, because they are used in to cases below
+        let where_predicates = where_clause
+            .predicates
+            .iter()
+            .filter_map(|p| match p {
+                WherePredicate::BoundPredicate(hir::WhereBoundPredicate {
+                    bounds,
+                    bounded_ty,
+                    ..
+                }) => {
+                    // FIXME: Maybe these calls to `ast_ty_to_ty` can be removed (and the ones below)
+                    let ty = <dyn AstConv<'_>>::ast_ty_to_ty(self, bounded_ty);
+                    Some((ty, bounds))
+                }
+                _ => None,
+            })
+            .map(|(ty, bounds)| match ty.kind() {
+                ty::Param(param_ty) if param_ty == expected_ty_as_param => Ok(Some(bounds)),
+                // check whether there is any predicate that contains our `T`, like `Option<T>: Send`
+                _ => match ty.contains(expected) {
+                    true => Err(()),
+                    false => Ok(None),
+                },
+            })
+            .collect::<Result<Vec<_>, _>>();
+
+        let Ok(where_predicates) =  where_predicates else { return };
+
+        // now get all predicates in the same types as the where bounds, so we can chain them
+        let predicates_from_where =
+            where_predicates.iter().flatten().map(|bounds| bounds.iter()).flatten();
+
+        // extract all bounds from the source code using their spans
+        let all_matching_bounds_strs = expected_generic_param
+            .bounds
+            .iter()
+            .chain(predicates_from_where)
+            .filter_map(|bound| match bound {
+                GenericBound::Trait(_, _) => {
+                    self.tcx.sess.source_map().span_to_snippet(bound.span()).ok()
+                }
+                _ => None,
+            })
+            .collect::<Vec<String>>();
+
+        if all_matching_bounds_strs.len() == 0 {
+            return;
+        }
+
+        let all_bounds_str = all_matching_bounds_strs.join(" + ");
+
+        let ty_param_used_in_fn_params = fn_parameters.iter().any(|param| {
+                let ty = <dyn AstConv<'_>>::ast_ty_to_ty(self, param);
+                matches!(ty.kind(), ty::Param(fn_param_ty_param) if expected_ty_as_param == fn_param_ty_param)
+            });
+
+        if ty_param_used_in_fn_params {
+            return;
+        }
+
+        err.span_suggestion(
+            fn_return.span(),
+            "consider using an impl return type",
+            format!("impl {}", all_bounds_str),
+            Applicability::MaybeIncorrect,
+        );
     }
 
     pub(in super::super) fn suggest_missing_break_or_return_expr(
@@ -608,6 +722,21 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let bound_vars = self.tcx.late_bound_vars(fn_id);
             let ty = self.tcx.erase_late_bound_regions(Binder::bind_with_vars(ty, bound_vars));
             let ty = self.normalize_associated_types_in(expr.span, ty);
+            let ty = match self.tcx.asyncness(fn_id.owner) {
+                hir::IsAsync::Async => self
+                    .tcx
+                    .infer_ctxt()
+                    .enter(|infcx| {
+                        infcx.get_impl_future_output_ty(ty).unwrap_or_else(|| {
+                            span_bug!(
+                                fn_decl.output.span(),
+                                "failed to get output type of async function"
+                            )
+                        })
+                    })
+                    .skip_binder(),
+                hir::IsAsync::NotAsync => ty,
+            };
             if self.can_coerce(found, ty) {
                 err.multipart_suggestion(
                     "you might have meant to return this value",

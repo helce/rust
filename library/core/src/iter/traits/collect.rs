@@ -15,8 +15,6 @@
 /// Basic usage:
 ///
 /// ```
-/// use std::iter::FromIterator;
-///
 /// let five_fives = std::iter::repeat(5).take(5);
 ///
 /// let v = Vec::from_iter(five_fives);
@@ -37,8 +35,6 @@
 /// Implementing `FromIterator` for your type:
 ///
 /// ```
-/// use std::iter::FromIterator;
-///
 /// // A sample collection, that's just a wrapper over Vec<T>
 /// #[derive(Debug)]
 /// struct MyCollection(Vec<i32>);
@@ -85,6 +81,32 @@
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_on_unimplemented(
+    on(
+        _Self = "[{A}]",
+        message = "a value of type `{Self}` cannot be built since `{Self}` has no definite size",
+        label = "try explicitly collecting into a `Vec<{A}>`",
+    ),
+    on(
+        all(
+            A = "{integer}",
+            any(
+                _Self = "[i8]",
+                _Self = "[i16]",
+                _Self = "[i32]",
+                _Self = "[i64]",
+                _Self = "[i128]",
+                _Self = "[isize]",
+                _Self = "[u8]",
+                _Self = "[u16]",
+                _Self = "[u32]",
+                _Self = "[u64]",
+                _Self = "[u128]",
+                _Self = "[usize]"
+            )
+        ),
+        message = "a value of type `{Self}` cannot be built since `{Self}` has no definite size",
+        label = "try explicitly collecting into a `Vec<{A}>`",
+    ),
     message = "a value of type `{Self}` cannot be built from an iterator \
                over elements of type `{A}`",
     label = "value of type `{Self}` cannot be built from `std::iter::Iterator<Item={A}>`"
@@ -102,8 +124,6 @@ pub trait FromIterator<A>: Sized {
     /// Basic usage:
     ///
     /// ```
-    /// use std::iter::FromIterator;
-    ///
     /// let five_fives = std::iter::repeat(5).take(5);
     ///
     /// let v = Vec::from_iter(five_fives);
@@ -130,7 +150,7 @@ pub trait FromIterator<A>: Sized {
 /// Basic usage:
 ///
 /// ```
-/// let v = vec![1, 2, 3];
+/// let v = [1, 2, 3];
 /// let mut iter = v.into_iter();
 ///
 /// assert_eq!(Some(1), iter.next());
@@ -221,7 +241,7 @@ pub trait IntoIterator {
     /// Basic usage:
     ///
     /// ```
-    /// let v = vec![1, 2, 3];
+    /// let v = [1, 2, 3];
     /// let mut iter = v.into_iter();
     ///
     /// assert_eq!(Some(1), iter.next());

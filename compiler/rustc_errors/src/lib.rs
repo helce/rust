@@ -8,6 +8,7 @@
 #![feature(if_let_guard)]
 #![feature(let_else)]
 #![feature(nll)]
+#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
 
 #[macro_use]
 extern crate rustc_macros;
@@ -54,9 +55,11 @@ pub use snippet::Style;
 pub type PResult<'a, T> = Result<T, DiagnosticBuilder<'a>>;
 
 // `PResult` is used a lot. Make sure it doesn't unintentionally get bigger.
-// (See also the comment on `DiagnosticBuilderInner`.)
+// (See also the comment on `DiagnosticBuilder`'s `diagnostic` field.)
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-rustc_data_structures::static_assert_size!(PResult<'_, bool>, 16);
+rustc_data_structures::static_assert_size!(PResult<'_, ()>, 16);
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+rustc_data_structures::static_assert_size!(PResult<'_, bool>, 24);
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash, Encodable, Decodable)]
 pub enum SuggestionStyle {
@@ -99,8 +102,8 @@ impl Hash for ToolMetadata {
 
 // Doesn't really need to round-trip
 impl<D: Decoder> Decodable<D> for ToolMetadata {
-    fn decode(_d: &mut D) -> Result<Self, D::Error> {
-        Ok(ToolMetadata(None))
+    fn decode(_d: &mut D) -> Self {
+        ToolMetadata(None)
     }
 }
 
@@ -445,9 +448,6 @@ struct HandlerInner {
     deduplicated_warn_count: usize,
 
     future_breakage_diagnostics: Vec<Diagnostic>,
-
-    /// If set to `true`, no warning or error will be emitted.
-    quiet: bool,
 }
 
 /// A key denoting where from a diagnostic was stashed.
@@ -563,17 +563,8 @@ impl Handler {
                 emitted_diagnostics: Default::default(),
                 stashed_diagnostics: Default::default(),
                 future_breakage_diagnostics: Vec::new(),
-                quiet: false,
             }),
         }
-    }
-
-    pub fn with_disabled_diagnostic<T, F: FnOnce() -> T>(&self, f: F) -> T {
-        let prev = self.inner.borrow_mut().quiet;
-        self.inner.borrow_mut().quiet = true;
-        let ret = f();
-        self.inner.borrow_mut().quiet = prev;
-        ret
     }
 
     // This is here to not allow mutation of flags;
@@ -946,7 +937,7 @@ impl HandlerInner {
     }
 
     fn emit_diagnostic(&mut self, diagnostic: &Diagnostic) {
-        if diagnostic.cancelled() || self.quiet {
+        if diagnostic.cancelled() {
             return;
         }
 
@@ -1170,9 +1161,6 @@ impl HandlerInner {
     }
 
     fn delay_as_bug(&mut self, diagnostic: Diagnostic) {
-        if self.quiet {
-            return;
-        }
         if self.flags.report_delayed_bugs {
             self.emit_diagnostic(&diagnostic);
         }

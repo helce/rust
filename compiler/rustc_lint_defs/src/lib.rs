@@ -163,12 +163,17 @@ pub enum FutureIncompatibilityReason {
     /// This will be an error in a future release, and
     /// Cargo should create a report even for dependencies
     FutureReleaseErrorReportNow,
+    /// Code that changes meaning in some way in a
+    /// future release.
+    FutureReleaseSemanticsChange,
     /// Previously accepted code that will become an
     /// error in the provided edition
     EditionError(Edition),
     /// Code that changes meaning in some way in
     /// the provided edition
     EditionSemanticsChange(Edition),
+    /// A custom reason.
+    Custom(&'static str),
 }
 
 impl FutureIncompatibilityReason {
@@ -282,7 +287,7 @@ pub enum ExternDepSpec {
 
 // This could be a closure, but then implementing derive trait
 // becomes hacky (and it gets allocated).
-#[derive(PartialEq, Debug)]
+#[derive(Debug)]
 pub enum BuiltinLintDiagnostics {
     Normal,
     AbsPathWithModule(Span),
@@ -309,7 +314,6 @@ pub enum BuiltinLintDiagnostics {
 
 /// Lints that are buffered up early on in the `Session` before the
 /// `LintLevels` is calculated.
-#[derive(PartialEq)]
 pub struct BufferedEarlyLint {
     /// The span of code that we are linting on.
     pub span: MultiSpan,
@@ -336,9 +340,7 @@ pub struct LintBuffer {
 impl LintBuffer {
     pub fn add_early_lint(&mut self, early_lint: BufferedEarlyLint) {
         let arr = self.map.entry(early_lint.node_id).or_default();
-        if !arr.contains(&early_lint) {
-            arr.push(early_lint);
-        }
+        arr.push(early_lint);
     }
 
     pub fn add_lint(

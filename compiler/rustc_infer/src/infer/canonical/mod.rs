@@ -137,12 +137,9 @@ impl<'cx, 'tcx> InferCtxt<'cx, 'tcx> {
                 self.tcx.mk_region(ty::RePlaceholder(placeholder_mapped)).into()
             }
 
-            CanonicalVarKind::Const(ui) => self
+            CanonicalVarKind::Const(ui, ty) => self
                 .next_const_var_in_universe(
-                    self.next_ty_var_in_universe(
-                        TypeVariableOrigin { kind: TypeVariableOriginKind::MiscVariable, span },
-                        universe_map(ui),
-                    ),
+                    ty,
                     ConstVariableOrigin { kind: ConstVariableOriginKind::MiscVariable, span },
                     universe_map(ui),
                 )
@@ -152,7 +149,7 @@ impl<'cx, 'tcx> InferCtxt<'cx, 'tcx> {
                 let universe_mapped = universe_map(universe);
                 let placeholder_mapped = ty::PlaceholderConst { universe: universe_mapped, name };
                 self.tcx
-                    .mk_const(ty::Const {
+                    .mk_const(ty::ConstS {
                         val: ty::ConstKind::Placeholder(placeholder_mapped),
                         ty: name.ty,
                     })

@@ -192,7 +192,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
         if let Some(vec) = self.typeck_results.pat_adjustments().get(pat.hir_id) {
             if let Some(first_ty) = vec.first() {
                 debug!("pat_ty(pat={:?}) found adjusted ty `{:?}`", pat, first_ty);
-                return Ok(first_ty);
+                return Ok(*first_ty);
             }
         }
 
@@ -378,7 +378,6 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
             | hir::ExprKind::Struct(..)
             | hir::ExprKind::Repeat(..)
             | hir::ExprKind::InlineAsm(..)
-            | hir::ExprKind::LlvmInlineAsm(..)
             | hir::ExprKind::Box(..)
             | hir::ExprKind::Err => Ok(self.cat_rvalue(expr.hir_id, expr.span, expr_ty)),
         }
@@ -563,7 +562,7 @@ impl<'a, 'tcx> MemCategorizationContext<'a, 'tcx> {
             Res::Def(DefKind::Ctor(CtorOf::Struct, ..), _)
             | Res::Def(DefKind::Struct | DefKind::Union | DefKind::TyAlias | DefKind::AssocTy, _)
             | Res::SelfCtor(..)
-            | Res::SelfTy(..) => {
+            | Res::SelfTy { .. } => {
                 // Structs and Unions have only have one variant.
                 Ok(VariantIdx::new(0))
             }

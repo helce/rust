@@ -1,30 +1,23 @@
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::sync::{self, Lrc};
-use rustc_driver::abort_on_err;
 use rustc_errors::emitter::{Emitter, EmitterWriter};
 use rustc_errors::json::JsonEmitter;
 use rustc_feature::UnstableFeatures;
 use rustc_hir::def::Res;
-use rustc_hir::def_id::{DefId, LocalDefId};
-use rustc_hir::HirId;
-use rustc_hir::{
-    intravisit::{self, NestedVisitorMap, Visitor},
-    Path,
-};
-use rustc_interface::{interface, Queries};
-use rustc_middle::hir::map::Map;
+use rustc_hir::def_id::{DefId, DefIdMap, LocalDefId};
+use rustc_hir::intravisit::{self, Visitor};
+use rustc_hir::{HirId, Path, TraitCandidate};
+use rustc_interface::interface;
+use rustc_middle::hir::nested_filter;
 use rustc_middle::middle::privacy::AccessLevels;
 use rustc_middle::ty::{ParamEnv, Ty, TyCtxt};
 use rustc_resolve as resolve;
-use rustc_resolve::Namespace::TypeNS;
 use rustc_session::config::{self, CrateType, ErrorOutputType};
 use rustc_session::lint;
 use rustc_session::DiagnosticOutput;
 use rustc_session::Session;
-use rustc_span::def_id::CRATE_DEF_INDEX;
-use rustc_span::source_map;
 use rustc_span::symbol::sym;
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::{source_map, Span};
 
 use std::cell::RefCell;
 use std::lazy::SyncLazy;
@@ -39,14 +32,23 @@ use crate::passes::{self, Condition::*};
 
 crate use rustc_session::config::{DebuggingOptions, Input, Options};
 
+crate struct ResolverCaches {
+    /// Traits in scope for a given module.
+    /// See `collect_intra_doc_links::traits_implemented_by` for more details.
+    crate traits_in_scope: DefIdMap<Vec<TraitCandidate>>,
+    crate all_traits: Option<Vec<DefId>>,
+    crate all_trait_impls: Option<Vec<DefId>>,
+}
+
 crate struct DocContext<'tcx> {
     crate tcx: TyCtxt<'tcx>,
     /// Name resolver. Used for intra-doc links.
     ///
     /// The `Rc<RefCell<...>>` wrapping is needed because that is what's returned by
-    /// [`Queries::expansion()`].
+    /// [`rustc_interface::Queries::expansion()`].
     // FIXME: see if we can get rid of this RefCell somehow
     crate resolver: Rc<RefCell<interface::BoxedResolver>>,
+    crate resolver_caches: ResolverCaches,
     /// Used for normalization.
     ///
     /// Most of this logic is copied from rustc_lint::late.
@@ -68,11 +70,6 @@ crate struct DocContext<'tcx> {
     crate auto_traits: Vec<DefId>,
     /// The options given to rustdoc that could be relevant to a pass.
     crate render_options: RenderOptions,
-    /// The traits in scope for a given module.
-    ///
-    /// See `collect_intra_doc_links::traits_implemented_by` for more details.
-    /// `map<module, set<trait>>`
-    crate module_trait_cache: FxHashMap<DefId, FxHashSet<DefId>>,
     /// This same cache is used throughout rustdoc, including in [`crate::html::render`].
     crate cache: Cache,
     /// Used by [`clean::inline`] to tell if an item has already been inlined.
@@ -122,6 +119,18 @@ impl<'tcx> DocContext<'tcx> {
             // FIXME: Can this be `Some` for `Auto` or `Blanket`?
             _ => None,
         }
+    }
+
+    crate fn with_all_traits(&mut self, f: impl FnOnce(&mut Self, &[DefId])) {
+        let all_traits = self.resolver_caches.all_traits.take();
+        f(self, all_traits.as_ref().expect("`all_traits` are already borrowed"));
+        self.resolver_caches.all_traits = all_traits;
+    }
+
+    crate fn with_all_trait_impls(&mut self, f: impl FnOnce(&mut Self, &[DefId])) {
+        let all_trait_impls = self.resolver_caches.all_trait_impls.take();
+        f(self, all_trait_impls.as_ref().expect("`all_trait_impls` are already borrowed"));
+        self.resolver_caches.all_trait_impls = all_trait_impls;
     }
 }
 
@@ -191,6 +200,7 @@ crate fn create_config(
         lint_opts,
         describe_lints,
         lint_cap,
+        scrape_examples_options,
         ..
     }: RustdocOptions,
 ) -> rustc_interface::Config {
@@ -218,6 +228,7 @@ crate fn create_config(
 
     let crate_types =
         if proc_macro_crate { vec![CrateType::ProcMacro] } else { vec![CrateType::Rlib] };
+    let test = scrape_examples_options.map(|opts| opts.scrape_tests).unwrap_or(false);
     // plays with error output here!
     let sessopts = config::Options {
         maybe_sysroot,
@@ -235,19 +246,20 @@ crate fn create_config(
         edition,
         describe_lints,
         crate_name,
+        test,
         ..Options::default()
     };
 
     interface::Config {
         opts: sessopts,
         crate_cfg: interface::parse_cfgspecs(cfgs),
+        crate_check_cfg: interface::parse_check_cfg(vec![]),
         input,
         input_path: cpath,
         output_file: None,
         output_dir: None,
         file_loader: None,
         diagnostic_output: DiagnosticOutput::Default,
-        stderr: None,
         lint_caps,
         parse_sess_created: None,
         register_lints: Some(box crate::lint::register_lints),
@@ -284,49 +296,10 @@ crate fn create_config(
     }
 }
 
-crate fn create_resolver<'a>(
-    externs: config::Externs,
-    queries: &Queries<'a>,
-    sess: &Session,
-) -> Rc<RefCell<interface::BoxedResolver>> {
-    let (krate, resolver, _) = &*abort_on_err(queries.expansion(), sess).peek();
-    let resolver = resolver.clone();
-
-    let resolver = crate::passes::collect_intra_doc_links::load_intra_link_crates(resolver, krate);
-
-    // FIXME: somehow rustdoc is still missing crates even though we loaded all
-    // the known necessary crates. Load them all unconditionally until we find a way to fix this.
-    // DO NOT REMOVE THIS without first testing on the reproducer in
-    // https://github.com/jyn514/objr/commit/edcee7b8124abf0e4c63873e8422ff81beb11ebb
-    let extern_names: Vec<String> = externs
-        .iter()
-        .filter(|(_, entry)| entry.add_prelude)
-        .map(|(name, _)| name)
-        .cloned()
-        .collect();
-    resolver.borrow_mut().access(|resolver| {
-        sess.time("load_extern_crates", || {
-            for extern_name in &extern_names {
-                debug!("loading extern crate {}", extern_name);
-                if let Err(()) = resolver
-                    .resolve_str_path_error(
-                        DUMMY_SP,
-                        extern_name,
-                        TypeNS,
-                        LocalDefId { local_def_index: CRATE_DEF_INDEX }.to_def_id(),
-                  ) {
-                    warn!("unable to resolve external crate {} (do you have an unused `--extern` crate?)", extern_name)
-                  }
-            }
-        });
-    });
-
-    resolver
-}
-
 crate fn run_global_ctxt(
     tcx: TyCtxt<'_>,
     resolver: Rc<RefCell<interface::BoxedResolver>>,
+    resolver_caches: ResolverCaches,
     show_coverage: bool,
     render_options: RenderOptions,
     output_format: OutputFormat,
@@ -355,6 +328,14 @@ crate fn run_global_ctxt(
     });
     rustc_passes::stability::check_unused_or_stable_features(tcx);
 
+    let auto_traits = resolver_caches
+        .all_traits
+        .as_ref()
+        .expect("`all_traits` are already borrowed")
+        .iter()
+        .copied()
+        .filter(|&trait_def_id| tcx.trait_is_auto(trait_def_id))
+        .collect();
     let access_levels = AccessLevels {
         map: tcx.privacy_access_levels(()).map.iter().map(|(k, v)| (k.to_def_id(), *v)).collect(),
     };
@@ -362,17 +343,14 @@ crate fn run_global_ctxt(
     let mut ctxt = DocContext {
         tcx,
         resolver,
+        resolver_caches,
         param_env: ParamEnv::empty(),
         external_traits: Default::default(),
         active_extern_traits: Default::default(),
         substs: Default::default(),
         impl_trait_bounds: Default::default(),
         generated_synthetics: Default::default(),
-        auto_traits: tcx
-            .all_traits()
-            .filter(|&trait_def_id| tcx.trait_is_auto(trait_def_id))
-            .collect(),
-        module_trait_cache: FxHashMap::default(),
+        auto_traits,
         cache: Cache::new(access_levels, render_options.document_private),
         inlined: FxHashSet::default(),
         output_format,
@@ -496,12 +474,12 @@ impl<'tcx> EmitIgnoredResolutionErrors<'tcx> {
 }
 
 impl<'tcx> Visitor<'tcx> for EmitIgnoredResolutionErrors<'tcx> {
-    type Map = Map<'tcx>;
+    type NestedFilter = nested_filter::OnlyBodies;
 
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
+    fn nested_visit_map(&mut self) -> Self::Map {
         // We need to recurse into nested closures,
         // since those will fallback to the parent for type checking.
-        NestedVisitorMap::OnlyBodies(self.tcx.hir())
+        self.tcx.hir()
     }
 
     fn visit_path(&mut self, path: &'tcx Path<'_>, _id: HirId) {
@@ -514,9 +492,9 @@ impl<'tcx> Visitor<'tcx> for EmitIgnoredResolutionErrors<'tcx> {
                 "could not resolve path `{}`",
                 path.segments
                     .iter()
-                    .map(|segment| segment.ident.as_str().to_string())
-                    .collect::<Vec<_>>()
-                    .join("::")
+                    .map(|segment| segment.ident.as_str())
+                    .intersperse("::")
+                    .collect::<String>()
             );
             let mut err = rustc_errors::struct_span_err!(
                 self.tcx.sess,

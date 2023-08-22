@@ -1,7 +1,7 @@
 use libloading::Library;
 use rustc_ast::mut_visit::{visit_clobber, MutVisitor, *};
 use rustc_ast::ptr::P;
-use rustc_ast::{self as ast, AttrVec, BlockCheckMode};
+use rustc_ast::{self as ast, AttrVec, BlockCheckMode, Term};
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 #[cfg(parallel_compiler)]
@@ -15,6 +15,7 @@ use rustc_parse::validate_attr;
 use rustc_query_impl::QueryCtxt;
 use rustc_resolve::{self, Resolver};
 use rustc_session as session;
+use rustc_session::config::CheckCfg;
 use rustc_session::config::{self, CrateType};
 use rustc_session::config::{ErrorOutputType, Input, OutputFilenames};
 use rustc_session::lint::{self, BuiltinLintDiagnostics, LintBuffer};
@@ -27,7 +28,6 @@ use rustc_span::symbol::{sym, Symbol};
 use smallvec::SmallVec;
 use std::env;
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
-use std::io;
 use std::lazy::SyncOnceCell;
 use std::mem;
 use std::ops::DerefMut;
@@ -35,7 +35,6 @@ use std::ops::DerefMut;
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use tracing::info;
 
@@ -67,6 +66,7 @@ pub fn add_configuration(
 pub fn create_session(
     sopts: config::Options,
     cfg: FxHashSet<(String, Option<String>)>,
+    check_cfg: CheckCfg,
     diagnostic_output: DiagnosticOutput,
     file_loader: Option<Box<dyn FileLoader + Send + Sync + 'static>>,
     input_path: Option<PathBuf>,
@@ -102,7 +102,13 @@ pub fn create_session(
 
     let mut cfg = config::build_configuration(&sess, config::to_crate_config(cfg));
     add_configuration(&mut cfg, &mut sess, &*codegen_backend);
+
+    let mut check_cfg = config::to_crate_check_config(check_cfg);
+    check_cfg.fill_well_known();
+    check_cfg.fill_actual(&cfg);
+
     sess.parse_sess.config = cfg;
+    sess.parse_sess.check_config = check_cfg;
 
     (Lrc::new(sess), Lrc::new(codegen_backend))
 }
@@ -118,7 +124,7 @@ fn get_stack_size() -> Option<usize> {
 /// Like a `thread::Builder::spawn` followed by a `join()`, but avoids the need
 /// for `'static` bounds.
 #[cfg(not(parallel_compiler))]
-pub fn scoped_thread<F: FnOnce() -> R + Send, R: Send>(cfg: thread::Builder, f: F) -> R {
+fn scoped_thread<F: FnOnce() -> R + Send, R: Send>(cfg: thread::Builder, f: F) -> R {
     // SAFETY: join() is called immediately, so any closure captures are still
     // alive.
     match unsafe { cfg.spawn_unchecked(f) }.unwrap().join() {
@@ -128,10 +134,9 @@ pub fn scoped_thread<F: FnOnce() -> R + Send, R: Send>(cfg: thread::Builder, f: 
 }
 
 #[cfg(not(parallel_compiler))]
-pub fn setup_callbacks_and_run_in_thread_pool_with_globals<F: FnOnce() -> R + Send, R: Send>(
+pub fn run_in_thread_pool_with_globals<F: FnOnce() -> R + Send, R: Send>(
     edition: Edition,
     _threads: usize,
-    stderr: &Option<Arc<Mutex<Vec<u8>>>>,
     f: F,
 ) -> R {
     let mut cfg = thread::Builder::new().name("rustc".to_string());
@@ -140,14 +145,7 @@ pub fn setup_callbacks_and_run_in_thread_pool_with_globals<F: FnOnce() -> R + Se
         cfg = cfg.stack_size(size);
     }
 
-    crate::callbacks::setup_callbacks();
-
-    let main_handler = move || {
-        rustc_span::create_session_globals_then(edition, || {
-            io::set_output_capture(stderr.clone());
-            f()
-        })
-    };
+    let main_handler = move || rustc_span::create_session_globals_then(edition, f);
 
     scoped_thread(cfg, main_handler)
 }
@@ -176,14 +174,11 @@ unsafe fn handle_deadlock() {
 }
 
 #[cfg(parallel_compiler)]
-pub fn setup_callbacks_and_run_in_thread_pool_with_globals<F: FnOnce() -> R + Send, R: Send>(
+pub fn run_in_thread_pool_with_globals<F: FnOnce() -> R + Send, R: Send>(
     edition: Edition,
     threads: usize,
-    stderr: &Option<Arc<Mutex<Vec<u8>>>>,
     f: F,
 ) -> R {
-    crate::callbacks::setup_callbacks();
-
     let mut config = rayon::ThreadPoolBuilder::new()
         .thread_name(|_| "rustc".to_string())
         .acquire_thread_handler(jobserver::acquire_thread)
@@ -203,10 +198,7 @@ pub fn setup_callbacks_and_run_in_thread_pool_with_globals<F: FnOnce() -> R + Se
             // the thread local rustc uses. `session_globals` is captured and set
             // on the new threads.
             let main_handler = move |thread: rayon::ThreadBuilder| {
-                rustc_span::set_session_globals_then(session_globals, || {
-                    io::set_output_capture(stderr.clone());
-                    thread.run()
-                })
+                rustc_span::set_session_globals_then(session_globals, || thread.run())
             };
 
             config.build_scoped(main_handler, with_pool).unwrap()
@@ -343,6 +335,7 @@ fn sysroot_candidates() -> Vec<PathBuf> {
     #[cfg(windows)]
     fn current_dll_path() -> Option<PathBuf> {
         use std::ffi::OsString;
+        use std::io;
         use std::os::windows::prelude::*;
         use std::ptr;
 
@@ -379,7 +372,7 @@ fn sysroot_candidates() -> Vec<PathBuf> {
     }
 }
 
-pub fn get_codegen_sysroot(maybe_sysroot: &Option<PathBuf>, backend_name: &str) -> MakeBackendFn {
+fn get_codegen_sysroot(maybe_sysroot: &Option<PathBuf>, backend_name: &str) -> MakeBackendFn {
     // For now we only allow this function to be called once as it'll dlopen a
     // few things, which seems to work best if we only do that once. In
     // general this assertion never trips due to the once guard in `get_codegen_backend`,
@@ -717,52 +710,57 @@ impl<'a, 'b> ReplaceBodyWithLoop<'a, 'b> {
     }
 
     fn should_ignore_fn(ret_ty: &ast::FnRetTy) -> bool {
-        if let ast::FnRetTy::Ty(ref ty) = ret_ty {
-            fn involves_impl_trait(ty: &ast::Ty) -> bool {
-                match ty.kind {
-                    ast::TyKind::ImplTrait(..) => true,
-                    ast::TyKind::Slice(ref subty)
-                    | ast::TyKind::Array(ref subty, _)
-                    | ast::TyKind::Ptr(ast::MutTy { ty: ref subty, .. })
-                    | ast::TyKind::Rptr(_, ast::MutTy { ty: ref subty, .. })
-                    | ast::TyKind::Paren(ref subty) => involves_impl_trait(subty),
-                    ast::TyKind::Tup(ref tys) => any_involves_impl_trait(tys.iter()),
-                    ast::TyKind::Path(_, ref path) => {
-                        path.segments.iter().any(|seg| match seg.args.as_deref() {
-                            None => false,
-                            Some(&ast::GenericArgs::AngleBracketed(ref data)) => {
-                                data.args.iter().any(|arg| match arg {
-                                    ast::AngleBracketedArg::Arg(arg) => match arg {
-                                        ast::GenericArg::Type(ty) => involves_impl_trait(ty),
-                                        ast::GenericArg::Lifetime(_)
-                                        | ast::GenericArg::Const(_) => false,
-                                    },
-                                    ast::AngleBracketedArg::Constraint(c) => match c.kind {
-                                        ast::AssocTyConstraintKind::Bound { .. } => true,
-                                        ast::AssocTyConstraintKind::Equality { ref ty } => {
-                                            involves_impl_trait(ty)
+        let ast::FnRetTy::Ty(ref ty) = ret_ty else {
+            return false;
+        };
+        fn involves_impl_trait(ty: &ast::Ty) -> bool {
+            match ty.kind {
+                ast::TyKind::ImplTrait(..) => true,
+                ast::TyKind::Slice(ref subty)
+                | ast::TyKind::Array(ref subty, _)
+                | ast::TyKind::Ptr(ast::MutTy { ty: ref subty, .. })
+                | ast::TyKind::Rptr(_, ast::MutTy { ty: ref subty, .. })
+                | ast::TyKind::Paren(ref subty) => involves_impl_trait(subty),
+                ast::TyKind::Tup(ref tys) => any_involves_impl_trait(tys.iter()),
+                ast::TyKind::Path(_, ref path) => {
+                    path.segments.iter().any(|seg| match seg.args.as_deref() {
+                        None => false,
+                        Some(&ast::GenericArgs::AngleBracketed(ref data)) => {
+                            data.args.iter().any(|arg| match arg {
+                                ast::AngleBracketedArg::Arg(arg) => match arg {
+                                    ast::GenericArg::Type(ty) => involves_impl_trait(ty),
+                                    ast::GenericArg::Lifetime(_) | ast::GenericArg::Const(_) => {
+                                        false
+                                    }
+                                },
+                                ast::AngleBracketedArg::Constraint(c) => match c.kind {
+                                    ast::AssocConstraintKind::Bound { .. } => true,
+                                    ast::AssocConstraintKind::Equality { ref term } => {
+                                        match term {
+                                            Term::Ty(ty) => involves_impl_trait(ty),
+                                            // FIXME(...): This should check if the constant
+                                            // involves a trait impl, but for now ignore.
+                                            Term::Const(_) => false,
                                         }
-                                    },
-                                })
-                            }
-                            Some(&ast::GenericArgs::Parenthesized(ref data)) => {
-                                any_involves_impl_trait(data.inputs.iter())
-                                    || ReplaceBodyWithLoop::should_ignore_fn(&data.output)
-                            }
-                        })
-                    }
-                    _ => false,
+                                    }
+                                },
+                            })
+                        }
+                        Some(&ast::GenericArgs::Parenthesized(ref data)) => {
+                            any_involves_impl_trait(data.inputs.iter())
+                                || ReplaceBodyWithLoop::should_ignore_fn(&data.output)
+                        }
+                    })
                 }
+                _ => false,
             }
-
-            fn any_involves_impl_trait<'a, I: Iterator<Item = &'a P<ast::Ty>>>(mut it: I) -> bool {
-                it.any(|subty| involves_impl_trait(subty))
-            }
-
-            involves_impl_trait(ty)
-        } else {
-            false
         }
+
+        fn any_involves_impl_trait<'a, I: Iterator<Item = &'a P<ast::Ty>>>(mut it: I) -> bool {
+            it.any(|subty| involves_impl_trait(subty))
+        }
+
+        involves_impl_trait(ty)
     }
 
     fn is_sig_const(sig: &ast::FnSig) -> bool {

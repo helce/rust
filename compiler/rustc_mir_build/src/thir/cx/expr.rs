@@ -8,7 +8,6 @@ use rustc_middle::hir::place::Place as HirPlace;
 use rustc_middle::hir::place::PlaceBase as HirPlaceBase;
 use rustc_middle::hir::place::ProjectionKind as HirProjectionKind;
 use rustc_middle::middle::region;
-use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::mir::{BinOp, BorrowKind, Field, UnOp};
 use rustc_middle::thir::*;
 use rustc_middle::ty::adjustment::{
@@ -163,9 +162,9 @@ impl<'tcx> Cx<'tcx> {
 
         let kind = match expr.kind {
             // Here comes the interesting stuff:
-            hir::ExprKind::MethodCall(_, method_span, ref args, fn_span) => {
+            hir::ExprKind::MethodCall(segment, ref args, fn_span) => {
                 // Rewrite a.b(c) into UFCS form like Trait::b(a, c)
-                let expr = self.method_callee(expr, method_span, None);
+                let expr = self.method_callee(expr, segment.ident.span, None);
                 // When we apply adjustments to the receiver, use the span of
                 // the overall method call for better diagnostics. args[0]
                 // is guaranteed to exist, since a method call always has a receiver.
@@ -315,7 +314,6 @@ impl<'tcx> Cx<'tcx> {
                             lhs: self.mirror_expr(lhs),
                             rhs: self.mirror_expr(rhs),
                         },
-
                         _ => {
                             let op = bin_op(op.node);
                             ExprKind::Binary {
@@ -570,12 +568,6 @@ impl<'tcx> Cx<'tcx> {
                 line_spans: asm.line_spans,
             },
 
-            hir::ExprKind::LlvmInlineAsm(ref asm) => ExprKind::LlvmInlineAsm {
-                asm: &asm.inner,
-                outputs: self.mirror_exprs(asm.outputs_exprs),
-                inputs: self.mirror_exprs(asm.inputs_exprs),
-            },
-
             hir::ExprKind::ConstBlock(ref anon_const) => {
                 let anon_const_def_id = self.tcx.hir().local_def_id(anon_const.hir_id);
                 let value = ty::Const::from_inline_const(self.tcx, anon_const_def_id);
@@ -590,7 +582,7 @@ impl<'tcx> Cx<'tcx> {
                     _ => span_bug!(expr.span, "unexpected repeat expr ty: {:?}", ty),
                 };
 
-                ExprKind::Repeat { value: self.mirror_expr(v), count }
+                ExprKind::Repeat { value: self.mirror_expr(v), count: *count }
             }
             hir::ExprKind::Ret(ref v) => {
                 ExprKind::Return { value: v.as_ref().map(|v| self.mirror_expr(v)) }
@@ -715,7 +707,7 @@ impl<'tcx> Cx<'tcx> {
                                 // in case we are offsetting from a computed discriminant
                                 // and not the beginning of discriminants (which is always `0`)
                                 let substs = InternalSubsts::identity_for_item(self.tcx(), did);
-                                let lhs = ty::Const {
+                                let lhs = ty::ConstS {
                                     val: ty::ConstKind::Unevaluated(ty::Unevaluated::new(
                                         ty::WithOptConstParam::unknown(did),
                                         substs,
@@ -897,7 +889,7 @@ impl<'tcx> Cx<'tcx> {
                 let name = self.tcx.hir().name(hir_id);
                 let val = ty::ConstKind::Param(ty::ParamConst::new(index, name));
                 ExprKind::Literal {
-                    literal: self.tcx.mk_const(ty::Const {
+                    literal: self.tcx.mk_const(ty::ConstS {
                         val,
                         ty: self.typeck_results().node_type(expr.hir_id),
                     }),
@@ -910,7 +902,7 @@ impl<'tcx> Cx<'tcx> {
                 let user_ty = self.user_substs_applied_to_res(expr.hir_id, res);
                 debug!("convert_path_expr: (const) user_ty={:?}", user_ty);
                 ExprKind::Literal {
-                    literal: self.tcx.mk_const(ty::Const {
+                    literal: self.tcx.mk_const(ty::ConstS {
                         val: ty::ConstKind::Unevaluated(ty::Unevaluated::new(
                             ty::WithOptConstParam::unknown(def_id),
                             substs,
@@ -950,15 +942,8 @@ impl<'tcx> Cx<'tcx> {
                 let kind = if self.tcx.is_thread_local_static(id) {
                     ExprKind::ThreadLocalRef(id)
                 } else {
-                    let ptr = self.tcx.create_static_alloc(id);
-                    ExprKind::StaticRef {
-                        literal: ty::Const::from_scalar(
-                            self.tcx,
-                            Scalar::from_pointer(ptr.into(), &self.tcx),
-                            ty,
-                        ),
-                        def_id: id,
-                    }
+                    let alloc_id = self.tcx.create_static_alloc(id);
+                    ExprKind::StaticRef { alloc_id, ty, def_id: id }
                 };
                 ExprKind::Deref {
                     arg: self.thir.exprs.push(Expr { ty, temp_lifetime, span: expr.span, kind }),
@@ -1108,9 +1093,9 @@ impl<'tcx> Cx<'tcx> {
         let temp_lifetime = self.region_scope_tree.temporary_scope(closure_expr.hir_id.local_id);
 
         match upvar_capture {
-            ty::UpvarCapture::ByValue(_) => captured_place_expr,
+            ty::UpvarCapture::ByValue => captured_place_expr,
             ty::UpvarCapture::ByRef(upvar_borrow) => {
-                let borrow_kind = match upvar_borrow.kind {
+                let borrow_kind = match upvar_borrow {
                     ty::BorrowKind::ImmBorrow => BorrowKind::Shared,
                     ty::BorrowKind::UniqueImmBorrow => BorrowKind::Unique,
                     ty::BorrowKind::MutBorrow => BorrowKind::Mut { allow_two_phase_borrow: false },

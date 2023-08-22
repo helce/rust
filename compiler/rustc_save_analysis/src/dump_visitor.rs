@@ -21,7 +21,7 @@ use rustc_hir::def::{DefKind as HirDefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId, CRATE_DEF_ID};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir_pretty::{bounds_to_string, fn_to_string, generic_params_to_string, ty_to_string};
-use rustc_middle::hir::map::Map;
+use rustc_middle::hir::nested_filter;
 use rustc_middle::span_bug;
 use rustc_middle::ty::{self, DefIdTree, TyCtxt};
 use rustc_session::config::Input;
@@ -47,11 +47,10 @@ use rls_data::{
 
 use tracing::{debug, error};
 
+#[rustfmt::skip] // https://github.com/rust-lang/rustfmt/issues/5213
 macro_rules! down_cast_data {
     ($id:ident, $kind:ident, $sp:expr) => {
-        let $id = if let super::Data::$kind(data) = $id {
-            data
-        } else {
+        let super::Data::$kind($id) = $id else {
             span_bug!($sp, "unexpected data kind: {:?}", $id);
         };
     };
@@ -263,7 +262,7 @@ impl<'tcx> DumpVisitor<'tcx> {
     ) {
         debug!("process_method: {:?}:{}", def_id, ident);
 
-        let map = &self.tcx.hir();
+        let map = self.tcx.hir();
         let hir_id = map.local_def_id_to_hir_id(def_id);
         self.nest_typeck_results(def_id, |v| {
             if let Some(mut method_data) = v.save_ctxt.get_method_data(hir_id, ident, span) {
@@ -362,7 +361,7 @@ impl<'tcx> DumpVisitor<'tcx> {
         ty_params: &'tcx hir::Generics<'tcx>,
         body: hir::BodyId,
     ) {
-        let map = &self.tcx.hir();
+        let map = self.tcx.hir();
         self.nest_typeck_results(item.def_id, |v| {
             let body = map.body(body);
             if let Some(fn_data) = v.save_ctxt.get_item_data(item) {
@@ -627,7 +626,7 @@ impl<'tcx> DumpVisitor<'tcx> {
             }
         }
 
-        let map = &self.tcx.hir();
+        let map = self.tcx.hir();
         self.nest_typeck_results(item.def_id, |v| {
             v.visit_ty(&impl_.self_ty);
             if let Some(trait_ref) = &impl_.of_trait {
@@ -717,7 +716,7 @@ impl<'tcx> DumpVisitor<'tcx> {
         // walk generics and methods
         self.process_generic_params(generics, &qualname, item.hir_id());
         for method in methods {
-            let map = &self.tcx.hir();
+            let map = self.tcx.hir();
             self.process_trait_item(map.trait_item(method.id), item.def_id.to_def_id())
         }
     }
@@ -922,7 +921,7 @@ impl<'tcx> DumpVisitor<'tcx> {
                     | HirDefKind::AssocTy,
                     _,
                 )
-                | Res::SelfTy(..) => {
+                | Res::SelfTy { .. } => {
                     self.dump_path_segment_ref(id, &hir::PathSegment::from_ident(ident));
                 }
                 def => {
@@ -1137,10 +1136,10 @@ impl<'tcx> DumpVisitor<'tcx> {
 }
 
 impl<'tcx> Visitor<'tcx> for DumpVisitor<'tcx> {
-    type Map = Map<'tcx>;
+    type NestedFilter = nested_filter::All;
 
-    fn nested_visit_map(&mut self) -> intravisit::NestedVisitorMap<Self::Map> {
-        intravisit::NestedVisitorMap::All(self.tcx.hir())
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
     }
 
     fn visit_item(&mut self, item: &'tcx hir::Item<'tcx>) {
@@ -1363,9 +1362,7 @@ impl<'tcx> Visitor<'tcx> for DumpVisitor<'tcx> {
                 let res = self.save_ctxt.get_path_res(hir_expr.hir_id);
                 self.process_struct_lit(ex, path, fields, adt.variant_of_res(res), *rest)
             }
-            hir::ExprKind::MethodCall(ref seg, _, args, _) => {
-                self.process_method_call(ex, seg, args)
-            }
+            hir::ExprKind::MethodCall(ref seg, args, _) => self.process_method_call(ex, seg, args),
             hir::ExprKind::Field(ref sub_ex, _) => {
                 self.visit_expr(&sub_ex);
 

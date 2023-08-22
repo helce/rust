@@ -227,7 +227,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             if let ty::Ref(region, t_type, mutability) = self_ty.kind() {
                 let trait_type = self
                     .tcx
-                    .mk_ref(region, ty::TypeAndMut { ty: t_type, mutbl: mutability.invert() });
+                    .mk_ref(*region, ty::TypeAndMut { ty: *t_type, mutbl: mutability.invert() });
                 // We probe again to see if there might be a borrow mutability discrepancy.
                 match self.lookup_probe(
                     span,
@@ -359,6 +359,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let (obligation, substs) =
             self.obligation_for_method(span, trait_def_id, self_ty, opt_input_types);
 
+        debug!(?obligation);
+
         // Now we want to know if this can be matched
         if !self.predicate_may_hold(&obligation) {
             debug!("--> Cannot match obligation");
@@ -369,7 +371,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // Trait must have a method named `m_name` and it should not have
         // type parameters or early-bound regions.
         let tcx = self.tcx;
-        let method_item = match self.associated_item(trait_def_id, m_name, Namespace::ValueNS) {
+        let method_item = match self.associated_value(trait_def_id, m_name) {
             Some(method_item) => method_item,
             None => {
                 tcx.sess.delay_span_bug(
@@ -482,7 +484,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let variant_def = adt_def
                     .variants
                     .iter()
-                    .find(|vd| tcx.hygienic_eq(method_name, vd.ident, adt_def.did));
+                    .find(|vd| tcx.hygienic_eq(method_name, vd.ident(tcx), adt_def.did));
                 if let Some(variant_def) = variant_def {
                     // Braced variants generate unusable names in value namespace (reserved for
                     // possible future use), so variants resolved as associated items may refer to
@@ -538,15 +540,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     /// Finds item with name `item_name` defined in impl/trait `def_id`
     /// and return it, or `None`, if no such item was defined there.
-    pub fn associated_item(
-        &self,
-        def_id: DefId,
-        item_name: Ident,
-        ns: Namespace,
-    ) -> Option<ty::AssocItem> {
+    pub fn associated_value(&self, def_id: DefId, item_name: Ident) -> Option<ty::AssocItem> {
         self.tcx
             .associated_items(def_id)
-            .find_by_name_and_namespace(self.tcx, item_name, ns, def_id)
+            .find_by_name_and_namespace(self.tcx, item_name, Namespace::ValueNS, def_id)
             .copied()
     }
 }

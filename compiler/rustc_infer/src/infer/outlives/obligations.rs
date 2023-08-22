@@ -164,7 +164,7 @@ impl<'cx, 'tcx> InferCtxt<'cx, 'tcx> {
             "cannot process registered region obligations in a snapshot"
         );
 
-        debug!("process_registered_region_obligations()");
+        debug!(?param_env, "process_registered_region_obligations()");
 
         let my_region_obligations = self.take_registered_region_obligations();
 
@@ -285,7 +285,7 @@ where
             let origin = origin.clone();
             match component {
                 Component::Region(region1) => {
-                    self.delegate.push_sub_region_constraint(origin, region, region1);
+                    self.delegate.push_sub_region_constraint(origin, region, *region1);
                 }
                 Component::Param(param_ty) => {
                     self.param_ty_must_outlive(origin, region, *param_ty);
@@ -355,6 +355,8 @@ where
         // results.
         let trait_bounds: Vec<_> =
             self.verify_bound.projection_declared_bounds_from_trait(projection_ty).collect();
+
+        debug!(?trait_bounds);
 
         // Compute the bounds we can derive from the environment. This
         // is an "approximate" match -- in some cases, these bounds

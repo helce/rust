@@ -5,6 +5,7 @@ use rustc_infer::infer::{
     error_reporting::nice_region_error::NiceRegionError,
     error_reporting::unexpected_hidden_region_diagnostic, NllRegionVariableOrigin,
 };
+use rustc_middle::hir::place::PlaceBase;
 use rustc_middle::mir::{ConstraintCategory, ReturnConstraint};
 use rustc_middle::ty::subst::{InternalSubsts, Subst};
 use rustc_middle::ty::{self, RegionVid, Ty};
@@ -139,7 +140,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
 
     /// Returns `true` if a closure is inferred to be an `FnMut` closure.
     fn is_closure_fn_mut(&self, fr: RegionVid) -> bool {
-        if let Some(ty::ReFree(free_region)) = self.to_error_region(fr) {
+        if let Some(ty::ReFree(free_region)) = self.to_error_region(fr).as_deref() {
             if let ty::BoundRegionKind::BrEnv = free_region.bound_region {
                 if let DefiningTy::Closure(_, substs) =
                     self.regioncx.universal_regions().defining_ty
@@ -168,14 +169,12 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     let type_test_span = type_test.locations.span(&self.body);
 
                     if let Some(lower_bound_region) = lower_bound_region {
-                        self.infcx
-                            .construct_generic_bound_failure(
-                                type_test_span,
-                                None,
-                                type_test.generic_kind,
-                                lower_bound_region,
-                            )
-                            .buffer(&mut self.errors_buffer);
+                        self.buffer_error(self.infcx.construct_generic_bound_failure(
+                            type_test_span,
+                            None,
+                            type_test.generic_kind,
+                            lower_bound_region,
+                        ));
                     } else {
                         // FIXME. We should handle this case better. It
                         // indicates that we have e.g., some region variable
@@ -186,27 +185,22 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                         // to report it; we could probably handle it by
                         // iterating over the universal regions and reporting
                         // an error that multiple bounds are required.
-                        self.infcx
-                            .tcx
-                            .sess
-                            .struct_span_err(
-                                type_test_span,
-                                &format!("`{}` does not live long enough", type_test.generic_kind),
-                            )
-                            .buffer(&mut self.errors_buffer);
+                        self.buffer_error(self.infcx.tcx.sess.struct_span_err(
+                            type_test_span,
+                            &format!("`{}` does not live long enough", type_test.generic_kind),
+                        ));
                     }
                 }
 
                 RegionErrorKind::UnexpectedHiddenRegion { span, hidden_ty, member_region } => {
                     let named_ty = self.regioncx.name_regions(self.infcx.tcx, hidden_ty);
                     let named_region = self.regioncx.name_regions(self.infcx.tcx, member_region);
-                    unexpected_hidden_region_diagnostic(
+                    self.buffer_error(unexpected_hidden_region_diagnostic(
                         self.infcx.tcx,
                         span,
                         named_ty,
                         named_region,
-                    )
-                    .buffer(&mut self.errors_buffer);
+                    ));
                 }
 
                 RegionErrorKind::BoundUniversalRegionError {
@@ -285,7 +279,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         if let (Some(f), Some(o)) = (self.to_error_region(fr), self.to_error_region(outlived_fr)) {
             let nice = NiceRegionError::new_from_span(self.infcx, cause.span, o, f);
             if let Some(diag) = nice.try_report_from_nll() {
-                diag.buffer(&mut self.errors_buffer);
+                self.buffer_error(diag);
                 return;
             }
         }
@@ -375,7 +369,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             }
         }
 
-        diag.buffer(&mut self.errors_buffer);
+        self.buffer_error(diag);
     }
 
     /// Report a specialized error when `FnMut` closures return a reference to a captured variable.
@@ -428,17 +422,26 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
 
         diag.span_label(*span, message);
 
-        // FIXME(project-rfc-2229#48): This should store a captured_place not a hir id
-        if let ReturnConstraint::ClosureUpvar(upvar) = kind {
+        if let ReturnConstraint::ClosureUpvar(upvar_field) = kind {
             let def_id = match self.regioncx.universal_regions().defining_ty {
                 DefiningTy::Closure(def_id, _) => def_id,
                 ty => bug!("unexpected DefiningTy {:?}", ty),
             };
 
-            let upvar_def_span = self.infcx.tcx.hir().span(upvar);
-            let upvar_span = self.infcx.tcx.upvars_mentioned(def_id).unwrap()[&upvar].span;
-            diag.span_label(upvar_def_span, "variable defined here");
-            diag.span_label(upvar_span, "variable captured here");
+            let captured_place = &self.upvars[upvar_field.index()].place;
+            let defined_hir = match captured_place.place.base {
+                PlaceBase::Local(hirid) => Some(hirid),
+                PlaceBase::Upvar(upvar) => Some(upvar.var_path.hir_id),
+                _ => None,
+            };
+
+            if defined_hir.is_some() {
+                let upvars_map = self.infcx.tcx.upvars_mentioned(def_id).unwrap();
+                let upvar_def_span = self.infcx.tcx.hir().span(defined_hir.unwrap());
+                let upvar_span = upvars_map.get(&defined_hir.unwrap()).unwrap().span;
+                diag.span_label(upvar_def_span, "variable defined here");
+                diag.span_label(upvar_span, "variable captured here");
+            }
         }
 
         if let Some(fr_span) = self.give_region_a_name(*outlived_fr).unwrap().span() {
@@ -635,8 +638,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         fr_name: RegionName,
         outlived_fr: RegionVid,
     ) {
-        if let (Some(f), Some(ty::RegionKind::ReStatic)) =
-            (self.to_error_region(fr), self.to_error_region(outlived_fr))
+        if let (Some(f), Some(ty::ReStatic)) =
+            (self.to_error_region(fr), self.to_error_region(outlived_fr).as_deref())
         {
             if let Some(&ty::Opaque(did, substs)) = self
                 .infcx
@@ -659,7 +662,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                             bound.kind().skip_binder()
                         {
                             let r = r.subst(self.infcx.tcx, substs);
-                            if let ty::RegionKind::ReStatic = r {
+                            if r.is_static() {
                                 found = true;
                                 break;
                             } else {

@@ -10,13 +10,14 @@ use rustc_errors::{error_code, struct_span_err, Applicability, DiagnosticBuilder
 use rustc_hir as hir;
 use rustc_hir::def::*;
 use rustc_hir::def_id::DefId;
-use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
+use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{HirId, Pat};
 use rustc_middle::ty::{self, AdtDef, Ty, TyCtxt};
 use rustc_session::lint::builtin::{
     BINDINGS_WITH_VARIANT_NAME, IRREFUTABLE_LET_PATTERNS, UNREACHABLE_PATTERNS,
 };
 use rustc_session::Session;
+use rustc_span::source_map::Spanned;
 use rustc_span::{DesugaringKind, ExpnKind, Span};
 
 crate fn check_match(tcx: TyCtxt<'_>, def_id: DefId) {
@@ -54,12 +55,6 @@ struct MatchVisitor<'a, 'p, 'tcx> {
 }
 
 impl<'tcx> Visitor<'tcx> for MatchVisitor<'_, '_, 'tcx> {
-    type Map = intravisit::ErasedMap<'tcx>;
-
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::None
-    }
-
     fn visit_expr(&mut self, ex: &'tcx hir::Expr<'tcx>) {
         intravisit::walk_expr(self, ex);
         match &ex.kind {
@@ -327,7 +322,7 @@ fn check_for_bindings_named_same_as_variants(
                 if let ty::Adt(edef, _) = pat_ty.kind() {
                     if edef.is_enum()
                         && edef.variants.iter().any(|variant| {
-                            variant.ident == ident && variant.ctor_kind == CtorKind::Const
+                            variant.ident(cx.tcx) == ident && variant.ctor_kind == CtorKind::Const
                         })
                     {
                         let variant_count = edef.variants.len();
@@ -451,6 +446,10 @@ fn check_let_reachability<'p, 'tcx>(
     pat: &'p DeconstructedPat<'p, 'tcx>,
     span: Span,
 ) {
+    if is_let_chain(cx.tcx, pat_id) {
+        return;
+    }
+
     let arms = [MatchArm { pat, hir_id: pat_id, has_guard: false }];
     let report = compute_match_usefulness(&cx, &arms, pat_id, pat.ty());
 
@@ -557,7 +556,7 @@ fn non_exhaustive_match<'p, 'tcx>(
         }
     }
     if let ty::Ref(_, sub_ty, _) = scrut_ty.kind() {
-        if cx.tcx.is_ty_uninhabited_from(cx.module, sub_ty, cx.param_env) {
+        if cx.tcx.is_ty_uninhabited_from(cx.module, *sub_ty, cx.param_env) {
             err.note("references are always considered inhabited");
         }
     }
@@ -627,7 +626,7 @@ fn maybe_point_at_variant<'a, 'p: 'a, 'tcx: 'a>(
                     continue;
                 }
             }
-            let sp = def.variants[*variant_index].ident.span;
+            let sp = def.variants[*variant_index].ident(cx.tcx).span;
             if covered.contains(&sp) {
                 // Don't point at variants that have already been covered due to other patterns to avoid
                 // visual clutter.
@@ -770,8 +769,11 @@ pub enum LetSource {
 
 fn let_source(tcx: TyCtxt<'_>, pat_id: HirId) -> LetSource {
     let hir = tcx.hir();
+
     let parent = hir.get_parent_node(pat_id);
-    match hir.get(parent) {
+    let parent_node = hir.get(parent);
+
+    match parent_node {
         hir::Node::Arm(hir::Arm {
             guard: Some(hir::Guard::IfLet(&hir::Pat { hir_id, .. }, _)),
             ..
@@ -786,6 +788,7 @@ fn let_source(tcx: TyCtxt<'_>, pat_id: HirId) -> LetSource {
         }
         _ => {}
     }
+
     let parent_parent = hir.get_parent_node(parent);
     let parent_parent_node = hir.get(parent_parent);
 
@@ -798,12 +801,30 @@ fn let_source(tcx: TyCtxt<'_>, pat_id: HirId) -> LetSource {
         ..
     }) = parent_parent_parent_parent_node
     {
-        LetSource::WhileLet
-    } else if let hir::Node::Expr(hir::Expr { kind: hir::ExprKind::If { .. }, .. }) =
-        parent_parent_node
-    {
-        LetSource::IfLet
-    } else {
-        LetSource::GenericLet
+        return LetSource::WhileLet;
     }
+
+    if let hir::Node::Expr(hir::Expr { kind: hir::ExprKind::If(..), .. }) = parent_parent_node {
+        return LetSource::IfLet;
+    }
+
+    LetSource::GenericLet
+}
+
+// Since this function is called within a let context, it is reasonable to assume that any parent
+// `&&` infers a let chain
+fn is_let_chain(tcx: TyCtxt<'_>, pat_id: HirId) -> bool {
+    let hir = tcx.hir();
+    let parent = hir.get_parent_node(pat_id);
+    let parent_parent = hir.get_parent_node(parent);
+    matches!(
+        hir.get(parent_parent),
+        hir::Node::Expr(
+            hir::Expr {
+                kind: hir::ExprKind::Binary(Spanned { node: hir::BinOpKind::And, .. }, ..),
+                ..
+            },
+            ..
+        )
+    )
 }

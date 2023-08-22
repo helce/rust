@@ -1,6 +1,8 @@
 use super::{InlineAsmArch, InlineAsmType};
 use crate::spec::Target;
+use rustc_data_structures::stable_set::FxHashSet;
 use rustc_macros::HashStable_Generic;
+use rustc_span::Symbol;
 use std::fmt;
 
 def_reg_class! {
@@ -101,7 +103,7 @@ impl X86InlineAsmRegClass {
     pub fn supported_types(
         self,
         arch: InlineAsmArch,
-    ) -> &'static [(InlineAsmType, Option<&'static str>)] {
+    ) -> &'static [(InlineAsmType, Option<Symbol>)] {
         match self {
             Self::reg | Self::reg_abcd => {
                 if arch == InlineAsmArch::X86_64 {
@@ -112,23 +114,23 @@ impl X86InlineAsmRegClass {
             }
             Self::reg_byte => types! { _: I8; },
             Self::xmm_reg => types! {
-                "sse": I32, I64, F32, F64,
+                sse: I32, I64, F32, F64,
                   VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF32(4), VecF64(2);
             },
             Self::ymm_reg => types! {
-                "avx": I32, I64, F32, F64,
+                avx: I32, I64, F32, F64,
                     VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF32(4), VecF64(2),
                     VecI8(32), VecI16(16), VecI32(8), VecI64(4), VecF32(8), VecF64(4);
             },
             Self::zmm_reg => types! {
-                "avx512f": I32, I64, F32, F64,
+                avx512f: I32, I64, F32, F64,
                     VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF32(4), VecF64(2),
                     VecI8(32), VecI16(16), VecI32(8), VecI64(4), VecF32(8), VecF64(4),
                     VecI8(64), VecI16(32), VecI32(16), VecI64(8), VecF32(16), VecF64(8);
             },
             Self::kreg => types! {
-                "avx512f": I8, I16;
-                "avx512bw": I32, I64;
+                avx512f: I8, I16;
+                avx512bw: I32, I64;
             },
             Self::mmx_reg | Self::x87_reg => &[],
         }
@@ -137,8 +139,9 @@ impl X86InlineAsmRegClass {
 
 fn x86_64_only(
     arch: InlineAsmArch,
-    _has_feature: impl FnMut(&str) -> bool,
+    _target_features: &FxHashSet<Symbol>,
     _target: &Target,
+    _is_clobber: bool,
 ) -> Result<(), &'static str> {
     match arch {
         InlineAsmArch::X86 => Err("register is only available on x86_64"),
@@ -149,8 +152,9 @@ fn x86_64_only(
 
 fn high_byte(
     arch: InlineAsmArch,
-    _has_feature: impl FnMut(&str) -> bool,
+    _target_features: &FxHashSet<Symbol>,
     _target: &Target,
+    _is_clobber: bool,
 ) -> Result<(), &'static str> {
     match arch {
         InlineAsmArch::X86_64 => Err("high byte registers cannot be used as an operand on x86_64"),
@@ -160,8 +164,9 @@ fn high_byte(
 
 fn rbx_reserved(
     arch: InlineAsmArch,
-    _has_feature: impl FnMut(&str) -> bool,
+    _target_features: &FxHashSet<Symbol>,
     _target: &Target,
+    _is_clobber: bool,
 ) -> Result<(), &'static str> {
     match arch {
         InlineAsmArch::X86 => Ok(()),
@@ -174,8 +179,9 @@ fn rbx_reserved(
 
 fn esi_reserved(
     arch: InlineAsmArch,
-    _has_feature: impl FnMut(&str) -> bool,
+    _target_features: &FxHashSet<Symbol>,
     _target: &Target,
+    _is_clobber: bool,
 ) -> Result<(), &'static str> {
     match arch {
         InlineAsmArch::X86 => {

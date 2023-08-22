@@ -5,6 +5,7 @@ mod auto_trait;
 mod blanket_impl;
 crate mod cfg;
 crate mod inline;
+mod render_macro_matchers;
 mod simplify;
 crate mod types;
 crate mod utils;
@@ -217,9 +218,9 @@ impl Clean<Constant> for hir::ConstArg {
     }
 }
 
-impl Clean<Option<Lifetime>> for ty::RegionKind {
+impl Clean<Option<Lifetime>> for ty::Region<'_> {
     fn clean(&self, _cx: &mut DocContext<'_>) -> Option<Lifetime> {
-        match *self {
+        match **self {
             ty::ReStatic => Some(Lifetime::statik()),
             ty::ReLateBound(_, ty::BoundRegion { kind: ty::BrNamed(_, name), .. }) => {
                 Some(Lifetime(name))
@@ -272,9 +273,10 @@ impl Clean<WherePredicate> for hir::WherePredicate<'_> {
                 bounds: wrp.bounds.iter().filter_map(|x| x.clean(cx)).collect(),
             },
 
-            hir::WherePredicate::EqPredicate(ref wrp) => {
-                WherePredicate::EqPredicate { lhs: wrp.lhs_ty.clean(cx), rhs: wrp.rhs_ty.clean(cx) }
-            }
+            hir::WherePredicate::EqPredicate(ref wrp) => WherePredicate::EqPredicate {
+                lhs: wrp.lhs_ty.clean(cx),
+                rhs: wrp.rhs_ty.clean(cx).into(),
+            },
         }
     }
 }
@@ -325,7 +327,7 @@ impl<'tcx> Clean<Option<WherePredicate>>
     fn clean(&self, cx: &mut DocContext<'_>) -> Option<WherePredicate> {
         let ty::OutlivesPredicate(a, b) = self;
 
-        if let (ty::ReEmpty(_), ty::ReEmpty(_)) = (a, b) {
+        if a.is_empty() && b.is_empty() {
             return None;
         }
 
@@ -340,7 +342,7 @@ impl<'tcx> Clean<Option<WherePredicate>> for ty::OutlivesPredicate<Ty<'tcx>, ty:
     fn clean(&self, cx: &mut DocContext<'_>) -> Option<WherePredicate> {
         let ty::OutlivesPredicate(ty, lt) = self;
 
-        if let ty::ReEmpty(_) = lt {
+        if lt.is_empty() {
             return None;
         }
 
@@ -352,10 +354,31 @@ impl<'tcx> Clean<Option<WherePredicate>> for ty::OutlivesPredicate<Ty<'tcx>, ty:
     }
 }
 
+impl<'tcx> Clean<Term> for ty::Term<'tcx> {
+    fn clean(&self, cx: &mut DocContext<'_>) -> Term {
+        match self {
+            ty::Term::Ty(ty) => Term::Type(ty.clean(cx)),
+            ty::Term::Const(c) => Term::Constant(c.clean(cx)),
+        }
+    }
+}
+
+impl<'tcx> Clean<Term> for hir::Term<'tcx> {
+    fn clean(&self, cx: &mut DocContext<'_>) -> Term {
+        match self {
+            hir::Term::Ty(ty) => Term::Type(ty.clean(cx)),
+            hir::Term::Const(c) => {
+                let def_id = cx.tcx.hir().local_def_id(c.hir_id);
+                Term::Constant(ty::Const::from_anon_const(cx.tcx, def_id).clean(cx))
+            }
+        }
+    }
+}
+
 impl<'tcx> Clean<WherePredicate> for ty::ProjectionPredicate<'tcx> {
     fn clean(&self, cx: &mut DocContext<'_>) -> WherePredicate {
-        let ty::ProjectionPredicate { projection_ty, ty } = self;
-        WherePredicate::EqPredicate { lhs: projection_ty.clean(cx), rhs: ty.clean(cx) }
+        let ty::ProjectionPredicate { projection_ty, term } = self;
+        WherePredicate::EqPredicate { lhs: projection_ty.clean(cx), rhs: term.clean(cx) }
     }
 }
 
@@ -365,7 +388,7 @@ impl<'tcx> Clean<Type> for ty::ProjectionTy<'tcx> {
         let trait_ = lifted.trait_ref(cx.tcx).clean(cx);
         let self_type = self.self_ty().clean(cx);
         Type::QPath {
-            name: cx.tcx.associated_item(self.item_def_id).ident.name,
+            name: cx.tcx.associated_item(self.item_def_id).name,
             self_def_id: self_type.def_id(&cx.cache),
             self_type: box self_type,
             trait_,
@@ -613,7 +636,7 @@ fn clean_ty_generics(
 
             if let Some(param_idx) = param_idx {
                 if let Some(b) = impl_trait.get_mut(&param_idx.into()) {
-                    let p = p.clean(cx)?;
+                    let p: WherePredicate = p.clean(cx)?;
 
                     b.extend(
                         p.get_bounds()
@@ -624,11 +647,16 @@ fn clean_ty_generics(
                     );
 
                     let proj = projection
-                        .map(|p| (p.skip_binder().projection_ty.clean(cx), p.skip_binder().ty));
+                        .map(|p| (p.skip_binder().projection_ty.clean(cx), p.skip_binder().term));
                     if let Some(((_, trait_did, name), rhs)) =
                         proj.as_ref().and_then(|(lhs, rhs)| Some((lhs.projection()?, rhs)))
                     {
-                        impl_trait_proj.entry(param_idx).or_default().push((trait_did, name, rhs));
+                        // FIXME(...): Remove this unwrap()
+                        impl_trait_proj.entry(param_idx).or_default().push((
+                            trait_did,
+                            name,
+                            rhs.ty().unwrap(),
+                        ));
                     }
 
                     return None;
@@ -647,7 +675,7 @@ fn clean_ty_generics(
             if let Some(proj) = impl_trait_proj.remove(&idx) {
                 for (trait_did, name, rhs) in proj {
                     let rhs = rhs.clean(cx);
-                    simplify::merge_bounds(cx, &mut bounds, trait_did, name, &rhs);
+                    simplify::merge_bounds(cx, &mut bounds, trait_did, name, &Term::Type(rhs));
                 }
             }
         } else {
@@ -986,7 +1014,8 @@ impl Clean<Item> for hir::ImplItem<'_> {
                     {
                         m.header.constness = hir::Constness::NotConst;
                     }
-                    MethodItem(m, Some(self.defaultness))
+                    let defaultness = cx.tcx.associated_item(self.def_id).defaultness;
+                    MethodItem(m, Some(defaultness))
                 }
                 hir::ImplItemKind::TyAlias(ref hir_ty) => {
                     let type_ = hir_ty.clean(cx);
@@ -1004,7 +1033,7 @@ impl Clean<Item> for hir::ImplItem<'_> {
 
             let what_rustc_thinks =
                 Item::from_def_id_and_parts(local_did, Some(self.ident.name), inner, cx);
-            let parent_item = cx.tcx.hir().expect_item(cx.tcx.hir().get_parent_did(self.hir_id()));
+            let parent_item = cx.tcx.hir().expect_item(cx.tcx.hir().get_parent_item(self.hir_id()));
             if let hir::ItemKind::Impl(impl_) = &parent_item.kind {
                 if impl_.of_trait.is_some() {
                     // Trait impl items always inherit the impl's visibility --
@@ -1104,7 +1133,7 @@ impl Clean<Item> for ty::AssocItem {
                 }
             }
             ty::AssocKind::Type => {
-                let my_name = self.ident.name;
+                let my_name = self.name;
 
                 if let ty::TraitContainer(_) = self.container {
                     let bounds = tcx.explicit_item_bounds(self.def_id);
@@ -1170,7 +1199,7 @@ impl Clean<Item> for ty::AssocItem {
             }
         };
 
-        Item::from_def_id_and_parts(self.def_id, Some(self.ident.name), kind, cx)
+        Item::from_def_id_and_parts(self.def_id, Some(self.name), kind, cx)
     }
 }
 
@@ -1399,15 +1428,25 @@ fn normalize<'tcx>(cx: &mut DocContext<'tcx>, ty: Ty<'_>) -> Option<Ty<'tcx>> {
         return None;
     }
 
+    use crate::rustc_trait_selection::infer::TyCtxtInferExt;
+    use crate::rustc_trait_selection::traits::query::normalize::AtExt;
+    use rustc_middle::traits::ObligationCause;
+
     // Try to normalize `<X as Y>::T` to a type
     let lifted = ty.lift_to_tcx(cx.tcx).unwrap();
-    match cx.tcx.try_normalize_erasing_regions(cx.param_env, lifted) {
+    let normalized = cx.tcx.infer_ctxt().enter(|infcx| {
+        infcx
+            .at(&ObligationCause::dummy(), cx.param_env)
+            .normalize(lifted)
+            .map(|resolved| infcx.resolve_vars_if_possible(resolved.value))
+    });
+    match normalized {
         Ok(normalized_value) => {
-            trace!("normalized {:?} to {:?}", ty, normalized_value);
+            debug!("normalized {:?} to {:?}", ty, normalized_value);
             Some(normalized_value)
         }
         Err(err) => {
-            info!("failed to normalize {:?}: {:?}", ty, err);
+            debug!("failed to normalize {:?}: {:?}", ty, err);
             None
         }
     }
@@ -1416,7 +1455,7 @@ fn normalize<'tcx>(cx: &mut DocContext<'tcx>, ty: Ty<'_>) -> Option<Ty<'tcx>> {
 impl<'tcx> Clean<Type> for Ty<'tcx> {
     fn clean(&self, cx: &mut DocContext<'_>) -> Type {
         trace!("cleaning type: {:?}", self);
-        let ty = normalize(cx, self).unwrap_or(self);
+        let ty = normalize(cx, *self).unwrap_or(*self);
         match *ty.kind() {
             ty::Never => Primitive(PrimitiveType::Never),
             ty::Bool => Primitive(PrimitiveType::Bool),
@@ -1494,8 +1533,8 @@ impl<'tcx> Clean<Type> for Ty<'tcx> {
                 let mut bindings = vec![];
                 for pb in obj.projection_bounds() {
                     bindings.push(TypeBinding {
-                        name: cx.tcx.associated_item(pb.item_def_id()).ident.name,
-                        kind: TypeBindingKind::Equality { ty: pb.skip_binder().ty.clean(cx) },
+                        name: cx.tcx.associated_item(pb.item_def_id()).name,
+                        kind: TypeBindingKind::Equality { term: pb.skip_binder().term.clean(cx) },
                     });
                 }
 
@@ -1563,10 +1602,9 @@ impl<'tcx> Clean<Type> for Ty<'tcx> {
                                             name: cx
                                                 .tcx
                                                 .associated_item(proj.projection_ty.item_def_id)
-                                                .ident
                                                 .name,
                                             kind: TypeBindingKind::Equality {
-                                                ty: proj.ty.clean(cx),
+                                                term: proj.term.clean(cx),
                                             },
                                         })
                                     } else {
@@ -1603,7 +1641,7 @@ impl<'tcx> Clean<Constant> for ty::Const<'tcx> {
     fn clean(&self, cx: &mut DocContext<'_>) -> Constant {
         // FIXME: instead of storing the stringified expression, store `self` directly instead.
         Constant {
-            type_: self.ty.clean(cx),
+            type_: self.ty().clean(cx),
             kind: ConstantKind::TyConst { expr: self.to_string() },
         }
     }
@@ -1618,7 +1656,7 @@ impl Clean<Item> for hir::FieldDef<'_> {
 
 impl Clean<Item> for ty::FieldDef {
     fn clean(&self, cx: &mut DocContext<'_>) -> Item {
-        clean_field(self.did, self.ident.name, cx.tcx.type_of(self.did).clean(cx), cx)
+        clean_field(self.did, self.name, cx.tcx.type_of(self.did).clean(cx), cx)
     }
 }
 
@@ -1689,7 +1727,7 @@ impl Clean<Item> for ty::VariantDef {
             }),
         };
         let what_rustc_thinks =
-            Item::from_def_id_and_parts(self.def_id, Some(self.ident.name), VariantItem(kind), cx);
+            Item::from_def_id_and_parts(self.def_id, Some(self.name), VariantItem(kind), cx);
         // don't show `pub` for variants, which always inherit visibility
         Item { visibility: Inherited, ..what_rustc_thinks }
     }
@@ -2114,10 +2152,10 @@ impl Clean<TypeBinding> for hir::TypeBinding<'_> {
 impl Clean<TypeBindingKind> for hir::TypeBindingKind<'_> {
     fn clean(&self, cx: &mut DocContext<'_>) -> TypeBindingKind {
         match *self {
-            hir::TypeBindingKind::Equality { ref ty } => {
-                TypeBindingKind::Equality { ty: ty.clean(cx) }
+            hir::TypeBindingKind::Equality { ref term } => {
+                TypeBindingKind::Equality { term: term.clean(cx) }
             }
-            hir::TypeBindingKind::Constraint { bounds } => TypeBindingKind::Constraint {
+            hir::TypeBindingKind::Constraint { ref bounds } => TypeBindingKind::Constraint {
                 bounds: bounds.iter().filter_map(|b| b.clean(cx)).collect(),
             },
         }

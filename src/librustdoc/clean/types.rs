@@ -1,12 +1,11 @@
 use std::cell::RefCell;
 use std::default::Default;
-use std::fmt::Write;
 use std::hash::Hash;
 use std::lazy::SyncOnceCell as OnceCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::{slice, vec};
+use std::vec;
 
 use arrayvec::ArrayVec;
 
@@ -265,7 +264,7 @@ impl ExternalCrate {
                 })
                 .collect()
         } else {
-            tcx.item_children(root).iter().map(|item| item.res).filter_map(as_keyword).collect()
+            tcx.module_children(root).iter().map(|item| item.res).filter_map(as_keyword).collect()
         }
     }
 
@@ -333,12 +332,13 @@ impl ExternalCrate {
                 })
                 .collect()
         } else {
-            tcx.item_children(root).iter().map(|item| item.res).filter_map(as_primitive).collect()
+            tcx.module_children(root).iter().map(|item| item.res).filter_map(as_primitive).collect()
         }
     }
 }
 
 /// Indicates where an external crate can be found.
+#[derive(Debug)]
 crate enum ExternalLocation {
     /// Remote URL root of the external crate
     Remote(String),
@@ -430,7 +430,7 @@ impl Item {
 
     /// Convenience wrapper around [`Self::from_def_id_and_parts`] which converts
     /// `hir_id` to a [`DefId`]
-    pub fn from_hir_id_and_parts(
+    crate fn from_hir_id_and_parts(
         hir_id: hir::HirId,
         name: Option<Symbol>,
         kind: ItemKind,
@@ -439,7 +439,7 @@ impl Item {
         Item::from_def_id_and_parts(cx.tcx.hir().local_def_id(hir_id).to_def_id(), name, kind, cx)
     }
 
-    pub fn from_def_id_and_parts(
+    crate fn from_def_id_and_parts(
         def_id: DefId,
         name: Option<Symbol>,
         kind: ItemKind,
@@ -457,7 +457,7 @@ impl Item {
         )
     }
 
-    pub fn from_def_id_and_attrs_and_parts(
+    crate fn from_def_id_and_attrs_and_parts(
         def_id: DefId,
         name: Option<Symbol>,
         kind: ItemKind,
@@ -496,7 +496,7 @@ impl Item {
                 if let Ok((mut href, ..)) = href(*did, cx) {
                     debug!(?href);
                     if let Some(ref fragment) = *fragment {
-                        write!(href, "{}", fragment).unwrap()
+                        fragment.render(&mut href, cx.tcx()).unwrap()
                     }
                     Some(RenderedLink {
                         original_text: s.clone(),
@@ -734,43 +734,12 @@ crate struct Module {
     crate span: Span,
 }
 
-crate struct ListAttributesIter<'a> {
-    attrs: slice::Iter<'a, ast::Attribute>,
-    current_list: vec::IntoIter<ast::NestedMetaItem>,
-    name: Symbol,
-}
-
-impl<'a> Iterator for ListAttributesIter<'a> {
-    type Item = ast::NestedMetaItem;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(nested) = self.current_list.next() {
-            return Some(nested);
-        }
-
-        for attr in &mut self.attrs {
-            if let Some(list) = attr.meta_item_list() {
-                if attr.has_name(self.name) {
-                    self.current_list = list.into_iter();
-                    if let Some(nested) = self.current_list.next() {
-                        return Some(nested);
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let lower = self.current_list.len();
-        (lower, None)
-    }
-}
-
 crate trait AttributesExt {
-    /// Finds an attribute as List and returns the list of attributes nested inside.
-    fn lists(&self, name: Symbol) -> ListAttributesIter<'_>;
+    type AttributeIterator<'a>: Iterator<Item = ast::NestedMetaItem>
+    where
+        Self: 'a;
+
+    fn lists<'a>(&'a self, name: Symbol) -> Self::AttributeIterator<'a>;
 
     fn span(&self) -> Option<rustc_span::Span>;
 
@@ -782,8 +751,13 @@ crate trait AttributesExt {
 }
 
 impl AttributesExt for [ast::Attribute] {
-    fn lists(&self, name: Symbol) -> ListAttributesIter<'_> {
-        ListAttributesIter { attrs: self.iter(), current_list: Vec::new().into_iter(), name }
+    type AttributeIterator<'a> = impl Iterator<Item = ast::NestedMetaItem> + 'a;
+
+    fn lists<'a>(&'a self, name: Symbol) -> Self::AttributeIterator<'a> {
+        self.iter()
+            .filter(move |attr| attr.has_name(name))
+            .filter_map(ast::Attribute::meta_item_list)
+            .flatten()
     }
 
     /// Return the span of the first doc-comment, if it exists.
@@ -832,8 +806,9 @@ impl AttributesExt for [ast::Attribute] {
                 self.iter()
                     .filter(|attr| attr.has_name(sym::cfg))
                     .filter_map(|attr| single(attr.meta_item_list()?))
-                    .filter_map(|attr| Cfg::parse(attr.meta_item()?).ok())
-                    .filter(|cfg| !hidden_cfg.contains(cfg))
+                    .filter_map(|attr| {
+                        Cfg::parse_without(attr.meta_item()?, hidden_cfg).ok().flatten()
+                    })
                     .fold(Cfg::True, |cfg, new_cfg| cfg & new_cfg)
             } else {
                 Cfg::True
@@ -902,12 +877,9 @@ crate trait NestedAttributesExt {
     fn get_word_attr(self, word: Symbol) -> Option<ast::NestedMetaItem>;
 }
 
-impl<I> NestedAttributesExt for I
-where
-    I: IntoIterator<Item = ast::NestedMetaItem>,
-{
-    fn get_word_attr(self, word: Symbol) -> Option<ast::NestedMetaItem> {
-        self.into_iter().find(|attr| attr.is_word() && attr.has_name(word))
+impl<I: Iterator<Item = ast::NestedMetaItem>> NestedAttributesExt for I {
+    fn get_word_attr(mut self, word: Symbol) -> Option<ast::NestedMetaItem> {
+        self.find(|attr| attr.is_word() && attr.has_name(word))
     }
 }
 
@@ -981,29 +953,29 @@ crate fn collapse_doc_fragments(doc_strings: &[DocFragment]) -> String {
 /// A link that has not yet been rendered.
 ///
 /// This link will be turned into a rendered link by [`Item::links`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 crate struct ItemLink {
     /// The original link written in the markdown
-    pub(crate) link: String,
+    crate link: String,
     /// The link text displayed in the HTML.
     ///
     /// This may not be the same as `link` if there was a disambiguator
     /// in an intra-doc link (e.g. \[`fn@f`\])
-    pub(crate) link_text: String,
-    pub(crate) did: DefId,
+    crate link_text: String,
+    crate did: DefId,
     /// The url fragment to append to the link
-    pub(crate) fragment: Option<UrlFragment>,
+    crate fragment: Option<UrlFragment>,
 }
 
 pub struct RenderedLink {
     /// The text the link was original written as.
     ///
     /// This could potentially include disambiguators and backticks.
-    pub(crate) original_text: String,
+    crate original_text: String,
     /// The text to display in the HTML
-    pub(crate) new_text: String,
+    crate new_text: String,
     /// The URL to put in the `href`
-    pub(crate) href: String,
+    crate href: String,
 }
 
 /// The attributes on an [`Item`], including attributes like `#[derive(...)]` and `#[inline]`,
@@ -1015,7 +987,7 @@ crate struct Attributes {
 }
 
 impl Attributes {
-    crate fn lists(&self, name: Symbol) -> ListAttributesIter<'_> {
+    crate fn lists(&self, name: Symbol) -> impl Iterator<Item = ast::NestedMetaItem> + '_ {
         self.other_attrs.lists(name)
     }
 
@@ -1041,9 +1013,9 @@ impl Attributes {
     ) -> Attributes {
         let mut doc_strings: Vec<DocFragment> = vec![];
         let clean_attr = |(attr, parent_module): (&ast::Attribute, Option<DefId>)| {
-            if let Some(value) = attr.doc_str() {
+            if let Some((value, kind)) = attr.doc_str_and_comment_kind() {
                 trace!("got doc_str={:?}", value);
-                let value = beautify_doc_string(value);
+                let value = beautify_doc_string(value, kind);
                 let kind = if attr.is_doc_comment() {
                     DocFragmentKind::SugaredDoc
                 } else {
@@ -1064,8 +1036,7 @@ impl Attributes {
         // Additional documentation should be shown before the original documentation
         let other_attrs = additional_attrs
             .into_iter()
-            .map(|(attrs, id)| attrs.iter().map(move |attr| (attr, Some(id))))
-            .flatten()
+            .flat_map(|(attrs, id)| attrs.iter().map(move |attr| (attr, Some(id))))
             .chain(attrs.iter().map(|attr| (attr, None)))
             .filter_map(clean_attr)
             .collect();
@@ -1213,7 +1184,7 @@ impl Lifetime {
 crate enum WherePredicate {
     BoundPredicate { ty: Type, bounds: Vec<GenericBound>, bound_params: Vec<Lifetime> },
     RegionPredicate { lifetime: Lifetime, bounds: Vec<GenericBound> },
-    EqPredicate { lhs: Type, rhs: Type },
+    EqPredicate { lhs: Type, rhs: Term },
 }
 
 impl WherePredicate {
@@ -1309,7 +1280,9 @@ impl FnDecl {
             FnRetTy::Return(Type::ImplTrait(bounds)) => match &bounds[0] {
                 GenericBound::TraitBound(PolyTrait { trait_, .. }, ..) => {
                     let bindings = trait_.bindings().unwrap();
-                    FnRetTy::Return(bindings[0].ty().clone())
+                    let ret_ty = bindings[0].term();
+                    let ty = ret_ty.ty().expect("Unexpected constant return term");
+                    FnRetTy::Return(ty.clone())
                 }
                 _ => panic!("unexpected desugaring of async function"),
             },
@@ -1566,22 +1539,9 @@ impl Type {
 
     /// Use this method to get the [DefId] of a [clean] AST node, including [PrimitiveType]s.
     ///
-    /// See [`Self::def_id_no_primitives`] for more.
-    ///
     /// [clean]: crate::clean
     crate fn def_id(&self, cache: &Cache) -> Option<DefId> {
         self.inner_def_id(Some(cache))
-    }
-
-    /// Use this method to get the [`DefId`] of a [`clean`] AST node.
-    /// This will return [`None`] when called on a primitive [`clean::Type`].
-    /// Use [`Self::def_id`] if you want to include primitives.
-    ///
-    /// [`clean`]: crate::clean
-    /// [`clean::Type`]: crate::clean::Type
-    // FIXME: get rid of this function and always use `def_id`
-    crate fn def_id_no_primitives(&self) -> Option<DefId> {
-        self.inner_def_id(None)
     }
 }
 
@@ -2012,7 +1972,7 @@ impl Path {
     /// Checks if this is a `T::Name` path for an associated type.
     crate fn is_assoc_ty(&self) -> bool {
         match self.res {
-            Res::SelfTy(..) if self.segments.len() != 1 => true,
+            Res::SelfTy { .. } if self.segments.len() != 1 => true,
             Res::Def(DefKind::TyParam, _) if self.segments.len() != 1 => true,
             Res::Def(DefKind::AssocTy, _) => true,
             _ => false,
@@ -2123,6 +2083,24 @@ crate struct Constant {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
+crate enum Term {
+    Type(Type),
+    Constant(Constant),
+}
+
+impl Term {
+    crate fn ty(&self) -> Option<&Type> {
+        if let Term::Type(ty) = self { Some(ty) } else { None }
+    }
+}
+
+impl From<Type> for Term {
+    fn from(ty: Type) -> Self {
+        Term::Type(ty)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 crate enum ConstantKind {
     /// This is the wrapper around `ty::Const` for a non-local constant. Because it doesn't have a
     /// `BodyId`, we need to handle it on its own.
@@ -2203,7 +2181,7 @@ impl Impl {
         self.trait_
             .as_ref()
             .map(|t| t.def_id())
-            .map(|did| tcx.provided_trait_methods(did).map(|meth| meth.ident.name).collect())
+            .map(|did| tcx.provided_trait_methods(did).map(|meth| meth.name).collect())
             .unwrap_or_default()
     }
 }
@@ -2284,14 +2262,14 @@ crate struct TypeBinding {
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 crate enum TypeBindingKind {
-    Equality { ty: Type },
+    Equality { term: Term },
     Constraint { bounds: Vec<GenericBound> },
 }
 
 impl TypeBinding {
-    crate fn ty(&self) -> &Type {
+    crate fn term(&self) -> &Term {
         match self.kind {
-            TypeBindingKind::Equality { ref ty } => ty,
+            TypeBindingKind::Equality { ref term } => term,
             _ => panic!("expected equality type binding for parenthesized generic args"),
         }
     }

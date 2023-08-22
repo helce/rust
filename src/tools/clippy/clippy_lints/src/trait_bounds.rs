@@ -1,11 +1,16 @@
 use clippy_utils::diagnostics::span_lint_and_help;
 use clippy_utils::source::{snippet, snippet_with_applicability};
-use clippy_utils::SpanlessHash;
+use clippy_utils::{SpanlessEq, SpanlessHash};
+use core::hash::{Hash, Hasher};
 use if_chain::if_chain;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::unhash::UnhashMap;
 use rustc_errors::Applicability;
-use rustc_hir::{def::Res, GenericBound, Generics, ParamName, Path, QPath, TyKind, WherePredicate};
+use rustc_hir::def::Res;
+use rustc_hir::{
+    GenericBound, Generics, Item, ItemKind, Node, ParamName, Path, PathSegment, QPath, TraitItem, Ty, TyKind,
+    WherePredicate,
+};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::Span;
@@ -83,35 +88,92 @@ impl<'tcx> LateLintPass<'tcx> for TraitBounds {
         self.check_type_repetition(cx, gen);
         check_trait_bound_duplication(cx, gen);
     }
-}
 
-fn get_trait_res_span_from_bound(bound: &GenericBound<'_>) -> Option<(Res, Span)> {
-    if let GenericBound::Trait(t, _) = bound {
-        Some((t.trait_ref.path.res, t.span))
-    } else {
-        None
+    fn check_trait_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx TraitItem<'tcx>) {
+        let Generics { where_clause, .. } = &item.generics;
+        let mut self_bounds_map = FxHashMap::default();
+
+        for predicate in where_clause.predicates {
+            if_chain! {
+                if let WherePredicate::BoundPredicate(ref bound_predicate) = predicate;
+                if !bound_predicate.span.from_expansion();
+                if let TyKind::Path(QPath::Resolved(_, Path { segments, .. })) = bound_predicate.bounded_ty.kind;
+                if let Some(PathSegment { res: Some(Res::SelfTy{ trait_: Some(def_id), alias_to: _ }), .. }) = segments.first();
+
+                if let Some(
+                    Node::Item(
+                        Item {
+                            kind: ItemKind::Trait(_, _, _, self_bounds, _),
+                            .. }
+                        )
+                    ) = cx.tcx.hir().get_if_local(*def_id);
+                then {
+                    if self_bounds_map.is_empty() {
+                        for bound in self_bounds.iter() {
+                            let Some((self_res, self_segments, _)) = get_trait_info_from_bound(bound) else { continue };
+                            self_bounds_map.insert(self_res, self_segments);
+                        }
+                    }
+
+                    bound_predicate
+                        .bounds
+                        .iter()
+                        .filter_map(get_trait_info_from_bound)
+                        .for_each(|(trait_item_res, trait_item_segments, span)| {
+                            if let Some(self_segments) = self_bounds_map.get(&trait_item_res) {
+                                if SpanlessEq::new(cx).eq_path_segments(self_segments, trait_item_segments) {
+                                    span_lint_and_help(
+                                        cx,
+                                        TRAIT_DUPLICATION_IN_BOUNDS,
+                                        span,
+                                        "this trait bound is already specified in trait declaration",
+                                        None,
+                                        "consider removing this trait bound",
+                                    );
+                                }
+                            }
+                        });
+                }
+            }
+        }
     }
 }
 
 impl TraitBounds {
-    fn check_type_repetition(self, cx: &LateContext<'_>, gen: &'_ Generics<'_>) {
+    fn check_type_repetition<'tcx>(self, cx: &LateContext<'tcx>, gen: &'tcx Generics<'_>) {
+        struct SpanlessTy<'cx, 'tcx> {
+            ty: &'tcx Ty<'tcx>,
+            cx: &'cx LateContext<'tcx>,
+        }
+        impl PartialEq for SpanlessTy<'_, '_> {
+            fn eq(&self, other: &Self) -> bool {
+                let mut eq = SpanlessEq::new(self.cx);
+                eq.inter_expr().eq_ty(self.ty, other.ty)
+            }
+        }
+        impl Hash for SpanlessTy<'_, '_> {
+            fn hash<H: Hasher>(&self, h: &mut H) {
+                let mut t = SpanlessHash::new(self.cx);
+                t.hash_ty(self.ty);
+                h.write_u64(t.finish());
+            }
+        }
+        impl Eq for SpanlessTy<'_, '_> {}
+
         if gen.span.from_expansion() {
             return;
         }
-        let hash = |ty| -> u64 {
-            let mut hasher = SpanlessHash::new(cx);
-            hasher.hash_ty(ty);
-            hasher.finish()
-        };
-        let mut map: UnhashMap<u64, Vec<&GenericBound<'_>>> = UnhashMap::default();
+        let mut map: UnhashMap<SpanlessTy<'_, '_>, Vec<&GenericBound<'_>>> = UnhashMap::default();
         let mut applicability = Applicability::MaybeIncorrect;
         for bound in gen.where_clause.predicates {
             if_chain! {
                 if let WherePredicate::BoundPredicate(ref p) = bound;
                 if p.bounds.len() as u64 <= self.max_trait_bounds;
                 if !p.span.from_expansion();
-                let h = hash(p.bounded_ty);
-                if let Some(ref v) = map.insert(h, p.bounds.iter().collect::<Vec<_>>());
+                if let Some(ref v) = map.insert(
+                    SpanlessTy { ty: p.bounded_ty, cx },
+                    p.bounds.iter().collect::<Vec<_>>()
+                );
 
                 then {
                     let mut hint_string = format!(
@@ -163,7 +225,7 @@ fn check_trait_bound_duplication(cx: &LateContext<'_>, gen: &'_ Generics<'_>) {
             let res = param
                 .bounds
                 .iter()
-                .filter_map(get_trait_res_span_from_bound)
+                .filter_map(get_trait_info_from_bound)
                 .collect::<Vec<_>>();
             map.insert(*ident, res);
         }
@@ -177,10 +239,10 @@ fn check_trait_bound_duplication(cx: &LateContext<'_>, gen: &'_ Generics<'_>) {
             if let Some(segment) = segments.first();
             if let Some(trait_resolutions_direct) = map.get(&segment.ident);
             then {
-                for (res_where, _) in bound_predicate.bounds.iter().filter_map(get_trait_res_span_from_bound) {
-                    if let Some((_, span_direct)) = trait_resolutions_direct
+                for (res_where, _,  _) in bound_predicate.bounds.iter().filter_map(get_trait_info_from_bound) {
+                    if let Some((_, _, span_direct)) = trait_resolutions_direct
                                                 .iter()
-                                                .find(|(res_direct, _)| *res_direct == res_where) {
+                                                .find(|(res_direct, _, _)| *res_direct == res_where) {
                         span_lint_and_help(
                             cx,
                             TRAIT_DUPLICATION_IN_BOUNDS,
@@ -193,5 +255,13 @@ fn check_trait_bound_duplication(cx: &LateContext<'_>, gen: &'_ Generics<'_>) {
                 }
             }
         }
+    }
+}
+
+fn get_trait_info_from_bound<'a>(bound: &'a GenericBound<'_>) -> Option<(Res, &'a [PathSegment<'a>], Span)> {
+    if let GenericBound::Trait(t, _) = bound {
+        Some((t.trait_ref.path.res, t.trait_ref.path.segments, t.span))
+    } else {
+        None
     }
 }

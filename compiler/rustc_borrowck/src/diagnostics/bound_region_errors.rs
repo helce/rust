@@ -55,7 +55,7 @@ impl<'tcx> UniverseInfo<'tcx> {
                     found,
                     TypeError::RegionsPlaceholderMismatch,
                 );
-                err.buffer(&mut mbcx.errors_buffer);
+                mbcx.buffer_error(err);
             }
             UniverseInfoInner::TypeOp(ref type_op_info) => {
                 type_op_info.report_error(mbcx, placeholder, error_element, cause);
@@ -64,11 +64,9 @@ impl<'tcx> UniverseInfo<'tcx> {
                 // FIXME: This error message isn't great, but it doesn't show
                 // up in the existing UI tests. Consider investigating this
                 // some more.
-                mbcx.infcx
-                    .tcx
-                    .sess
-                    .struct_span_err(cause.span, "higher-ranked subtype error")
-                    .buffer(&mut mbcx.errors_buffer);
+                mbcx.buffer_error(
+                    mbcx.infcx.tcx.sess.struct_span_err(cause.span, "higher-ranked subtype error"),
+                );
             }
         }
     }
@@ -144,12 +142,10 @@ trait TypeOpInfo<'tcx> {
         let tcx = mbcx.infcx.tcx;
         let base_universe = self.base_universe();
 
-        let adjusted_universe = if let Some(adjusted) =
+        let Some(adjusted_universe) =
             placeholder.universe.as_u32().checked_sub(base_universe.as_u32())
-        {
-            adjusted
-        } else {
-            self.fallback_error(tcx, cause.span).buffer(&mut mbcx.errors_buffer);
+        else {
+            mbcx.buffer_error(self.fallback_error(tcx, cause.span));
             return;
         };
 
@@ -178,9 +174,9 @@ trait TypeOpInfo<'tcx> {
         let nice_error = self.nice_error(tcx, cause, placeholder_region, error_region);
 
         if let Some(nice_error) = nice_error {
-            nice_error.buffer(&mut mbcx.errors_buffer);
+            mbcx.buffer_error(nice_error);
         } else {
-            self.fallback_error(tcx, span).buffer(&mut mbcx.errors_buffer);
+            mbcx.buffer_error(self.fallback_error(tcx, span));
         }
     }
 }
@@ -358,8 +354,8 @@ fn try_extract_error_from_fulfill_cx<'tcx>(
     })?;
 
     debug!(?sub_region, "cause = {:#?}", cause);
-    let nice_error = match (error_region, sub_region) {
-        (Some(error_region), &ty::ReVar(vid)) => NiceRegionError::new(
+    let nice_error = match (error_region, *sub_region) {
+        (Some(error_region), ty::ReVar(vid)) => NiceRegionError::new(
             infcx,
             RegionResolutionError::SubSupConflict(
                 vid,
@@ -376,7 +372,7 @@ fn try_extract_error_from_fulfill_cx<'tcx>(
             RegionResolutionError::ConcreteFailure(cause.clone(), error_region, placeholder_region),
         ),
         // Note universe here is wrong...
-        (None, &ty::ReVar(vid)) => NiceRegionError::new(
+        (None, ty::ReVar(vid)) => NiceRegionError::new(
             infcx,
             RegionResolutionError::UpperBoundUniverseConflict(
                 vid,

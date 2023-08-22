@@ -1,6 +1,6 @@
 use rustc_ast as ast;
 use rustc_ast::visit::{self, AssocCtxt, FnCtxt, FnKind, Visitor};
-use rustc_ast::{AssocTyConstraint, AssocTyConstraintKind, NodeId};
+use rustc_ast::{AssocConstraint, AssocConstraintKind, NodeId};
 use rustc_ast::{PatKind, RangeEnd, VariantData};
 use rustc_errors::struct_span_err;
 use rustc_feature::{AttributeGate, BuiltinAttribute, BUILTIN_ATTRIBUTE_MAP};
@@ -194,6 +194,54 @@ impl<'a> PostExpansionVisitor<'a> {
                     c_unwind,
                     span,
                     "thiscall-unwind ABI is experimental and subject to change"
+                );
+            }
+            "cdecl-unwind" => {
+                gate_feature_post!(
+                    &self,
+                    c_unwind,
+                    span,
+                    "cdecl-unwind ABI is experimental and subject to change"
+                );
+            }
+            "fastcall-unwind" => {
+                gate_feature_post!(
+                    &self,
+                    c_unwind,
+                    span,
+                    "fastcall-unwind ABI is experimental and subject to change"
+                );
+            }
+            "vectorcall-unwind" => {
+                gate_feature_post!(
+                    &self,
+                    c_unwind,
+                    span,
+                    "vectorcall-unwind ABI is experimental and subject to change"
+                );
+            }
+            "aapcs-unwind" => {
+                gate_feature_post!(
+                    &self,
+                    c_unwind,
+                    span,
+                    "aapcs-unwind ABI is experimental and subject to change"
+                );
+            }
+            "win64-unwind" => {
+                gate_feature_post!(
+                    &self,
+                    c_unwind,
+                    span,
+                    "win64-unwind ABI is experimental and subject to change"
+                );
+            }
+            "sysv64-unwind" => {
+                gate_feature_post!(
+                    &self,
+                    c_unwind,
+                    span,
+                    "sysv64-unwind ABI is experimental and subject to change"
                 );
             }
             "wasm" => {
@@ -622,8 +670,8 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
         visit::walk_fn(self, fn_kind, span)
     }
 
-    fn visit_assoc_ty_constraint(&mut self, constraint: &'a AssocTyConstraint) {
-        if let AssocTyConstraintKind::Bound { .. } = constraint.kind {
+    fn visit_assoc_constraint(&mut self, constraint: &'a AssocConstraint) {
+        if let AssocConstraintKind::Bound { .. } = constraint.kind {
             gate_feature_post!(
                 &self,
                 associated_type_bounds,
@@ -631,7 +679,7 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                 "associated type bounds are unstable"
             )
         }
-        visit::walk_assoc_ty_constraint(self, constraint)
+        visit::walk_assoc_constraint(self, constraint)
     }
 
     fn visit_assoc_item(&mut self, i: &'a ast::AssocItem, ctxt: AssocCtxt) {
@@ -707,11 +755,7 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session) {
         "`if let` guards are experimental",
         "you can write `if matches!(<expr>, <pattern>)` instead of `if let <pattern> = <expr>`"
     );
-    gate_all!(
-        let_chains,
-        "`let` expressions in this position are experimental",
-        "you can write `matches!(<expr>, <pattern>)` instead of `let <pattern> = <expr>`"
-    );
+    gate_all!(let_chains, "`let` expressions in this position are unstable");
     gate_all!(
         async_closure,
         "async closures are unstable",
@@ -724,6 +768,7 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session) {
     gate_all!(half_open_range_patterns, "half-open range patterns are unstable");
     gate_all!(inline_const, "inline-const is experimental");
     gate_all!(inline_const_pat, "inline-const in pattern position is experimental");
+    gate_all!(associated_const_equality, "associated const equality is incomplete");
 
     // All uses of `gate_all!` below this point were added in #65742,
     // and subsequently disabled (with the non-early gating readded).
@@ -778,7 +823,7 @@ fn maybe_stage_features(sess: &Session, krate: &ast::Crate) {
             );
             let mut all_stable = true;
             for ident in
-                attr.meta_item_list().into_iter().flatten().map(|nested| nested.ident()).flatten()
+                attr.meta_item_list().into_iter().flatten().flat_map(|nested| nested.ident())
             {
                 let name = ident.name;
                 let stable_since = lang_features

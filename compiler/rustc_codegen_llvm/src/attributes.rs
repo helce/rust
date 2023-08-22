@@ -55,12 +55,28 @@ pub fn sanitize<'ll>(cx: &CodegenCx<'ll, '_>, no_sanitize: SanitizerSet, llfn: &
     if enabled.contains(SanitizerSet::HWADDRESS) {
         llvm::Attribute::SanitizeHWAddress.apply_llfn(Function, llfn);
     }
+    if enabled.contains(SanitizerSet::MEMTAG) {
+        // Check to make sure the mte target feature is actually enabled.
+        let sess = cx.tcx.sess;
+        let features = llvm_util::llvm_global_features(sess).join(",");
+        let mte_feature_enabled = features.rfind("+mte");
+        let mte_feature_disabled = features.rfind("-mte");
+
+        if mte_feature_enabled.is_none() || (mte_feature_disabled > mte_feature_enabled) {
+            sess.err("`-Zsanitizer=memtag` requires `-Ctarget-feature=+mte`");
+        }
+
+        llvm::Attribute::SanitizeMemTag.apply_llfn(Function, llfn);
+    }
 }
 
 /// Tell LLVM to emit or not emit the information necessary to unwind the stack for the function.
 #[inline]
-pub fn emit_uwtable(val: &Value, emit: bool) {
-    Attribute::UWTable.toggle_llfn(Function, val, emit);
+pub fn emit_uwtable(val: &Value) {
+    // NOTE: We should determine if we even need async unwind tables, as they
+    // take have more overhead and if we can use sync unwind tables we
+    // probably should.
+    llvm::EmitUWTableAttr(val, true);
 }
 
 /// Tell LLVM if this function should be 'naked', i.e., skip the epilogue and prologue.
@@ -275,7 +291,7 @@ pub fn from_fn_attrs<'ll, 'tcx>(
     // You can also find more info on why Windows always requires uwtables here:
     //      https://bugzilla.mozilla.org/show_bug.cgi?id=1302078
     if cx.sess().must_emit_unwind_tables() {
-        attributes::emit_uwtable(llfn, true);
+        attributes::emit_uwtable(llfn);
     }
 
     if cx.sess().opts.debugging_opts.profile_sample_use.is_some() {
@@ -322,12 +338,33 @@ pub fn from_fn_attrs<'ll, 'tcx>(
     // The target doesn't care; the subtarget reads our attribute.
     apply_tune_cpu_attr(cx, llfn);
 
-    let mut function_features = codegen_fn_attrs
-        .target_features
+    let function_features =
+        codegen_fn_attrs.target_features.iter().map(|f| f.as_str()).collect::<Vec<&str>>();
+
+    if let Some(f) = llvm_util::check_tied_features(
+        cx.tcx.sess,
+        &function_features.iter().map(|f| (*f, true)).collect(),
+    ) {
+        let span = cx
+            .tcx
+            .get_attrs(instance.def_id())
+            .iter()
+            .find(|a| a.has_name(rustc_span::sym::target_feature))
+            .map_or_else(|| cx.tcx.def_span(instance.def_id()), |a| a.span);
+        let msg = format!(
+            "the target features {} must all be either enabled or disabled together",
+            f.join(", ")
+        );
+        let mut err = cx.tcx.sess.struct_span_err(span, &msg);
+        err.help("add the missing features in a `target_feature` attribute");
+        err.emit();
+        return;
+    }
+
+    let mut function_features = function_features
         .iter()
-        .flat_map(|f| {
-            let feature = f.as_str();
-            llvm_util::to_llvm_feature(cx.tcx.sess, feature)
+        .flat_map(|feat| {
+            llvm_util::to_llvm_feature(cx.tcx.sess, feat)
                 .into_iter()
                 .map(|f| format!("+{}", f))
                 .collect::<Vec<String>>()

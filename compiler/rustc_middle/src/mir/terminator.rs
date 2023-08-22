@@ -105,7 +105,7 @@ impl<'a> Iterator for SwitchTargetsIter<'a> {
 
 impl<'a> ExactSizeIterator for SwitchTargetsIter<'a> {}
 
-#[derive(Clone, TyEncodable, TyDecodable, Hash, HashStable, PartialEq, PartialOrd)]
+#[derive(Clone, TyEncodable, TyDecodable, Hash, HashStable, PartialEq)]
 pub enum TerminatorKind<'tcx> {
     /// Block should have one successor in the graph; we jump there.
     Goto { target: BasicBlock },
@@ -430,7 +430,7 @@ impl<'tcx> TerminatorKind<'tcx> {
     pub fn as_switch(&self) -> Option<(&Operand<'tcx>, Ty<'tcx>, &SwitchTargets)> {
         match self {
             TerminatorKind::SwitchInt { discr, switch_ty, targets } => {
-                Some((discr, switch_ty, targets))
+                Some((discr, *switch_ty, targets))
             }
             _ => None,
         }

@@ -961,7 +961,7 @@ extern "rust-intrinsic" {
     /// Below are common applications of `transmute` which can be replaced with safer
     /// constructs.
     ///
-    /// Turning raw bytes(`&[u8]`) to `u32`, `f64`, etc.:
+    /// Turning raw bytes (`&[u8]`) into `u32`, `f64`, etc.:
     ///
     /// ```
     /// let raw_bytes = [0x78, 0x56, 0x34, 0x12];
@@ -1893,7 +1893,7 @@ extern "rust-intrinsic" {
     pub fn nontemporal_store<T>(ptr: *mut T, val: T);
 
     /// See documentation of `<*const T>::offset_from` for details.
-    #[rustc_const_unstable(feature = "const_ptr_offset_from", issue = "41079")]
+    #[rustc_const_unstable(feature = "const_ptr_offset_from", issue = "92980")]
     pub fn ptr_offset_from<T>(ptr: *const T, base: *const T) -> isize;
 
     /// See documentation of `<*const T>::guaranteed_eq` for details.
@@ -1914,9 +1914,30 @@ extern "rust-intrinsic" {
     #[rustc_const_unstable(feature = "const_raw_ptr_comparison", issue = "53020")]
     pub fn ptr_guaranteed_ne<T>(ptr: *const T, other: *const T) -> bool;
 
-    /// Allocate at compile time. Should not be called at runtime.
+    /// Allocates a block of memory at compile time.
+    /// At runtime, just returns a null pointer.
+    ///
+    /// # Safety
+    ///
+    /// - The `align` argument must be a power of two.
+    ///    - At compile time, a compile error occurs if this constraint is violated.
+    ///    - At runtime, it is not checked.
     #[rustc_const_unstable(feature = "const_heap", issue = "79597")]
     pub fn const_allocate(size: usize, align: usize) -> *mut u8;
+
+    /// Deallocates a memory which allocated by `intrinsics::const_allocate` at compile time.
+    /// At runtime, does nothing.
+    ///
+    /// # Safety
+    ///
+    /// - The `align` argument must be a power of two.
+    ///    - At compile time, a compile error occurs if this constraint is violated.
+    ///    - At runtime, it is not checked.
+    /// - If the `ptr` is created in an another const, this intrinsic doesn't deallocate it.
+    /// - If the `ptr` is pointing to a local variable, this intrinsic doesn't deallocate it.
+    #[rustc_const_unstable(feature = "const_heap", issue = "79597")]
+    #[cfg(not(bootstrap))]
+    pub fn const_deallocate(ptr: *mut u8, size: usize, align: usize);
 
     /// Determines whether the raw bytes of the two values are equal.
     ///

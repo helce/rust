@@ -19,13 +19,20 @@ pub struct HirId {
 }
 
 impl HirId {
+    #[inline]
     pub fn expect_owner(self) -> LocalDefId {
         assert_eq!(self.local_id.index(), 0);
         self.owner
     }
 
+    #[inline]
     pub fn as_owner(self) -> Option<LocalDefId> {
         if self.local_id.index() == 0 { Some(self.owner) } else { None }
+    }
+
+    #[inline]
+    pub fn is_owner(self) -> bool {
+        self.local_id.index() == 0
     }
 
     #[inline]

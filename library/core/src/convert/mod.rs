@@ -91,7 +91,7 @@ pub use num::FloatToInt;
 /// ```rust
 /// use std::convert::identity;
 ///
-/// let iter = vec![Some(1), None, Some(3)].into_iter();
+/// let iter = [Some(1), None, Some(3)].into_iter();
 /// let filtered = iter.filter_map(identity).collect::<Vec<_>>();
 /// assert_eq!(vec![1, 3], filtered);
 /// ```
@@ -426,8 +426,6 @@ pub trait TryInto<T>: Sized {
 /// `TryFrom<T>` can be implemented as follows:
 ///
 /// ```
-/// use std::convert::TryFrom;
-///
 /// struct GreaterThanZero(i32);
 ///
 /// impl TryFrom<i32> for GreaterThanZero {
@@ -448,8 +446,6 @@ pub trait TryInto<T>: Sized {
 /// As described, [`i32`] implements `TryFrom<`[`i64`]`>`:
 ///
 /// ```
-/// use std::convert::TryFrom;
-///
 /// let big_number = 1_000_000_000_000i64;
 /// // Silently truncates `big_number`, requires detecting
 /// // and handling the truncation after the fact.
@@ -485,9 +481,10 @@ pub trait TryFrom<T>: Sized {
 
 // As lifts over &
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: ?Sized, U: ?Sized> AsRef<U> for &T
+#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
+impl<T: ?Sized, U: ?Sized> const AsRef<U> for &T
 where
-    T: AsRef<U>,
+    T: ~const AsRef<U>,
 {
     fn as_ref(&self) -> &U {
         <T as AsRef<U>>::as_ref(*self)
@@ -496,9 +493,10 @@ where
 
 // As lifts over &mut
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: ?Sized, U: ?Sized> AsRef<U> for &mut T
+#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
+impl<T: ?Sized, U: ?Sized> const AsRef<U> for &mut T
 where
-    T: AsRef<U>,
+    T: ~const AsRef<U>,
 {
     fn as_ref(&self) -> &U {
         <T as AsRef<U>>::as_ref(*self)
@@ -515,9 +513,10 @@ where
 
 // AsMut lifts over &mut
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: ?Sized, U: ?Sized> AsMut<U> for &mut T
+#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
+impl<T: ?Sized, U: ?Sized> const AsMut<U> for &mut T
 where
-    T: AsMut<U>,
+    T: ~const AsMut<U>,
 {
     fn as_mut(&mut self) -> &mut U {
         (*self).as_mut()
@@ -539,6 +538,10 @@ impl<T, U> const Into<U> for T
 where
     U: ~const From<T>,
 {
+    /// Calls `U::from(self)`.
+    ///
+    /// That is, this conversion is whatever the implementation of
+    /// <code>[From]&lt;T&gt; for U</code> chooses to do.
     fn into(self) -> U {
         U::from(self)
     }
@@ -548,6 +551,7 @@ where
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_const_unstable(feature = "const_convert", issue = "88674")]
 impl<T> const From<T> for T {
+    /// Returns the argument unchanged.
     fn from(t: T) -> T {
         t
     }
@@ -571,9 +575,10 @@ impl<T> const From<!> for T {
 
 // TryFrom implies TryInto
 #[stable(feature = "try_from", since = "1.34.0")]
-impl<T, U> TryInto<U> for T
+#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
+impl<T, U> const TryInto<U> for T
 where
-    U: TryFrom<T>,
+    U: ~const TryFrom<T>,
 {
     type Error = U::Error;
 
@@ -585,9 +590,10 @@ where
 // Infallible conversions are semantically equivalent to fallible conversions
 // with an uninhabited error type.
 #[stable(feature = "try_from", since = "1.34.0")]
-impl<T, U> TryFrom<U> for T
+#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
+impl<T, U> const TryFrom<U> for T
 where
-    U: Into<T>,
+    U: ~const Into<T>,
 {
     type Error = Infallible;
 

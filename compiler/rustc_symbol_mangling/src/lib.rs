@@ -91,6 +91,7 @@
 #![feature(never_type)]
 #![feature(nll)]
 #![recursion_limit = "256"]
+#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
 
 #[macro_use]
 extern crate rustc_middle;
@@ -173,8 +174,7 @@ fn compute_symbol_name<'tcx>(
             let stable_crate_id = tcx.sess.local_stable_crate_id();
             return tcx.sess.generate_proc_macro_decls_symbol(stable_crate_id);
         }
-        let hir_id = tcx.hir().local_def_id_to_hir_id(def_id);
-        matches!(tcx.hir().get(hir_id), Node::ForeignItem(_))
+        matches!(tcx.hir().get_by_def_id(def_id), Node::ForeignItem(_))
     } else {
         tcx.is_foreign_item(def_id)
     };

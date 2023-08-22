@@ -79,7 +79,7 @@ pub(crate) fn codegen_fn<'tcx>(
     let arg_uninhabited = fx
         .mir
         .args_iter()
-        .any(|arg| fx.layout_of(fx.monomorphize(&fx.mir.local_decls[arg].ty)).abi.is_uninhabited());
+        .any(|arg| fx.layout_of(fx.monomorphize(fx.mir.local_decls[arg].ty)).abi.is_uninhabited());
 
     if !crate::constant::check_constants(&mut fx) {
         fx.bcx.append_block_params_for_function_params(fx.block_map[START_BLOCK]);
@@ -668,7 +668,7 @@ fn codegen_stmt<'tcx>(
                     let times = fx
                         .monomorphize(times)
                         .eval(fx.tcx, ParamEnv::reveal_all())
-                        .val
+                        .val()
                         .try_to_bits(fx.tcx.data_layout.pointer_size)
                         .unwrap();
                     if operand.layout().size.bytes() == 0 {
@@ -749,18 +749,6 @@ fn codegen_stmt<'tcx>(
         | StatementKind::Retag { .. }
         | StatementKind::AscribeUserType(..) => {}
 
-        StatementKind::LlvmInlineAsm(asm) => {
-            match asm.asm.asm.as_str().trim() {
-                "" => {
-                    // Black box
-                }
-                _ => fx.tcx.sess.span_fatal(
-                    stmt.source_info.span,
-                    "Legacy `llvm_asm!` inline assembly is not supported. \
-                    Try using the new `asm!` instead.",
-                ),
-            }
-        }
         StatementKind::Coverage { .. } => fx.tcx.sess.fatal("-Zcoverage is unimplemented"),
         StatementKind::CopyNonOverlapping(inner) => {
             let dst = codegen_operand(fx, &inner.dst);
@@ -830,16 +818,16 @@ pub(crate) fn codegen_place<'tcx>(
                 match cplace.layout().ty.kind() {
                     ty::Array(elem_ty, _len) => {
                         assert!(!from_end, "array subslices are never `from_end`");
-                        let elem_layout = fx.layout_of(elem_ty);
+                        let elem_layout = fx.layout_of(*elem_ty);
                         let ptr = cplace.to_ptr();
                         cplace = CPlace::for_ptr(
                             ptr.offset_i64(fx, elem_layout.size.bytes() as i64 * (from as i64)),
-                            fx.layout_of(fx.tcx.mk_array(elem_ty, to - from)),
+                            fx.layout_of(fx.tcx.mk_array(*elem_ty, to - from)),
                         );
                     }
                     ty::Slice(elem_ty) => {
                         assert!(from_end, "slice subslices should be `from_end`");
-                        let elem_layout = fx.layout_of(elem_ty);
+                        let elem_layout = fx.layout_of(*elem_ty);
                         let (ptr, len) = cplace.to_ptr_maybe_unsized();
                         let len = len.unwrap();
                         cplace = CPlace::for_ptr_with_extra(

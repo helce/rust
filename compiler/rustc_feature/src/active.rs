@@ -161,6 +161,12 @@ declare_features! (
     (active, staged_api, "1.0.0", None, None),
     /// Added for testing E0705; perma-unstable.
     (active, test_2018_feature, "1.31.0", None, Some(Edition::Edition2018)),
+    /// Allows non-`unsafe` —and thus, unsound— access to `Pin` constructions.
+    /// Marked `incomplete` since perma-unstable and unsound.
+    (incomplete, unsafe_pin_internals, "1.60.0", None, None),
+    /// Use for stable + negative coherence and strict coherence depending on trait's
+    /// rustc_strict_coherence value.
+    (active, with_negative_coherence, "1.60.0", None, None),
     // !!!!    !!!!    !!!!    !!!!   !!!!    !!!!    !!!!    !!!!    !!!!    !!!!    !!!!
     // Features are listed in alphabetical order. Tidy will fail if you don't keep it this way.
     // !!!!    !!!!    !!!!    !!!!   !!!!    !!!!    !!!!    !!!!    !!!!    !!!!    !!!!
@@ -274,20 +280,20 @@ declare_features! (
     (incomplete, adt_const_params, "1.56.0", Some(44580), None),
     /// Allows defining an `#[alloc_error_handler]`.
     (active, alloc_error_handler, "1.29.0", Some(51540), None),
-    /// Allows a test to fail without failing the whole suite.
-    (active, allow_fail, "1.19.0", Some(46488), None),
     /// Allows explicit discriminants on non-unit enum variants.
     (active, arbitrary_enum_discriminant, "1.37.0", Some(60553), None),
     /// Allows trait methods with arbitrary self types.
     (active, arbitrary_self_types, "1.23.0", Some(44874), None),
     /// Allows using `const` operands in inline assembly.
-    (active, asm_const, "1.58.0", Some(72016), None),
+    (active, asm_const, "1.58.0", Some(93332), None),
     /// Enables experimental inline assembly support for additional architectures.
-    (active, asm_experimental_arch, "1.58.0", Some(72016), None),
+    (active, asm_experimental_arch, "1.58.0", Some(93335), None),
     /// Allows using `sym` operands in inline assembly.
-    (active, asm_sym, "1.58.0", Some(72016), None),
+    (active, asm_sym, "1.58.0", Some(93333), None),
     /// Allows the `may_unwind` option in inline assembly.
-    (active, asm_unwind, "1.58.0", Some(72016), None),
+    (active, asm_unwind, "1.58.0", Some(93334), None),
+    /// Allows users to enforce equality of associated constants `TraitImpl<AssocConst=3>`.
+    (active, associated_const_equality, "1.58.0", Some(92827), None),
     /// Allows the user of associated type bounds.
     (active, associated_type_bounds, "1.34.0", Some(52662), None),
     /// Allows associated type defaults.
@@ -300,14 +306,14 @@ declare_features! (
     (active, c_variadic, "1.34.0", Some(44930), None),
     /// Allows capturing disjoint fields in a closure/generator (RFC 2229).
     (incomplete, capture_disjoint_fields, "1.49.0", Some(53488), None),
-    /// Enables `#[cfg(panic = "...")]` config key.
-    (active, cfg_panic, "1.49.0", Some(77443), None),
     /// Allows the use of `#[cfg(sanitize = "option")]`; set when -Zsanitizer is used.
     (active, cfg_sanitize, "1.41.0", Some(39699), None),
     /// Allows `cfg(target_abi = "...")`.
     (active, cfg_target_abi, "1.55.0", Some(80970), None),
-    /// Allows `cfg(target_has_atomic = "...")`.
-    (active, cfg_target_has_atomic, "1.9.0", Some(32976), None),
+    /// Allows `cfg(target_has_atomic_load_store = "...")`.
+    (active, cfg_target_has_atomic, "1.60.0", Some(94039), None),
+    /// Allows `cfg(target_has_atomic_equal_alignment = "...")`.
+    (active, cfg_target_has_atomic_equal_alignment, "1.60.0", Some(93822), None),
     /// Allows `cfg(target_thread_local)`.
     (active, cfg_target_thread_local, "1.7.0", Some(29594), None),
     /// Allow conditional compilation depending on rust version
@@ -327,7 +333,7 @@ declare_features! (
     /// Allows using and casting function pointers in a `const fn`.
     (active, const_fn_fn_ptr_basics, "1.48.0", Some(57563), None),
     /// Allows trait bounds in `const fn`.
-    (active, const_fn_trait_bound, "1.53.0", Some(57563), None),
+    (active, const_fn_trait_bound, "1.53.0", Some(93706), None),
     /// Allows `for _ in _` loops in const contexts.
     (active, const_for, "1.56.0", Some(87575), None),
     /// Allows argument and return position `impl Trait` in a `const fn`.
@@ -413,7 +419,7 @@ declare_features! (
     // Allows setting the threshold for the `large_assignments` lint.
     (active, large_assignments, "1.52.0", Some(83518), None),
     /// Allows `if/while p && let q = r && ...` chains.
-    (incomplete, let_chains, "1.37.0", Some(53667), None),
+    (active, let_chains, "1.37.0", Some(53667), None),
     /// Allows `let...else` statements.
     (active, let_else, "1.56.0", Some(87335), None),
     /// Allows `#[link(..., cfg(..))]`.
@@ -528,6 +534,8 @@ declare_features! (
     ///
     /// NOTE: A limited form of `union U { ... }` was accepted in 1.19.0.
     (active, untagged_unions, "1.13.0", Some(55149), None),
+    /// Allows using the `#[used(linker)]` (or `#[used(compiler)]`) attribute.
+    (active, used_with_arg, "1.60.0", Some(93798), None),
     /// Allows `extern "wasm" fn`
     (active, wasm_abi, "1.53.0", Some(83788), None),
     // !!!!    !!!!    !!!!    !!!!   !!!!    !!!!    !!!!    !!!!    !!!!    !!!!    !!!!

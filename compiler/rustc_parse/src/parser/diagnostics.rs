@@ -1,5 +1,5 @@
 use super::pat::Expected;
-use super::ty::AllowPlus;
+use super::ty::{AllowPlus, RecoverQuestionMark};
 use super::{
     BlockMode, Parser, PathStyle, RecoverColon, RecoverComma, Restrictions, SemiColonMode, SeqSep,
     TokenExpectType, TokenType,
@@ -27,7 +27,7 @@ use std::mem::take;
 use tracing::{debug, trace};
 
 const TURBOFISH_SUGGESTION_STR: &str =
-    "use `::<...>` instead of `<...>` to specify type or const arguments";
+    "use `::<...>` instead of `<...>` to specify lifetime, type, or const arguments";
 
 /// Creates a placeholder argument.
 pub(super) fn dummy_arg(ident: Ident) -> Param {
@@ -192,10 +192,10 @@ impl<'a> Parser<'a> {
                 if ident.is_raw_guess()
                     && self.look_ahead(1, |t| valid_follow.contains(&t.kind)) =>
             {
-                err.span_suggestion(
-                    ident.span,
-                    "you can escape reserved keywords to use them as identifiers",
-                    format!("r#{}", ident.name),
+                err.span_suggestion_verbose(
+                    ident.span.shrink_to_lo(),
+                    &format!("escape `{}` to use it as an identifier", ident.name),
+                    "r#".to_owned(),
                     Applicability::MaybeIncorrect,
                 );
             }
@@ -550,8 +550,8 @@ impl<'a> Parser<'a> {
     /// a diagnostic to suggest removing them.
     ///
     /// ```ignore (diagnostic)
-    /// let _ = vec![1, 2, 3].into_iter().collect::<Vec<usize>>>>();
-    ///                                                        ^^ help: remove extra angle brackets
+    /// let _ = [1, 2, 3].into_iter().collect::<Vec<usize>>>>();
+    ///                                                    ^^ help: remove extra angle brackets
     /// ```
     ///
     /// If `true` is returned, then trailing brackets were recovered, tokens were consumed
@@ -731,20 +731,21 @@ impl<'a> Parser<'a> {
                     match x {
                         Ok((_, _, false)) => {
                             if self.eat(&token::Gt) {
+                                e.span_suggestion_verbose(
+                                    binop.span.shrink_to_lo(),
+                                    TURBOFISH_SUGGESTION_STR,
+                                    "::".to_string(),
+                                    Applicability::MaybeIncorrect,
+                                )
+                                .emit();
                                 match self.parse_expr() {
                                     Ok(_) => {
-                                        e.span_suggestion_verbose(
-                                            binop.span.shrink_to_lo(),
-                                            TURBOFISH_SUGGESTION_STR,
-                                            "::".to_string(),
-                                            Applicability::MaybeIncorrect,
-                                        );
-                                        e.emit();
                                         *expr =
                                             self.mk_expr_err(expr.span.to(self.prev_token.span));
                                         return Ok(());
                                     }
                                     Err(mut err) => {
+                                        *expr = self.mk_expr_err(expr.span);
                                         err.cancel();
                                     }
                                 }
@@ -1029,6 +1030,34 @@ impl<'a> Parser<'a> {
                     Applicability::MachineApplicable,
                 )
                 .emit();
+        }
+    }
+
+    /// Swift lets users write `Ty?` to mean `Option<Ty>`. Parse the construct and recover from it.
+    pub(super) fn maybe_recover_from_question_mark(
+        &mut self,
+        ty: P<Ty>,
+        recover_question_mark: RecoverQuestionMark,
+    ) -> P<Ty> {
+        if let RecoverQuestionMark::No = recover_question_mark {
+            return ty;
+        }
+        if self.token == token::Question {
+            self.bump();
+            self.struct_span_err(self.prev_token.span, "invalid `?` in type")
+                .span_label(self.prev_token.span, "`?` is only allowed on expressions, not types")
+                .multipart_suggestion(
+                    "if you meant to express that the type might not contain a value, use the `Option` wrapper type",
+                    vec![
+                        (ty.span.shrink_to_lo(), "Option<".to_string()),
+                        (self.prev_token.span, ">".to_string()),
+                    ],
+                    Applicability::MachineApplicable,
+                )
+                .emit();
+            self.mk_ty(ty.span.to(self.prev_token.span), TyKind::Err)
+        } else {
+            ty
         }
     }
 
@@ -2127,7 +2156,7 @@ impl<'a> Parser<'a> {
                             | PatKind::TupleStruct(qself @ None, path, _)
                             | PatKind::Path(qself @ None, path) => match &first_pat.kind {
                                 PatKind::Ident(_, ident, _) => {
-                                    path.segments.insert(0, PathSegment::from_ident(ident.clone()));
+                                    path.segments.insert(0, PathSegment::from_ident(*ident));
                                     path.span = new_span;
                                     show_sugg = true;
                                     first_pat = pat;
@@ -2154,8 +2183,8 @@ impl<'a> Parser<'a> {
                                             Path {
                                                 span: new_span,
                                                 segments: vec![
-                                                    PathSegment::from_ident(old_ident.clone()),
-                                                    PathSegment::from_ident(ident.clone()),
+                                                    PathSegment::from_ident(*old_ident),
+                                                    PathSegment::from_ident(*ident),
                                                 ],
                                                 tokens: None,
                                             },
@@ -2165,7 +2194,7 @@ impl<'a> Parser<'a> {
                                     }
                                     PatKind::Path(old_qself, old_path) => {
                                         let mut segments = old_path.segments.clone();
-                                        segments.push(PathSegment::from_ident(ident.clone()));
+                                        segments.push(PathSegment::from_ident(*ident));
                                         let path = PatKind::Path(
                                             old_qself.clone(),
                                             Path { span: new_span, segments, tokens: None },

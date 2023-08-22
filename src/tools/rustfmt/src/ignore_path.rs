@@ -38,9 +38,9 @@ mod test {
     #[test]
     fn test_ignore_path_set() {
         use std::path::{Path, PathBuf};
+
         use crate::config::{Config, FileName};
         use crate::ignore_path::IgnorePathSet;
-
         let config =
             Config::from_toml(r#"ignore = ["foo.rs", "bar_dir/*"]"#, Path::new("")).unwrap();
         let ignore_path_set = IgnorePathSet::from_ignore_list(&config.ignore()).unwrap();

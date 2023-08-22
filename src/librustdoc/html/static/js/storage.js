@@ -15,7 +15,7 @@ var settingsDataset = (function () {
 })();
 
 function getSettingValue(settingName) {
-    var current = getCurrentValue('rustdoc-' + settingName);
+    var current = getCurrentValue(settingName);
     if (current !== null) {
         return current;
     }
@@ -106,7 +106,7 @@ function hasOwnPropertyRustdoc(obj, property) {
 
 function updateLocalStorage(name, value) {
     try {
-        window.localStorage.setItem(name, value);
+        window.localStorage.setItem("rustdoc-" + name, value);
     } catch(e) {
         // localStorage is not accessible, do nothing
     }
@@ -114,7 +114,7 @@ function updateLocalStorage(name, value) {
 
 function getCurrentValue(name) {
     try {
-        return window.localStorage.getItem(name);
+        return window.localStorage.getItem("rustdoc-" + name);
     } catch(e) {
         return null;
     }
@@ -127,7 +127,7 @@ function switchTheme(styleElem, mainStyleElem, newTheme, saveTheme) {
     // If this new value comes from a system setting or from the previously
     // saved theme, no need to save it.
     if (saveTheme) {
-        updateLocalStorage("rustdoc-theme", newTheme);
+        updateLocalStorage("theme", newTheme);
     }
 
     if (styleElem.href === newHref) {
@@ -158,7 +158,7 @@ function useSystemTheme(value) {
         value = true;
     }
 
-    updateLocalStorage("rustdoc-use-system-theme", value);
+    updateLocalStorage("use-system-theme", value);
 
     // update the toggle if we're on the settings page
     var toggle = document.getElementById("use-system-theme");
@@ -187,22 +187,25 @@ var updateSystemTheme = (function() {
     var mql = window.matchMedia("(prefers-color-scheme: dark)");
 
     function handlePreferenceChange(mql) {
+        let use = function(theme) {
+            switchTheme(window.currentTheme, window.mainTheme, theme, true);
+        };
         // maybe the user has disabled the setting in the meantime!
         if (getSettingValue("use-system-theme") !== "false") {
             var lightTheme = getSettingValue("preferred-light-theme") || "light";
             var darkTheme = getSettingValue("preferred-dark-theme") || "dark";
 
             if (mql.matches) {
-                // prefers a dark theme
-                switchTheme(window.currentTheme, window.mainTheme, darkTheme, true);
+                use(darkTheme);
             } else {
                 // prefers a light theme, or has no preference
-                switchTheme(window.currentTheme, window.mainTheme, lightTheme, true);
+                use(lightTheme);
             }
-
             // note: we save the theme so that it doesn't suddenly change when
             // the user disables "use-system-theme" and reloads the page or
             // navigates to another page
+        } else {
+            use(getSettingValue("theme"));
         }
     }
 
@@ -213,18 +216,7 @@ var updateSystemTheme = (function() {
     };
 })();
 
-if (getSettingValue("use-system-theme") !== "false" && window.matchMedia) {
-    // update the preferred dark theme if the user is already using a dark theme
-    // See https://github.com/rust-lang/rust/pull/77809#issuecomment-707875732
-    if (getSettingValue("use-system-theme") === null
-        && getSettingValue("preferred-dark-theme") === null
-        && darkThemes.indexOf(localStoredTheme) >= 0) {
-        updateLocalStorage("rustdoc-preferred-dark-theme", localStoredTheme);
-    }
-
-    // call the function to initialize the theme at least once!
-    updateSystemTheme();
-} else {
+function switchToSavedTheme() {
     switchTheme(
         window.currentTheme,
         window.mainTheme,
@@ -232,3 +224,33 @@ if (getSettingValue("use-system-theme") !== "false" && window.matchMedia) {
         false
     );
 }
+
+if (getSettingValue("use-system-theme") !== "false" && window.matchMedia) {
+    // update the preferred dark theme if the user is already using a dark theme
+    // See https://github.com/rust-lang/rust/pull/77809#issuecomment-707875732
+    if (getSettingValue("use-system-theme") === null
+        && getSettingValue("preferred-dark-theme") === null
+        && darkThemes.indexOf(localStoredTheme) >= 0) {
+        updateLocalStorage("preferred-dark-theme", localStoredTheme);
+    }
+
+    // call the function to initialize the theme at least once!
+    updateSystemTheme();
+} else {
+    switchToSavedTheme();
+}
+
+// If we navigate away (for example to a settings page), and then use the back or
+// forward button to get back to a page, the theme may have changed in the meantime.
+// But scripts may not be re-loaded in such a case due to the bfcache
+// (https://web.dev/bfcache/). The "pageshow" event triggers on such navigations.
+// Use that opportunity to update the theme.
+// We use a setTimeout with a 0 timeout here to put the change on the event queue.
+// For some reason, if we try to change the theme while the `pageshow` event is
+// running, it sometimes fails to take effect. The problem manifests on Chrome,
+// specifically when talking to a remote website with no caching.
+window.addEventListener("pageshow", function(ev) {
+    if (ev.persisted) {
+        setTimeout(switchToSavedTheme, 0);
+    }
+});

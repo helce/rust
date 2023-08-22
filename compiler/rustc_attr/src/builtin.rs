@@ -1,10 +1,13 @@
 //! Parsing and validation of builtin attributes
 
-use rustc_ast::{self as ast, Attribute, Lit, LitKind, MetaItem, MetaItemKind, NestedMetaItem};
+use rustc_ast as ast;
+use rustc_ast::node_id::CRATE_NODE_ID;
+use rustc_ast::{Attribute, Lit, LitKind, MetaItem, MetaItemKind, NestedMetaItem};
 use rustc_ast_pretty::pprust;
 use rustc_errors::{struct_span_err, Applicability};
 use rustc_feature::{find_gated_cfg, is_builtin_attr_name, Features, GatedCfg};
 use rustc_macros::HashStable_Generic;
+use rustc_session::lint::builtin::UNEXPECTED_CFGS;
 use rustc_session::parse::{feature_err, ParseSess};
 use rustc_session::Session;
 use rustc_span::hygiene::Transparency;
@@ -217,85 +220,81 @@ where
                     let mut issue_num = None;
                     let mut is_soft = false;
                     for meta in metas {
-                        if let Some(mi) = meta.meta_item() {
-                            match mi.name_or_empty() {
-                                sym::feature => {
-                                    if !get(mi, &mut feature) {
-                                        continue 'outer;
-                                    }
-                                }
-                                sym::reason => {
-                                    if !get(mi, &mut reason) {
-                                        continue 'outer;
-                                    }
-                                }
-                                sym::issue => {
-                                    if !get(mi, &mut issue) {
-                                        continue 'outer;
-                                    }
-
-                                    // These unwraps are safe because `get` ensures the meta item
-                                    // is a name/value pair string literal.
-                                    issue_num = match issue.unwrap().as_str() {
-                                        "none" => None,
-                                        issue => {
-                                            let emit_diag = |msg: &str| {
-                                                struct_span_err!(
-                                                    diagnostic,
-                                                    mi.span,
-                                                    E0545,
-                                                    "`issue` must be a non-zero numeric string \
-                                                    or \"none\"",
-                                                )
-                                                .span_label(
-                                                    mi.name_value_literal_span().unwrap(),
-                                                    msg,
-                                                )
-                                                .emit();
-                                            };
-                                            match issue.parse() {
-                                                Ok(0) => {
-                                                    emit_diag(
-                                                        "`issue` must not be \"0\", \
-                                                        use \"none\" instead",
-                                                    );
-                                                    continue 'outer;
-                                                }
-                                                Ok(num) => NonZeroU32::new(num),
-                                                Err(err) => {
-                                                    emit_diag(&err.to_string());
-                                                    continue 'outer;
-                                                }
-                                            }
-                                        }
-                                    };
-                                }
-                                sym::soft => {
-                                    if !mi.is_word() {
-                                        let msg = "`soft` should not have any arguments";
-                                        sess.parse_sess.span_diagnostic.span_err(mi.span, msg);
-                                    }
-                                    is_soft = true;
-                                }
-                                _ => {
-                                    handle_errors(
-                                        &sess.parse_sess,
-                                        meta.span(),
-                                        AttrError::UnknownMetaItem(
-                                            pprust::path_to_string(&mi.path),
-                                            &["feature", "reason", "issue", "soft"],
-                                        ),
-                                    );
-                                    continue 'outer;
-                                }
-                            }
-                        } else {
+                        let Some(mi) = meta.meta_item() else {
                             handle_errors(
                                 &sess.parse_sess,
                                 meta.span(),
                                 AttrError::UnsupportedLiteral("unsupported literal", false),
                             );
                             continue 'outer;
+                        };
+                        match mi.name_or_empty() {
+                            sym::feature => {
+                                if !get(mi, &mut feature) {
+                                    continue 'outer;
+                                }
+                            }
+                            sym::reason => {
+                                if !get(mi, &mut reason) {
+                                    continue 'outer;
+                                }
+                            }
+                            sym::issue => {
+                                if !get(mi, &mut issue) {
+                                    continue 'outer;
+                                }
+
+                                // These unwraps are safe because `get` ensures the meta item
+                                // is a name/value pair string literal.
+                                issue_num = match issue.unwrap().as_str() {
+                                    "none" => None,
+                                    issue => {
+                                        let emit_diag = |msg: &str| {
+                                            struct_span_err!(
+                                                diagnostic,
+                                                mi.span,
+                                                E0545,
+                                                "`issue` must be a non-zero numeric string \
+                                                or \"none\"",
+                                            )
+                                            .span_label(mi.name_value_literal_span().unwrap(), msg)
+                                            .emit();
+                                        };
+                                        match issue.parse() {
+                                            Ok(0) => {
+                                                emit_diag(
+                                                    "`issue` must not be \"0\", \
+                                                    use \"none\" instead",
+                                                );
+                                                continue 'outer;
+                                            }
+                                            Ok(num) => NonZeroU32::new(num),
+                                            Err(err) => {
+                                                emit_diag(&err.to_string());
+                                                continue 'outer;
+                                            }
+                                        }
+                                    }
+                                };
+                            }
+                            sym::soft => {
+                                if !mi.is_word() {
+                                    let msg = "`soft` should not have any arguments";
+                                    sess.parse_sess.span_diagnostic.span_err(mi.span, msg);
+                                }
+                                is_soft = true;
+                            }
+                            _ => {
+                                handle_errors(
+                                    &sess.parse_sess,
+                                    meta.span(),
+                                    AttrError::UnknownMetaItem(
+                                        pprust::path_to_string(&mi.path),
+                                        &["feature", "reason", "issue", "soft"],
+                                    ),
+                                );
+                                continue 'outer;
+                            }
                         }
                     }
 
@@ -462,8 +461,30 @@ pub fn cfg_matches(cfg: &ast::MetaItem, sess: &ParseSess, features: Option<&Feat
                 true
             }
             MetaItemKind::NameValue(..) | MetaItemKind::Word => {
-                let ident = cfg.ident().expect("multi-segment cfg predicate");
-                sess.config.contains(&(ident.name, cfg.value_str()))
+                let name = cfg.ident().expect("multi-segment cfg predicate").name;
+                let value = cfg.value_str();
+                if sess.check_config.names_checked && !sess.check_config.names_valid.contains(&name)
+                {
+                    sess.buffer_lint(
+                        UNEXPECTED_CFGS,
+                        cfg.span,
+                        CRATE_NODE_ID,
+                        "unexpected `cfg` condition name",
+                    );
+                }
+                if let Some(val) = value {
+                    if sess.check_config.values_checked.contains(&name)
+                        && !sess.check_config.values_valid.contains(&(name, val))
+                    {
+                        sess.buffer_lint(
+                            UNEXPECTED_CFGS,
+                            cfg.span,
+                            CRATE_NODE_ID,
+                            "unexpected `cfg` condition value",
+                        );
+                    }
+                }
+                sess.config.contains(&(name, value))
             }
         }
     })
@@ -608,7 +629,7 @@ pub fn eval_condition(
     }
 }
 
-#[derive(Debug, Encodable, Decodable, Clone, HashStable_Generic)]
+#[derive(Copy, Debug, Encodable, Decodable, Clone, HashStable_Generic)]
 pub struct Deprecation {
     pub since: Option<Symbol>,
     /// The note to issue a reason.

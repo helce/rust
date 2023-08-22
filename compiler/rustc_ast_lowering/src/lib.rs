@@ -32,8 +32,10 @@
 
 #![feature(crate_visibility_modifier)]
 #![feature(box_patterns)]
+#![feature(let_else)]
 #![feature(never_type)]
 #![recursion_limit = "256"]
+#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
 
 use rustc_ast::token::{self, Token};
 use rustc_ast::tokenstream::{CanSynthesizeMissingTokens, TokenStream, TokenTree};
@@ -98,7 +100,7 @@ struct LoweringContext<'a, 'hir: 'a> {
     arena: &'hir Arena<'hir>,
 
     /// The items being lowered are collected here.
-    owners: IndexVec<LocalDefId, Option<hir::OwnerInfo<'hir>>>,
+    owners: IndexVec<LocalDefId, hir::MaybeOwner<&'hir hir::OwnerInfo<'hir>>>,
     /// Bodies inside the owner being lowered.
     bodies: Vec<(hir::ItemLocalId, &'hir hir::Body<'hir>)>,
     /// Attributes inside the owner being lowered.
@@ -254,19 +256,28 @@ enum ImplTraitContext<'b, 'a> {
 /// Position in which `impl Trait` is disallowed.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum ImplTraitPosition {
-    /// Disallowed in `let` / `const` / `static` bindings.
-    Binding,
-
-    /// All other positions.
-    Other,
+    Path,
+    Variable,
+    Type,
+    Trait,
+    AsyncBlock,
+    Bound,
+    Generic,
+    ExternFnParam,
+    ClosureParam,
+    PointerParam,
+    FnTraitParam,
+    TraitParam,
+    ImplParam,
+    ExternFnReturn,
+    ClosureReturn,
+    PointerReturn,
+    FnTraitReturn,
+    TraitReturn,
+    ImplReturn,
 }
 
 impl<'a> ImplTraitContext<'_, 'a> {
-    #[inline]
-    fn disallowed() -> Self {
-        ImplTraitContext::Disallowed(ImplTraitPosition::Other)
-    }
-
     fn reborrow<'this>(&'this mut self) -> ImplTraitContext<'this, 'a> {
         use self::ImplTraitContext::*;
         match self {
@@ -282,6 +293,54 @@ impl<'a> ImplTraitContext<'_, 'a> {
     }
 }
 
+impl std::fmt::Display for ImplTraitPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            ImplTraitPosition::Path => "path",
+            ImplTraitPosition::Variable => "variable binding",
+            ImplTraitPosition::Type => "type",
+            ImplTraitPosition::Trait => "trait",
+            ImplTraitPosition::AsyncBlock => "async block",
+            ImplTraitPosition::Bound => "bound",
+            ImplTraitPosition::Generic => "generic",
+            ImplTraitPosition::ExternFnParam => "`extern fn` param",
+            ImplTraitPosition::ClosureParam => "closure param",
+            ImplTraitPosition::PointerParam => "`fn` pointer param",
+            ImplTraitPosition::FnTraitParam => "`Fn` trait param",
+            ImplTraitPosition::TraitParam => "trait method param",
+            ImplTraitPosition::ImplParam => "`impl` method param",
+            ImplTraitPosition::ExternFnReturn => "`extern fn` return",
+            ImplTraitPosition::ClosureReturn => "closure return",
+            ImplTraitPosition::PointerReturn => "`fn` pointer return",
+            ImplTraitPosition::FnTraitReturn => "`Fn` trait return",
+            ImplTraitPosition::TraitReturn => "trait method return",
+            ImplTraitPosition::ImplReturn => "`impl` method return",
+        };
+
+        write!(f, "{}", name)
+    }
+}
+
+#[derive(Debug)]
+enum FnDeclKind {
+    Fn,
+    Inherent,
+    ExternFn,
+    Closure,
+    Pointer,
+    Trait,
+    Impl,
+}
+
+impl FnDeclKind {
+    fn impl_trait_return_allowed(&self) -> bool {
+        match self {
+            FnDeclKind::Fn | FnDeclKind::Inherent => true,
+            _ => false,
+        }
+    }
+}
+
 pub fn lower_crate<'a, 'hir>(
     sess: &'a Session,
     krate: &'a Crate,
@@ -291,7 +350,8 @@ pub fn lower_crate<'a, 'hir>(
 ) -> &'hir hir::Crate<'hir> {
     let _prof_timer = sess.prof.verbose_generic_activity("hir_lowering");
 
-    let owners = IndexVec::from_fn_n(|_| None, resolver.definitions().def_index_count());
+    let owners =
+        IndexVec::from_fn_n(|_| hir::MaybeOwner::Phantom, resolver.definitions().def_index_count());
     LoweringContext {
         sess,
         resolver,
@@ -402,19 +462,6 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
 
         let hir_hash = self.compute_hir_hash();
 
-        let mut def_id_to_hir_id = IndexVec::default();
-
-        for (node_id, hir_id) in self.node_id_to_hir_id.into_iter_enumerated() {
-            if let Some(def_id) = self.resolver.opt_local_def_id(node_id) {
-                if def_id_to_hir_id.len() <= def_id.index() {
-                    def_id_to_hir_id.resize(def_id.index() + 1, None);
-                }
-                def_id_to_hir_id[def_id] = hir_id;
-            }
-        }
-
-        self.resolver.definitions().init_def_id_to_hir_id_mapping(def_id_to_hir_id);
-
         let krate = hir::Crate { owners: self.owners, hir_hash };
         self.arena.alloc(krate)
     }
@@ -427,7 +474,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             .owners
             .iter_enumerated()
             .filter_map(|(def_id, info)| {
-                let info = info.as_ref()?;
+                let info = info.as_owner()?;
                 let def_path_hash = definitions.def_path_hash(def_id);
                 Some((def_path_hash, info))
             })
@@ -469,8 +516,8 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         self.current_hir_id_owner = current_owner;
         self.item_local_id_counter = current_local_counter;
 
-        let _old = self.owners.insert(def_id, info);
-        debug_assert!(_old.is_none());
+        self.owners.ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
+        self.owners[def_id] = hir::MaybeOwner::Owner(self.arena.alloc(info));
 
         def_id
     }
@@ -479,6 +526,25 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         let attrs = std::mem::take(&mut self.attrs);
         let mut bodies = std::mem::take(&mut self.bodies);
         let local_node_ids = std::mem::take(&mut self.local_node_ids);
+
+        let local_id_to_def_id = local_node_ids
+            .iter()
+            .filter_map(|&node_id| {
+                let hir_id = self.node_id_to_hir_id[node_id]?;
+                if hir_id.local_id == hir::ItemLocalId::new(0) {
+                    None
+                } else {
+                    let def_id = self.resolver.opt_local_def_id(node_id)?;
+                    self.owners.ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
+                    if let o @ hir::MaybeOwner::Phantom = &mut self.owners[def_id] {
+                        // Do not override a `MaybeOwner::Owner` that may already here.
+                        *o = hir::MaybeOwner::NonOwner(hir_id);
+                    }
+                    Some((hir_id.local_id, def_id))
+                }
+            })
+            .collect();
+
         let trait_map = local_node_ids
             .into_iter()
             .filter_map(|node_id| {
@@ -501,7 +567,13 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         let (hash_including_bodies, hash_without_bodies) = self.hash_owner(node, &bodies);
         let (nodes, parenting) =
             index::index_hir(self.sess, self.resolver.definitions(), node, &bodies);
-        let nodes = hir::OwnerNodes { hash_including_bodies, hash_without_bodies, nodes, bodies };
+        let nodes = hir::OwnerNodes {
+            hash_including_bodies,
+            hash_without_bodies,
+            nodes,
+            bodies,
+            local_id_to_def_id,
+        };
         let attrs = {
             let mut hcx = self.resolver.create_stable_hashing_context();
             let mut stable_hasher = StableHasher::new();
@@ -960,7 +1032,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     /// returns a `hir::TypeBinding` representing `Item`.
     fn lower_assoc_ty_constraint(
         &mut self,
-        constraint: &AssocTyConstraint,
+        constraint: &AssocConstraint,
         mut itctx: ImplTraitContext<'_, 'hir>,
     ) -> hir::TypeBinding<'hir> {
         debug!("lower_assoc_ty_constraint(constraint={:?}, itctx={:?})", constraint, itctx);
@@ -997,10 +1069,14 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         };
 
         let kind = match constraint.kind {
-            AssocTyConstraintKind::Equality { ref ty } => {
-                hir::TypeBindingKind::Equality { ty: self.lower_ty(ty, itctx) }
+            AssocConstraintKind::Equality { ref term } => {
+                let term = match term {
+                    Term::Ty(ref ty) => self.lower_ty(ty, itctx).into(),
+                    Term::Const(ref c) => self.lower_anon_const(c).into(),
+                };
+                hir::TypeBindingKind::Equality { term }
             }
-            AssocTyConstraintKind::Bound { ref bounds } => {
+            AssocConstraintKind::Bound { ref bounds } => {
                 let mut capturable_lifetimes;
                 let mut parent_def_id = self.current_hir_id_owner;
                 // Piggy-back on the `impl Trait` context to figure out the correct behavior.
@@ -1078,7 +1154,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                             itctx,
                         );
 
-                        hir::TypeBindingKind::Equality { ty }
+                        hir::TypeBindingKind::Equality { term: ty.into() }
                     })
                 } else {
                     // Desugar `AssocTy: Bounds` into a type binding where the
@@ -1213,11 +1289,11 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     hir::TyKind::BareFn(this.arena.alloc(hir::BareFnTy {
                         generic_params: this.lower_generic_params(
                             &f.generic_params,
-                            ImplTraitContext::disallowed(),
+                            ImplTraitContext::Disallowed(ImplTraitPosition::Generic),
                         ),
                         unsafety: this.lower_unsafety(f.unsafety),
                         abi: this.lower_extern(f.ext),
-                        decl: this.lower_fn_decl(&f.decl, None, false, None),
+                        decl: this.lower_fn_decl(&f.decl, None, FnDeclKind::Pointer, None),
                         param_names: this.lower_fn_params_to_names(&f.decl),
                     }))
                 })
@@ -1338,13 +1414,13 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                             }),
                         ))
                     }
-                    ImplTraitContext::Disallowed(_) => {
+                    ImplTraitContext::Disallowed(position) => {
                         let mut err = struct_span_err!(
                             self.sess,
                             t.span,
                             E0562,
-                            "`impl Trait` not allowed outside of {}",
-                            "function and method return types",
+                            "`impl Trait` only allowed in function and inherent method return types, not in {}",
+                            position
                         );
                         err.emit();
                         hir::TyKind::Err
@@ -1509,16 +1585,16 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         &mut self,
         decl: &FnDecl,
         mut in_band_ty_params: Option<(LocalDefId, &mut Vec<hir::GenericParam<'hir>>)>,
-        impl_trait_return_allow: bool,
+        kind: FnDeclKind,
         make_ret_async: Option<NodeId>,
     ) -> &'hir hir::FnDecl<'hir> {
         debug!(
             "lower_fn_decl(\
             fn_decl: {:?}, \
             in_band_ty_params: {:?}, \
-            impl_trait_return_allow: {}, \
+            kind: {:?}, \
             make_ret_async: {:?})",
-            decl, in_band_ty_params, impl_trait_return_allow, make_ret_async,
+            decl, in_band_ty_params, kind, make_ret_async,
         );
         let lt_mode = if make_ret_async.is_some() {
             // In `async fn`, argument-position elided lifetimes
@@ -1548,7 +1624,19 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                         ImplTraitContext::Universal(ibty, this.current_hir_id_owner),
                     )
                 } else {
-                    this.lower_ty_direct(&param.ty, ImplTraitContext::disallowed())
+                    this.lower_ty_direct(
+                        &param.ty,
+                        ImplTraitContext::Disallowed(match kind {
+                            FnDeclKind::Fn | FnDeclKind::Inherent => {
+                                unreachable!("fn should allow in-band lifetimes")
+                            }
+                            FnDeclKind::ExternFn => ImplTraitPosition::ExternFnParam,
+                            FnDeclKind::Closure => ImplTraitPosition::ClosureParam,
+                            FnDeclKind::Pointer => ImplTraitPosition::PointerParam,
+                            FnDeclKind::Trait => ImplTraitPosition::TraitParam,
+                            FnDeclKind::Impl => ImplTraitPosition::ImplParam,
+                        }),
+                    )
                 }
             }))
         });
@@ -1563,13 +1651,22 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             match decl.output {
                 FnRetTy::Ty(ref ty) => {
                     let context = match in_band_ty_params {
-                        Some((def_id, _)) if impl_trait_return_allow => {
+                        Some((def_id, _)) if kind.impl_trait_return_allowed() => {
                             ImplTraitContext::ReturnPositionOpaqueTy {
                                 fn_def_id: def_id,
                                 origin: hir::OpaqueTyOrigin::FnReturn(def_id),
                             }
                         }
-                        _ => ImplTraitContext::disallowed(),
+                        _ => ImplTraitContext::Disallowed(match kind {
+                            FnDeclKind::Fn | FnDeclKind::Inherent => {
+                                unreachable!("fn should allow in-band lifetimes")
+                            }
+                            FnDeclKind::ExternFn => ImplTraitPosition::ExternFnReturn,
+                            FnDeclKind::Closure => ImplTraitPosition::ClosureReturn,
+                            FnDeclKind::Pointer => ImplTraitPosition::PointerReturn,
+                            FnDeclKind::Trait => ImplTraitPosition::TraitReturn,
+                            FnDeclKind::Impl => ImplTraitPosition::ImplReturn,
+                        }),
                     };
                     hir::FnRetTy::Return(self.lower_ty(ty, context))
                 }
@@ -1927,7 +2024,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             GenericParamKind::Type { ref default, .. } => {
                 let kind = hir::GenericParamKind::Type {
                     default: default.as_ref().map(|x| {
-                        self.lower_ty(x, ImplTraitContext::Disallowed(ImplTraitPosition::Other))
+                        self.lower_ty(x, ImplTraitContext::Disallowed(ImplTraitPosition::Type))
                     }),
                     synthetic: false,
                 };
@@ -1935,9 +2032,9 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                 (hir::ParamName::Plain(self.lower_ident(param.ident)), kind)
             }
             GenericParamKind::Const { ref ty, kw_span: _, ref default } => {
-                let ty = self
-                    .with_anonymous_lifetime_mode(AnonymousLifetimeMode::ReportError, |this| {
-                        this.lower_ty(&ty, ImplTraitContext::disallowed())
+                let ty =
+                    self.with_anonymous_lifetime_mode(AnonymousLifetimeMode::ReportError, |this| {
+                        this.lower_ty(&ty, ImplTraitContext::Disallowed(ImplTraitPosition::Type))
                     });
                 let default = default.as_ref().map(|def| self.lower_anon_const(def));
                 (
@@ -2436,12 +2533,6 @@ fn lifetimes_from_impl_trait_bounds(
     }
 
     impl<'r, 'v> intravisit::Visitor<'v> for ImplTraitLifetimeCollector<'r> {
-        type Map = intravisit::ErasedMap<'v>;
-
-        fn nested_visit_map(&mut self) -> intravisit::NestedVisitorMap<Self::Map> {
-            intravisit::NestedVisitorMap::None
-        }
-
         fn visit_generic_args(&mut self, span: Span, parameters: &'v hir::GenericArgs<'v>) {
             // Don't collect elided lifetimes used inside of `Fn()` syntax.
             if parameters.parenthesized {

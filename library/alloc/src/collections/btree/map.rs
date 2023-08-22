@@ -16,7 +16,10 @@ use super::node::{self, marker, ForceResult::*, Handle, NodeRef, Root};
 use super::search::SearchResult::*;
 
 mod entry;
+
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use entry::{Entry, OccupiedEntry, OccupiedError, VacantEntry};
+
 use Entry::*;
 
 /// Minimum number of elements in a node that is not a root.
@@ -31,7 +34,7 @@ pub(super) const MIN_LEN: usize = node::MIN_LEN_AFTER_SPLIT;
 // An empty map is represented either by the absence of a root node or by a
 // root node that is an empty leaf.
 
-/// A map based on a [B-Tree].
+/// An ordered map based on a [B-Tree].
 ///
 /// B-Trees represent a fundamental compromise between cache-efficiency and actually minimizing
 /// the amount of work performed in a search. In theory, a binary search tree (BST) is the optimal
@@ -64,6 +67,10 @@ pub(super) const MIN_LEN: usize = node::MIN_LEN_AFTER_SPLIT;
 /// The behavior resulting from such a logic error is not specified (it could include panics,
 /// incorrect results, aborts, memory leaks, or non-termination) but will not be undefined
 /// behavior.
+///
+/// Iterators obtained from functions such as [`BTreeMap::iter`], [`BTreeMap::values`], or
+/// [`BTreeMap::keys`] produce their items in order by key, and take worst-case logarithmic and
+/// amortized constant time per item returned.
 ///
 /// [B-Tree]: https://en.wikipedia.org/wiki/B-tree
 /// [`Cell`]: core::cell::Cell
@@ -1091,10 +1098,8 @@ impl<K, V> BTreeMap<K, V> {
     /// ```
     /// use std::collections::BTreeMap;
     ///
-    /// let mut map: BTreeMap<&str, i32> = ["Alice", "Bob", "Carol", "Cheryl"]
-    ///     .iter()
-    ///     .map(|&s| (s, 0))
-    ///     .collect();
+    /// let mut map: BTreeMap<&str, i32> =
+    ///     [("Alice", 0), ("Bob", 0), ("Carol", 0), ("Cheryl", 0)].into();
     /// for (_, balance) in map.range_mut("B".."Cheryl") {
     ///     *balance += 100;
     /// }
@@ -1128,7 +1133,7 @@ impl<K, V> BTreeMap<K, V> {
     /// let mut count: BTreeMap<&str, usize> = BTreeMap::new();
     ///
     /// // count the number of occurrences of letters in the vec
-    /// for x in vec!["a", "b", "a", "c", "a", "b"] {
+    /// for x in ["a", "b", "a", "c", "a", "b"] {
     ///     *count.entry(x).or_insert(0) += 1;
     /// }
     ///
@@ -1228,8 +1233,8 @@ impl<K, V> BTreeMap<K, V> {
     /// let mut map: BTreeMap<i32, i32> = (0..8).map(|x| (x, x)).collect();
     /// let evens: BTreeMap<_, _> = map.drain_filter(|k, _v| k % 2 == 0).collect();
     /// let odds = map;
-    /// assert_eq!(evens.keys().copied().collect::<Vec<_>>(), vec![0, 2, 4, 6]);
-    /// assert_eq!(odds.keys().copied().collect::<Vec<_>>(), vec![1, 3, 5, 7]);
+    /// assert_eq!(evens.keys().copied().collect::<Vec<_>>(), [0, 2, 4, 6]);
+    /// assert_eq!(odds.keys().copied().collect::<Vec<_>>(), [1, 3, 5, 7]);
     /// ```
     #[unstable(feature = "btree_drain_filter", issue = "70530")]
     pub fn drain_filter<F>(&mut self, pred: F) -> DrainFilter<'_, K, V, F>
@@ -2047,6 +2052,8 @@ where
 
 #[stable(feature = "std_collections_from_array", since = "1.56.0")]
 impl<K: Ord, V, const N: usize> From<[(K, V); N]> for BTreeMap<K, V> {
+    /// Converts a `[(K, V); N]` into a `BTreeMap<(K, V)>`.
+    ///
     /// ```
     /// use std::collections::BTreeMap;
     ///

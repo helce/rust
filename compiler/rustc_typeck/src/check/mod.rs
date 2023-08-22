@@ -511,19 +511,15 @@ struct GeneratorTypes<'tcx> {
 fn get_owner_return_paths<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: LocalDefId,
-) -> Option<(hir::HirId, ReturnsVisitor<'tcx>)> {
+) -> Option<(LocalDefId, ReturnsVisitor<'tcx>)> {
     let hir_id = tcx.hir().local_def_id_to_hir_id(def_id);
-    let id = tcx.hir().get_parent_item(hir_id);
-    tcx.hir()
-        .find(id)
-        .map(|n| (id, n))
-        .and_then(|(hir_id, node)| node.body_id().map(|b| (hir_id, b)))
-        .map(|(hir_id, body_id)| {
-            let body = tcx.hir().body(body_id);
-            let mut visitor = ReturnsVisitor::default();
-            visitor.visit_body(body);
-            (hir_id, visitor)
-        })
+    let parent_id = tcx.hir().get_parent_item(hir_id);
+    tcx.hir().find_by_def_id(parent_id).and_then(|node| node.body_id()).map(|body_id| {
+        let body = tcx.hir().body(body_id);
+        let mut visitor = ReturnsVisitor::default();
+        visitor.visit_body(body);
+        (parent_id, visitor)
+    })
 }
 
 // Forbid defining intrinsics in Rust code,
@@ -566,7 +562,7 @@ fn maybe_check_static_with_link_section(tcx: TyCtxt<'_>, id: LocalDefId, span: S
 
 fn report_forbidden_specialization(
     tcx: TyCtxt<'_>,
-    impl_item: &hir::ImplItem<'_>,
+    impl_item: &hir::ImplItemRef,
     parent_impl: DefId,
 ) {
     let mut err = struct_span_err!(
@@ -598,12 +594,12 @@ fn report_forbidden_specialization(
 fn missing_items_err(
     tcx: TyCtxt<'_>,
     impl_span: Span,
-    missing_items: &[ty::AssocItem],
+    missing_items: &[&ty::AssocItem],
     full_impl_span: Span,
 ) {
     let missing_items_msg = missing_items
         .iter()
-        .map(|trait_item| trait_item.ident.to_string())
+        .map(|trait_item| trait_item.name.to_string())
         .collect::<Vec<_>>()
         .join("`, `");
 
@@ -632,12 +628,37 @@ fn missing_items_err(
         let msg = format!("implement the missing item: `{}`", snippet);
         let appl = Applicability::HasPlaceholders;
         if let Some(span) = tcx.hir().span_if_local(trait_item.def_id) {
-            err.span_label(span, format!("`{}` from trait", trait_item.ident));
+            err.span_label(span, format!("`{}` from trait", trait_item.name));
             err.tool_only_span_suggestion(sugg_sp, &msg, code, appl);
         } else {
             err.span_suggestion_hidden(sugg_sp, &msg, code, appl);
         }
     }
+    err.emit();
+}
+
+fn missing_items_must_implement_one_of_err(
+    tcx: TyCtxt<'_>,
+    impl_span: Span,
+    missing_items: &[Ident],
+    annotation_span: Option<Span>,
+) {
+    let missing_items_msg =
+        missing_items.iter().map(Ident::to_string).collect::<Vec<_>>().join("`, `");
+
+    let mut err = struct_span_err!(
+        tcx.sess,
+        impl_span,
+        E0046,
+        "not all trait items implemented, missing one of: `{}`",
+        missing_items_msg
+    );
+    err.span_label(impl_span, format!("missing one of `{}` in implementation", missing_items_msg));
+
+    if let Some(annotation_span) = annotation_span {
+        err.span_note(annotation_span, "required because of this annotation");
+    }
+
     err.emit();
 }
 
@@ -695,7 +716,11 @@ fn bounds_from_generic_predicates<'tcx>(
         // insert the associated types where they correspond, but for now let's be "lazy" and
         // propose this instead of the following valid resugaring:
         // `T: Trait, Trait::Assoc = K` → `T: Trait<Assoc = K>`
-        where_clauses.push(format!("{} = {}", tcx.def_path_str(p.projection_ty.item_def_id), p.ty));
+        where_clauses.push(format!(
+            "{} = {}",
+            tcx.def_path_str(p.projection_ty.item_def_id),
+            p.term,
+        ));
     }
     let where_clauses = if where_clauses.is_empty() {
         String::new()
@@ -780,16 +805,16 @@ fn suggestion_signature(assoc: &ty::AssocItem, tcx: TyCtxt<'_>) -> String {
             fn_sig_suggestion(
                 tcx,
                 tcx.fn_sig(assoc.def_id).skip_binder(),
-                assoc.ident,
+                assoc.ident(tcx),
                 tcx.predicates_of(assoc.def_id),
                 assoc,
             )
         }
-        ty::AssocKind::Type => format!("type {} = Type;", assoc.ident),
+        ty::AssocKind::Type => format!("type {} = Type;", assoc.name),
         ty::AssocKind::Const => {
             let ty = tcx.type_of(assoc.def_id);
             let val = expr::ty_kind_suggestion(ty).unwrap_or("value");
-            format!("const {}: {} = {};", assoc.ident, ty, val)
+            format!("const {}: {} = {};", assoc.name, ty, val)
         }
     }
 }

@@ -133,6 +133,7 @@
 #![stable(feature = "rust1", since = "1.0.0")]
 
 use core::any::Any;
+use core::async_iter::AsyncIterator;
 use core::borrow;
 use core::cmp::Ordering;
 use core::convert::{From, TryFrom};
@@ -149,7 +150,6 @@ use core::ops::{
 };
 use core::pin::Pin;
 use core::ptr::{self, Unique};
-use core::stream::Stream;
 use core::task::{Context, Poll};
 
 #[cfg(not(no_global_oom_handling))]
@@ -1170,8 +1170,7 @@ impl<T: ?Sized, A: Allocator> Box<T, A> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_box", issue = "92521")]
-unsafe impl<#[may_dangle] T: ?Sized, A: Allocator> const Drop for Box<T, A> {
+unsafe impl<#[may_dangle] T: ?Sized, A: Allocator> Drop for Box<T, A> {
     fn drop(&mut self) {
         // FIXME: Do nothing, drop is currently performed by compiler.
     }
@@ -1992,8 +1991,8 @@ where
     }
 }
 
-#[unstable(feature = "async_stream", issue = "79024")]
-impl<S: ?Sized + Stream + Unpin> Stream for Box<S> {
+#[unstable(feature = "async_iterator", issue = "79024")]
+impl<S: ?Sized + AsyncIterator + Unpin> AsyncIterator for Box<S> {
     type Item = S::Item;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

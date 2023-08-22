@@ -8,7 +8,7 @@ use rustc_data_structures::stable_map::FxHashMap;
 use rustc_errors::ErrorReported;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
-use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
+use rustc_hir::intravisit::{self, Visitor};
 use rustc_infer::infer::error_reporting::TypeAnnotationNeeded::E0282;
 use rustc_infer::infer::InferCtxt;
 use rustc_middle::hir::place::Place as HirPlace;
@@ -43,7 +43,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let item_def_id = self.tcx.hir().local_def_id(item_id);
 
         // This attribute causes us to dump some writeback information
-        // in the form of errors, which is uSymbol for unit tests.
+        // in the form of errors, which is used for unit tests.
         let rustc_dump_user_substs =
             self.tcx.has_attr(item_def_id.to_def_id(), sym::rustc_dump_user_substs);
 
@@ -130,7 +130,7 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
 
     fn write_ty_to_typeck_results(&mut self, hir_id: hir::HirId, ty: Ty<'tcx>) {
         debug!("write_ty_to_typeck_results({:?}, {:?})", hir_id, ty);
-        assert!(!ty.needs_infer() && !ty.has_placeholders() && !ty.has_free_regions(self.tcx()));
+        assert!(!ty.needs_infer() && !ty.has_placeholders() && !ty.has_free_regions());
         self.typeck_results.node_types_mut().insert(hir_id, ty);
     }
 
@@ -253,12 +253,6 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
 // traffic in node-ids or update typeck results in the type context etc.
 
 impl<'cx, 'tcx> Visitor<'tcx> for WritebackCx<'cx, 'tcx> {
-    type Map = intravisit::ErasedMap<'tcx>;
-
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::None
-    }
-
     fn visit_expr(&mut self, e: &'tcx hir::Expr<'tcx>) {
         self.fix_scalar_builtin_expr(e);
         self.fix_index_builtin_expr(e);
@@ -726,7 +720,7 @@ impl<'cx, 'tcx> Resolver<'cx, 'tcx> {
         }
     }
 
-    fn report_const_error(&self, c: &'tcx ty::Const<'tcx>) {
+    fn report_const_error(&self, c: ty::Const<'tcx>) {
         if !self.tcx.sess.has_errors() {
             self.infcx
                 .emit_inference_failure_err(
@@ -750,14 +744,14 @@ impl<'tcx> TypeFolder<'tcx> for EraseEarlyRegions<'tcx> {
         self.tcx
     }
     fn fold_ty(&mut self, ty: Ty<'tcx>) -> Ty<'tcx> {
-        if ty.has_type_flags(ty::TypeFlags::HAS_POTENTIAL_FREE_REGIONS) {
+        if ty.has_type_flags(ty::TypeFlags::HAS_FREE_REGIONS) {
             ty.super_fold_with(self)
         } else {
             ty
         }
     }
     fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
-        if let ty::ReLateBound(..) = r { r } else { self.tcx.lifetimes.re_erased }
+        if r.is_late_bound() { r } else { self.tcx.lifetimes.re_erased }
     }
 }
 
@@ -789,14 +783,14 @@ impl<'cx, 'tcx> TypeFolder<'tcx> for Resolver<'cx, 'tcx> {
         self.tcx.lifetimes.re_erased
     }
 
-    fn fold_const(&mut self, ct: &'tcx ty::Const<'tcx>) -> &'tcx ty::Const<'tcx> {
+    fn fold_const(&mut self, ct: ty::Const<'tcx>) -> ty::Const<'tcx> {
         match self.infcx.fully_resolve(ct) {
             Ok(ct) => self.infcx.tcx.erase_regions(ct),
             Err(_) => {
                 debug!("Resolver::fold_const: input const `{:?}` not fully resolvable", ct);
                 self.report_const_error(ct);
                 self.replaced_with_error = true;
-                self.tcx().const_error(ct.ty)
+                self.tcx().const_error(ct.ty())
             }
         }
     }

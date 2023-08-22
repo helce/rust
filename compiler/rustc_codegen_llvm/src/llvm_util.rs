@@ -2,8 +2,8 @@ use crate::back::write::create_informational_target_machine;
 use crate::{llvm, llvm_util};
 use libc::c_int;
 use libloading::Library;
-use rustc_codegen_ssa::target_features::supported_target_features;
-use rustc_data_structures::fx::FxHashSet;
+use rustc_codegen_ssa::target_features::{supported_target_features, tied_target_features};
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_fs_util::path_to_c_string;
 use rustc_middle::bug;
 use rustc_session::config::PrintRequest;
@@ -46,6 +46,12 @@ unsafe fn configure_llvm(sess: &Session) {
     let mut llvm_args = Vec::with_capacity(n_args + 1);
 
     llvm::LLVMRustInstallFatalErrorHandler();
+    // On Windows, an LLVM assertion will open an Abort/Retry/Ignore dialog
+    // box for the purpose of launching a debugger. However, on CI this will
+    // cause it to hang until it times out, which can take several hours.
+    if std::env::var_os("CI").is_some() {
+        llvm::LLVMRustDisableSystemDialogsOnCrash();
+    }
 
     fn llvm_arg_to_arg_name(full_arg: &str) -> &str {
         full_arg.trim().split(|c: char| c == '=' || c.is_whitespace()).next().unwrap_or("")
@@ -185,30 +191,58 @@ pub fn to_llvm_feature<'a>(sess: &Session, s: &'a str) -> Vec<&'a str> {
         ("aarch64", "frintts") => vec!["fptoint"],
         ("aarch64", "fcma") => vec!["complxnum"],
         ("aarch64", "pmuv3") => vec!["perfmon"],
+        ("aarch64", "paca") => vec!["pauth"],
+        ("aarch64", "pacg") => vec!["pauth"],
         (_, s) => vec![s],
     }
 }
 
+// Given a map from target_features to whether they are enabled or disabled,
+// ensure only valid combinations are allowed.
+pub fn check_tied_features(
+    sess: &Session,
+    features: &FxHashMap<&str, bool>,
+) -> Option<&'static [&'static str]> {
+    for tied in tied_target_features(sess) {
+        // Tied features must be set to the same value, or not set at all
+        let mut tied_iter = tied.iter();
+        let enabled = features.get(tied_iter.next().unwrap());
+
+        if tied_iter.any(|f| enabled != features.get(f)) {
+            return Some(tied);
+        }
+    }
+    None
+}
+
 pub fn target_features(sess: &Session) -> Vec<Symbol> {
     let target_machine = create_informational_target_machine(sess);
-    supported_target_features(sess)
-        .iter()
-        .filter_map(
-            |&(feature, gate)| {
+    let mut features: Vec<Symbol> =
+        supported_target_features(sess)
+            .iter()
+            .filter_map(|&(feature, gate)| {
                 if sess.is_nightly_build() || gate.is_none() { Some(feature) } else { None }
-            },
-        )
-        .filter(|feature| {
-            for llvm_feature in to_llvm_feature(sess, feature) {
-                let cstr = CString::new(llvm_feature).unwrap();
-                if unsafe { llvm::LLVMRustHasFeature(target_machine, cstr.as_ptr()) } {
-                    return true;
+            })
+            .filter(|feature| {
+                for llvm_feature in to_llvm_feature(sess, feature) {
+                    let cstr = CString::new(llvm_feature).unwrap();
+                    if unsafe { llvm::LLVMRustHasFeature(target_machine, cstr.as_ptr()) } {
+                        return true;
+                    }
                 }
-            }
-            false
-        })
-        .map(|feature| Symbol::intern(feature))
-        .collect()
+                false
+            })
+            .map(|feature| Symbol::intern(feature))
+            .collect();
+
+    // LLVM 14 changed the ABI for i128 arguments to __float/__fix builtins on Win64
+    // (see https://reviews.llvm.org/D110413). This unstable target feature is intended for use
+    // by compiler-builtins, to export the builtins with the expected, LLVM-version-dependent ABI.
+    // The target feature can be dropped once we no longer support older LLVM versions.
+    if sess.is_nightly_build() && get_version() >= (14, 0, 0) {
+        features.push(Symbol::intern("llvm14-builtins-abi"));
+    }
+    features
 }
 
 pub fn print_version() {
@@ -389,15 +423,19 @@ pub fn llvm_global_features(sess: &Session) -> Vec<String> {
         Some(_) | None => {}
     };
 
+    fn strip(s: &str) -> &str {
+        s.strip_prefix(&['+', '-']).unwrap_or(s)
+    }
+
     let filter = |s: &str| {
         if s.is_empty() {
             return vec![];
         }
-        let feature = if s.starts_with('+') || s.starts_with('-') {
-            &s[1..]
-        } else {
+        let feature = strip(s);
+        if feature == s {
             return vec![s.to_string()];
-        };
+        }
+
         // Rustc-specific feature requests like `+crt-static` or `-crt-static`
         // are not passed down to LLVM.
         if RUSTC_SPECIFIC_FEATURES.contains(&feature) {
@@ -414,8 +452,17 @@ pub fn llvm_global_features(sess: &Session) -> Vec<String> {
     features.extend(sess.target.features.split(',').flat_map(&filter));
 
     // -Ctarget-features
-    features.extend(sess.opts.cg.target_feature.split(',').flat_map(&filter));
-
+    let feats: Vec<&str> = sess.opts.cg.target_feature.split(',').collect();
+    // LLVM enables based on the last occurence of a feature
+    if let Some(f) =
+        check_tied_features(sess, &feats.iter().map(|f| (strip(f), !f.starts_with("-"))).collect())
+    {
+        sess.err(&format!(
+            "Target features {} must all be enabled or disabled together",
+            f.join(", ")
+        ));
+    }
+    features.extend(feats.iter().flat_map(|&f| filter(f)));
     features
 }
 
@@ -428,8 +475,9 @@ pub(crate) fn should_use_new_llvm_pass_manager(user_opt: &Option<bool>, target_a
     // The new pass manager is enabled by default for LLVM >= 13.
     // This matches Clang, which also enables it since Clang 13.
 
-    // FIXME: There are some perf issues with the new pass manager
-    // when targeting s390x, so it is temporarily disabled for that
-    // arch, see https://github.com/rust-lang/rust/issues/89609
-    user_opt.unwrap_or_else(|| target_arch != "s390x" && llvm_util::get_version() >= (13, 0, 0))
+    // There are some perf issues with the new pass manager when targeting
+    // s390x with LLVM 13, so enable the new pass manager only with LLVM 14.
+    // See https://github.com/rust-lang/rust/issues/89609.
+    let min_version = if target_arch == "s390x" { 14 } else { 13 };
+    user_opt.unwrap_or_else(|| llvm_util::get_version() >= (min_version, 0, 0))
 }

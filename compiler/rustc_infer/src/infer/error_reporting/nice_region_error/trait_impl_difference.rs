@@ -2,13 +2,14 @@
 
 use crate::infer::error_reporting::nice_region_error::NiceRegionError;
 use crate::infer::lexical_region_resolve::RegionResolutionError;
-use crate::infer::{SubregionOrigin, Subtype, ValuePairs};
+use crate::infer::{SubregionOrigin, Subtype};
 use crate::traits::ObligationCauseCode::CompareImplMethodObligation;
 use rustc_errors::ErrorReported;
 use rustc_hir as hir;
 use rustc_hir::def::Res;
 use rustc_hir::def_id::DefId;
 use rustc_hir::intravisit::Visitor;
+use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::print::RegionHighlightMode;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable, TypeVisitor};
 
@@ -33,16 +34,16 @@ impl<'a, 'tcx> NiceRegionError<'a, 'tcx> {
         {
             if let (&Subtype(ref sup_trace), &Subtype(ref sub_trace)) = (&sup_origin, &sub_origin) {
                 if let (
-                    ValuePairs::Types(sub_expected_found),
-                    ValuePairs::Types(sup_expected_found),
+                    sub_expected_found @ Some((sub_expected, sub_found)),
+                    sup_expected_found @ Some(_),
                     CompareImplMethodObligation { trait_item_def_id, .. },
-                ) = (&sub_trace.values, &sup_trace.values, sub_trace.cause.code())
+                ) = (&sub_trace.values.ty(), &sup_trace.values.ty(), sub_trace.cause.code())
                 {
                     if sup_expected_found == sub_expected_found {
                         self.emit_err(
                             var_origin.span(),
-                            sub_expected_found.expected,
-                            sub_expected_found.found,
+                            *sub_expected,
+                            *sub_found,
                             *trait_item_def_id,
                         );
                         return Some(ErrorReported);
@@ -81,25 +82,20 @@ impl<'a, 'tcx> NiceRegionError<'a, 'tcx> {
         // Mark all unnamed regions in the type with a number.
         // This diagnostic is called in response to lifetime errors, so be informative.
         struct HighlightBuilder<'tcx> {
-            highlight: RegionHighlightMode,
-            tcx: TyCtxt<'tcx>,
+            highlight: RegionHighlightMode<'tcx>,
             counter: usize,
         }
 
         impl<'tcx> HighlightBuilder<'tcx> {
-            fn build(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> RegionHighlightMode {
+            fn build(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> RegionHighlightMode<'tcx> {
                 let mut builder =
-                    HighlightBuilder { highlight: RegionHighlightMode::default(), counter: 1, tcx };
+                    HighlightBuilder { highlight: RegionHighlightMode::new(tcx), counter: 1 };
                 builder.visit_ty(ty);
                 builder.highlight
             }
         }
 
         impl<'tcx> ty::fold::TypeVisitor<'tcx> for HighlightBuilder<'tcx> {
-            fn tcx_for_anon_const_substs(&self) -> Option<TyCtxt<'tcx>> {
-                Some(self.tcx)
-            }
-
             fn visit_region(&mut self, r: ty::Region<'tcx>) -> ControlFlow<Self::BreakTy> {
                 if !r.has_name() && self.counter <= 3 {
                     self.highlight.highlighting_region(r, self.counter);
@@ -187,10 +183,10 @@ struct TypeParamSpanVisitor<'tcx> {
 }
 
 impl<'tcx> Visitor<'tcx> for TypeParamSpanVisitor<'tcx> {
-    type Map = rustc_middle::hir::map::Map<'tcx>;
+    type NestedFilter = nested_filter::OnlyBodies;
 
-    fn nested_visit_map(&mut self) -> hir::intravisit::NestedVisitorMap<Self::Map> {
-        hir::intravisit::NestedVisitorMap::OnlyBodies(self.tcx.hir())
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
     }
 
     fn visit_ty(&mut self, arg: &'tcx hir::Ty<'tcx>) {
@@ -207,7 +203,8 @@ impl<'tcx> Visitor<'tcx> for TypeParamSpanVisitor<'tcx> {
                         .map(|res| {
                             matches!(
                                 res,
-                                Res::SelfTy(_, _) | Res::Def(hir::def::DefKind::TyParam, _)
+                                Res::SelfTy { trait_: _, alias_to: _ }
+                                    | Res::Def(hir::def::DefKind::TyParam, _)
                             )
                         })
                         .unwrap_or(false) =>

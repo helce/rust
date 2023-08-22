@@ -90,6 +90,7 @@ mod windows_uwp_msvc_base;
 pub enum LinkerFlavor {
     Em,
     Gcc,
+    L4Bender,
     Ld,
     Msvc,
     Lld(LldFlavor),
@@ -160,6 +161,7 @@ macro_rules! flavor_mappings {
 flavor_mappings! {
     ((LinkerFlavor::Em), "em"),
     ((LinkerFlavor::Gcc), "gcc"),
+    ((LinkerFlavor::L4Bender), "l4-bender"),
     ((LinkerFlavor::Ld), "ld"),
     ((LinkerFlavor::Msvc), "msvc"),
     ((LinkerFlavor::PtxLinker), "ptx-linker"),
@@ -574,15 +576,15 @@ impl ToJson for StackProbeType {
     fn to_json(&self) -> Json {
         Json::Object(match self {
             StackProbeType::None => {
-                vec![(String::from("kind"), "none".to_json())].into_iter().collect()
+                [(String::from("kind"), "none".to_json())].into_iter().collect()
             }
             StackProbeType::Inline => {
-                vec![(String::from("kind"), "inline".to_json())].into_iter().collect()
+                [(String::from("kind"), "inline".to_json())].into_iter().collect()
             }
             StackProbeType::Call => {
-                vec![(String::from("kind"), "call".to_json())].into_iter().collect()
+                [(String::from("kind"), "call".to_json())].into_iter().collect()
             }
-            StackProbeType::InlineOrCall { min_llvm_version_for_inline } => vec![
+            StackProbeType::InlineOrCall { min_llvm_version_for_inline } => [
                 (String::from("kind"), "inline-or-call".to_json()),
                 (
                     String::from("min-llvm-version-for-inline"),
@@ -604,6 +606,7 @@ bitflags::bitflags! {
         const THREAD  = 1 << 3;
         const HWADDRESS = 1 << 4;
         const CFI     = 1 << 5;
+        const MEMTAG  = 1 << 6;
     }
 }
 
@@ -617,6 +620,7 @@ impl SanitizerSet {
             SanitizerSet::CFI => "cfi",
             SanitizerSet::LEAK => "leak",
             SanitizerSet::MEMORY => "memory",
+            SanitizerSet::MEMTAG => "memtag",
             SanitizerSet::THREAD => "thread",
             SanitizerSet::HWADDRESS => "hwaddress",
             _ => return None,
@@ -650,6 +654,7 @@ impl IntoIterator for SanitizerSet {
             SanitizerSet::CFI,
             SanitizerSet::LEAK,
             SanitizerSet::MEMORY,
+            SanitizerSet::MEMTAG,
             SanitizerSet::THREAD,
             SanitizerSet::HWADDRESS,
         ]
@@ -962,6 +967,7 @@ supported_targets! {
     ("aarch64-unknown-hermit", aarch64_unknown_hermit),
     ("x86_64-unknown-hermit", x86_64_unknown_hermit),
 
+    ("aarch64-unknown-none-hermitkernel", aarch64_unknown_none_hermitkernel),
     ("x86_64-unknown-none-hermitkernel", x86_64_unknown_none_hermitkernel),
 
     ("riscv32i-unknown-none-elf", riscv32i_unknown_none_elf),
@@ -1011,6 +1017,7 @@ supported_targets! {
 
     ("armv6k-nintendo-3ds", armv6k_nintendo_3ds),
 
+    ("armv7-unknown-linux-uclibceabi", armv7_unknown_linux_uclibceabi),
     ("armv7-unknown-linux-uclibceabihf", armv7_unknown_linux_uclibceabihf),
 
     ("e2k64-unknown-linux-gnu", e2k64_unknown_linux_gnu),
@@ -1021,6 +1028,8 @@ supported_targets! {
     ("e2kv6-unknown-linux-gnu", e2kv6_unknown_linux_gnu),
 
     ("x86_64-unknown-none", x86_64_unknown_none),
+
+    ("mips64-openwrt-linux-musl", mips64_openwrt_linux_musl),
 }
 
 /// Warnings encountered when parsing the target `json`.
@@ -1542,11 +1551,13 @@ impl Default for TargetOptions {
 impl Deref for Target {
     type Target = TargetOptions;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.options
     }
 }
 impl DerefMut for Target {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.options
     }
@@ -1561,15 +1572,15 @@ impl Target {
                 Abi::Stdcall { unwind }
             }
             Abi::System { unwind } => Abi::C { unwind },
-            Abi::EfiApi if self.arch == "x86_64" => Abi::Win64,
+            Abi::EfiApi if self.arch == "x86_64" => Abi::Win64 { unwind: false },
             Abi::EfiApi => Abi::C { unwind: false },
 
             // See commentary in `is_abi_supported`.
             Abi::Stdcall { .. } | Abi::Thiscall { .. } if self.arch == "x86" => abi,
             Abi::Stdcall { unwind } | Abi::Thiscall { unwind } => Abi::C { unwind },
-            Abi::Fastcall if self.arch == "x86" => abi,
-            Abi::Vectorcall if ["x86", "x86_64"].contains(&&self.arch[..]) => abi,
-            Abi::Fastcall | Abi::Vectorcall => Abi::C { unwind: false },
+            Abi::Fastcall { .. } if self.arch == "x86" => abi,
+            Abi::Vectorcall { .. } if ["x86", "x86_64"].contains(&&self.arch[..]) => abi,
+            Abi::Fastcall { unwind } | Abi::Vectorcall { unwind } => Abi::C { unwind },
 
             abi => abi,
         }
@@ -1586,12 +1597,12 @@ impl Target {
             | RustCall
             | PlatformIntrinsic
             | Unadjusted
-            | Cdecl
+            | Cdecl { .. }
             | EfiApi => true,
             X86Interrupt => ["x86", "x86_64"].contains(&&self.arch[..]),
-            Aapcs => "arm" == self.arch,
+            Aapcs { .. } => "arm" == self.arch,
             CCmseNonSecureCall => ["arm", "aarch64"].contains(&&self.arch[..]),
-            Win64 | SysV64 => self.arch == "x86_64",
+            Win64 { .. } | SysV64 { .. } => self.arch == "x86_64",
             PtxKernel => self.arch == "nvptx64",
             Msp430Interrupt => self.arch == "msp430",
             AmdGpuKernel => self.arch == "amdgcn",
@@ -1628,13 +1639,13 @@ impl Target {
             // > convention is used.
             //
             // -- https://docs.microsoft.com/en-us/cpp/cpp/argument-passing-and-naming-conventions
-            Stdcall { .. } | Fastcall | Vectorcall if self.is_like_windows => true,
+            Stdcall { .. } | Fastcall { .. } | Vectorcall { .. } if self.is_like_windows => true,
             // Outside of Windows we want to only support these calling conventions for the
             // architectures for which these calling conventions are actually well defined.
-            Stdcall { .. } | Fastcall if self.arch == "x86" => true,
-            Vectorcall if ["x86", "x86_64"].contains(&&self.arch[..]) => true,
+            Stdcall { .. } | Fastcall { .. } if self.arch == "x86" => true,
+            Vectorcall { .. } if ["x86", "x86_64"].contains(&&self.arch[..]) => true,
             // Return a `None` for other cases so that we know to emit a future compat lint.
-            Stdcall { .. } | Fastcall | Vectorcall => return None,
+            Stdcall { .. } | Fastcall { .. } | Vectorcall { .. } => return None,
         })
     }
 
@@ -1882,6 +1893,7 @@ impl Target {
                                 Some("cfi") => SanitizerSet::CFI,
                                 Some("leak") => SanitizerSet::LEAK,
                                 Some("memory") => SanitizerSet::MEMORY,
+                                Some("memtag") => SanitizerSet::MEMTAG,
                                 Some("thread") => SanitizerSet::THREAD,
                                 Some("hwaddress") => SanitizerSet::HWADDRESS,
                                 Some(s) => return Err(format!("unknown sanitizer {}", s)),
@@ -2150,8 +2162,8 @@ impl Target {
         use std::fs;
 
         fn load_file(path: &Path) -> Result<(Target, TargetWarnings), String> {
-            let contents = fs::read(path).map_err(|e| e.to_string())?;
-            let obj = json::from_reader(&mut &contents[..]).map_err(|e| e.to_string())?;
+            let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
+            let obj = json::from_str(&contents).map_err(|e| e.to_string())?;
             Target::from_json(obj)
         }
 

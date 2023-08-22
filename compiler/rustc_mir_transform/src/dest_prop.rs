@@ -222,9 +222,11 @@ impl From<Local> for UnifyLocal {
 
 impl UnifyKey for UnifyLocal {
     type Value = ();
+    #[inline]
     fn index(&self) -> u32 {
         self.0.as_u32()
     }
+    #[inline]
     fn from_index(u: u32) -> Self {
         Self(Local::from_u32(u))
     }
@@ -533,25 +535,6 @@ impl<'a> Conflicts<'a> {
             // conflicts here as that would make this optimization useless. When we optimize, we
             // eliminate the resulting self-assignments automatically.
             StatementKind::Assign(_) => {}
-
-            StatementKind::LlvmInlineAsm(asm) => {
-                // Inputs and outputs must not overlap.
-                for (_, input) in &*asm.inputs {
-                    if let Some(in_place) = input.place() {
-                        if !in_place.is_indirect() {
-                            for out_place in &*asm.outputs {
-                                if !out_place.is_indirect() && !in_place.is_indirect() {
-                                    self.record_local_conflict(
-                                        in_place.local,
-                                        out_place.local,
-                                        "aliasing llvm_asm! operands",
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
 
             StatementKind::SetDiscriminant { .. }
             | StatementKind::StorageLive(..)

@@ -10,7 +10,7 @@ use rustc_hir::lang_items::LangItem;
 use rustc_index::bit_set::BitSet;
 use rustc_index::vec::{Idx, IndexVec};
 use rustc_session::{config::OptLevel, DataTypeKind, FieldInfo, SizeKind, VariantInfo};
-use rustc_span::symbol::{Ident, Symbol};
+use rustc_span::symbol::Symbol;
 use rustc_span::{Span, DUMMY_SP};
 use rustc_target::abi::call::{
     ArgAbi, ArgAttribute, ArgAttributes, ArgExtension, Conv, FnAbi, PassMode, Reg, RegKind,
@@ -1310,7 +1310,10 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
                     },
                 };
                 let mut abi = Abi::Aggregate { sized: true };
-                if tag.value.size(dl) == size {
+
+                // Without latter check aligned enums with custom discriminant values
+                // Would result in ICE see the issue #92464 for more info
+                if tag.value.size(dl) == size || variants.iter().all(|layout| layout.is_empty()) {
                     abi = Abi::Scalar(tag);
                 } else {
                     // Try to use a ScalarPair for all tagged enums.
@@ -1769,9 +1772,7 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
         // Ignore layouts that are done with non-empty environments or
         // non-monomorphic layouts, as the user only wants to see the stuff
         // resulting from the final codegen session.
-        if layout.ty.definitely_has_param_types_or_consts(self.tcx)
-            || !self.param_env.caller_bounds().is_empty()
-        {
+        if layout.ty.has_param_types_or_consts() || !self.param_env.caller_bounds().is_empty() {
             return;
         }
 
@@ -1810,7 +1811,7 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
         let adt_kind = adt_def.adt_kind();
         let adt_packed = adt_def.repr.pack.is_some();
 
-        let build_variant_info = |n: Option<Ident>, flds: &[Symbol], layout: TyAndLayout<'tcx>| {
+        let build_variant_info = |n: Option<Symbol>, flds: &[Symbol], layout: TyAndLayout<'tcx>| {
             let mut min_size = Size::ZERO;
             let field_info: Vec<_> = flds
                 .iter()
@@ -1845,15 +1846,15 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
                 if !adt_def.variants.is_empty() && layout.fields != FieldsShape::Primitive {
                     debug!(
                         "print-type-size `{:#?}` variant {}",
-                        layout, adt_def.variants[index].ident
+                        layout, adt_def.variants[index].name
                     );
                     let variant_def = &adt_def.variants[index];
-                    let fields: Vec<_> = variant_def.fields.iter().map(|f| f.ident.name).collect();
+                    let fields: Vec<_> = variant_def.fields.iter().map(|f| f.name).collect();
                     record(
                         adt_kind.into(),
                         adt_packed,
                         None,
-                        vec![build_variant_info(Some(variant_def.ident), &fields, layout)],
+                        vec![build_variant_info(Some(variant_def.name), &fields, layout)],
                     );
                 } else {
                     // (This case arises for *empty* enums; so give it
@@ -1872,10 +1873,9 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
                     .variants
                     .iter_enumerated()
                     .map(|(i, variant_def)| {
-                        let fields: Vec<_> =
-                            variant_def.fields.iter().map(|f| f.ident.name).collect();
+                        let fields: Vec<_> = variant_def.fields.iter().map(|f| f.name).collect();
                         build_variant_info(
-                            Some(variant_def.ident),
+                            Some(variant_def.name),
                             &fields,
                             layout.for_variant(self, i),
                         )
@@ -1937,7 +1937,7 @@ impl<'tcx> SizeSkeleton<'tcx> {
                 let tail = tcx.struct_tail_erasing_lifetimes(pointee, param_env);
                 match tail.kind() {
                     ty::Param(_) | ty::Projection(_) => {
-                        debug_assert!(tail.definitely_has_param_types_or_consts(tcx));
+                        debug_assert!(tail.has_param_types_or_consts());
                         Ok(SizeSkeleton::Pointer { non_zero, tail: tcx.erase_regions(tail) })
                     }
                     _ => bug!(
@@ -2776,17 +2776,20 @@ pub fn fn_can_unwind<'tcx>(
     // [rfc]: https://github.com/rust-lang/rfcs/blob/master/text/2945-c-unwind-abi.md
     use SpecAbi::*;
     match abi {
-        C { unwind } | Stdcall { unwind } | System { unwind } | Thiscall { unwind } => {
+        C { unwind }
+        | System { unwind }
+        | Cdecl { unwind }
+        | Stdcall { unwind }
+        | Fastcall { unwind }
+        | Vectorcall { unwind }
+        | Thiscall { unwind }
+        | Aapcs { unwind }
+        | Win64 { unwind }
+        | SysV64 { unwind } => {
             unwind
                 || (!tcx.features().c_unwind && tcx.sess.panic_strategy() == PanicStrategy::Unwind)
         }
-        Cdecl
-        | Fastcall
-        | Vectorcall
-        | Aapcs
-        | Win64
-        | SysV64
-        | PtxKernel
+        PtxKernel
         | Msp430Interrupt
         | X86Interrupt
         | AmdGpuKernel
@@ -2813,14 +2816,14 @@ pub fn conv_from_spec_abi(tcx: TyCtxt<'_>, abi: SpecAbi) -> Conv {
         EfiApi => bug!("eficall abi should be selected elsewhere"),
 
         Stdcall { .. } => Conv::X86Stdcall,
-        Fastcall => Conv::X86Fastcall,
-        Vectorcall => Conv::X86VectorCall,
+        Fastcall { .. } => Conv::X86Fastcall,
+        Vectorcall { .. } => Conv::X86VectorCall,
         Thiscall { .. } => Conv::X86ThisCall,
         C { .. } => Conv::C,
         Unadjusted => Conv::C,
-        Win64 => Conv::X86_64Win64,
-        SysV64 => Conv::X86_64SysV,
-        Aapcs => Conv::ArmAapcs,
+        Win64 { .. } => Conv::X86_64Win64,
+        SysV64 { .. } => Conv::X86_64SysV,
+        Aapcs { .. } => Conv::ArmAapcs,
         CCmseNonSecureCall => Conv::CCmseNonSecureCall,
         PtxKernel => Conv::PtxKernel,
         Msp430Interrupt => Conv::Msp430Intr,
@@ -2831,12 +2834,12 @@ pub fn conv_from_spec_abi(tcx: TyCtxt<'_>, abi: SpecAbi) -> Conv {
         Wasm => Conv::C,
 
         // These API constants ought to be more specific...
-        Cdecl => Conv::C,
+        Cdecl { .. } => Conv::C,
     }
 }
 
 /// Error produced by attempting to compute or adjust a `FnAbi`.
-#[derive(Clone, Debug, HashStable)]
+#[derive(Copy, Clone, Debug, HashStable)]
 pub enum FnAbiError<'tcx> {
     /// Error produced by a `layout_of` call, while computing `FnAbi` initially.
     Layout(LayoutError<'tcx>),
@@ -3048,9 +3051,10 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
                                       layout: TyAndLayout<'tcx>,
                                       offset: Size,
                                       is_return: bool| {
-            // Booleans are always an i1 that needs to be zero-extended.
+            // Booleans are always a noundef i1 that needs to be zero-extended.
             if scalar.is_bool() {
                 attrs.ext(ArgExtension::Zext);
+                attrs.set(ArgAttribute::NoUndef);
                 return;
             }
 
@@ -3074,6 +3078,11 @@ impl<'tcx> LayoutCx<'tcx, TyCtxt<'tcx>> {
                         PointerKind::UniqueOwned => Size::ZERO,
                         _ => pointee.size,
                     };
+
+                    // `Box`, `&T`, and `&mut T` cannot be undef.
+                    // Note that this only applies to the value of the pointer itself;
+                    // this attribute doesn't make it UB for the pointed-to data to be undef.
+                    attrs.set(ArgAttribute::NoUndef);
 
                     // `Box` pointer parameters never alias because ownership is transferred
                     // `&mut` pointer parameters never alias other parameters,

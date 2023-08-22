@@ -4,6 +4,7 @@ use crate::ty::util::{Discr, IntTypeExt};
 use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::stable_hasher::HashingControls;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_errors::ErrorReported;
 use rustc_hir as hir;
@@ -25,7 +26,7 @@ use super::{
     Destructor, FieldDef, GenericPredicates, ReprOptions, Ty, TyCtxt, VariantDef, VariantDiscr,
 };
 
-#[derive(Clone, HashStable, Debug)]
+#[derive(Copy, Clone, HashStable, Debug)]
 pub struct AdtSizedConstraint<'tcx>(pub &'tcx [Ty<'tcx>]);
 
 bitflags! {
@@ -136,12 +137,13 @@ impl Hash for AdtDef {
 impl<'a> HashStable<StableHashingContext<'a>> for AdtDef {
     fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
         thread_local! {
-            static CACHE: RefCell<FxHashMap<usize, Fingerprint>> = Default::default();
+            static CACHE: RefCell<FxHashMap<(usize, HashingControls), Fingerprint>> = Default::default();
         }
 
         let hash: Fingerprint = CACHE.with(|cache| {
             let addr = self as *const AdtDef as usize;
-            *cache.borrow_mut().entry(addr).or_insert_with(|| {
+            let hashing_controls = hcx.hashing_controls();
+            *cache.borrow_mut().entry((addr, hashing_controls)).or_insert_with(|| {
                 let ty::AdtDef { did, ref variants, ref flags, ref repr } = *self;
 
                 let mut hasher = StableHasher::new();
@@ -393,7 +395,7 @@ impl<'tcx> AdtDef {
             | Res::Def(DefKind::Union, _)
             | Res::Def(DefKind::TyAlias, _)
             | Res::Def(DefKind::AssocTy, _)
-            | Res::SelfTy(..)
+            | Res::SelfTy { .. }
             | Res::SelfCtor(..) => self.non_enum_variant(),
             _ => bug!("unexpected res {:?} in variant_of_res", res),
         }

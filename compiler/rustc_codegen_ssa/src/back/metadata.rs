@@ -95,7 +95,7 @@ fn search_for_metadata<'a>(
         .map_err(|e| format!("failed to read {} section in '{}': {}", section, path.display(), e))
 }
 
-fn create_object_file(sess: &Session) -> Option<write::Object> {
+fn create_object_file(sess: &Session) -> Option<write::Object<'static>> {
     let endianness = match sess.target.options.endian {
         Endian::Little => Endianness::Little,
         Endian::Big => Endianness::Big,
@@ -136,12 +136,24 @@ fn create_object_file(sess: &Session) -> Option<write::Object> {
         Architecture::Mips => {
             // copied from `mipsel-linux-gnu-gcc foo.c -c` and
             // inspecting the resulting `e_flags` field.
-            let e_flags = elf::EF_MIPS_ARCH_32R2 | elf::EF_MIPS_CPIC | elf::EF_MIPS_PIC;
+            let e_flags = elf::EF_MIPS_CPIC
+                | elf::EF_MIPS_PIC
+                | if sess.target.options.cpu.contains("r6") {
+                    elf::EF_MIPS_ARCH_32R6 | elf::EF_MIPS_NAN2008
+                } else {
+                    elf::EF_MIPS_ARCH_32R2
+                };
             file.flags = FileFlags::Elf { e_flags };
         }
         Architecture::Mips64 => {
             // copied from `mips64el-linux-gnuabi64-gcc foo.c -c`
-            let e_flags = elf::EF_MIPS_ARCH_64R2 | elf::EF_MIPS_CPIC | elf::EF_MIPS_PIC;
+            let e_flags = elf::EF_MIPS_CPIC
+                | elf::EF_MIPS_PIC
+                | if sess.target.options.cpu.contains("r6") {
+                    elf::EF_MIPS_ARCH_64R6 | elf::EF_MIPS_NAN2008
+                } else {
+                    elf::EF_MIPS_ARCH_64R2
+                };
             file.flags = FileFlags::Elf { e_flags };
         }
         Architecture::Riscv64 if sess.target.options.features.contains("+d") => {
@@ -194,9 +206,7 @@ fn create_object_file(sess: &Session) -> Option<write::Object> {
 //   `SHF_EXCLUDE` flag we can set on sections in an object file to get
 //   automatically removed from the final output.
 pub fn create_rmeta_file(sess: &Session, metadata: &[u8]) -> Vec<u8> {
-    let mut file = if let Some(file) = create_object_file(sess) {
-        file
-    } else {
+    let Some(mut file) = create_object_file(sess) else {
         // This is used to handle all "other" targets. This includes targets
         // in two categories:
         //
@@ -256,9 +266,7 @@ pub fn create_compressed_metadata_file(
 ) -> Vec<u8> {
     let mut compressed = rustc_metadata::METADATA_HEADER.to_vec();
     FrameEncoder::new(&mut compressed).write_all(metadata.raw_data()).unwrap();
-    let mut file = if let Some(file) = create_object_file(sess) {
-        file
-    } else {
+    let Some(mut file) = create_object_file(sess) else {
         return compressed.to_vec();
     };
     let section = file.add_section(

@@ -8,12 +8,10 @@ use rustc_hir::{
     self as hir,
     def::{CtorOf, DefKind, Res},
     def_id::LocalDefId,
-    intravisit::{walk_inf, walk_ty, NestedVisitorMap, Visitor},
+    intravisit::{walk_inf, walk_ty, Visitor},
     Expr, ExprKind, FnRetTy, FnSig, GenericArg, HirId, Impl, ImplItemKind, Item, ItemKind, Path, QPath, TyKind,
 };
-use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_middle::hir::map::Map;
-use rustc_middle::ty::AssocKind;
+use rustc_lint::{LateContext, LateLintPass};
 use rustc_semver::RustcVersion;
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::Span;
@@ -143,10 +141,10 @@ impl<'tcx> LateLintPass<'tcx> for UseSelf {
                 // trait, not in the impl of the trait.
                 let trait_method = cx
                     .tcx
-                    .associated_items(impl_trait_ref.def_id)
-                    .find_by_name_and_kind(cx.tcx, impl_item.ident, AssocKind::Fn, impl_trait_ref.def_id)
+                    .associated_item(impl_item.def_id)
+                    .trait_item_def_id
                     .expect("impl method matches a trait method");
-                let trait_method_sig = cx.tcx.fn_sig(trait_method.def_id);
+                let trait_method_sig = cx.tcx.fn_sig(trait_method);
                 let trait_method_sig = cx.tcx.erase_late_bound_regions(trait_method_sig);
 
                 // `impl_inputs_outputs` is an iterator over the types (`hir::Ty`) declared in the
@@ -171,7 +169,7 @@ impl<'tcx> LateLintPass<'tcx> for UseSelf {
                 //
                 // See also https://github.com/rust-lang/rust-clippy/issues/2894.
                 for (impl_hir_ty, trait_sem_ty) in impl_inputs_outputs.zip(trait_method_sig.inputs_and_output) {
-                    if trait_sem_ty.walk(cx.tcx).any(|inner| inner == self_ty.into()) {
+                    if trait_sem_ty.walk().any(|inner| inner == self_ty.into()) {
                         let mut visitor = SkipTyCollector::default();
                         visitor.visit_ty(impl_hir_ty);
                         types_to_skip.extend(visitor.types_to_skip);
@@ -206,7 +204,7 @@ impl<'tcx> LateLintPass<'tcx> for UseSelf {
                 ref types_to_skip,
             }) = self.stack.last();
             if let TyKind::Path(QPath::Resolved(_, path)) = hir_ty.kind;
-            if !matches!(path.res, Res::SelfTy(..) | Res::Def(DefKind::TyParam, _));
+            if !matches!(path.res, Res::SelfTy { .. } | Res::Def(DefKind::TyParam, _));
             if !types_to_skip.contains(&hir_ty.hir_id);
             let ty = if in_body > 0 {
                 cx.typeck_results().node_type(hir_ty.hir_id)
@@ -233,7 +231,7 @@ impl<'tcx> LateLintPass<'tcx> for UseSelf {
         }
         match expr.kind {
             ExprKind::Struct(QPath::Resolved(_, path), ..) => match path.res {
-                Res::SelfTy(..) => (),
+                Res::SelfTy { .. } => (),
                 Res::Def(DefKind::Variant, _) => lint_path_to_variant(cx, path),
                 _ => span_lint(cx, path.span),
             },
@@ -263,8 +261,6 @@ struct SkipTyCollector {
 }
 
 impl<'tcx> Visitor<'tcx> for SkipTyCollector {
-    type Map = Map<'tcx>;
-
     fn visit_infer(&mut self, inf: &hir::InferArg) {
         self.types_to_skip.push(inf.hir_id);
 
@@ -274,10 +270,6 @@ impl<'tcx> Visitor<'tcx> for SkipTyCollector {
         self.types_to_skip.push(hir_ty.hir_id);
 
         walk_ty(self, hir_ty);
-    }
-
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::None
     }
 }
 

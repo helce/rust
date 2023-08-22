@@ -76,10 +76,8 @@ impl<'tcx> MirPass<'tcx> for ConstProp {
         }
 
         let def_id = body.source.def_id().expect_local();
-        let hir_id = tcx.hir().local_def_id_to_hir_id(def_id);
-
-        let is_fn_like = tcx.hir().get(hir_id).fn_kind().is_some();
-        let is_assoc_const = tcx.def_kind(def_id.to_def_id()) == DefKind::AssocConst;
+        let is_fn_like = tcx.hir().get_by_def_id(def_id).fn_kind().is_some();
+        let is_assoc_const = tcx.def_kind(def_id) == DefKind::AssocConst;
 
         // Only run const prop on functions, methods, closures and associated constants
         if !is_fn_like && !is_assoc_const {
@@ -126,7 +124,7 @@ impl<'tcx> MirPass<'tcx> for ConstProp {
             .predicates_of(def_id.to_def_id())
             .predicates
             .iter()
-            .filter_map(|(p, _)| if p.is_global(tcx) { Some(*p) } else { None });
+            .filter_map(|(p, _)| if p.is_global() { Some(*p) } else { None });
         if traits::impossible_predicates(
             tcx,
             traits::elaborate_predicates(tcx, predicates).map(|o| o.predicate).collect(),
@@ -138,7 +136,6 @@ impl<'tcx> MirPass<'tcx> for ConstProp {
         trace!("ConstProp starting for {:?}", def_id);
 
         let dummy_body = &Body::new(
-            tcx,
             body.source,
             body.basic_blocks().clone(),
             body.source_scopes.clone(),
@@ -148,6 +145,7 @@ impl<'tcx> MirPass<'tcx> for ConstProp {
             Default::default(),
             body.span,
             body.generator_kind(),
+            body.tainted_by_errors,
         );
 
         // FIXME(oli-obk, eddyb) Optimize locals (or even local paths) to hold
@@ -475,7 +473,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
     /// Returns the value, if any, of evaluating `c`.
     fn eval_constant(&mut self, c: &Constant<'tcx>, source_info: SourceInfo) -> Option<OpTy<'tcx>> {
         // FIXME we need to revisit this for #67176
-        if c.definitely_needs_subst(self.tcx) {
+        if c.needs_subst() {
             return None;
         }
 
@@ -486,18 +484,18 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                 let err = ConstEvalErr::new(&self.ecx, error, Some(c.span));
                 if let Some(lint_root) = self.lint_root(source_info) {
                     let lint_only = match c.literal {
-                        ConstantKind::Ty(ct) => match ct.val {
+                        ConstantKind::Ty(ct) => match ct.val() {
                             // Promoteds must lint and not error as the user didn't ask for them
                             ConstKind::Unevaluated(ty::Unevaluated {
                                 def: _,
-                                substs_: _,
+                                substs: _,
                                 promoted: Some(_),
                             }) => true,
                             // Out of backwards compatibility we cannot report hard errors in unused
                             // generic functions using associated constants of the generic parameters.
-                            _ => c.literal.definitely_needs_subst(*tcx),
+                            _ => c.literal.needs_subst(),
                         },
-                        ConstantKind::Val(_, ty) => ty.definitely_needs_subst(*tcx),
+                        ConstantKind::Val(_, ty) => ty.needs_subst(),
                     };
                     if lint_only {
                         // Out of backwards compatibility we cannot report hard errors in unused
@@ -728,7 +726,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
         }
 
         // FIXME we need to revisit this for #67176
-        if rvalue.definitely_needs_subst(self.tcx) {
+        if rvalue.needs_subst() {
             return None;
         }
 
@@ -803,7 +801,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
     ) {
         if let Rvalue::Use(Operand::Constant(c)) = rval {
             match c.literal {
-                ConstantKind::Ty(c) if matches!(c.val, ConstKind::Unevaluated(..)) => {}
+                ConstantKind::Ty(c) if matches!(c.val(), ConstKind::Unevaluated(..)) => {}
                 _ => {
                     trace!("skipping replace of Rvalue::Use({:?} because it is already a const", c);
                     return;
@@ -843,7 +841,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                     // Found a value represented as a pair. For now only do const-prop if the type
                     // of `rvalue` is also a tuple with two scalars.
                     // FIXME: enable the general case stated above ^.
-                    let ty = &value.layout.ty;
+                    let ty = value.layout.ty;
                     // Only do it for tuples
                     if let ty::Tuple(substs) = ty.kind() {
                         // Only do it if tuple is also a pair with two scalars
@@ -877,7 +875,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                                     literal: self
                                         .ecx
                                         .tcx
-                                        .mk_const(ty::Const {
+                                        .mk_const(ty::ConstS {
                                             ty,
                                             val: ty::ConstKind::Value(ConstValue::ByRef {
                                                 alloc,
@@ -1035,8 +1033,7 @@ impl Visitor<'_> for CanConstProp {
 
             // These could be propagated with a smarter analysis or just some careful thinking about
             // whether they'd be fine right now.
-            MutatingUse(MutatingUseContext::LlvmAsmOutput)
-            | MutatingUse(MutatingUseContext::Yield)
+            MutatingUse(MutatingUseContext::Yield)
             | MutatingUse(MutatingUseContext::Drop)
             | MutatingUse(MutatingUseContext::Retag)
             // These can't ever be propagated under any scheme, as we can't reason about indirect

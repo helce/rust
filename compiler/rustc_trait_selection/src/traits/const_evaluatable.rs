@@ -8,6 +8,7 @@
 //! In this case we try to build an abstract representation of this constant using
 //! `thir_abstract_const` which can then be checked for structural equality with other
 //! generic constants mentioned in the `caller_bounds` of the current environment.
+use rustc_data_structures::intern::Interned;
 use rustc_errors::ErrorReported;
 use rustc_hir::def::DefKind;
 use rustc_index::vec::IndexVec;
@@ -84,7 +85,7 @@ pub fn is_const_evaluatable<'cx, 'tcx>(
                     Node::Leaf(leaf) => {
                         if leaf.has_infer_types_or_consts() {
                             failure_kind = FailureKind::MentionsInfer;
-                        } else if leaf.definitely_has_param_types_or_consts(tcx) {
+                        } else if leaf.has_param_types_or_consts() {
                             failure_kind = cmp::min(failure_kind, FailureKind::MentionsParam);
                         }
 
@@ -93,7 +94,7 @@ pub fn is_const_evaluatable<'cx, 'tcx>(
                     Node::Cast(_, _, ty) => {
                         if ty.has_infer_types_or_consts() {
                             failure_kind = FailureKind::MentionsInfer;
-                        } else if ty.definitely_has_param_types_or_consts(tcx) {
+                        } else if ty.has_param_types_or_consts() {
                             failure_kind = cmp::min(failure_kind, FailureKind::MentionsParam);
                         }
 
@@ -149,7 +150,7 @@ pub fn is_const_evaluatable<'cx, 'tcx>(
     // See #74595 for more details about this.
     let concrete = infcx.const_eval_resolve(param_env, uv.expand(), Some(span));
 
-    if concrete.is_ok() && uv.substs(infcx.tcx).definitely_has_param_types_or_consts(infcx.tcx) {
+    if concrete.is_ok() && uv.substs.has_param_types_or_consts() {
         match infcx.tcx.def_kind(uv.def.did) {
             DefKind::AnonConst | DefKind::InlineConst => {
                 let mir_body = infcx.tcx.mir_for_ctfe_opt_const_arg(uv.def);
@@ -196,14 +197,14 @@ impl<'tcx> AbstractConst<'tcx> {
     ) -> Result<Option<AbstractConst<'tcx>>, ErrorReported> {
         let inner = tcx.thir_abstract_const_opt_const_arg(uv.def)?;
         debug!("AbstractConst::new({:?}) = {:?}", uv, inner);
-        Ok(inner.map(|inner| AbstractConst { inner, substs: uv.substs(tcx) }))
+        Ok(inner.map(|inner| AbstractConst { inner, substs: uv.substs }))
     }
 
     pub fn from_const(
         tcx: TyCtxt<'tcx>,
-        ct: &ty::Const<'tcx>,
+        ct: ty::Const<'tcx>,
     ) -> Result<Option<AbstractConst<'tcx>>, ErrorReported> {
-        match ct.val {
+        match ct.val() {
             ty::ConstKind::Unevaluated(uv) => AbstractConst::new(tcx, uv.shrink()),
             ty::ConstKind::Error(_) => Err(ErrorReported),
             _ => Ok(None),
@@ -271,7 +272,6 @@ impl<'a, 'tcx> AbstractConstBuilder<'a, 'tcx> {
         struct IsThirPolymorphic<'a, 'tcx> {
             is_poly: bool,
             thir: &'a thir::Thir<'tcx>,
-            tcx: TyCtxt<'tcx>,
         }
 
         use thir::visit;
@@ -281,25 +281,25 @@ impl<'a, 'tcx> AbstractConstBuilder<'a, 'tcx> {
             }
 
             fn visit_expr(&mut self, expr: &thir::Expr<'tcx>) {
-                self.is_poly |= expr.ty.definitely_has_param_types_or_consts(self.tcx);
+                self.is_poly |= expr.ty.has_param_types_or_consts();
                 if !self.is_poly {
                     visit::walk_expr(self, expr)
                 }
             }
 
             fn visit_pat(&mut self, pat: &thir::Pat<'tcx>) {
-                self.is_poly |= pat.ty.definitely_has_param_types_or_consts(self.tcx);
+                self.is_poly |= pat.ty.has_param_types_or_consts();
                 if !self.is_poly {
                     visit::walk_pat(self, pat);
                 }
             }
 
-            fn visit_const(&mut self, ct: &'tcx ty::Const<'tcx>) {
-                self.is_poly |= ct.definitely_has_param_types_or_consts(self.tcx);
+            fn visit_const(&mut self, ct: ty::Const<'tcx>) {
+                self.is_poly |= ct.has_param_types_or_consts();
             }
         }
 
-        let mut is_poly_vis = IsThirPolymorphic { is_poly: false, thir: body, tcx };
+        let mut is_poly_vis = IsThirPolymorphic { is_poly: false, thir: body };
         visit::walk_expr(&mut is_poly_vis, &body[body_id]);
         debug!("AbstractConstBuilder: is_poly={}", is_poly_vis.is_poly);
         if !is_poly_vis.is_poly {
@@ -335,7 +335,11 @@ impl<'a, 'tcx> AbstractConstBuilder<'a, 'tcx> {
         self.recurse_build(self.body_id)?;
 
         for n in self.nodes.iter() {
-            if let Node::Leaf(ty::Const { val: ty::ConstKind::Unevaluated(ct), ty: _ }) = n {
+            if let Node::Leaf(ty::Const(Interned(
+                ty::ConstS { val: ty::ConstKind::Unevaluated(ct), ty: _ },
+                _,
+            ))) = n
+            {
                 // `AbstractConst`s should not contain any promoteds as they require references which
                 // are not allowed.
                 assert_eq!(ct.promoted, None);
@@ -480,7 +484,7 @@ impl<'a, 'tcx> AbstractConstBuilder<'a, 'tcx> {
             // let expressions imply control flow
             ExprKind::Match { .. } | ExprKind::If { .. } | ExprKind::Let { .. } =>
                 self.error(node.span, "control flow is not supported in generic constants")?,
-            ExprKind::LlvmInlineAsm { .. } | ExprKind::InlineAsm { .. } => {
+            ExprKind::InlineAsm { .. } => {
                 self.error(node.span, "assembly is not supported in generic constants")?
             }
 
@@ -603,11 +607,11 @@ pub(super) fn try_unify<'tcx>(
 
     match (a.root(tcx), b.root(tcx)) {
         (Node::Leaf(a_ct), Node::Leaf(b_ct)) => {
-            if a_ct.ty != b_ct.ty {
+            if a_ct.ty() != b_ct.ty() {
                 return false;
             }
 
-            match (a_ct.val, b_ct.val) {
+            match (a_ct.val(), b_ct.val()) {
                 // We can just unify errors with everything to reduce the amount of
                 // emitted errors here.
                 (ty::ConstKind::Error(_), _) | (_, ty::ConstKind::Error(_)) => true,

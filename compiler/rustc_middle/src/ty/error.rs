@@ -60,13 +60,13 @@ pub enum TypeError<'tcx> {
     /// created a cycle (because it appears somewhere within that
     /// type).
     CyclicTy(Ty<'tcx>),
-    CyclicConst(&'tcx ty::Const<'tcx>),
+    CyclicConst(ty::Const<'tcx>),
     ProjectionMismatched(ExpectedFound<DefId>),
     ExistentialMismatch(
         ExpectedFound<&'tcx ty::List<ty::Binder<'tcx, ty::ExistentialPredicate<'tcx>>>>,
     ),
     ObjectUnsafeCoercion(DefId),
-    ConstMismatch(ExpectedFound<&'tcx ty::Const<'tcx>>),
+    ConstMismatch(ExpectedFound<ty::Const<'tcx>>),
 
     IntrinsicCast,
     /// Safe `#[target_feature]` functions are not assignable to safe function pointers.
@@ -239,8 +239,8 @@ impl<'tcx> TypeError<'tcx> {
     }
 }
 
-impl<'tcx> ty::TyS<'tcx> {
-    pub fn sort_string(&self, tcx: TyCtxt<'_>) -> Cow<'static, str> {
+impl<'tcx> Ty<'tcx> {
+    pub fn sort_string(self, tcx: TyCtxt<'_>) -> Cow<'static, str> {
         match *self.kind() {
             ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Str | ty::Never => {
                 format!("`{}`", self).into()
@@ -255,7 +255,7 @@ impl<'tcx> ty::TyS<'tcx> {
                 }
 
                 let n = tcx.lift(n).unwrap();
-                if let ty::ConstKind::Value(v) = n.val {
+                if let ty::ConstKind::Value(v) = n.val() {
                     if let Some(n) = v.try_to_machine_usize(tcx) {
                         return format!("array of {} element{}", n, pluralize!(n)).into();
                     }
@@ -306,7 +306,7 @@ impl<'tcx> ty::TyS<'tcx> {
         }
     }
 
-    pub fn prefix_string(&self, tcx: TyCtxt<'_>) -> Cow<'static, str> {
+    pub fn prefix_string(self, tcx: TyCtxt<'_>) -> Cow<'static, str> {
         match *self.kind() {
             ty::Infer(_)
             | ty::Error(_)
@@ -869,7 +869,7 @@ fn foo(&self) -> Self::T { String::new() }
         // When `body_owner` is an `impl` or `trait` item, look in its associated types for
         // `expected` and point at it.
         let parent_id = self.hir().get_parent_item(hir_id);
-        let item = self.hir().find(parent_id);
+        let item = self.hir().find_by_def_id(parent_id);
         debug!("expected_projection parent item {:?}", item);
         match item {
             Some(hir::Node::Item(hir::Item { kind: hir::ItemKind::Trait(.., items), .. })) => {
@@ -972,10 +972,10 @@ fn foo(&self) -> Self::T { String::new() }
             let (span, sugg) = if has_params {
                 let pos = span.hi() - BytePos(1);
                 let span = Span::new(pos, pos, span.ctxt(), span.parent());
-                (span, format!(", {} = {}", assoc.ident, ty))
+                (span, format!(", {} = {}", assoc.ident(self), ty))
             } else {
                 let item_args = self.format_generic_args(assoc_substs);
-                (span.shrink_to_hi(), format!("<{}{} = {}>", assoc.ident, item_args, ty))
+                (span.shrink_to_hi(), format!("<{}{} = {}>", assoc.ident(self), item_args, ty))
             };
             db.span_suggestion_verbose(span, msg, sugg, MaybeIncorrect);
             return true;

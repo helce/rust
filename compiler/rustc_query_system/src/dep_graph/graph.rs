@@ -9,6 +9,7 @@ use rustc_data_structures::sync::{AtomicU32, AtomicU64, Lock, Lrc, Ordering};
 use rustc_index::vec::IndexVec;
 use rustc_serialize::opaque::{FileEncodeResult, FileEncoder};
 use smallvec::{smallvec, SmallVec};
+use std::assert_matches::assert_matches;
 use std::collections::hash_map::Entry;
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -165,7 +166,11 @@ impl<K: DepKind> DepGraph<K> {
     pub fn assert_ignored(&self) {
         if let Some(..) = self.data {
             K::read_deps(|task_deps| {
-                assert!(task_deps.is_none(), "expected no task dependency tracking");
+                assert_matches!(
+                    task_deps,
+                    TaskDepsRef::Ignore,
+                    "expected no task dependency tracking"
+                );
             })
         }
     }
@@ -174,7 +179,60 @@ impl<K: DepKind> DepGraph<K> {
     where
         OP: FnOnce() -> R,
     {
-        K::with_deps(None, op)
+        K::with_deps(TaskDepsRef::Ignore, op)
+    }
+
+    /// Used to wrap the deserialization of a query result from disk,
+    /// This method enforces that no new `DepNodes` are created during
+    /// query result deserialization.
+    ///
+    /// Enforcing this makes the query dep graph simpler - all nodes
+    /// must be created during the query execution, and should be
+    /// created from inside the 'body' of a query (the implementation
+    /// provided by a particular compiler crate).
+    ///
+    /// Consider the case of three queries `A`, `B`, and `C`, where
+    /// `A` invokes `B` and `B` invokes `C`:
+    ///
+    /// `A -> B -> C`
+    ///
+    /// Suppose that decoding the result of query `B` required re-computing
+    /// the query `C`. If we did not create a fresh `TaskDeps` when
+    /// decoding `B`, we would still be using the `TaskDeps` for query `A`
+    /// (if we needed to re-execute `A`). This would cause us to create
+    /// a new edge `A -> C`. If this edge did not previously
+    /// exist in the `DepGraph`, then we could end up with a different
+    /// `DepGraph` at the end of compilation, even if there were no
+    /// meaningful changes to the overall program (e.g. a newline was added).
+    /// In addition, this edge might cause a subsequent compilation run
+    /// to try to force `C` before marking other necessary nodes green. If
+    /// `C` did not exist in the new compilation session, then we could
+    /// get an ICE. Normally, we would have tried (and failed) to mark
+    /// some other query green (e.g. `item_children`) which was used
+    /// to obtain `C`, which would prevent us from ever trying to force
+    /// a non-existent `D`.
+    ///
+    /// It might be possible to enforce that all `DepNode`s read during
+    /// deserialization already exist in the previous `DepGraph`. In
+    /// the above example, we would invoke `D` during the deserialization
+    /// of `B`. Since we correctly create a new `TaskDeps` from the decoding
+    /// of `B`, this would result in an edge `B -> D`. If that edge already
+    /// existed (with the same `DepPathHash`es), then it should be correct
+    /// to allow the invocation of the query to proceed during deserialization
+    /// of a query result. We would merely assert that the dep-graph fragment
+    /// that would have been added by invoking `C` while decoding `B`
+    /// is equivalent to the dep-graph fragment that we already instantiated for B
+    /// (at the point where we successfully marked B as green).
+    ///
+    /// However, this would require additional complexity
+    /// in the query infrastructure, and is not currently needed by the
+    /// decoding of any query results. Should the need arise in the future,
+    /// we should consider extending the query system with this functionality.
+    pub fn with_query_deserialization<OP, R>(&self, op: OP) -> R
+    where
+        OP: FnOnce() -> R,
+    {
+        K::with_deps(TaskDepsRef::Forbid, op)
     }
 
     /// Starts a new dep-graph task. Dep-graph tasks are specified
@@ -259,7 +317,13 @@ impl<K: DepKind> DepGraph<K> {
                 phantom_data: PhantomData,
             }))
         };
-        let result = K::with_deps(task_deps.as_ref(), || task(cx, arg));
+
+        let task_deps_ref = match &task_deps {
+            Some(deps) => TaskDepsRef::Allow(deps),
+            None => TaskDepsRef::Ignore,
+        };
+
+        let result = K::with_deps(task_deps_ref, || task(cx, arg));
         let edges = task_deps.map_or_else(|| smallvec![], |lock| lock.into_inner().reads);
 
         let dcx = cx.dep_context();
@@ -312,7 +376,7 @@ impl<K: DepKind> DepGraph<K> {
 
         if let Some(ref data) = self.data {
             let task_deps = Lock::new(TaskDeps::default());
-            let result = K::with_deps(Some(&task_deps), op);
+            let result = K::with_deps(TaskDepsRef::Allow(&task_deps), op);
             let task_deps = task_deps.into_inner();
             let task_deps = task_deps.reads;
 
@@ -365,42 +429,47 @@ impl<K: DepKind> DepGraph<K> {
     pub fn read_index(&self, dep_node_index: DepNodeIndex) {
         if let Some(ref data) = self.data {
             K::read_deps(|task_deps| {
-                if let Some(task_deps) = task_deps {
-                    let mut task_deps = task_deps.lock();
-                    let task_deps = &mut *task_deps;
-                    if cfg!(debug_assertions) {
-                        data.current.total_read_count.fetch_add(1, Relaxed);
+                let mut task_deps = match task_deps {
+                    TaskDepsRef::Allow(deps) => deps.lock(),
+                    TaskDepsRef::Ignore => return,
+                    TaskDepsRef::Forbid => {
+                        panic!("Illegal read of: {:?}", dep_node_index)
+                    }
+                };
+                let task_deps = &mut *task_deps;
+
+                if cfg!(debug_assertions) {
+                    data.current.total_read_count.fetch_add(1, Relaxed);
+                }
+
+                // As long as we only have a low number of reads we can avoid doing a hash
+                // insert and potentially allocating/reallocating the hashmap
+                let new_read = if task_deps.reads.len() < TASK_DEPS_READS_CAP {
+                    task_deps.reads.iter().all(|other| *other != dep_node_index)
+                } else {
+                    task_deps.read_set.insert(dep_node_index)
+                };
+                if new_read {
+                    task_deps.reads.push(dep_node_index);
+                    if task_deps.reads.len() == TASK_DEPS_READS_CAP {
+                        // Fill `read_set` with what we have so far so we can use the hashset
+                        // next time
+                        task_deps.read_set.extend(task_deps.reads.iter().copied());
                     }
 
-                    // As long as we only have a low number of reads we can avoid doing a hash
-                    // insert and potentially allocating/reallocating the hashmap
-                    let new_read = if task_deps.reads.len() < TASK_DEPS_READS_CAP {
-                        task_deps.reads.iter().all(|other| *other != dep_node_index)
-                    } else {
-                        task_deps.read_set.insert(dep_node_index)
-                    };
-                    if new_read {
-                        task_deps.reads.push(dep_node_index);
-                        if task_deps.reads.len() == TASK_DEPS_READS_CAP {
-                            // Fill `read_set` with what we have so far so we can use the hashset
-                            // next time
-                            task_deps.read_set.extend(task_deps.reads.iter().copied());
-                        }
-
-                        #[cfg(debug_assertions)]
-                        {
-                            if let Some(target) = task_deps.node {
-                                if let Some(ref forbidden_edge) = data.current.forbidden_edge {
-                                    let src = forbidden_edge.index_to_node.lock()[&dep_node_index];
-                                    if forbidden_edge.test(&src, &target) {
-                                        panic!("forbidden edge {:?} -> {:?} created", src, target)
-                                    }
+                    #[cfg(debug_assertions)]
+                    {
+                        if let Some(target) = task_deps.node {
+                            if let Some(ref forbidden_edge) = data.current.forbidden_edge {
+                                let src = forbidden_edge.index_to_node.lock()[&dep_node_index];
+                                if forbidden_edge.test(&src, &target) {
+                                    panic!("forbidden edge {:?} -> {:?} created", src, target)
                                 }
                             }
                         }
-                    } else if cfg!(debug_assertions) {
-                        data.current.total_duplicate_read_count.fetch_add(1, Relaxed);
                     }
+                } else if cfg!(debug_assertions) {
+                    data.current.total_duplicate_read_count.fetch_add(1, Relaxed);
                 }
             })
         }
@@ -1123,7 +1192,26 @@ impl<K: DepKind> CurrentDepGraph<K> {
 const TASK_DEPS_READS_CAP: usize = 8;
 type EdgesVec = SmallVec<[DepNodeIndex; TASK_DEPS_READS_CAP]>;
 
-pub struct TaskDeps<K> {
+#[derive(Debug, Clone, Copy)]
+pub enum TaskDepsRef<'a, K: DepKind> {
+    /// New dependencies can be added to the
+    /// `TaskDeps`. This is used when executing a 'normal' query
+    /// (no `eval_always` modifier)
+    Allow(&'a Lock<TaskDeps<K>>),
+    /// New dependencies are ignored. This is used when
+    /// executing an `eval_always` query, since there's no
+    /// need to track dependencies for a query that's always
+    /// re-executed. This is also used for `dep_graph.with_ignore`
+    Ignore,
+    /// Any attempt to add new dependencies will cause a panic.
+    /// This is used when decoding a query result from disk,
+    /// to ensure that the decoding process doesn't itself
+    /// require the execution of any queries.
+    Forbid,
+}
+
+#[derive(Debug)]
+pub struct TaskDeps<K: DepKind> {
     #[cfg(debug_assertions)]
     node: Option<DepNode<K>>,
     reads: EdgesVec,
@@ -1131,7 +1219,7 @@ pub struct TaskDeps<K> {
     phantom_data: PhantomData<DepNode<K>>,
 }
 
-impl<K> Default for TaskDeps<K> {
+impl<K: DepKind> Default for TaskDeps<K> {
     fn default() -> Self {
         Self {
             #[cfg(debug_assertions)]

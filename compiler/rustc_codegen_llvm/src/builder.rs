@@ -731,27 +731,11 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
     }
 
     fn fptoui_sat(&mut self, val: &'ll Value, dest_ty: &'ll Type) -> Option<&'ll Value> {
-        if !self.fptoint_sat_broken_in_llvm() {
-            let src_ty = self.cx.val_ty(val);
-            let float_width = self.cx.float_width(src_ty);
-            let int_width = self.cx.int_width(dest_ty);
-            let name = format!("llvm.fptoui.sat.i{}.f{}", int_width, float_width);
-            return Some(self.call_intrinsic(&name, &[val]));
-        }
-
-        None
+        self.fptoint_sat(false, val, dest_ty)
     }
 
     fn fptosi_sat(&mut self, val: &'ll Value, dest_ty: &'ll Type) -> Option<&'ll Value> {
-        if !self.fptoint_sat_broken_in_llvm() {
-            let src_ty = self.cx.val_ty(val);
-            let float_width = self.cx.float_width(src_ty);
-            let int_width = self.cx.int_width(dest_ty);
-            let name = format!("llvm.fptosi.sat.i{}.f{}", int_width, float_width);
-            return Some(self.call_intrinsic(&name, &[val]));
-        }
-
-        None
+        self.fptoint_sat(true, val, dest_ty)
     }
 
     fn fptoui(&mut self, val: &'ll Value, dest_ty: &'ll Type) -> &'ll Value {
@@ -972,29 +956,24 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         unsafe { llvm::LLVMBuildInsertValue(self.llbuilder, agg_val, elt, idx as c_uint, UNNAMED) }
     }
 
-    fn landing_pad(
-        &mut self,
-        ty: &'ll Type,
-        pers_fn: &'ll Value,
-        num_clauses: usize,
-    ) -> &'ll Value {
-        // Use LLVMSetPersonalityFn to set the personality. It supports arbitrary Consts while,
-        // LLVMBuildLandingPad requires the argument to be a Function (as of LLVM 12). The
-        // personality lives on the parent function anyway.
-        self.set_personality_fn(pers_fn);
+    fn set_personality_fn(&mut self, personality: &'ll Value) {
         unsafe {
-            llvm::LLVMBuildLandingPad(self.llbuilder, ty, None, num_clauses as c_uint, UNNAMED)
+            llvm::LLVMSetPersonalityFn(self.llfn(), personality);
         }
     }
 
-    fn set_cleanup(&mut self, landing_pad: &'ll Value) {
+    fn cleanup_landing_pad(&mut self, ty: &'ll Type, pers_fn: &'ll Value) -> &'ll Value {
+        let landing_pad = self.landing_pad(ty, pers_fn, 1 /* FIXME should this be 0? */);
         unsafe {
             llvm::LLVMSetCleanup(landing_pad, llvm::True);
         }
+        landing_pad
     }
 
-    fn resume(&mut self, exn: &'ll Value) -> &'ll Value {
-        unsafe { llvm::LLVMBuildResume(self.llbuilder, exn) }
+    fn resume(&mut self, exn: &'ll Value) {
+        unsafe {
+            llvm::LLVMBuildResume(self.llbuilder, exn);
+        }
     }
 
     fn cleanup_pad(&mut self, parent: Option<&'ll Value>, args: &[&'ll Value]) -> Funclet<'ll> {
@@ -1011,14 +990,11 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         Funclet::new(ret.expect("LLVM does not have support for cleanuppad"))
     }
 
-    fn cleanup_ret(
-        &mut self,
-        funclet: &Funclet<'ll>,
-        unwind: Option<&'ll BasicBlock>,
-    ) -> &'ll Value {
-        let ret =
-            unsafe { llvm::LLVMRustBuildCleanupRet(self.llbuilder, funclet.cleanuppad(), unwind) };
-        ret.expect("LLVM does not have support for cleanupret")
+    fn cleanup_ret(&mut self, funclet: &Funclet<'ll>, unwind: Option<&'ll BasicBlock>) {
+        unsafe {
+            llvm::LLVMRustBuildCleanupRet(self.llbuilder, funclet.cleanuppad(), unwind)
+                .expect("LLVM does not have support for cleanupret");
+        }
     }
 
     fn catch_pad(&mut self, parent: &'ll Value, args: &[&'ll Value]) -> Funclet<'ll> {
@@ -1039,7 +1015,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         &mut self,
         parent: Option<&'ll Value>,
         unwind: Option<&'ll BasicBlock>,
-        num_handlers: usize,
+        handlers: &[&'ll BasicBlock],
     ) -> &'ll Value {
         let name = cstr!("catchswitch");
         let ret = unsafe {
@@ -1047,23 +1023,17 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 self.llbuilder,
                 parent,
                 unwind,
-                num_handlers as c_uint,
+                handlers.len() as c_uint,
                 name.as_ptr(),
             )
         };
-        ret.expect("LLVM does not have support for catchswitch")
-    }
-
-    fn add_handler(&mut self, catch_switch: &'ll Value, handler: &'ll BasicBlock) {
-        unsafe {
-            llvm::LLVMRustAddHandler(catch_switch, handler);
+        let ret = ret.expect("LLVM does not have support for catchswitch");
+        for handler in handlers {
+            unsafe {
+                llvm::LLVMRustAddHandler(ret, handler);
+            }
         }
-    }
-
-    fn set_personality_fn(&mut self, personality: &'ll Value) {
-        unsafe {
-            llvm::LLVMSetPersonalityFn(self.llfn(), personality);
-        }
+        ret
     }
 
     // Atomic Operations
@@ -1453,6 +1423,60 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
             // FIXME - https://bugs.llvm.org/show_bug.cgi?id=50083
             "riscv64" => llvm_util::get_version() < (13, 0, 0),
             _ => false,
+        }
+    }
+
+    fn fptoint_sat(
+        &mut self,
+        signed: bool,
+        val: &'ll Value,
+        dest_ty: &'ll Type,
+    ) -> Option<&'ll Value> {
+        if !self.fptoint_sat_broken_in_llvm() {
+            let src_ty = self.cx.val_ty(val);
+            let (float_ty, int_ty, vector_length) = if self.cx.type_kind(src_ty) == TypeKind::Vector
+            {
+                assert_eq!(self.cx.vector_length(src_ty), self.cx.vector_length(dest_ty));
+                (
+                    self.cx.element_type(src_ty),
+                    self.cx.element_type(dest_ty),
+                    Some(self.cx.vector_length(src_ty)),
+                )
+            } else {
+                (src_ty, dest_ty, None)
+            };
+            let float_width = self.cx.float_width(float_ty);
+            let int_width = self.cx.int_width(int_ty);
+
+            let instr = if signed { "fptosi" } else { "fptoui" };
+            let name = if let Some(vector_length) = vector_length {
+                format!(
+                    "llvm.{}.sat.v{}i{}.v{}f{}",
+                    instr, vector_length, int_width, vector_length, float_width
+                )
+            } else {
+                format!("llvm.{}.sat.i{}.f{}", instr, int_width, float_width)
+            };
+            let f =
+                self.declare_cfn(&name, llvm::UnnamedAddr::No, self.type_func(&[src_ty], dest_ty));
+            Some(self.call(self.type_func(&[src_ty], dest_ty), f, &[val], None))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn landing_pad(
+        &mut self,
+        ty: &'ll Type,
+        pers_fn: &'ll Value,
+        num_clauses: usize,
+    ) -> &'ll Value {
+        // Use LLVMSetPersonalityFn to set the personality. It supports arbitrary Consts while,
+        // LLVMBuildLandingPad requires the argument to be a Function (as of LLVM 12). The
+        // personality lives on the parent function anyway.
+        self.set_personality_fn(pers_fn);
+        unsafe {
+            llvm::LLVMBuildLandingPad(self.llbuilder, ty, None, num_clauses as c_uint, UNNAMED)
         }
     }
 }

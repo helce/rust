@@ -123,7 +123,7 @@ impl<'a> Resolver<'a> {
 
                 let sm = self.session.source_map();
                 match outer_res {
-                    Res::SelfTy(maybe_trait_defid, maybe_impl_defid) => {
+                    Res::SelfTy { trait_: maybe_trait_defid, alias_to: maybe_impl_defid } => {
                         if let Some(impl_span) =
                             maybe_impl_defid.and_then(|(def_id, _)| self.opt_span(def_id))
                         {
@@ -453,28 +453,28 @@ impl<'a> Resolver<'a> {
                 // edit:
                 // only do this if the const and usage of the non-constant value are on the same line
                 // the further the two are apart, the higher the chance of the suggestion being wrong
-                // also make sure that the pos for the suggestion is not 0 (ICE #90878)
 
-                let sp =
-                    self.session.source_map().span_extend_to_prev_str(ident.span, current, true);
+                let sp = self
+                    .session
+                    .source_map()
+                    .span_extend_to_prev_str(ident.span, current, true, false);
 
-                let pos_for_suggestion = sp.lo().0.saturating_sub(current.len() as u32);
-
-                if sp.lo().0 == 0
-                    || pos_for_suggestion == 0
-                    || self.session.source_map().is_multiline(sp)
-                {
-                    err.span_label(ident.span, &format!("this would need to be a `{}`", sugg));
-                } else {
-                    let sp = sp.with_lo(BytePos(pos_for_suggestion));
-                    err.span_suggestion(
-                        sp,
-                        &format!("consider using `{}` instead of `{}`", sugg, current),
-                        format!("{} {}", sugg, ident),
-                        Applicability::MaybeIncorrect,
-                    );
-                    err.span_label(span, "non-constant value");
+                match sp {
+                    Some(sp) if !self.session.source_map().is_multiline(sp) => {
+                        let sp = sp.with_lo(BytePos(sp.lo().0 - (current.len() as u32)));
+                        err.span_suggestion(
+                            sp,
+                            &format!("consider using `{}` instead of `{}`", sugg, current),
+                            format!("{} {}", sugg, ident),
+                            Applicability::MaybeIncorrect,
+                        );
+                        err.span_label(span, "non-constant value");
+                    }
+                    _ => {
+                        err.span_label(ident.span, &format!("this would need to be a `{}`", sugg));
+                    }
                 }
+
                 err
             }
             ResolutionError::BindingShadowsSomethingUnacceptable {
@@ -600,6 +600,25 @@ impl<'a> Resolver<'a> {
                     None => (),
                 }
 
+                err
+            }
+            ResolutionError::TraitImplMismatch {
+                name,
+                kind,
+                code,
+                trait_item_span,
+                trait_path,
+            } => {
+                let mut err = self.session.struct_span_err_with_code(
+                    span,
+                    &format!(
+                        "item `{}` is an associated {}, which doesn't match its trait `{}`",
+                        name, kind, trait_path,
+                    ),
+                    code,
+                );
+                err.span_label(span, "does not match trait");
+                err.span_label(trait_item_span, "item in trait");
                 err
             }
         }
@@ -895,11 +914,8 @@ impl<'a> Resolver<'a> {
                             // a note about editions
                             let note = if let Some(did) = did {
                                 let requires_note = !did.is_local()
-                                    && this
-                                        .cstore()
-                                        .item_attrs_untracked(did, this.session)
-                                        .iter()
-                                        .any(|attr| {
+                                    && this.cstore().item_attrs_untracked(did, this.session).any(
+                                        |attr| {
                                             if attr.has_name(sym::rustc_diagnostic_item) {
                                                 [sym::TryInto, sym::TryFrom, sym::FromIterator]
                                                     .map(|x| Some(x))
@@ -907,7 +923,8 @@ impl<'a> Resolver<'a> {
                                             } else {
                                                 false
                                             }
-                                        });
+                                        },
+                                    );
 
                                 requires_note.then(|| {
                                     format!(
@@ -1345,8 +1362,7 @@ impl<'a> Resolver<'a> {
                     .filter(|(_, module)| {
                         current_module.is_ancestor_of(module) && !ptr::eq(current_module, *module)
                     })
-                    .map(|(_, module)| module.kind.name())
-                    .flatten(),
+                    .flat_map(|(_, module)| module.kind.name()),
             )
             .filter(|c| !c.to_string().is_empty())
             .collect::<Vec<_>>();
@@ -1842,7 +1858,7 @@ crate fn show_candidates(
         let instead = if instead { " instead" } else { "" };
         let mut msg = format!("consider importing {} {}{}", determiner, kind, instead);
 
-        for note in accessible_path_strings.iter().map(|cand| cand.3.as_ref()).flatten() {
+        for note in accessible_path_strings.iter().flat_map(|cand| cand.3.as_ref()) {
             err.note(note);
         }
 
@@ -1925,7 +1941,7 @@ crate fn show_candidates(
                 multi_span.push_span_label(span, format!("`{}`: not accessible", name));
             }
 
-            for note in inaccessible_path_strings.iter().map(|cand| cand.3.as_ref()).flatten() {
+            for note in inaccessible_path_strings.iter().flat_map(|cand| cand.3.as_ref()) {
                 err.note(note);
             }
 

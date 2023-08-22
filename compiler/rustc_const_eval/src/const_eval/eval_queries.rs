@@ -6,8 +6,6 @@ use crate::interpret::{
     ScalarMaybeUninit, StackPopCleanup,
 };
 
-use rustc_errors::ErrorReported;
-use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_middle::mir;
 use rustc_middle::mir::interpret::ErrorHandled;
@@ -216,7 +214,7 @@ pub fn eval_to_const_value_raw_provider<'tcx>(
     tcx: TyCtxt<'tcx>,
     key: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>,
 ) -> ::rustc_middle::mir::interpret::EvalToConstValueResult<'tcx> {
-    assert!(key.param_env.constness() == hir::Constness::Const);
+    assert!(key.param_env.is_const());
     // see comment in eval_to_allocation_raw_provider for what we're doing here
     if key.param_env.reveal() == Reveal::All {
         let mut key = key;
@@ -251,7 +249,7 @@ pub fn eval_to_allocation_raw_provider<'tcx>(
     tcx: TyCtxt<'tcx>,
     key: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>,
 ) -> ::rustc_middle::mir::interpret::EvalToAllocationRawResult<'tcx> {
-    assert!(key.param_env.constness() == hir::Constness::Const);
+    assert!(key.param_env.is_const());
     // Because the constant is computed twice (once per value of `Reveal`), we are at risk of
     // reporting the same error twice here. To resolve this, we check whether we can evaluate the
     // constant in the more restrictive `Reveal::UserFacing`, which most likely already was
@@ -282,25 +280,6 @@ pub fn eval_to_allocation_raw_provider<'tcx>(
 
     let cid = key.value;
     let def = cid.instance.def.with_opt_param();
-
-    if let Some(def) = def.as_local() {
-        if tcx.has_typeck_results(def.did) {
-            if let Some(error_reported) = tcx.typeck_opt_const_arg(def).tainted_by_errors {
-                return Err(ErrorHandled::Reported(error_reported));
-            }
-        }
-        if !tcx.is_mir_available(def.did) {
-            tcx.sess.delay_span_bug(
-                tcx.def_span(def.did),
-                &format!("no MIR body is available for {:?}", def.did),
-            );
-            return Err(ErrorHandled::Reported(ErrorReported {}));
-        }
-        if let Some(error_reported) = tcx.mir_const_qualif_opt_const_arg(def).error_occured {
-            return Err(ErrorHandled::Reported(error_reported));
-        }
-    }
-
     let is_static = tcx.is_static(def.did);
 
     let mut ecx = InterpCx::new(

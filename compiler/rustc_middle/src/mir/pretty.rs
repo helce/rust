@@ -17,9 +17,8 @@ use rustc_middle::mir::interpret::{
 use rustc_middle::mir::visit::Visitor;
 use rustc_middle::mir::MirSource;
 use rustc_middle::mir::*;
-use rustc_middle::ty::{self, TyCtxt, TyS, TypeFoldable, TypeVisitor};
+use rustc_middle::ty::{self, TyCtxt};
 use rustc_target::abi::Size;
-use std::ops::ControlFlow;
 
 const INDENT: &str = "    ";
 /// Alignment for lining up comments following MIR statements
@@ -427,12 +426,12 @@ impl<'tcx> ExtraComments<'tcx> {
     }
 }
 
-fn use_verbose<'tcx>(ty: &&TyS<'tcx>, fn_def: bool) -> bool {
-    match ty.kind() {
+fn use_verbose<'tcx>(ty: Ty<'tcx>, fn_def: bool) -> bool {
+    match *ty.kind() {
         ty::Int(_) | ty::Uint(_) | ty::Bool | ty::Char | ty::Float(_) => false,
         // Unit type
         ty::Tuple(g_args) if g_args.is_empty() => false,
-        ty::Tuple(g_args) => g_args.iter().any(|g_arg| use_verbose(&g_arg.expect_ty(), fn_def)),
+        ty::Tuple(g_args) => g_args.iter().any(|g_arg| use_verbose(g_arg.expect_ty(), fn_def)),
         ty::Array(ty, _) => use_verbose(ty, fn_def),
         ty::FnDef(..) => fn_def,
         _ => true,
@@ -443,7 +442,7 @@ impl<'tcx> Visitor<'tcx> for ExtraComments<'tcx> {
     fn visit_constant(&mut self, constant: &Constant<'tcx>, location: Location) {
         self.super_constant(constant, location);
         let Constant { span, user_ty, literal } = constant;
-        if use_verbose(&literal.ty(), true) {
+        if use_verbose(literal.ty(), true) {
             self.push("mir::Constant");
             self.push(&format!(
                 "+ span: {}",
@@ -462,9 +461,10 @@ impl<'tcx> Visitor<'tcx> for ExtraComments<'tcx> {
         }
     }
 
-    fn visit_const(&mut self, constant: &&'tcx ty::Const<'tcx>, _: Location) {
+    fn visit_const(&mut self, constant: ty::Const<'tcx>, _: Location) {
         self.super_const(constant);
-        let ty::Const { ty, val, .. } = constant;
+        let ty = constant.ty();
+        let val = constant.val();
         if use_verbose(ty, false) {
             self.push("ty::Const");
             self.push(&format!("+ ty: {:?}", ty));
@@ -476,8 +476,8 @@ impl<'tcx> Visitor<'tcx> for ExtraComments<'tcx> {
                 ty::ConstKind::Unevaluated(uv) => format!(
                     "Unevaluated({}, {:?}, {:?})",
                     self.tcx.def_path_str(uv.def.did),
-                    uv.substs(self.tcx),
-                    uv.promoted
+                    uv.substs,
+                    uv.promoted,
                 ),
                 ty::ConstKind::Value(val) => format!("Value({:?})", val),
                 ty::ConstKind::Error(_) => "Error".to_string(),
@@ -668,6 +668,7 @@ pub fn write_allocations<'tcx>(
     fn alloc_ids_from_alloc(alloc: &Allocation) -> impl DoubleEndedIterator<Item = AllocId> + '_ {
         alloc.relocations().values().map(|id| *id)
     }
+
     fn alloc_ids_from_const(val: ConstValue<'_>) -> impl Iterator<Item = AllocId> + '_ {
         match val {
             ConstValue::Scalar(interpret::Scalar::Ptr(ptr, _size)) => {
@@ -681,23 +682,29 @@ pub fn write_allocations<'tcx>(
             }
         }
     }
-    struct CollectAllocIds(BTreeSet<AllocId>);
-    impl<'tcx> TypeVisitor<'tcx> for CollectAllocIds {
-        fn tcx_for_anon_const_substs(&self) -> Option<TyCtxt<'tcx>> {
-            // `AllocId`s are only inside of `ConstKind::Value` which
-            // can't be part of the anon const default substs.
-            None
-        }
 
-        fn visit_const(&mut self, c: &'tcx ty::Const<'tcx>) -> ControlFlow<Self::BreakTy> {
-            if let ty::ConstKind::Value(val) = c.val {
+    struct CollectAllocIds(BTreeSet<AllocId>);
+
+    impl<'tcx> Visitor<'tcx> for CollectAllocIds {
+        fn visit_const(&mut self, c: ty::Const<'tcx>, _loc: Location) {
+            if let ty::ConstKind::Value(val) = c.val() {
                 self.0.extend(alloc_ids_from_const(val));
             }
-            c.super_visit_with(self)
+        }
+
+        fn visit_constant(&mut self, c: &Constant<'tcx>, loc: Location) {
+            match c.literal {
+                ConstantKind::Ty(c) => self.visit_const(c, loc),
+                ConstantKind::Val(val, _) => {
+                    self.0.extend(alloc_ids_from_const(val));
+                }
+            }
         }
     }
+
     let mut visitor = CollectAllocIds(Default::default());
-    body.visit_with(&mut visitor);
+    visitor.visit_body(body);
+
     // `seen` contains all seen allocations, including the ones we have *not* printed yet.
     // The protocol is to first `insert` into `seen`, and only if that returns `true`
     // then push to `todo`.

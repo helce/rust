@@ -1,6 +1,5 @@
 // build-pass
 // ignore-tidy-filelength
-// ignore-compare-mode-chalk
 // ignore-e2k64 segfault on stack overflow
 #![crate_type = "rlib"]
 

@@ -289,7 +289,7 @@ impl<'a> PathSource<'a> {
                         | DefKind::ForeignTy,
                     _,
                 ) | Res::PrimTy(..)
-                    | Res::SelfTy(..)
+                    | Res::SelfTy { .. }
             ),
             PathSource::Trait(AliasPossibility::No) => matches!(res, Res::Def(DefKind::Trait, _)),
             PathSource::Trait(AliasPossibility::Maybe) => {
@@ -326,7 +326,7 @@ impl<'a> PathSource<'a> {
                         | DefKind::TyAlias
                         | DefKind::AssocTy,
                     _,
-                ) | Res::SelfTy(..)
+                ) | Res::SelfTy { .. }
             ),
             PathSource::TraitItem(ns) => match res {
                 Res::Def(DefKind::AssocConst | DefKind::AssocFn, _) if ns == ValueNS => true,
@@ -400,6 +400,8 @@ struct DiagnosticMetadata<'ast> {
 
     /// Given `where <T as Bar>::Baz: String`, suggest `where T: Bar<Baz = String>`.
     current_where_predicate: Option<&'ast WherePredicate>,
+
+    current_type_path: Option<&'ast Ty>,
 }
 
 struct LateResolutionVisitor<'a, 'b, 'ast> {
@@ -472,8 +474,10 @@ impl<'a: 'ast, 'ast> Visitor<'ast> for LateResolutionVisitor<'a, '_, 'ast> {
     }
     fn visit_ty(&mut self, ty: &'ast Ty) {
         let prev = self.diagnostic_metadata.current_trait_object;
+        let prev_ty = self.diagnostic_metadata.current_type_path;
         match ty.kind {
             TyKind::Path(ref qself, ref path) => {
+                self.diagnostic_metadata.current_type_path = Some(ty);
                 self.smart_resolve_path(ty.id, qself.as_ref(), path, PathSource::Type);
             }
             TyKind::ImplicitSelf => {
@@ -490,6 +494,7 @@ impl<'a: 'ast, 'ast> Visitor<'ast> for LateResolutionVisitor<'a, '_, 'ast> {
         }
         visit::walk_ty(self, ty);
         self.diagnostic_metadata.current_trait_object = prev;
+        self.diagnostic_metadata.current_type_path = prev_ty;
     }
     fn visit_poly_trait_ref(&mut self, tref: &'ast PolyTraitRef, m: &'ast TraitBoundModifier) {
         self.smart_resolve_path(
@@ -520,9 +525,16 @@ impl<'a: 'ast, 'ast> Visitor<'ast> for LateResolutionVisitor<'a, '_, 'ast> {
     }
     fn visit_fn(&mut self, fn_kind: FnKind<'ast>, sp: Span, _: NodeId) {
         let rib_kind = match fn_kind {
-            // Bail if there's no body.
-            FnKind::Fn(.., None) => return visit::walk_fn(self, fn_kind, sp),
-            FnKind::Fn(FnCtxt::Free | FnCtxt::Foreign, ..) => FnItemRibKind,
+            // Bail if the function is foreign, and thus cannot validly have
+            // a body, or if there's no body for some other reason.
+            FnKind::Fn(FnCtxt::Foreign, _, sig, ..) | FnKind::Fn(_, _, sig, .., None) => {
+                // We don't need to deal with patterns in parameters, because
+                // they are not possible for foreign or bodiless functions.
+                self.visit_fn_header(&sig.header);
+                visit::walk_fn_decl(self, &sig.decl);
+                return;
+            }
+            FnKind::Fn(FnCtxt::Free, ..) => FnItemRibKind,
             FnKind::Fn(FnCtxt::Assoc(_), ..) => NormalRibKind,
             FnKind::Closure(..) => ClosureOrAsyncRibKind,
         };
@@ -899,9 +911,12 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
         self.with_current_self_item(item, |this| {
             this.with_generic_param_rib(generics, ItemRibKind(HasGenericParams::Yes), |this| {
                 let item_def_id = this.r.local_def_id(item.id).to_def_id();
-                this.with_self_rib(Res::SelfTy(None, Some((item_def_id, false))), |this| {
-                    visit::walk_item(this, item);
-                });
+                this.with_self_rib(
+                    Res::SelfTy { trait_: None, alias_to: Some((item_def_id, false)) },
+                    |this| {
+                        visit::walk_item(this, item);
+                    },
+                );
             });
         });
     }
@@ -987,8 +1002,8 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
                 self.compute_num_lifetime_params(item.id, generics);
                 // Create a new rib for the trait-wide type parameters.
                 self.with_generic_param_rib(generics, ItemRibKind(HasGenericParams::Yes), |this| {
-                    let local_def_id = this.r.local_def_id(item.id).to_def_id();
-                    this.with_self_rib(Res::SelfTy(Some(local_def_id), None), |this| {
+                    let def = this.r.local_def_id(item.id).to_def_id();
+                    this.with_self_rib(Res::SelfTy { trait_: Some(def), alias_to: None }, |this| {
                         this.visit_generics(generics);
                         walk_list!(this, visit_param_bound, bounds);
 
@@ -1039,8 +1054,8 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
                 self.compute_num_lifetime_params(item.id, generics);
                 // Create a new rib for the trait-wide type parameters.
                 self.with_generic_param_rib(generics, ItemRibKind(HasGenericParams::Yes), |this| {
-                    let local_def_id = this.r.local_def_id(item.id).to_def_id();
-                    this.with_self_rib(Res::SelfTy(Some(local_def_id), None), |this| {
+                    let def = this.r.local_def_id(item.id).to_def_id();
+                    this.with_self_rib(Res::SelfTy { trait_: Some(def), alias_to: None }, |this| {
                         this.visit_generics(generics);
                         walk_list!(this, visit_param_bound, bounds);
                     });
@@ -1240,15 +1255,14 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
             );
             let res = res.base_res();
             if res != Res::Err {
-                new_id = Some(res.def_id());
-                let span = trait_ref.path.span;
                 if let PathResult::Module(ModuleOrUniformRoot::Module(module)) = self.resolve_path(
                     &path,
                     Some(TypeNS),
-                    false,
-                    span,
+                    true,
+                    trait_ref.path.span,
                     CrateLint::SimplePath(trait_ref.ref_id),
                 ) {
+                    new_id = Some(res.def_id());
                     new_val = Some((module, trait_ref.clone()));
                 }
             }
@@ -1285,7 +1299,7 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
         // If applicable, create a rib for the type parameters.
         self.with_generic_param_rib(generics, ItemRibKind(HasGenericParams::Yes), |this| {
             // Dummy self type for better errors if `Self` is used in the trait path.
-            this.with_self_rib(Res::SelfTy(None, None), |this| {
+            this.with_self_rib(Res::SelfTy { trait_: None, alias_to: None }, |this| {
                 // Resolve the trait reference, if necessary.
                 this.with_optional_trait_ref(opt_trait_reference.as_ref(), |this, trait_id| {
                     let item_def_id = this.r.local_def_id(item_id);
@@ -1296,7 +1310,9 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
                     }
 
                     let item_def_id = item_def_id.to_def_id();
-                    this.with_self_rib(Res::SelfTy(trait_id, Some((item_def_id, false))), |this| {
+                    let res =
+                        Res::SelfTy { trait_: trait_id, alias_to: Some((item_def_id, false)) };
+                    this.with_self_rib(res, |this| {
                         if let Some(trait_ref) = opt_trait_reference.as_ref() {
                             // Resolve type arguments in the trait path.
                             visit::walk_trait_ref(this, trait_ref);
@@ -1317,6 +1333,7 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
                                             // If this is a trait impl, ensure the const
                                             // exists in trait
                                             this.check_trait_item(
+                                                item.id,
                                                 item.ident,
                                                 &item.kind,
                                                 ValueNS,
@@ -1352,6 +1369,7 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
                                                     // If this is a trait impl, ensure the method
                                                     // exists in trait
                                                     this.check_trait_item(
+                                                        item.id,
                                                         item.ident,
                                                         &item.kind,
                                                         ValueNS,
@@ -1379,6 +1397,7 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
                                                     // If this is a trait impl, ensure the type
                                                     // exists in trait
                                                     this.check_trait_item(
+                                                        item.id,
                                                         item.ident,
                                                         &item.kind,
                                                         TypeNS,
@@ -1409,7 +1428,8 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
 
     fn check_trait_item<F>(
         &mut self,
-        ident: Ident,
+        id: NodeId,
+        mut ident: Ident,
         kind: &AssocItemKind,
         ns: Namespace,
         span: Span,
@@ -1417,26 +1437,62 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
     ) where
         F: FnOnce(Ident, &str, Option<Symbol>) -> ResolutionError<'_>,
     {
-        // If there is a TraitRef in scope for an impl, then the method must be in the
-        // trait.
-        if let Some((module, _)) = self.current_trait_ref {
-            if self
-                .r
-                .resolve_ident_in_module(
-                    ModuleOrUniformRoot::Module(module),
-                    ident,
-                    ns,
-                    &self.parent_scope,
-                    false,
-                    span,
-                )
-                .is_err()
-            {
-                let candidate = self.find_similarly_named_assoc_item(ident.name, kind);
-                let path = &self.current_trait_ref.as_ref().unwrap().1.path;
-                self.report_error(span, err(ident, &path_names_to_string(path), candidate));
-            }
+        // If there is a TraitRef in scope for an impl, then the method must be in the trait.
+        let Some((module, _)) = &self.current_trait_ref else { return; };
+        ident.span.normalize_to_macros_2_0_and_adjust(module.expansion);
+        let key = self.r.new_key(ident, ns);
+        let mut binding = self.r.resolution(module, key).try_borrow().ok().and_then(|r| r.binding);
+        debug!(?binding);
+        if binding.is_none() {
+            // We could not find the trait item in the correct namespace.
+            // Check the other namespace to report an error.
+            let ns = match ns {
+                ValueNS => TypeNS,
+                TypeNS => ValueNS,
+                _ => ns,
+            };
+            let key = self.r.new_key(ident, ns);
+            binding = self.r.resolution(module, key).try_borrow().ok().and_then(|r| r.binding);
+            debug!(?binding);
         }
+        let Some(binding) = binding else {
+            // We could not find the method: report an error.
+            let candidate = self.find_similarly_named_assoc_item(ident.name, kind);
+            let path = &self.current_trait_ref.as_ref().unwrap().1.path;
+            self.report_error(span, err(ident, &path_names_to_string(path), candidate));
+            return;
+        };
+
+        let res = binding.res();
+        let Res::Def(def_kind, _) = res else { bug!() };
+        match (def_kind, kind) {
+            (DefKind::AssocTy, AssocItemKind::TyAlias(..))
+            | (DefKind::AssocFn, AssocItemKind::Fn(..))
+            | (DefKind::AssocConst, AssocItemKind::Const(..)) => {
+                self.r.record_partial_res(id, PartialRes::new(res));
+                return;
+            }
+            _ => {}
+        }
+
+        // The method kind does not correspond to what appeared in the trait, report.
+        let path = &self.current_trait_ref.as_ref().unwrap().1.path;
+        let (code, kind) = match kind {
+            AssocItemKind::Const(..) => (rustc_errors::error_code!(E0323), "const"),
+            AssocItemKind::Fn(..) => (rustc_errors::error_code!(E0324), "method"),
+            AssocItemKind::TyAlias(..) => (rustc_errors::error_code!(E0325), "type"),
+            AssocItemKind::MacCall(..) => span_bug!(span, "unexpanded macro"),
+        };
+        self.report_error(
+            span,
+            ResolutionError::TraitImplMismatch {
+                name: ident.name,
+                kind,
+                code,
+                trait_path: path_names_to_string(path),
+                trait_item_span: binding.span,
+            },
+        );
     }
 
     fn resolve_params(&mut self, params: &'ast [Param]) {
@@ -1890,7 +1946,6 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
                 let instead = res.is_some();
                 let suggestion =
                     if res.is_none() { this.report_missing_type_error(path) } else { None };
-                // get_from_node_id
 
                 this.r.use_injections.push(UseError {
                     err,
@@ -2470,6 +2525,10 @@ impl<'a: 'ast, 'b, 'ast> LateResolutionVisitor<'a, 'b, 'ast> {
             ExprKind::Repeat(ref elem, ref ct) => {
                 self.visit_expr(elem);
                 self.resolve_anon_const(ct, IsRepeatExpr::Yes);
+            }
+            ExprKind::Index(ref elem, ref idx) => {
+                self.resolve_expr(elem, Some(expr));
+                self.visit_expr(idx);
             }
             _ => {
                 visit::walk_expr(self, expr);

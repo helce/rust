@@ -1,3 +1,4 @@
+use crate::token::CommentKind;
 use rustc_span::source_map::SourceMap;
 use rustc_span::{BytePos, CharPos, FileName, Pos, Symbol};
 
@@ -25,7 +26,7 @@ pub struct Comment {
 
 /// Makes a doc string more presentable to users.
 /// Used by rustdoc and perhaps other tools, but not by rustc.
-pub fn beautify_doc_string(data: Symbol) -> Symbol {
+pub fn beautify_doc_string(data: Symbol, kind: CommentKind) -> Symbol {
     fn get_vertical_trim(lines: &[&str]) -> Option<(usize, usize)> {
         let mut i = 0;
         let mut j = lines.len();
@@ -34,24 +35,36 @@ pub fn beautify_doc_string(data: Symbol) -> Symbol {
             i += 1;
         }
 
-        while i < j && lines[i].trim().is_empty() {
-            i += 1;
-        }
         // like the first, a last line of all stars should be omitted
         if j > i && !lines[j - 1].is_empty() && lines[j - 1].chars().all(|c| c == '*') {
-            j -= 1;
-        }
-
-        while j > i && lines[j - 1].trim().is_empty() {
             j -= 1;
         }
 
         if i != 0 || j != lines.len() { Some((i, j)) } else { None }
     }
 
-    fn get_horizontal_trim(lines: &[&str]) -> Option<usize> {
+    fn get_horizontal_trim<'a>(lines: &'a [&str], kind: CommentKind) -> Option<String> {
         let mut i = usize::MAX;
         let mut first = true;
+
+        // In case we have doc comments like `/**` or `/*!`, we want to remove stars if they are
+        // present. However, we first need to strip the empty lines so they don't get in the middle
+        // when we try to compute the "horizontal trim".
+        let lines = if kind == CommentKind::Block {
+            // Whatever happens, we skip the first line.
+            let mut i = if lines[0].trim_start().starts_with('*') { 0 } else { 1 };
+            let mut j = lines.len();
+
+            while i < j && lines[i].trim().is_empty() {
+                i += 1;
+            }
+            while j > i && lines[j - 1].trim().is_empty() {
+                j -= 1;
+            }
+            &lines[i..j]
+        } else {
+            lines
+        };
 
         for line in lines {
             for (j, c) in line.chars().enumerate() {
@@ -72,7 +85,7 @@ pub fn beautify_doc_string(data: Symbol) -> Symbol {
                 return None;
             }
         }
-        Some(i)
+        if lines.is_empty() { None } else { Some(lines[0][..i].into()) }
     }
 
     let data_s = data.as_str();
@@ -86,11 +99,18 @@ pub fn beautify_doc_string(data: Symbol) -> Symbol {
         } else {
             &mut lines
         };
-        if let Some(horizontal) = get_horizontal_trim(&lines) {
+        if let Some(horizontal) = get_horizontal_trim(&lines, kind) {
             changes = true;
             // remove a "[ \t]*\*" block from each line, if possible
             for line in lines.iter_mut() {
-                *line = &line[horizontal + 1..];
+                if let Some(tmp) = line.strip_prefix(&horizontal) {
+                    *line = tmp;
+                    if kind == CommentKind::Block
+                        && (*line == "*" || line.starts_with("* ") || line.starts_with("**"))
+                    {
+                        *line = &line[1..];
+                    }
+                }
             }
         }
         if changes {

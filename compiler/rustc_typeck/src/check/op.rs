@@ -221,7 +221,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             },
                         };
                         let autoref = Adjustment {
-                            kind: Adjust::Borrow(AutoBorrow::Ref(region, mutbl)),
+                            kind: Adjust::Borrow(AutoBorrow::Ref(*region, mutbl)),
                             target: method.sig.inputs()[0],
                         };
                         self.apply_adjustments(lhs_expr, vec![autoref]);
@@ -238,7 +238,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             },
                         };
                         let autoref = Adjustment {
-                            kind: Adjust::Borrow(AutoBorrow::Ref(region, mutbl)),
+                            kind: Adjust::Borrow(AutoBorrow::Ref(*region, mutbl)),
                             target: method.sig.inputs()[1],
                         };
                         // HACK(eddyb) Bypass checks due to reborrows being in
@@ -399,8 +399,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                 };
                 if let Ref(_, rty, _) = lhs_ty.kind() {
-                    if self.infcx.type_is_copy_modulo_regions(self.param_env, rty, lhs_expr.span)
-                        && self.lookup_op_method(rty, &[rhs_ty], Op::Binary(op, is_assign)).is_ok()
+                    if self.infcx.type_is_copy_modulo_regions(self.param_env, *rty, lhs_expr.span)
+                        && self.lookup_op_method(*rty, &[rhs_ty], Op::Binary(op, is_assign)).is_ok()
                     {
                         if let Ok(lstring) = source_map.span_to_snippet(lhs_expr.span) {
                             let msg = &format!(
@@ -423,7 +423,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                 }
                 if let Some(missing_trait) = missing_trait {
-                    let mut visitor = TypeParamVisitor(self.tcx, vec![]);
+                    let mut visitor = TypeParamVisitor(vec![]);
                     visitor.visit_ty(lhs_ty);
 
                     if op.node == hir::BinOpKind::Add
@@ -434,7 +434,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         // This has nothing here because it means we did string
                         // concatenation (e.g., "Hello " + "World!"). This means
                         // we don't want the note in the else clause to be emitted
-                    } else if let [ty] = &visitor.1[..] {
+                    } else if let [ty] = &visitor.0[..] {
                         if let ty::Param(p) = *ty.kind() {
                             // Check if the method would be found if the type param wasn't
                             // involved. If so, it means that adding a trait bound to the param is
@@ -452,7 +452,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                     self.tcx,
                                     self.body_id,
                                     &mut err,
-                                    ty,
+                                    *ty,
                                     rhs_ty,
                                     missing_trait,
                                     p,
@@ -549,16 +549,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         is_assign: IsAssign,
         op: hir::BinOp,
     ) -> bool {
-        let source_map = self.tcx.sess.source_map();
-        let remove_borrow_msg = "String concatenation appends the string on the right to the \
-                                 string on the left and may require reallocation. This \
-                                 requires ownership of the string on the left";
-
-        let msg = "`to_owned()` can be used to create an owned `String` \
-                   from a string reference. String concatenation \
-                   appends the string on the right to the string \
-                   on the left and may require reallocation. This \
-                   requires ownership of the string on the left";
+        let str_concat_note = "string concatenation requires an owned `String` on the left";
+        let rm_borrow_msg = "remove the borrow to obtain an owned `String`";
+        let to_owned_msg = "create an owned `String` from a string reference";
 
         let string_type = self.tcx.get_diagnostic_item(sym::String);
         let is_std_string = |ty: Ty<'tcx>| match ty.ty_adt_def() {
@@ -574,31 +567,23 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     ) =>
             {
                 if let IsAssign::No = is_assign { // Do not supply this message if `&str += &str`
-                    err.span_label(
-                        op.span,
-                        "`+` cannot be used to concatenate two `&str` strings",
-                    );
-                    match source_map.span_to_snippet(lhs_expr.span) {
-                        Ok(lstring) => {
-                            err.span_suggestion(
-                                lhs_expr.span,
-                                if lstring.starts_with('&') {
-                                    remove_borrow_msg
-                                } else {
-                                    msg
-                                },
-                                if let Some(stripped) = lstring.strip_prefix('&') {
-                                    // let a = String::new();
-                                    // let _ = &a + "bar";
-                                    stripped.to_string()
-                                } else {
-                                    format!("{}.to_owned()", lstring)
-                                },
-                                Applicability::MachineApplicable,
-                            )
-                        }
-                        _ => err.help(msg),
-                    };
+                    err.span_label(op.span, "`+` cannot be used to concatenate two `&str` strings");
+                    err.note(str_concat_note);
+                    if let hir::ExprKind::AddrOf(_, _, lhs_inner_expr) = lhs_expr.kind {
+                        err.span_suggestion_verbose(
+                            lhs_expr.span.until(lhs_inner_expr.span),
+                            rm_borrow_msg,
+                            "".to_owned(),
+                            Applicability::MachineApplicable
+                        );
+                    } else {
+                        err.span_suggestion_verbose(
+                            lhs_expr.span.shrink_to_hi(),
+                            to_owned_msg,
+                            ".to_owned()".to_owned(),
+                            Applicability::MachineApplicable
+                        );
+                    }
                 }
                 true
             }
@@ -609,32 +594,30 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     op.span,
                     "`+` cannot be used to concatenate a `&str` with a `String`",
                 );
-                match (
-                    source_map.span_to_snippet(lhs_expr.span),
-                    source_map.span_to_snippet(rhs_expr.span),
-                    is_assign,
-                ) {
-                    (Ok(l), Ok(r), IsAssign::No) => {
-                        let to_string = if let Some(stripped) = l.strip_prefix('&') {
-                            // let a = String::new(); let b = String::new();
-                            // let _ = &a + b;
-                            stripped.to_string()
+                match is_assign {
+                    IsAssign::No => {
+                        let sugg_msg;
+                        let lhs_sugg = if let hir::ExprKind::AddrOf(_, _, lhs_inner_expr) = lhs_expr.kind {
+                            sugg_msg = "remove the borrow on the left and add one on the right";
+                            (lhs_expr.span.until(lhs_inner_expr.span), "".to_owned())
                         } else {
-                            format!("{}.to_owned()", l)
+                            sugg_msg = "create an owned `String` on the left and add a borrow on the right";
+                            (lhs_expr.span.shrink_to_hi(), ".to_owned()".to_owned())
                         };
-                        err.multipart_suggestion(
-                            msg,
-                            vec![
-                                (lhs_expr.span, to_string),
-                                (rhs_expr.span, format!("&{}", r)),
-                            ],
+                        let suggestions = vec![
+                            lhs_sugg,
+                            (rhs_expr.span.shrink_to_lo(), "&".to_owned()),
+                        ];
+                        err.multipart_suggestion_verbose(
+                            sugg_msg,
+                            suggestions,
                             Applicability::MachineApplicable,
                         );
                     }
-                    _ => {
-                        err.help(msg);
+                    IsAssign::Yes => {
+                        err.note(str_concat_note);
                     }
-                };
+                }
                 true
             }
             _ => false,
@@ -895,7 +878,7 @@ enum Op {
 /// Dereferences a single level of immutable referencing.
 fn deref_ty_if_possible<'tcx>(ty: Ty<'tcx>) -> Ty<'tcx> {
     match ty.kind() {
-        ty::Ref(_, ty, hir::Mutability::Not) => ty,
+        ty::Ref(_, ty, hir::Mutability::Not) => *ty,
         _ => ty,
     }
 }
@@ -972,7 +955,7 @@ fn suggest_constraining_param(
     if let Some(generics) = param_def_id
         .as_local()
         .map(|id| hir.local_def_id_to_hir_id(id))
-        .and_then(|id| hir.find(hir.get_parent_item(id)))
+        .and_then(|id| hir.find_by_def_id(hir.get_parent_item(id)))
         .as_ref()
         .and_then(|node| node.generics())
     {
@@ -991,15 +974,12 @@ fn suggest_constraining_param(
     }
 }
 
-struct TypeParamVisitor<'tcx>(TyCtxt<'tcx>, Vec<Ty<'tcx>>);
+struct TypeParamVisitor<'tcx>(Vec<Ty<'tcx>>);
 
 impl<'tcx> TypeVisitor<'tcx> for TypeParamVisitor<'tcx> {
-    fn tcx_for_anon_const_substs(&self) -> Option<TyCtxt<'tcx>> {
-        Some(self.0)
-    }
     fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
         if let ty::Param(_) = ty.kind() {
-            self.1.push(ty);
+            self.0.push(ty);
         }
         ty.super_visit_with(self)
     }

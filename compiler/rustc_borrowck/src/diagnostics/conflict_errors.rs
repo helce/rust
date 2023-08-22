@@ -1,4 +1,5 @@
 use either::Either;
+use rustc_const_eval::util::{CallDesugaringKind, CallKind};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::{Applicability, DiagnosticBuilder};
 use rustc_hir as hir;
@@ -26,7 +27,7 @@ use crate::{
 
 use super::{
     explain_borrow::{BorrowExplanation, LaterUseKind},
-    FnSelfUseKind, IncludingDowncast, RegionName, RegionNameSource, UseSpans,
+    IncludingDowncast, RegionName, RegionNameSource, UseSpans,
 };
 
 #[derive(Debug)]
@@ -104,9 +105,9 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 format!("{} occurs due to use{}", desired_action.as_noun(), use_spans.describe()),
             );
 
-            err.buffer(&mut self.errors_buffer);
+            self.buffer_error(err);
         } else {
-            if let Some((reported_place, _)) = self.move_error_reported.get(&move_out_indices) {
+            if let Some((reported_place, _)) = self.has_move_error(&move_out_indices) {
                 if self.prefixes(*reported_place, PrefixSet::All).any(|p| p == used_place) {
                     debug!(
                         "report_use_of_moved_or_uninitialized place: error suppressed \
@@ -195,7 +196,9 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                         .map(|n| format!("`{}`", n))
                         .unwrap_or_else(|| "value".to_owned());
                     match kind {
-                        FnSelfUseKind::FnOnceCall => {
+                        CallKind::FnCall { fn_trait_id, .. }
+                            if Some(fn_trait_id) == self.infcx.tcx.lang_items().fn_once_trait() =>
+                        {
                             err.span_label(
                                 fn_call_span,
                                 &format!(
@@ -208,7 +211,8 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                                 "this value implements `FnOnce`, which causes it to be moved when called",
                             );
                         }
-                        FnSelfUseKind::Operator { self_arg } => {
+                        CallKind::Operator { self_arg, .. } => {
+                            let self_arg = self_arg.unwrap();
                             err.span_label(
                                 fn_call_span,
                                 &format!(
@@ -235,12 +239,9 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                                 );
                             }
                         }
-                        FnSelfUseKind::Normal {
-                            self_arg,
-                            implicit_into_iter,
-                            is_option_or_result,
-                        } => {
-                            if implicit_into_iter {
+                        CallKind::Normal { self_arg, desugaring, is_option_or_result } => {
+                            let self_arg = self_arg.unwrap();
+                            if let Some((CallDesugaringKind::ForLoopIntoIter, _)) = desugaring {
                                 err.span_label(
                                     fn_call_span,
                                     &format!(
@@ -305,8 +306,8 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                                     );
                             }
                         }
-                        // Deref::deref takes &self, which cannot cause a move
-                        FnSelfUseKind::DerefCoercion { .. } => unreachable!(),
+                        // Other desugarings takes &self, which cannot cause a move
+                        _ => unreachable!(),
                     }
                 } else {
                     err.span_label(
@@ -409,8 +410,9 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                     let generics = tcx.generics_of(self.mir_def_id());
                     let param = generics.type_param(&param_ty, tcx);
                     if let Some(generics) = tcx
-                        .hir()
-                        .get_generics(tcx.typeck_root_def_id(self.mir_def_id().to_def_id()))
+                        .typeck_root_def_id(self.mir_def_id().to_def_id())
+                        .as_local()
+                        .and_then(|def_id| tcx.hir().get_generics(def_id))
                     {
                         suggest_constraining_type_param(
                             tcx,
@@ -432,7 +434,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             }
 
             if let UseSpans::FnSelfUse {
-                kind: FnSelfUseKind::DerefCoercion { deref_target, deref_target_ty },
+                kind: CallKind::DerefCoercion { deref_target, deref_target_ty, .. },
                 ..
             } = use_spans
             {
@@ -448,12 +450,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 }
             }
 
-            if let Some((_, mut old_err)) =
-                self.move_error_reported.insert(move_out_indices, (used_place, err))
-            {
-                // Cancel the old error so it doesn't ICE.
-                old_err.cancel();
-            }
+            self.buffer_move_error(move_out_indices, (used_place, err));
         }
     }
 
@@ -502,7 +499,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 Some(borrow_span),
                 None,
             );
-        err.buffer(&mut self.errors_buffer);
+        self.buffer_error(err);
     }
 
     pub(crate) fn report_use_while_mutably_borrowed(
@@ -1020,7 +1017,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         if self.body.local_decls[borrowed_local].is_ref_to_thread_local() {
             let err =
                 self.report_thread_local_value_does_not_live_long_enough(drop_span, borrow_span);
-            err.buffer(&mut self.errors_buffer);
+            self.buffer_error(err);
             return;
         }
 
@@ -1112,7 +1109,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             ),
         };
 
-        err.buffer(&mut self.errors_buffer);
+        self.buffer_error(err);
     }
 
     fn report_local_value_does_not_live_long_enough(
@@ -1294,7 +1291,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             None,
         );
 
-        err.buffer(&mut self.errors_buffer);
+        self.buffer_error(err);
     }
 
     fn report_thread_local_value_does_not_live_long_enough(
@@ -1809,7 +1806,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                     loan.kind.describe_mutability(),
                 );
 
-                err.buffer(&mut self.errors_buffer);
+                self.buffer_error(err);
 
                 return;
             }
@@ -1835,7 +1832,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
         self.explain_deref_coercion(loan, &mut err);
 
-        err.buffer(&mut self.errors_buffer);
+        self.buffer_error(err);
     }
 
     fn explain_deref_coercion(&mut self, loan: &BorrowData<'tcx>, err: &mut DiagnosticBuilder<'_>) {
@@ -1937,7 +1934,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             }
         }
         err.span_label(span, msg);
-        err.buffer(&mut self.errors_buffer);
+        self.buffer_error(err);
     }
 
     fn classify_drop_access_kind(&self, place: PlaceRef<'tcx>) -> StorageDeadOrDrop<'tcx> {
@@ -2327,7 +2324,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                 // This is also case 2 from above but for functions, return type is still an
                 // anonymous reference so we select the first argument.
                 let argument_span = fn_decl.inputs.first()?.span;
-                let argument_ty = sig.inputs().skip_binder().first()?;
+                let argument_ty = *sig.inputs().skip_binder().first()?;
 
                 let return_span = fn_decl.output.span();
                 let return_ty = sig.output().skip_binder();
@@ -2382,27 +2379,27 @@ impl<'tcx> AnnotatedBorrowFnSignature<'tcx> {
         diag: &mut DiagnosticBuilder<'_>,
     ) -> String {
         match self {
-            AnnotatedBorrowFnSignature::Closure { argument_ty, argument_span } => {
+            &AnnotatedBorrowFnSignature::Closure { argument_ty, argument_span } => {
                 diag.span_label(
-                    *argument_span,
+                    argument_span,
                     format!("has type `{}`", cx.get_name_for_ty(argument_ty, 0)),
                 );
 
                 cx.get_region_name_for_ty(argument_ty, 0)
             }
-            AnnotatedBorrowFnSignature::AnonymousFunction {
+            &AnnotatedBorrowFnSignature::AnonymousFunction {
                 argument_ty,
                 argument_span,
                 return_ty,
                 return_span,
             } => {
                 let argument_ty_name = cx.get_name_for_ty(argument_ty, 0);
-                diag.span_label(*argument_span, format!("has type `{}`", argument_ty_name));
+                diag.span_label(argument_span, format!("has type `{}`", argument_ty_name));
 
                 let return_ty_name = cx.get_name_for_ty(return_ty, 0);
                 let types_equal = return_ty_name == argument_ty_name;
                 diag.span_label(
-                    *return_span,
+                    return_span,
                     format!(
                         "{}has type `{}`",
                         if types_equal { "also " } else { "" },
@@ -2422,7 +2419,7 @@ impl<'tcx> AnnotatedBorrowFnSignature<'tcx> {
             }
             AnnotatedBorrowFnSignature::NamedFunction { arguments, return_ty, return_span } => {
                 // Region of return type and arguments checked to be the same earlier.
-                let region_name = cx.get_region_name_for_ty(return_ty, 0);
+                let region_name = cx.get_region_name_for_ty(*return_ty, 0);
                 for (_, argument_span) in arguments {
                     diag.span_label(*argument_span, format!("has lifetime `{}`", region_name));
                 }

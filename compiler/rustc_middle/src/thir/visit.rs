@@ -26,7 +26,7 @@ pub trait Visitor<'a, 'tcx: 'a>: Sized {
         walk_pat(self, pat);
     }
 
-    fn visit_const(&mut self, _cnst: &'tcx Const<'tcx>) {}
+    fn visit_const(&mut self, _cnst: Const<'tcx>) {}
 }
 
 pub fn walk_expr<'a, 'tcx: 'a, V: Visitor<'a, 'tcx>>(visitor: &mut V, expr: &Expr<'tcx>) {
@@ -123,7 +123,7 @@ pub fn walk_expr<'a, 'tcx: 'a, V: Visitor<'a, 'tcx>>(visitor: &mut V, expr: &Exp
         }
         Closure { closure_id: _, substs: _, upvars: _, movability: _, fake_reads: _ } => {}
         Literal { literal, user_ty: _, const_id: _ } => visitor.visit_const(literal),
-        StaticRef { literal, def_id: _ } => visitor.visit_const(literal),
+        StaticRef { .. } => {}
         InlineAsm { ref operands, template: _, options: _, line_spans: _ } => {
             for op in &**operands {
                 use InlineAsmOperand::*;
@@ -145,14 +145,6 @@ pub fn walk_expr<'a, 'tcx: 'a, V: Visitor<'a, 'tcx>>(visitor: &mut V, expr: &Exp
             }
         }
         ThreadLocalRef(_) => {}
-        LlvmInlineAsm { ref outputs, ref inputs, asm: _ } => {
-            for &out_expr in &**outputs {
-                visitor.visit_expr(&visitor.thir()[out_expr]);
-            }
-            for &in_expr in &**inputs {
-                visitor.visit_expr(&visitor.thir()[in_expr]);
-            }
-        }
         Yield { value } => visitor.visit_expr(&visitor.thir()[value]),
     }
 }
@@ -217,7 +209,7 @@ pub fn walk_pat<'a, 'tcx: 'a, V: Visitor<'a, 'tcx>>(visitor: &mut V, pat: &Pat<'
                 visitor.visit_pat(&subpattern.pattern);
             }
         }
-        Constant { value } => visitor.visit_const(value),
+        Constant { value } => visitor.visit_const(*value),
         Range(range) => {
             visitor.visit_const(range.lo);
             visitor.visit_const(range.hi);

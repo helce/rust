@@ -19,6 +19,7 @@ pub struct OnUnimplementedDirective {
     pub label: Option<OnUnimplementedFormatString>,
     pub note: Option<OnUnimplementedFormatString>,
     pub enclosing_scope: Option<OnUnimplementedFormatString>,
+    pub append_const_msg: Option<Option<Symbol>>,
 }
 
 #[derive(Default)]
@@ -27,6 +28,11 @@ pub struct OnUnimplementedNote {
     pub label: Option<String>,
     pub note: Option<String>,
     pub enclosing_scope: Option<String>,
+    /// Append a message for `~const Trait` errors. `None` means not requested and
+    /// should fallback to a generic message, `Some(None)` suggests using the default
+    /// appended message, `Some(Some(s))` suggests use the `s` message instead of the
+    /// default one..
+    pub append_const_msg: Option<Option<Symbol>>,
 }
 
 fn parse_error(
@@ -56,6 +62,10 @@ impl<'tcx> OnUnimplementedDirective {
         let mut errored = false;
         let mut item_iter = items.iter();
 
+        let parse_value = |value_str| {
+            OnUnimplementedFormatString::try_parse(tcx, trait_def_id, value_str, span).map(Some)
+        };
+
         let condition = if is_root {
             None
         } else {
@@ -80,7 +90,14 @@ impl<'tcx> OnUnimplementedDirective {
                         None,
                     )
                 })?;
-            attr::eval_condition(cond, &tcx.sess.parse_sess, Some(tcx.features()), &mut |_| true);
+            attr::eval_condition(cond, &tcx.sess.parse_sess, Some(tcx.features()), &mut |item| {
+                if let Some(symbol) = item.value_str() {
+                    if parse_value(symbol).is_err() {
+                        errored = true;
+                    }
+                }
+                true
+            });
             Some(cond.clone())
         };
 
@@ -89,10 +106,7 @@ impl<'tcx> OnUnimplementedDirective {
         let mut note = None;
         let mut enclosing_scope = None;
         let mut subcommands = vec![];
-
-        let parse_value = |value_str| {
-            OnUnimplementedFormatString::try_parse(tcx, trait_def_id, value_str, span).map(Some)
-        };
+        let mut append_const_msg = None;
 
         for item in item_iter {
             if item.has_name(sym::message) && message.is_none() {
@@ -131,6 +145,14 @@ impl<'tcx> OnUnimplementedDirective {
                     }
                     continue;
                 }
+            } else if item.has_name(sym::append_const_msg) && append_const_msg.is_none() {
+                if let Some(msg) = item.value_str() {
+                    append_const_msg = Some(Some(msg));
+                    continue;
+                } else if item.is_word() {
+                    append_const_msg = Some(None);
+                    continue;
+                }
             }
 
             // nothing found
@@ -153,6 +175,7 @@ impl<'tcx> OnUnimplementedDirective {
                 label,
                 note,
                 enclosing_scope,
+                append_const_msg,
             })
         }
     }
@@ -183,6 +206,7 @@ impl<'tcx> OnUnimplementedDirective {
                 )?),
                 note: None,
                 enclosing_scope: None,
+                append_const_msg: None,
             }))
         } else {
             return Err(ErrorReported);
@@ -201,7 +225,11 @@ impl<'tcx> OnUnimplementedDirective {
         let mut label = None;
         let mut note = None;
         let mut enclosing_scope = None;
+        let mut append_const_msg = None;
         info!("evaluate({:?}, trait_ref={:?}, options={:?})", self, trait_ref, options);
+
+        let options_map: FxHashMap<Symbol, String> =
+            options.iter().filter_map(|(k, v)| v.as_ref().map(|v| (*k, v.to_owned()))).collect();
 
         for command in self.subcommands.iter().chain(Some(self)).rev() {
             if let Some(ref condition) = command.condition {
@@ -211,7 +239,11 @@ impl<'tcx> OnUnimplementedDirective {
                     Some(tcx.features()),
                     &mut |c| {
                         c.ident().map_or(false, |ident| {
-                            options.contains(&(ident.name, c.value_str().map(|s| s.to_string())))
+                            let value = c.value_str().map(|s| {
+                                OnUnimplementedFormatString(s).format(tcx, trait_ref, &options_map)
+                            });
+
+                            options.contains(&(ident.name, value))
                         })
                     },
                 ) {
@@ -235,15 +267,16 @@ impl<'tcx> OnUnimplementedDirective {
             if let Some(ref enclosing_scope_) = command.enclosing_scope {
                 enclosing_scope = Some(enclosing_scope_.clone());
             }
+
+            append_const_msg = command.append_const_msg.clone();
         }
 
-        let options: FxHashMap<Symbol, String> =
-            options.iter().filter_map(|(k, v)| v.as_ref().map(|v| (*k, v.to_owned()))).collect();
         OnUnimplementedNote {
-            label: label.map(|l| l.format(tcx, trait_ref, &options)),
-            message: message.map(|m| m.format(tcx, trait_ref, &options)),
-            note: note.map(|n| n.format(tcx, trait_ref, &options)),
-            enclosing_scope: enclosing_scope.map(|e_s| e_s.format(tcx, trait_ref, &options)),
+            label: label.map(|l| l.format(tcx, trait_ref, &options_map)),
+            message: message.map(|m| m.format(tcx, trait_ref, &options_map)),
+            note: note.map(|n| n.format(tcx, trait_ref, &options_map)),
+            enclosing_scope: enclosing_scope.map(|e_s| e_s.format(tcx, trait_ref, &options_map)),
+            append_const_msg,
         }
     }
 }
@@ -276,17 +309,23 @@ impl<'tcx> OnUnimplementedFormatString {
                 Piece::String(_) => (), // Normal string, no need to check it
                 Piece::NextArgument(a) => match a.position {
                     // `{Self}` is allowed
-                    Position::ArgumentNamed(s) if s == kw::SelfUpper => (),
+                    Position::ArgumentNamed(s, _) if s == kw::SelfUpper => (),
                     // `{ThisTraitsName}` is allowed
-                    Position::ArgumentNamed(s) if s == name => (),
+                    Position::ArgumentNamed(s, _) if s == name => (),
                     // `{from_method}` is allowed
-                    Position::ArgumentNamed(s) if s == sym::from_method => (),
+                    Position::ArgumentNamed(s, _) if s == sym::from_method => (),
                     // `{from_desugaring}` is allowed
-                    Position::ArgumentNamed(s) if s == sym::from_desugaring => (),
+                    Position::ArgumentNamed(s, _) if s == sym::from_desugaring => (),
                     // `{ItemContext}` is allowed
-                    Position::ArgumentNamed(s) if s == sym::ItemContext => (),
+                    Position::ArgumentNamed(s, _) if s == sym::ItemContext => (),
+                    // `{integral}` and `{integer}` and `{float}` are allowed
+                    Position::ArgumentNamed(s, _)
+                        if s == sym::integral || s == sym::integer_ || s == sym::float =>
+                    {
+                        ()
+                    }
                     // So is `{A}` if A is a type parameter
-                    Position::ArgumentNamed(s) => {
+                    Position::ArgumentNamed(s, _) => {
                         match generics.params.iter().find(|param| param.name == s) {
                             Some(_) => (),
                             None => {
@@ -353,7 +392,7 @@ impl<'tcx> OnUnimplementedFormatString {
             .map(|p| match p {
                 Piece::String(s) => s,
                 Piece::NextArgument(a) => match a.position {
-                    Position::ArgumentNamed(s) => match generic_map.get(&s) {
+                    Position::ArgumentNamed(s, _) => match generic_map.get(&s) {
                         Some(val) => val,
                         None if s == name => &trait_str,
                         None => {
@@ -364,6 +403,12 @@ impl<'tcx> OnUnimplementedFormatString {
                                 &empty_string
                             } else if s == sym::ItemContext {
                                 &item_context
+                            } else if s == sym::integral {
+                                "{integral}"
+                            } else if s == sym::integer_ {
+                                "{integer}"
+                            } else if s == sym::float {
+                                "{float}"
                             } else {
                                 bug!(
                                     "broken on_unimplemented {:?} for {:?}: \

@@ -26,7 +26,7 @@ use rustc_hir::def::{self, *};
 use rustc_hir::def_id::{DefId, LocalDefId, CRATE_DEF_INDEX};
 use rustc_metadata::creader::LoadedMacro;
 use rustc_middle::bug;
-use rustc_middle::hir::exports::Export;
+use rustc_middle::metadata::ModChild;
 use rustc_middle::ty;
 use rustc_session::cstore::CrateStore;
 use rustc_span::hygiene::{ExpnId, LocalExpnId, MacroKind};
@@ -108,7 +108,7 @@ impl<'a> Resolver<'a> {
     /// Reachable macros with block module parents exist due to `#[macro_export] macro_rules!`,
     /// but they cannot use def-site hygiene, so the assumption holds
     /// (<https://github.com/rust-lang/rust/pull/77984#issuecomment-712445508>).
-    crate fn get_nearest_non_block_module(&mut self, mut def_id: DefId) -> Module<'a> {
+    pub fn get_nearest_non_block_module(&mut self, mut def_id: DefId) -> Module<'a> {
         loop {
             match self.get_module(def_id) {
                 Some(module) => return module,
@@ -214,7 +214,7 @@ impl<'a> Resolver<'a> {
     }
 
     crate fn build_reduced_graph_external(&mut self, module: Module<'a>) {
-        for child in self.cstore().item_children_untracked(module.def_id(), self.session) {
+        for child in self.cstore().module_children_untracked(module.def_id(), self.session) {
             let parent_scope = ParentScope::module(module, self);
             BuildReducedGraphVisitor { r: self, parent_scope }
                 .build_reduced_graph_for_external_crate_res(child);
@@ -383,8 +383,6 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
             used: Cell::new(false),
         });
 
-        debug!("add_import({:?})", import);
-
         self.r.indeterminate_imports.push(import);
         match import.kind {
             // Don't add unresolved underscore imports to modules
@@ -455,7 +453,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
             prefix.is_empty() || prefix.len() == 1 && prefix[0].ident.name == kw::PathRoot
         };
         match use_tree.kind {
-            ast::UseTreeKind::Simple(rename, ..) => {
+            ast::UseTreeKind::Simple(rename, id1, id2) => {
                 let mut ident = use_tree.ident();
                 let mut module_path = prefix;
                 let mut source = module_path.pop().unwrap();
@@ -565,7 +563,9 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                     },
                     type_ns_only,
                     nested,
+                    additional_ids: (id1, id2),
                 };
+
                 self.add_import(
                     module_path,
                     kind,
@@ -938,9 +938,9 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
     }
 
     /// Builds the reduced graph for a single item in an external crate.
-    fn build_reduced_graph_for_external_crate_res(&mut self, child: Export) {
+    fn build_reduced_graph_for_external_crate_res(&mut self, child: ModChild) {
         let parent = self.parent_scope.module;
-        let Export { ident, res, vis, span } = child;
+        let ModChild { ident, res, vis, span } = child;
         let res = res.expect_non_local();
         let expansion = self.parent_scope.expansion;
         // Record primary definitions.
@@ -991,7 +991,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                 _,
             )
             | Res::Local(..)
-            | Res::SelfTy(..)
+            | Res::SelfTy { .. }
             | Res::SelfCtor(..)
             | Res::Err => bug!("unexpected resolution: {:?}", res),
         }
@@ -999,12 +999,14 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
         let cstore = self.r.cstore();
         match res {
             Res::Def(DefKind::Struct, def_id) => {
-                let field_names = cstore.struct_field_names_untracked(def_id, self.r.session);
+                let field_names =
+                    cstore.struct_field_names_untracked(def_id, self.r.session).collect();
                 let ctor = cstore.ctor_def_id_and_kind_untracked(def_id);
                 if let Some((ctor_def_id, ctor_kind)) = ctor {
                     let ctor_res = Res::Def(DefKind::Ctor(CtorOf::Struct, ctor_kind), ctor_def_id);
                     let ctor_vis = cstore.visibility_untracked(ctor_def_id);
-                    let field_visibilities = cstore.struct_field_visibilities_untracked(def_id);
+                    let field_visibilities =
+                        cstore.struct_field_visibilities_untracked(def_id).collect();
                     self.r
                         .struct_constructors
                         .insert(def_id, (ctor_res, ctor_vis, field_visibilities));
@@ -1012,7 +1014,8 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                 self.insert_field_names(def_id, field_names);
             }
             Res::Def(DefKind::Union, def_id) => {
-                let field_names = cstore.struct_field_names_untracked(def_id, self.r.session);
+                let field_names =
+                    cstore.struct_field_names_untracked(def_id, self.r.session).collect();
                 self.insert_field_names(def_id, field_names);
             }
             Res::Def(DefKind::AssocFn, def_id) => {

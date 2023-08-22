@@ -182,7 +182,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // `foo.bar::<u32>(...)` -- the `Self` type here will be the
         // type of `foo` (possibly adjusted), but we don't want to
         // include that. We want just the `[_, u32]` part.
-        if !method.substs.is_noop() {
+        if !method.substs.is_empty() {
             let method_generics = self.tcx.generics_of(method.def_id);
             if !method_generics.params.is_empty() {
                 let user_type_annotation = self.infcx.probe(|_| {
@@ -211,7 +211,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     pub fn write_substs(&self, node_id: hir::HirId, substs: SubstsRef<'tcx>) {
-        if !substs.is_noop() {
+        if !substs.is_empty() {
             debug!("write_substs({:?}, {:?}) in fcx {}", node_id, substs, self.tag());
 
             self.typeck_results.borrow_mut().node_substs_mut().insert(node_id, substs);
@@ -235,7 +235,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     ) {
         debug!("fcx {}", self.tag());
 
-        if self.can_contain_user_lifetime_bounds((substs, user_self_ty)) {
+        if Self::can_contain_user_lifetime_bounds((substs, user_self_ty)) {
             let canonicalized = self.infcx.canonicalize_user_type_annotation(UserType::TypeOf(
                 def_id,
                 UserSubsts { substs, user_self_ty },
@@ -315,11 +315,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                     // FIXME: currently we never try to compose autoderefs
                     // and ReifyFnPointer/UnsafeFnPointer, but we could.
-                    _ => bug!(
-                        "while adjusting {:?}, can't compose {:?} and {:?}",
-                        expr,
-                        entry.get(),
-                        adj
+                    _ => self.tcx.sess.delay_span_bug(
+                        expr.span,
+                        &format!(
+                            "while adjusting {:?}, can't compose {:?} and {:?}",
+                            expr,
+                            entry.get(),
+                            adj
+                        ),
                     ),
                 };
                 *entry.get_mut() = adj;
@@ -489,7 +492,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let ty = self.to_ty(ast_ty);
         debug!("to_ty_saving_user_provided_ty: ty={:?}", ty);
 
-        if self.can_contain_user_lifetime_bounds(ty) {
+        if Self::can_contain_user_lifetime_bounds(ty) {
             let c_ty = self.infcx.canonicalize_response(UserType::Ty(ty));
             debug!("to_ty_saving_user_provided_ty: c_ty={:?}", c_ty);
             self.typeck_results.borrow_mut().user_provided_types_mut().insert(ast_ty.hir_id, c_ty);
@@ -498,14 +501,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         ty
     }
 
-    pub fn array_length_to_const(&self, length: &hir::ArrayLen) -> &'tcx ty::Const<'tcx> {
+    pub fn array_length_to_const(&self, length: &hir::ArrayLen) -> ty::Const<'tcx> {
         match length {
             &hir::ArrayLen::Infer(_, span) => self.ct_infer(self.tcx.types.usize, None, span),
             hir::ArrayLen::Body(anon_const) => self.to_const(anon_const),
         }
     }
 
-    pub fn to_const(&self, ast_c: &hir::AnonConst) -> &'tcx ty::Const<'tcx> {
+    pub fn to_const(&self, ast_c: &hir::AnonConst) -> ty::Const<'tcx> {
         let const_def_id = self.tcx.hir().local_def_id(ast_c.hir_id);
         let c = ty::Const::from_anon_const(self.tcx, const_def_id);
         self.register_wf_obligation(
@@ -520,7 +523,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         ast_c: &hir::AnonConst,
         param_def_id: DefId,
-    ) -> &'tcx ty::Const<'tcx> {
+    ) -> ty::Const<'tcx> {
         let const_def = ty::WithOptConstParam {
             did: self.tcx.hir().local_def_id(ast_c.hir_id),
             const_param_did: Some(param_def_id),
@@ -541,11 +544,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     // reader, although I have my doubts). Also pass in types with inference
     // types, because they may be repeated. Other sorts of things are already
     // sufficiently enforced with erased regions. =)
-    fn can_contain_user_lifetime_bounds<T>(&self, t: T) -> bool
+    fn can_contain_user_lifetime_bounds<T>(t: T) -> bool
     where
         T: TypeFoldable<'tcx>,
     {
-        t.has_free_regions(self.tcx) || t.has_projections() || t.has_infer_types()
+        t.has_free_regions() || t.has_projections() || t.has_infer_types()
     }
 
     pub fn node_ty(&self, id: hir::HirId) -> Ty<'tcx> {
@@ -605,7 +608,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         field: &'tcx ty::FieldDef,
         substs: SubstsRef<'tcx>,
     ) -> Ty<'tcx> {
-        self.normalize_associated_types_in(span, &field.ty(self.tcx, substs))
+        self.normalize_associated_types_in(span, field.ty(self.tcx, substs))
     }
 
     pub(in super::super) fn resolve_generator_interiors(&self, def_id: DefId) {
@@ -756,7 +759,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // is polymorphic) and the expected return type.
                 // No argument expectations are produced if unification fails.
                 let origin = self.misc(call_span);
-                let ures = self.at(&origin, self.param_env).sup(ret_ty, &formal_ret);
+                let ures = self.at(&origin, self.param_env).sup(ret_ty, formal_ret);
 
                 // FIXME(#27336) can't use ? here, Try::from_error doesn't default
                 // to identity so the resulting type is not constrained.
@@ -964,7 +967,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if found != self.tcx.types.unit {
             return;
         }
-        if let ExprKind::MethodCall(path_segment, _, [rcvr, ..], _) = expr.kind {
+        if let ExprKind::MethodCall(path_segment, [rcvr, ..], _) = expr.kind {
             if self
                 .typeck_results
                 .borrow()

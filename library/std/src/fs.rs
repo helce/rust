@@ -356,9 +356,10 @@ impl File {
     /// open or create a file with specific options if `open()` or `create()`
     /// are not appropriate.
     ///
-    /// It is equivalent to `OpenOptions::new()` but allows you to write more
-    /// readable code. Instead of `OpenOptions::new().read(true).open("foo.txt")`
-    /// you can write `File::options().read(true).open("foo.txt")`. This
+    /// It is equivalent to `OpenOptions::new()`, but allows you to write more
+    /// readable code. Instead of
+    /// `OpenOptions::new().append(true).open("example.log")`,
+    /// you can write `File::options().append(true).open("example.log")`. This
     /// also avoids the need to import `OpenOptions`.
     ///
     /// See the [`OpenOptions::new`] function for more details.
@@ -369,7 +370,7 @@ impl File {
     /// use std::fs::File;
     ///
     /// fn main() -> std::io::Result<()> {
-    ///     let mut f = File::options().read(true).open("foo.txt")?;
+    ///     let mut f = File::options().append(true).open("example.log")?;
     ///     Ok(())
     /// }
     /// ```
@@ -1049,7 +1050,7 @@ impl Metadata {
     ///
     /// fn main() -> std::io::Result<()> {
     ///     let link_path = Path::new("link");
-    ///     symlink("/origin_does_not_exists/", link_path)?;
+    ///     symlink("/origin_does_not_exist/", link_path)?;
     ///
     ///     let metadata = fs::symlink_metadata(link_path)?;
     ///
@@ -2043,7 +2044,7 @@ pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 ///
 /// This function currently corresponds to `openat`, `fdopendir`, `unlinkat` and `lstat` functions
 /// on Unix (except for macOS before version 10.10 and REDOX) and the `CreateFileW`,
-/// `GetFileInformationByHandleEx`, `SetFileInformationByHandle`, and `NtOpenFile` functions on
+/// `GetFileInformationByHandleEx`, `SetFileInformationByHandle`, and `NtCreateFile` functions on
 /// Windows. Note that, this [may change in the future][changes].
 ///
 /// [changes]: io#platform-specific-behavior
@@ -2262,9 +2263,9 @@ impl DirBuilder {
         match path.parent() {
             Some(p) => self.create_dir_all(p)?,
             None => {
-                return Err(io::Error::new_const(
+                return Err(io::const_io_error!(
                     io::ErrorKind::Uncategorized,
-                    &"failed to create whole tree",
+                    "failed to create whole tree",
                 ));
             }
         }
@@ -2287,7 +2288,7 @@ impl AsInnerMut<fs_imp::DirBuilder> for DirBuilder {
 /// This function will traverse symbolic links to query information about the
 /// destination file. In case of broken symbolic links this will return `Ok(false)`.
 ///
-/// As opposed to the `exists()` method, this one doesn't silently ignore errors
+/// As opposed to the [`Path::exists`] method, this one doesn't silently ignore errors
 /// unrelated to the path not existing. (E.g. it will return `Err(_)` in case of permission
 /// denied on some of the parent directories.)
 ///
@@ -2300,6 +2301,8 @@ impl AsInnerMut<fs_imp::DirBuilder> for DirBuilder {
 /// assert!(!fs::try_exists("does_not_exist.txt").expect("Can't check existence of file does_not_exist.txt"));
 /// assert!(fs::try_exists("/root/secret_file.txt").is_err());
 /// ```
+///
+/// [`Path::exists`]: crate::path::Path::exists
 // FIXME: stabilization should modify documentation of `exists()` to recommend this method
 // instead.
 #[unstable(feature = "path_try_exists", issue = "83186")]

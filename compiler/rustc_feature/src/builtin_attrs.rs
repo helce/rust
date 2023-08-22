@@ -26,16 +26,14 @@ const GATED_CFGS: &[GatedCfg] = &[
     // (name in cfg, feature, function to check if the feature is enabled)
     (sym::target_abi, sym::cfg_target_abi, cfg_fn!(cfg_target_abi)),
     (sym::target_thread_local, sym::cfg_target_thread_local, cfg_fn!(cfg_target_thread_local)),
-    (sym::target_has_atomic, sym::cfg_target_has_atomic, cfg_fn!(cfg_target_has_atomic)),
-    (sym::target_has_atomic_load_store, sym::cfg_target_has_atomic, cfg_fn!(cfg_target_has_atomic)),
     (
         sym::target_has_atomic_equal_alignment,
-        sym::cfg_target_has_atomic,
-        cfg_fn!(cfg_target_has_atomic),
+        sym::cfg_target_has_atomic_equal_alignment,
+        cfg_fn!(cfg_target_has_atomic_equal_alignment),
     ),
+    (sym::target_has_atomic_load_store, sym::cfg_target_has_atomic, cfg_fn!(cfg_target_has_atomic)),
     (sym::sanitize, sym::cfg_sanitize, cfg_fn!(cfg_sanitize)),
     (sym::version, sym::cfg_version, cfg_fn!(cfg_version)),
-    (sym::panic, sym::cfg_panic, cfg_fn!(cfg_panic)),
 ];
 
 /// Find a gated cfg determined by the `pred`icate which is given the cfg's name.
@@ -324,7 +322,7 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     ungated!(export_name, Normal, template!(NameValueStr: "name"), FutureWarnPreceding),
     ungated!(link_section, Normal, template!(NameValueStr: "name"), FutureWarnPreceding),
     ungated!(no_mangle, Normal, template!(Word), WarnFollowing),
-    ungated!(used, Normal, template!(Word), WarnFollowing),
+    ungated!(used, Normal, template!(Word, List: "compiler|linker"), WarnFollowing),
 
     // Limits:
     ungated!(recursion_limit, CrateLevel, template!(NameValueStr: "N"), FutureWarnFollowing),
@@ -351,7 +349,7 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
 
     // Runtime
     ungated!(
-        windows_subsystem, Normal,
+        windows_subsystem, CrateLevel,
         template!(NameValueStr: "windows|console"), FutureWarnFollowing
     ),
     ungated!(panic_handler, Normal, template!(Word), WarnFollowing), // RFC 2070
@@ -359,7 +357,7 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     // Code generation:
     ungated!(inline, Normal, template!(Word, List: "always|never"), FutureWarnFollowing),
     ungated!(cold, Normal, template!(Word), WarnFollowing),
-    ungated!(no_builtins, Normal, template!(Word), WarnFollowing),
+    ungated!(no_builtins, CrateLevel, template!(Word), WarnFollowing),
     ungated!(target_feature, Normal, template!(List: r#"enable = "name""#), DuplicatesOk),
     ungated!(track_caller, Normal, template!(Word), WarnFollowing),
     gated!(
@@ -402,7 +400,6 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     },
 
     // Testing:
-    gated!(allow_fail, Normal, template!(Word), WarnFollowing, experimental!(allow_fail)),
     gated!(
         test_runner, CrateLevel, template!(List: "path"), ErrorFollowing, custom_test_frameworks,
         "custom test frameworks are an unstable feature",
@@ -580,6 +577,9 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     rustc_attr!(
         rustc_trivial_field_reads, Normal, template!(Word), WarnFollowing, INTERNAL_UNSTABLE
     ),
+    // Used by the `rustc::potential_query_instability` lint to warn methods which
+    // might not be stable during incremental compilation.
+    rustc_attr!(rustc_lint_query_instability, Normal, template!(Word), WarnFollowing, INTERNAL_UNSTABLE),
 
     // ==========================================================================
     // Internal attributes, Const related:
@@ -621,6 +621,11 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     gated!(
         lang, Normal, template!(NameValueStr: "name"), DuplicatesOk, lang_items,
         "language items are subject to change",
+    ),
+    rustc_attr!(
+        rustc_pass_by_value, Normal,
+        template!(Word), ErrorFollowing,
+        "#[rustc_pass_by_value] is used to mark types that must be passed by value instead of reference."
     ),
     BuiltinAttribute {
         name: sym::rustc_diagnostic_item,
@@ -675,6 +680,12 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         rustc_skip_array_during_method_dispatch, Normal, template!(Word), WarnFollowing,
         "the `#[rustc_skip_array_during_method_dispatch]` attribute is used to exclude a trait \
         from method dispatch when the receiver is an array, for compatibility in editions < 2021."
+    ),
+    rustc_attr!(
+        rustc_must_implement_one_of, Normal, template!(List: "function1, function2, ..."), ErrorFollowing,
+        "the `#[rustc_must_implement_one_of]` attribute is used to change minimal complete \
+        definition of a trait, it's currently in experimental form and should be changed before \
+        being exposed outside of the std"
     ),
 
     // ==========================================================================

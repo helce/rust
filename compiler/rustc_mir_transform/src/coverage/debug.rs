@@ -3,7 +3,7 @@
 //!
 //! To enable coverage, include the rustc command line option:
 //!
-//!   * `-Z instrument-coverage`
+//!   * `-C instrument-coverage`
 //!
 //! MIR Dump Files, with additional `CoverageGraph` graphviz and `CoverageSpan` spanview
 //! ------------------------------------------------------------------------------------
@@ -111,6 +111,7 @@
 use super::graph::{BasicCoverageBlock, BasicCoverageBlockData, CoverageGraph};
 use super::spans::CoverageSpan;
 
+use itertools::Itertools;
 use rustc_middle::mir::create_dump_file;
 use rustc_middle::mir::generic_graphviz::GraphvizWriter;
 use rustc_middle::mir::spanview::{self, SpanViewable};
@@ -739,7 +740,6 @@ pub(super) fn dump_coverage_graphviz<'tcx>(
                         )
                     }
                 })
-                .collect::<Vec<_>>()
                 .join("\n  ")
         ));
     }
@@ -768,7 +768,6 @@ fn bcb_to_string_sections<'tcx>(
                 .map(|expression| {
                     format!("Intermediate {}", debug_counters.format_counter(expression))
                 })
-                .collect::<Vec<_>>()
                 .join("\n"),
         );
     }
@@ -783,7 +782,6 @@ fn bcb_to_string_sections<'tcx>(
                         covspan.format(tcx, mir_body)
                     )
                 })
-                .collect::<Vec<_>>()
                 .join("\n"),
         );
     }
@@ -793,7 +791,6 @@ fn bcb_to_string_sections<'tcx>(
             dependency_counters
                 .iter()
                 .map(|counter| debug_counters.format_counter(counter))
-                .collect::<Vec<_>>()
                 .join("  \n"),
         ));
     }

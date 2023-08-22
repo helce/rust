@@ -34,7 +34,20 @@ use libc::c_char;
 use libc::dirfd;
 #[cfg(any(target_os = "linux", target_os = "emscripten"))]
 use libc::fstatat64;
+#[cfg(any(
+    target_os = "android",
+    target_os = "solaris",
+    target_os = "fuchsia",
+    target_os = "redox",
+    target_os = "illumos"
+))]
+use libc::readdir as readdir64;
+#[cfg(target_os = "linux")]
+use libc::readdir64;
+#[cfg(any(target_os = "emscripten", target_os = "l4re"))]
+use libc::readdir64_r;
 #[cfg(not(any(
+    target_os = "android",
     target_os = "linux",
     target_os = "emscripten",
     target_os = "solaris",
@@ -60,9 +73,7 @@ use libc::{
     lstat as lstat64, off_t as off64_t, open as open64, stat as stat64,
 };
 #[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "l4re"))]
-use libc::{
-    dirent64, fstat64, ftruncate64, lseek64, lstat64, off64_t, open64, readdir64_r, stat64,
-};
+use libc::{dirent64, fstat64, ftruncate64, lseek64, lstat64, off64_t, open64, stat64};
 
 pub use crate::sys_common::fs::try_exists;
 
@@ -202,6 +213,8 @@ struct InnerReadDir {
 pub struct ReadDir {
     inner: Arc<InnerReadDir>,
     #[cfg(not(any(
+        target_os = "android",
+        target_os = "linux",
         target_os = "solaris",
         target_os = "illumos",
         target_os = "fuchsia",
@@ -218,11 +231,12 @@ unsafe impl Sync for Dir {}
 pub struct DirEntry {
     entry: dirent64,
     dir: Arc<InnerReadDir>,
-    // We need to store an owned copy of the entry name
-    // on Solaris and Fuchsia because a) it uses a zero-length
-    // array to store the name, b) its lifetime between readdir
-    // calls is not guaranteed.
+    // We need to store an owned copy of the entry name on platforms that use
+    // readdir() (not readdir_r()), because a) struct dirent may use a flexible
+    // array to store the name, b) it lives only until the next readdir() call.
     #[cfg(any(
+        target_os = "android",
+        target_os = "linux",
         target_os = "solaris",
         target_os = "illumos",
         target_os = "fuchsia",
@@ -373,17 +387,17 @@ impl FileAttr {
                         tv_nsec: ext.stx_btime.tv_nsec as _,
                     }))
                 } else {
-                    Err(io::Error::new_const(
+                    Err(io::const_io_error!(
                         io::ErrorKind::Uncategorized,
-                        &"creation time is not available for the filesystem",
+                        "creation time is not available for the filesystem",
                     ))
                 };
             }
         }
 
-        Err(io::Error::new_const(
+        Err(io::const_io_error!(
             io::ErrorKind::Unsupported,
-            &"creation time is not available on this platform \
+            "creation time is not available on this platform \
                             currently",
         ))
     }
@@ -449,6 +463,8 @@ impl Iterator for ReadDir {
     type Item = io::Result<DirEntry>;
 
     #[cfg(any(
+        target_os = "android",
+        target_os = "linux",
         target_os = "solaris",
         target_os = "fuchsia",
         target_os = "redox",
@@ -457,12 +473,13 @@ impl Iterator for ReadDir {
     fn next(&mut self) -> Option<io::Result<DirEntry>> {
         unsafe {
             loop {
-                // Although readdir_r(3) would be a correct function to use here because
-                // of the thread safety, on Illumos and Fuchsia the readdir(3C) function
-                // is safe to use in threaded applications and it is generally preferred
-                // over the readdir_r(3C) function.
+                // As of POSIX.1-2017, readdir() is not required to be thread safe; only
+                // readdir_r() is. However, readdir_r() cannot correctly handle platforms
+                // with unlimited or variable NAME_MAX.  Many modern platforms guarantee
+                // thread safety for readdir() as long an individual DIR* is not accessed
+                // concurrently, which is sufficient for Rust.
                 super::os::set_errno(0);
-                let entry_ptr = libc::readdir(self.inner.dirp.0);
+                let entry_ptr = readdir64(self.inner.dirp.0);
                 if entry_ptr.is_null() {
                     // null can mean either the end is reached or an error occurred.
                     // So we had to clear errno beforehand to check for an error now.
@@ -472,10 +489,18 @@ impl Iterator for ReadDir {
                     };
                 }
 
+                // Only d_reclen bytes of *entry_ptr are valid, so we can't just copy the
+                // whole thing (#93384).  Instead, copy everything except the name.
+                let entry_bytes = entry_ptr as *const u8;
+                let entry_name = ptr::addr_of!((*entry_ptr).d_name) as *const u8;
+                let name_offset = entry_name.offset_from(entry_bytes) as usize;
+                let mut entry: dirent64 = mem::zeroed();
+                ptr::copy_nonoverlapping(entry_bytes, &mut entry as *mut _ as *mut u8, name_offset);
+
                 let ret = DirEntry {
-                    entry: *entry_ptr,
+                    entry,
                     // d_name is guaranteed to be null-terminated.
-                    name: CStr::from_ptr((*entry_ptr).d_name.as_ptr()).to_owned(),
+                    name: CStr::from_ptr(entry_name as *const _).to_owned(),
                     dir: Arc::clone(&self.inner),
                 };
                 if ret.name_bytes() != b"." && ret.name_bytes() != b".." {
@@ -486,6 +511,8 @@ impl Iterator for ReadDir {
     }
 
     #[cfg(not(any(
+        target_os = "android",
+        target_os = "linux",
         target_os = "solaris",
         target_os = "fuchsia",
         target_os = "redox",
@@ -531,17 +558,17 @@ impl Drop for Dir {
 
 impl DirEntry {
     pub fn path(&self) -> PathBuf {
-        self.dir.root.join(OsStr::from_bytes(self.name_bytes()))
+        self.dir.root.join(self.file_name_os_str())
     }
 
     pub fn file_name(&self) -> OsString {
-        OsStr::from_bytes(self.name_bytes()).to_os_string()
+        self.file_name_os_str().to_os_string()
     }
 
     #[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "android"))]
     pub fn metadata(&self) -> io::Result<FileAttr> {
         let fd = cvt(unsafe { dirfd(self.dir.dirp.0) })?;
-        let name = self.entry.d_name.as_ptr();
+        let name = self.name_cstr().as_ptr();
 
         cfg_has_statx! {
             if let Some(ret) = unsafe { try_statx(
@@ -571,7 +598,7 @@ impl DirEntry {
         target_os = "vxworks"
     ))]
     pub fn file_type(&self) -> io::Result<FileType> {
-        lstat(&self.path()).map(|m| m.file_type())
+        self.metadata().map(|m| m.file_type())
     }
 
     #[cfg(not(any(
@@ -589,7 +616,7 @@ impl DirEntry {
             libc::DT_SOCK => Ok(FileType { mode: libc::S_IFSOCK }),
             libc::DT_DIR => Ok(FileType { mode: libc::S_IFDIR }),
             libc::DT_BLK => Ok(FileType { mode: libc::S_IFBLK }),
-            _ => lstat(&self.path()).map(|m| m.file_type()),
+            _ => self.metadata().map(|m| m.file_type()),
         }
     }
 
@@ -639,29 +666,21 @@ impl DirEntry {
             )
         }
     }
-    #[cfg(any(
-        target_os = "android",
-        target_os = "linux",
-        target_os = "emscripten",
-        target_os = "l4re",
-        target_os = "haiku",
-        target_os = "vxworks",
-        target_os = "espidf"
-    ))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "freebsd",
+        target_os = "dragonfly"
+    )))]
     fn name_bytes(&self) -> &[u8] {
-        unsafe { CStr::from_ptr(self.entry.d_name.as_ptr()).to_bytes() }
-    }
-    #[cfg(any(
-        target_os = "solaris",
-        target_os = "illumos",
-        target_os = "fuchsia",
-        target_os = "redox"
-    ))]
-    fn name_bytes(&self) -> &[u8] {
-        self.name.as_bytes()
+        self.name_cstr().to_bytes()
     }
 
     #[cfg(not(any(
+        target_os = "android",
+        target_os = "linux",
         target_os = "solaris",
         target_os = "illumos",
         target_os = "fuchsia",
@@ -670,7 +689,14 @@ impl DirEntry {
     fn name_cstr(&self) -> &CStr {
         unsafe { CStr::from_ptr(self.entry.d_name.as_ptr()) }
     }
-    #[cfg(any(target_os = "solaris", target_os = "illumos", target_os = "fuchsia"))]
+    #[cfg(any(
+        target_os = "android",
+        target_os = "linux",
+        target_os = "solaris",
+        target_os = "illumos",
+        target_os = "fuchsia",
+        target_os = "redox"
+    ))]
     fn name_cstr(&self) -> &CStr {
         &self.name
     }
@@ -1076,6 +1102,8 @@ pub fn readdir(p: &Path) -> io::Result<ReadDir> {
             Ok(ReadDir {
                 inner: Arc::new(inner),
                 #[cfg(not(any(
+                    target_os = "android",
+                    target_os = "linux",
                     target_os = "solaris",
                     target_os = "illumos",
                     target_os = "fuchsia",
@@ -1448,8 +1476,8 @@ pub fn chroot(dir: &Path) -> io::Result<()> {
 
 pub use remove_dir_impl::remove_dir_all;
 
-// Fallback for REDOX
-#[cfg(target_os = "redox")]
+// Fallback for REDOX and ESP-IDF
+#[cfg(any(target_os = "redox", target_os = "espidf"))]
 mod remove_dir_impl {
     pub use crate::sys_common::fs::remove_dir_all;
 }
@@ -1573,7 +1601,11 @@ mod remove_dir_impl {
 }
 
 // Modern implementation using openat(), unlinkat() and fdopendir()
-#[cfg(not(any(all(target_os = "macos", target_arch = "x86_64"), target_os = "redox")))]
+#[cfg(not(any(
+    all(target_os = "macos", target_arch = "x86_64"),
+    target_os = "redox",
+    target_os = "espidf"
+)))]
 mod remove_dir_impl {
     use super::{cstr, lstat, Dir, DirEntry, InnerReadDir, ReadDir};
     use crate::ffi::CStr;
@@ -1611,6 +1643,8 @@ mod remove_dir_impl {
             ReadDir {
                 inner: Arc::new(InnerReadDir { dirp, root: dummy_root }),
                 #[cfg(not(any(
+                    target_os = "android",
+                    target_os = "linux",
                     target_os = "solaris",
                     target_os = "illumos",
                     target_os = "fuchsia",
@@ -1627,7 +1661,6 @@ mod remove_dir_impl {
         target_os = "illumos",
         target_os = "haiku",
         target_os = "vxworks",
-        target_os = "fuchsia"
     ))]
     fn is_dir(_ent: &DirEntry) -> Option<bool> {
         None
@@ -1638,7 +1671,6 @@ mod remove_dir_impl {
         target_os = "illumos",
         target_os = "haiku",
         target_os = "vxworks",
-        target_os = "fuchsia"
     )))]
     fn is_dir(ent: &DirEntry) -> Option<bool> {
         match ent.entry.d_type {

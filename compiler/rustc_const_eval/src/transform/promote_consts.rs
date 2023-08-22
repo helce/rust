@@ -496,7 +496,7 @@ impl<'tcx> Validator<'_, 'tcx> {
                 if matches!(kind, CastKind::Misc) {
                     let operand_ty = operand.ty(self.body, self.tcx);
                     let cast_in = CastTy::from_ty(operand_ty).expect("bad input type for cast");
-                    let cast_out = CastTy::from_ty(cast_ty).expect("bad output type for cast");
+                    let cast_out = CastTy::from_ty(*cast_ty).expect("bad output type for cast");
                     if let (CastTy::Ptr(_) | CastTy::FnPtr, CastTy::Int(_)) = (cast_in, cast_out) {
                         // ptr-to-int casts are not possible in consts and thus not promotable
                         return Err(Unpromotable);
@@ -839,21 +839,17 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
                     span,
                     user_ty: None,
                     literal: tcx
-                        .mk_const(ty::Const {
+                        .mk_const(ty::ConstS {
                             ty,
                             val: ty::ConstKind::Unevaluated(ty::Unevaluated {
                                 def,
-                                substs_: Some(InternalSubsts::for_item(
-                                    tcx,
-                                    def.did,
-                                    |param, _| {
-                                        if let ty::GenericParamDefKind::Lifetime = param.kind {
-                                            tcx.lifetimes.re_erased.into()
-                                        } else {
-                                            tcx.mk_param_from_def(param)
-                                        }
-                                    },
-                                )),
+                                substs: InternalSubsts::for_item(tcx, def.did, |param, _| {
+                                    if let ty::GenericParamDefKind::Lifetime = param.kind {
+                                        tcx.lifetimes.re_erased.into()
+                                    } else {
+                                        tcx.mk_param_from_def(param)
+                                    }
+                                }),
                                 promoted: Some(promoted_id),
                             }),
                         })
@@ -969,7 +965,6 @@ pub fn promote_candidates<'tcx>(
         scope.parent_scope = None;
 
         let promoted = Body::new(
-            tcx,
             body.source, // `promoted` gets filled in below
             IndexVec::new(),
             IndexVec::from_elem_n(scope, 1),
@@ -979,6 +974,7 @@ pub fn promote_candidates<'tcx>(
             vec![],
             body.span,
             body.generator_kind(),
+            body.tainted_by_errors,
         );
 
         let promoter = Promoter {

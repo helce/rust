@@ -10,6 +10,8 @@ use super::CrateDebugContext;
 
 use crate::abi;
 use crate::common::CodegenCx;
+use crate::debuginfo::utils::fat_pointer_kind;
+use crate::debuginfo::utils::FatPtrKind;
 use crate::llvm;
 use crate::llvm::debuginfo::{
     DIArray, DICompositeType, DIDescriptor, DIFile, DIFlags, DILexicalBlock, DIScope, DIType,
@@ -19,6 +21,7 @@ use crate::value::Value;
 
 use cstr::cstr;
 use rustc_codegen_ssa::debuginfo::type_names::cpp_like_debuginfo;
+use rustc_codegen_ssa::debuginfo::type_names::VTableNameKind;
 use rustc_codegen_ssa::traits::*;
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
@@ -27,18 +30,18 @@ use rustc_fs_util::path_to_c_string;
 use rustc_hir::def::CtorKind;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_index::vec::{Idx, IndexVec};
+use rustc_middle::bug;
 use rustc_middle::mir::{self, GeneratorLayout};
 use rustc_middle::ty::layout::{self, IntegerExt, LayoutOf, PrimitiveExt, TyAndLayout};
 use rustc_middle::ty::subst::GenericArgKind;
 use rustc_middle::ty::{
     self, AdtKind, GeneratorSubsts, Instance, ParamEnv, Ty, TyCtxt, COMMON_VTABLE_ENTRIES,
 };
-use rustc_middle::{bug, span_bug};
 use rustc_query_system::ich::NodeIdHashingMode;
 use rustc_session::config::{self, DebugInfo};
 use rustc_span::symbol::Symbol;
 use rustc_span::FileNameDisplayPreference;
-use rustc_span::{self, SourceFile, SourceFileHash, Span};
+use rustc_span::{self, SourceFile, SourceFileHash};
 use rustc_target::abi::{Abi, Align, HasDataLayout, Integer, TagEncoding};
 use rustc_target::abi::{Int, Pointer, F32, F64};
 use rustc_target::abi::{Primitive, Size, VariantIdx, Variants};
@@ -182,9 +185,9 @@ impl<'ll, 'tcx> TypeMap<'ll, 'tcx> {
     ///
     /// This function is used to remove the temporary metadata
     /// mapping after we've computed the actual metadata.
-    fn remove_type(&mut self, type_: Ty<'tcx>) {
-        if self.type_to_metadata.remove(type_).is_none() {
-            bug!("type metadata `Ty` '{}' is not in the `TypeMap`!", type_);
+    fn remove_type(&mut self, ty: Ty<'tcx>) {
+        if self.type_to_metadata.remove(&ty).is_none() {
+            bug!("type metadata `Ty` '{}' is not in the `TypeMap`!", ty);
         }
     }
 
@@ -274,6 +277,12 @@ impl<'ll, 'tcx> TypeMap<'ll, 'tcx> {
     ) -> String {
         format!("{}_variant_part", self.get_unique_type_id_as_string(enum_type_id))
     }
+
+    /// Gets the `UniqueTypeId` for the type of a vtable.
+    fn get_unique_type_id_of_vtable_type(&mut self, vtable_type_name: &str) -> UniqueTypeId {
+        let interner_key = self.unique_id_interner.intern(vtable_type_name);
+        interner_key
+    }
 }
 
 /// A description of some recursive type. It can either be already finished (as
@@ -349,14 +358,15 @@ impl<'ll, 'tcx> RecursiveTypeDescription<'ll, 'tcx> {
 
                 // ... then create the member descriptions ...
                 let member_descriptions = member_description_factory.create_member_descriptions(cx);
+                let type_params = compute_type_parameters(cx, unfinished_type);
 
                 // ... and attach them to the stub to complete it.
                 set_members_of_composite_type(
                     cx,
-                    unfinished_type,
                     member_holding_stub,
                     member_descriptions,
                     None,
+                    type_params,
                 );
                 MetadataCreationResult::new(metadata_stub, true)
             }
@@ -376,23 +386,24 @@ macro_rules! return_if_metadata_created_in_meantime {
     };
 }
 
-fn fixed_vec_metadata<'ll, 'tcx>(
+/// Creates debuginfo for a fixed size array (e.g. `[u64; 123]`).
+/// For slices (that is, "arrays" of unknown size) use [slice_type_metadata].
+fn fixed_size_array_metadata<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
     unique_type_id: UniqueTypeId,
-    array_or_slice_type: Ty<'tcx>,
-    element_type: Ty<'tcx>,
-    span: Span,
+    array_type: Ty<'tcx>,
 ) -> MetadataCreationResult<'ll> {
-    let element_type_metadata = type_metadata(cx, element_type, span);
+    let ty::Array(element_type, len) = array_type.kind() else {
+        bug!("fixed_size_array_metadata() called with non-ty::Array type `{:?}`", array_type)
+    };
+
+    let element_type_metadata = type_metadata(cx, *element_type);
 
     return_if_metadata_created_in_meantime!(cx, unique_type_id);
 
-    let (size, align) = cx.size_and_align_of(array_or_slice_type);
+    let (size, align) = cx.size_and_align_of(array_type);
 
-    let upper_bound = match array_or_slice_type.kind() {
-        ty::Array(_, len) => len.eval_usize(cx.tcx, ty::ParamEnv::reveal_all()) as c_longlong,
-        _ => -1,
-    };
+    let upper_bound = len.eval_usize(cx.tcx, ty::ParamEnv::reveal_all()) as c_longlong;
 
     let subrange =
         unsafe { Some(llvm::LLVMRustDIBuilderGetOrCreateSubrange(DIB(cx), 0, upper_bound)) };
@@ -411,67 +422,117 @@ fn fixed_vec_metadata<'ll, 'tcx>(
     MetadataCreationResult::new(metadata, false)
 }
 
-fn vec_slice_metadata<'ll, 'tcx>(
+/// Creates debuginfo for built-in pointer-like things:
+///
+///  - ty::Ref
+///  - ty::RawPtr
+///  - ty::Adt in the case it's Box
+///
+/// At some point we might want to remove the special handling of Box
+/// and treat it the same as other smart pointers (like Rc, Arc, ...).
+fn pointer_or_reference_metadata<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
-    slice_ptr_type: Ty<'tcx>,
-    element_type: Ty<'tcx>,
+    ptr_type: Ty<'tcx>,
+    pointee_type: Ty<'tcx>,
     unique_type_id: UniqueTypeId,
-    span: Span,
 ) -> MetadataCreationResult<'ll> {
-    let data_ptr_type = cx.tcx.mk_imm_ptr(element_type);
-
-    let data_ptr_metadata = type_metadata(cx, data_ptr_type, span);
+    let pointee_type_metadata = type_metadata(cx, pointee_type);
 
     return_if_metadata_created_in_meantime!(cx, unique_type_id);
 
-    let slice_type_name = compute_debuginfo_type_name(cx.tcx, slice_ptr_type, true);
+    let (thin_pointer_size, thin_pointer_align) =
+        cx.size_and_align_of(cx.tcx.mk_imm_ptr(cx.tcx.types.unit));
+    let ptr_type_debuginfo_name = compute_debuginfo_type_name(cx.tcx, ptr_type, true);
 
-    let (pointer_size, pointer_align) = cx.size_and_align_of(data_ptr_type);
-    let (usize_size, usize_align) = cx.size_and_align_of(cx.tcx.types.usize);
+    let pointer_type_metadata = match fat_pointer_kind(cx, pointee_type) {
+        None => {
+            // This is a thin pointer. Create a regular pointer type and give it the correct name.
+            debug_assert_eq!(
+                (thin_pointer_size, thin_pointer_align),
+                cx.size_and_align_of(ptr_type)
+            );
 
-    let member_descriptions = vec![
-        MemberDescription {
-            name: "data_ptr".to_owned(),
-            type_metadata: data_ptr_metadata,
-            offset: Size::ZERO,
-            size: pointer_size,
-            align: pointer_align,
-            flags: DIFlags::FlagZero,
-            discriminant: None,
-            source_info: None,
-        },
-        MemberDescription {
-            name: "length".to_owned(),
-            type_metadata: type_metadata(cx, cx.tcx.types.usize, span),
-            offset: pointer_size,
-            size: usize_size,
-            align: usize_align,
-            flags: DIFlags::FlagZero,
-            discriminant: None,
-            source_info: None,
-        },
-    ];
+            unsafe {
+                llvm::LLVMRustDIBuilderCreatePointerType(
+                    DIB(cx),
+                    pointee_type_metadata,
+                    thin_pointer_size.bits(),
+                    thin_pointer_align.bits() as u32,
+                    0, // Ignore DWARF address space.
+                    ptr_type_debuginfo_name.as_ptr().cast(),
+                    ptr_type_debuginfo_name.len(),
+                )
+            }
+        }
+        Some(fat_pointer_kind) => {
+            let layout = cx.layout_of(ptr_type);
 
-    let file_metadata = unknown_file_metadata(cx);
+            let addr_field = layout.field(cx, abi::FAT_PTR_ADDR);
+            let extra_field = layout.field(cx, abi::FAT_PTR_EXTRA);
 
-    let metadata = composite_type_metadata(
-        cx,
-        slice_ptr_type,
-        &slice_type_name,
-        unique_type_id,
-        member_descriptions,
-        NO_SCOPE_METADATA,
-        file_metadata,
-        span,
-    );
-    MetadataCreationResult::new(metadata, false)
+            let (addr_field_name, extra_field_name) = match fat_pointer_kind {
+                FatPtrKind::Dyn => ("pointer", "vtable"),
+                FatPtrKind::Slice => ("data_ptr", "length"),
+            };
+
+            debug_assert_eq!(abi::FAT_PTR_ADDR, 0);
+            debug_assert_eq!(abi::FAT_PTR_EXTRA, 1);
+
+            // The data pointer type is a regular, thin pointer, regardless of whether this is a slice
+            // or a trait object.
+            let data_ptr_type_metadata = unsafe {
+                llvm::LLVMRustDIBuilderCreatePointerType(
+                    DIB(cx),
+                    pointee_type_metadata,
+                    addr_field.size.bits(),
+                    addr_field.align.abi.bits() as u32,
+                    0, // Ignore DWARF address space.
+                    std::ptr::null(),
+                    0,
+                )
+            };
+
+            let member_descriptions = vec![
+                MemberDescription {
+                    name: addr_field_name.into(),
+                    type_metadata: data_ptr_type_metadata,
+                    offset: layout.fields.offset(abi::FAT_PTR_ADDR),
+                    size: addr_field.size,
+                    align: addr_field.align.abi,
+                    flags: DIFlags::FlagZero,
+                    discriminant: None,
+                    source_info: None,
+                },
+                MemberDescription {
+                    name: extra_field_name.into(),
+                    type_metadata: type_metadata(cx, extra_field.ty),
+                    offset: layout.fields.offset(abi::FAT_PTR_EXTRA),
+                    size: extra_field.size,
+                    align: extra_field.align.abi,
+                    flags: DIFlags::FlagZero,
+                    discriminant: None,
+                    source_info: None,
+                },
+            ];
+
+            composite_type_metadata(
+                cx,
+                ptr_type,
+                &ptr_type_debuginfo_name,
+                unique_type_id,
+                member_descriptions,
+                NO_SCOPE_METADATA,
+            )
+        }
+    };
+
+    MetadataCreationResult { metadata: pointer_type_metadata, already_stored_in_typemap: false }
 }
 
 fn subroutine_type_metadata<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
     unique_type_id: UniqueTypeId,
     signature: ty::PolyFnSig<'tcx>,
-    span: Span,
 ) -> MetadataCreationResult<'ll> {
     let signature =
         cx.tcx.normalize_erasing_late_bound_regions(ty::ParamEnv::reveal_all(), signature);
@@ -480,12 +541,12 @@ fn subroutine_type_metadata<'ll, 'tcx>(
         // return type
         match signature.output().kind() {
             ty::Tuple(tys) if tys.is_empty() => None,
-            _ => Some(type_metadata(cx, signature.output(), span)),
+            _ => Some(type_metadata(cx, signature.output())),
         },
     )
     .chain(
         // regular arguments
-        signature.inputs().iter().map(|argument_type| Some(type_metadata(cx, argument_type, span))),
+        signature.inputs().iter().map(|&argument_type| Some(type_metadata(cx, argument_type))),
     )
     .collect();
 
@@ -502,98 +563,60 @@ fn subroutine_type_metadata<'ll, 'tcx>(
     )
 }
 
-// FIXME(1563): This is all a bit of a hack because 'trait pointer' is an ill-
-// defined concept. For the case of an actual trait pointer (i.e., `Box<Trait>`,
-// `&Trait`), `trait_object_type` should be the whole thing (e.g, `Box<Trait>`) and
-// `trait_type` should be the actual trait (e.g., `Trait`). Where the trait is part
-// of a DST struct, there is no `trait_object_type` and the results of this
-// function will be a little bit weird.
-fn trait_pointer_metadata<'ll, 'tcx>(
+/// Create debuginfo for `dyn SomeTrait` types. Currently these are empty structs
+/// we with the correct type name (e.g. "dyn SomeTrait<Foo, Item=u32> + Sync").
+fn dyn_type_metadata<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
-    trait_type: Ty<'tcx>,
-    trait_object_type: Option<Ty<'tcx>>,
+    dyn_type: Ty<'tcx>,
     unique_type_id: UniqueTypeId,
 ) -> &'ll DIType {
-    // The implementation provided here is a stub. It makes sure that the trait
-    // type is assigned the correct name, size, namespace, and source location.
-    // However, it does not describe the trait's methods.
-
-    let (containing_scope, trait_type_name) = match trait_object_type {
-        Some(trait_object_type) => match trait_object_type.kind() {
-            ty::Adt(def, _) => (
-                Some(get_namespace_for_item(cx, def.did)),
-                compute_debuginfo_type_name(cx.tcx, trait_object_type, false),
-            ),
-            ty::RawPtr(_) | ty::Ref(..) => {
-                (NO_SCOPE_METADATA, compute_debuginfo_type_name(cx.tcx, trait_object_type, true))
-            }
-            _ => {
-                bug!(
-                    "debuginfo: unexpected trait-object type in \
-                      trait_pointer_metadata(): {:?}",
-                    trait_object_type
-                );
-            }
-        },
-
-        // No object type, use the trait type directly (no scope here since the type
-        // will be wrapped in the dyn$ synthetic type).
-        None => (NO_SCOPE_METADATA, compute_debuginfo_type_name(cx.tcx, trait_type, true)),
-    };
-
-    let file_metadata = unknown_file_metadata(cx);
-
-    let layout = cx.layout_of(cx.tcx.mk_mut_ptr(trait_type));
-
-    assert_eq!(abi::FAT_PTR_ADDR, 0);
-    assert_eq!(abi::FAT_PTR_EXTRA, 1);
-
-    let data_ptr_field = layout.field(cx, 0);
-    let vtable_field = layout.field(cx, 1);
-    let member_descriptions = vec![
-        MemberDescription {
-            name: "pointer".to_owned(),
-            type_metadata: type_metadata(
-                cx,
-                cx.tcx.mk_mut_ptr(cx.tcx.types.u8),
-                rustc_span::DUMMY_SP,
-            ),
-            offset: layout.fields.offset(0),
-            size: data_ptr_field.size,
-            align: data_ptr_field.align.abi,
-            flags: DIFlags::FlagArtificial,
-            discriminant: None,
-            source_info: None,
-        },
-        MemberDescription {
-            name: "vtable".to_owned(),
-            type_metadata: type_metadata(cx, vtable_field.ty, rustc_span::DUMMY_SP),
-            offset: layout.fields.offset(1),
-            size: vtable_field.size,
-            align: vtable_field.align.abi,
-            flags: DIFlags::FlagArtificial,
-            discriminant: None,
-            source_info: None,
-        },
-    ];
-
-    composite_type_metadata(
-        cx,
-        trait_object_type.unwrap_or(trait_type),
-        &trait_type_name,
-        unique_type_id,
-        member_descriptions,
-        containing_scope,
-        file_metadata,
-        rustc_span::DUMMY_SP,
-    )
+    if let ty::Dynamic(..) = dyn_type.kind() {
+        let type_name = compute_debuginfo_type_name(cx.tcx, dyn_type, true);
+        composite_type_metadata(cx, dyn_type, &type_name, unique_type_id, vec![], NO_SCOPE_METADATA)
+    } else {
+        bug!("Only ty::Dynamic is valid for dyn_type_metadata(). Found {:?} instead.", dyn_type)
+    }
 }
 
-pub fn type_metadata<'ll, 'tcx>(
+/// Create debuginfo for `[T]` and `str`. These are unsized.
+///
+/// NOTE: We currently emit just emit the debuginfo for the element type here
+/// (i.e. `T` for slices and `u8` for `str`), so that we end up with
+/// `*const T` for the `data_ptr` field of the corresponding fat-pointer
+/// debuginfo of `&[T]`.
+///
+/// It would be preferable and more accurate if we emitted a DIArray of T
+/// without an upper bound instead. That is, LLVM already supports emitting
+/// debuginfo of arrays of unknown size. But GDB currently seems to end up
+/// in an infinite loop when confronted with such a type.
+///
+/// As a side effect of the current encoding every instance of a type like
+/// `struct Foo { unsized_field: [u8] }` will look like
+/// `struct Foo { unsized_field: u8 }` in debuginfo. If the length of the
+/// slice is zero, then accessing `unsized_field` in the debugger would
+/// result in an out-of-bounds access.
+fn slice_type_metadata<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
-    t: Ty<'tcx>,
-    usage_site_span: Span,
-) -> &'ll DIType {
+    slice_type: Ty<'tcx>,
+    unique_type_id: UniqueTypeId,
+) -> MetadataCreationResult<'ll> {
+    let element_type = match slice_type.kind() {
+        ty::Slice(element_type) => *element_type,
+        ty::Str => cx.tcx.types.u8,
+        _ => {
+            bug!(
+                "Only ty::Slice is valid for slice_type_metadata(). Found {:?} instead.",
+                slice_type
+            )
+        }
+    };
+
+    let element_type_metadata = type_metadata(cx, element_type);
+    return_if_metadata_created_in_meantime!(cx, unique_type_id);
+    MetadataCreationResult { metadata: element_type_metadata, already_stored_in_typemap: false }
+}
+
+pub fn type_metadata<'ll, 'tcx>(cx: &CodegenCx<'ll, 'tcx>, t: Ty<'tcx>) -> &'ll DIType {
     // Get the unique type ID of this type.
     let unique_type_id = {
         let mut type_map = debug_context(cx).type_map.borrow_mut();
@@ -629,26 +652,6 @@ pub fn type_metadata<'ll, 'tcx>(
 
     debug!("type_metadata: {:?}", t);
 
-    let ptr_metadata = |ty: Ty<'tcx>| match *ty.kind() {
-        ty::Slice(typ) => Ok(vec_slice_metadata(cx, t, typ, unique_type_id, usage_site_span)),
-        ty::Str => Ok(vec_slice_metadata(cx, t, cx.tcx.types.u8, unique_type_id, usage_site_span)),
-        ty::Dynamic(..) => Ok(MetadataCreationResult::new(
-            trait_pointer_metadata(cx, ty, Some(t), unique_type_id),
-            false,
-        )),
-        _ => {
-            let pointee_metadata = type_metadata(cx, ty, usage_site_span);
-
-            if let Some(metadata) =
-                debug_context(cx).type_map.borrow().find_metadata_for_unique_id(unique_type_id)
-            {
-                return Err(metadata);
-            }
-
-            Ok(MetadataCreationResult::new(pointer_type_metadata(cx, t, pointee_metadata), false))
-        }
-    };
-
     let MetadataCreationResult { metadata, already_stored_in_typemap } = match *t.kind() {
         ty::Never | ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Float(_) => {
             MetadataCreationResult::new(basic_type_metadata(cx, t), false)
@@ -656,24 +659,20 @@ pub fn type_metadata<'ll, 'tcx>(
         ty::Tuple(elements) if elements.is_empty() => {
             MetadataCreationResult::new(basic_type_metadata(cx, t), false)
         }
-        ty::Array(typ, _) | ty::Slice(typ) => {
-            fixed_vec_metadata(cx, unique_type_id, t, typ, usage_site_span)
-        }
-        ty::Str => fixed_vec_metadata(cx, unique_type_id, t, cx.tcx.types.i8, usage_site_span),
+        ty::Array(..) => fixed_size_array_metadata(cx, unique_type_id, t),
+        ty::Slice(_) | ty::Str => slice_type_metadata(cx, t, unique_type_id),
         ty::Dynamic(..) => {
-            MetadataCreationResult::new(trait_pointer_metadata(cx, t, None, unique_type_id), false)
+            MetadataCreationResult::new(dyn_type_metadata(cx, t, unique_type_id), false)
         }
         ty::Foreign(..) => {
             MetadataCreationResult::new(foreign_type_metadata(cx, t, unique_type_id), false)
         }
-        ty::RawPtr(ty::TypeAndMut { ty, .. }) | ty::Ref(_, ty, _) => match ptr_metadata(ty) {
-            Ok(res) => res,
-            Err(metadata) => return metadata,
-        },
-        ty::Adt(def, _) if def.is_box() => match ptr_metadata(t.boxed_ty()) {
-            Ok(res) => res,
-            Err(metadata) => return metadata,
-        },
+        ty::RawPtr(ty::TypeAndMut { ty: pointee_type, .. }) | ty::Ref(_, pointee_type, _) => {
+            pointer_or_reference_metadata(cx, t, pointee_type, unique_type_id)
+        }
+        ty::Adt(def, _) if def.is_box() => {
+            pointer_or_reference_metadata(cx, t, t.boxed_ty(), unique_type_id)
+        }
         ty::FnDef(..) | ty::FnPtr(_) => {
             if let Some(metadata) =
                 debug_context(cx).type_map.borrow().find_metadata_for_unique_id(unique_type_id)
@@ -710,26 +709,33 @@ pub fn type_metadata<'ll, 'tcx>(
             type_map.borrow_mut().register_type_with_metadata(t, temp_type);
 
             let fn_metadata =
-                subroutine_type_metadata(cx, unique_type_id, t.fn_sig(cx.tcx), usage_site_span)
-                    .metadata;
+                subroutine_type_metadata(cx, unique_type_id, t.fn_sig(cx.tcx)).metadata;
 
             type_map.borrow_mut().remove_type(t);
 
             // This is actually a function pointer, so wrap it in pointer DI.
-            MetadataCreationResult::new(pointer_type_metadata(cx, t, fn_metadata), false)
+            let (pointer_size, pointer_align) =
+                cx.size_and_align_of(cx.tcx.mk_imm_ptr(cx.tcx.mk_unit()));
+            let name = compute_debuginfo_type_name(cx.tcx, t, false);
+            let md = unsafe {
+                llvm::LLVMRustDIBuilderCreatePointerType(
+                    DIB(cx),
+                    fn_metadata,
+                    pointer_size.bits(),
+                    pointer_align.bits() as u32,
+                    0, // Ignore DWARF address space.
+                    name.as_ptr().cast(),
+                    name.len(),
+                )
+            };
+
+            MetadataCreationResult::new(md, false)
         }
         ty::Closure(def_id, substs) => {
             let upvar_tys: Vec<_> = substs.as_closure().upvar_tys().collect();
             let containing_scope = get_namespace_for_item(cx, def_id);
-            prepare_tuple_metadata(
-                cx,
-                t,
-                &upvar_tys,
-                unique_type_id,
-                usage_site_span,
-                Some(containing_scope),
-            )
-            .finalize(cx)
+            prepare_tuple_metadata(cx, t, &upvar_tys, unique_type_id, Some(containing_scope))
+                .finalize(cx)
         }
         ty::Generator(def_id, substs, _) => {
             let upvar_tys: Vec<_> = substs
@@ -737,25 +743,18 @@ pub fn type_metadata<'ll, 'tcx>(
                 .prefix_tys()
                 .map(|t| cx.tcx.normalize_erasing_regions(ParamEnv::reveal_all(), t))
                 .collect();
-            prepare_enum_metadata(cx, t, def_id, unique_type_id, usage_site_span, upvar_tys)
-                .finalize(cx)
+            prepare_enum_metadata(cx, t, def_id, unique_type_id, upvar_tys).finalize(cx)
         }
         ty::Adt(def, ..) => match def.adt_kind() {
-            AdtKind::Struct => {
-                prepare_struct_metadata(cx, t, unique_type_id, usage_site_span).finalize(cx)
-            }
-            AdtKind::Union => {
-                prepare_union_metadata(cx, t, unique_type_id, usage_site_span).finalize(cx)
-            }
+            AdtKind::Struct => prepare_struct_metadata(cx, t, unique_type_id).finalize(cx),
+            AdtKind::Union => prepare_union_metadata(cx, t, unique_type_id).finalize(cx),
             AdtKind::Enum => {
-                prepare_enum_metadata(cx, t, def.did, unique_type_id, usage_site_span, vec![])
-                    .finalize(cx)
+                prepare_enum_metadata(cx, t, def.did, unique_type_id, vec![]).finalize(cx)
             }
         },
         ty::Tuple(elements) => {
             let tys: Vec<_> = elements.iter().map(|k| k.expect_ty()).collect();
-            prepare_tuple_metadata(cx, t, &tys, unique_type_id, usage_site_span, NO_SCOPE_METADATA)
-                .finalize(cx)
+            prepare_tuple_metadata(cx, t, &tys, unique_type_id, NO_SCOPE_METADATA).finalize(cx)
         }
         // Type parameters from polymorphized functions.
         ty::Param(_) => MetadataCreationResult::new(param_type_metadata(cx, t), false),
@@ -770,8 +769,7 @@ pub fn type_metadata<'ll, 'tcx>(
             let metadata_for_uid = match type_map.find_metadata_for_unique_id(unique_type_id) {
                 Some(metadata) => metadata,
                 None => {
-                    span_bug!(
-                        usage_site_span,
+                    bug!(
                         "expected type metadata for unique \
                                type ID '{}' to already be in \
                                the `debuginfo::TypeMap` but it \
@@ -785,8 +783,7 @@ pub fn type_metadata<'ll, 'tcx>(
             match type_map.find_metadata_for_type(t) {
                 Some(metadata) => {
                     if metadata != metadata_for_uid {
-                        span_bug!(
-                            usage_site_span,
+                        bug!(
                             "mismatch between `Ty` and \
                                    `UniqueTypeId` maps in \
                                    `debuginfo::TypeMap`. \
@@ -994,27 +991,17 @@ fn foreign_type_metadata<'ll, 'tcx>(
     debug!("foreign_type_metadata: {:?}", t);
 
     let name = compute_debuginfo_type_name(cx.tcx, t, false);
-    create_struct_stub(cx, t, &name, unique_type_id, NO_SCOPE_METADATA, DIFlags::FlagZero)
-}
-
-fn pointer_type_metadata<'ll, 'tcx>(
-    cx: &CodegenCx<'ll, 'tcx>,
-    pointer_type: Ty<'tcx>,
-    pointee_type_metadata: &'ll DIType,
-) -> &'ll DIType {
-    let (pointer_size, pointer_align) = cx.size_and_align_of(pointer_type);
-    let name = compute_debuginfo_type_name(cx.tcx, pointer_type, false);
-    unsafe {
-        llvm::LLVMRustDIBuilderCreatePointerType(
-            DIB(cx),
-            pointee_type_metadata,
-            pointer_size.bits(),
-            pointer_align.bits() as u32,
-            0, // Ignore DWARF address space.
-            name.as_ptr().cast(),
-            name.len(),
-        )
-    }
+    let (size, align) = cx.size_and_align_of(t);
+    create_struct_stub(
+        cx,
+        size,
+        align,
+        &name,
+        unique_type_id,
+        NO_SCOPE_METADATA,
+        DIFlags::FlagZero,
+        None,
+    )
 }
 
 fn param_type_metadata<'ll, 'tcx>(cx: &CodegenCx<'ll, 'tcx>, t: Ty<'tcx>) -> &'ll DIType {
@@ -1283,7 +1270,6 @@ impl<'ll, 'tcx> MemberDescriptionFactory<'ll, 'tcx> {
 struct StructMemberDescriptionFactory<'tcx> {
     ty: Ty<'tcx>,
     variant: &'tcx ty::VariantDef,
-    span: Span,
 }
 
 impl<'tcx> StructMemberDescriptionFactory<'tcx> {
@@ -1300,12 +1286,12 @@ impl<'tcx> StructMemberDescriptionFactory<'tcx> {
                 let name = if self.variant.ctor_kind == CtorKind::Fn {
                     format!("__{}", i)
                 } else {
-                    f.ident.to_string()
+                    f.name.to_string()
                 };
                 let field = layout.field(cx, i);
                 MemberDescription {
                     name,
-                    type_metadata: type_metadata(cx, field.ty, self.span),
+                    type_metadata: type_metadata(cx, field.ty),
                     offset: layout.fields.offset(i),
                     size: field.size,
                     align: field.align.abi,
@@ -1322,7 +1308,6 @@ fn prepare_struct_metadata<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
     struct_type: Ty<'tcx>,
     unique_type_id: UniqueTypeId,
-    span: Span,
 ) -> RecursiveTypeDescription<'ll, 'tcx> {
     let struct_name = compute_debuginfo_type_name(cx.tcx, struct_type, false);
 
@@ -1332,14 +1317,17 @@ fn prepare_struct_metadata<'ll, 'tcx>(
     };
 
     let containing_scope = get_namespace_for_item(cx, struct_def_id);
+    let (size, align) = cx.size_and_align_of(struct_type);
 
     let struct_metadata_stub = create_struct_stub(
         cx,
-        struct_type,
+        size,
+        align,
         &struct_name,
         unique_type_id,
         Some(containing_scope),
         DIFlags::FlagZero,
+        None,
     );
 
     create_and_register_recursive_type_forward_declaration(
@@ -1348,7 +1336,7 @@ fn prepare_struct_metadata<'ll, 'tcx>(
         unique_type_id,
         struct_metadata_stub,
         struct_metadata_stub,
-        StructMDF(StructMemberDescriptionFactory { ty: struct_type, variant, span }),
+        StructMDF(StructMemberDescriptionFactory { ty: struct_type, variant }),
     )
 }
 
@@ -1385,7 +1373,6 @@ fn closure_saved_names_of_captured_variables(tcx: TyCtxt<'_>, def_id: DefId) -> 
 struct TupleMemberDescriptionFactory<'tcx> {
     ty: Ty<'tcx>,
     component_types: Vec<Ty<'tcx>>,
-    span: Span,
 }
 
 impl<'tcx> TupleMemberDescriptionFactory<'tcx> {
@@ -1412,7 +1399,7 @@ impl<'tcx> TupleMemberDescriptionFactory<'tcx> {
                 };
                 MemberDescription {
                     name,
-                    type_metadata: type_metadata(cx, component_type, self.span),
+                    type_metadata: type_metadata(cx, component_type),
                     offset: layout.fields.offset(i),
                     size,
                     align,
@@ -1430,18 +1417,20 @@ fn prepare_tuple_metadata<'ll, 'tcx>(
     tuple_type: Ty<'tcx>,
     component_types: &[Ty<'tcx>],
     unique_type_id: UniqueTypeId,
-    span: Span,
     containing_scope: Option<&'ll DIScope>,
 ) -> RecursiveTypeDescription<'ll, 'tcx> {
+    let (size, align) = cx.size_and_align_of(tuple_type);
     let tuple_name = compute_debuginfo_type_name(cx.tcx, tuple_type, false);
 
     let struct_stub = create_struct_stub(
         cx,
-        tuple_type,
+        size,
+        align,
         &tuple_name[..],
         unique_type_id,
         containing_scope,
         DIFlags::FlagZero,
+        None,
     );
 
     create_and_register_recursive_type_forward_declaration(
@@ -1453,7 +1442,6 @@ fn prepare_tuple_metadata<'ll, 'tcx>(
         TupleMDF(TupleMemberDescriptionFactory {
             ty: tuple_type,
             component_types: component_types.to_vec(),
-            span,
         }),
     )
 }
@@ -1465,7 +1453,6 @@ fn prepare_tuple_metadata<'ll, 'tcx>(
 struct UnionMemberDescriptionFactory<'tcx> {
     layout: TyAndLayout<'tcx>,
     variant: &'tcx ty::VariantDef,
-    span: Span,
 }
 
 impl<'tcx> UnionMemberDescriptionFactory<'tcx> {
@@ -1480,8 +1467,8 @@ impl<'tcx> UnionMemberDescriptionFactory<'tcx> {
             .map(|(i, f)| {
                 let field = self.layout.field(cx, i);
                 MemberDescription {
-                    name: f.ident.to_string(),
-                    type_metadata: type_metadata(cx, field.ty, self.span),
+                    name: f.name.to_string(),
+                    type_metadata: type_metadata(cx, field.ty),
                     offset: Size::ZERO,
                     size: field.size,
                     align: field.align.abi,
@@ -1498,7 +1485,6 @@ fn prepare_union_metadata<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
     union_type: Ty<'tcx>,
     unique_type_id: UniqueTypeId,
-    span: Span,
 ) -> RecursiveTypeDescription<'ll, 'tcx> {
     let union_name = compute_debuginfo_type_name(cx.tcx, union_type, false);
 
@@ -1518,7 +1504,7 @@ fn prepare_union_metadata<'ll, 'tcx>(
         unique_type_id,
         union_metadata_stub,
         union_metadata_stub,
-        UnionMDF(UnionMemberDescriptionFactory { layout: cx.layout_of(union_type), variant, span }),
+        UnionMDF(UnionMemberDescriptionFactory { layout: cx.layout_of(union_type), variant }),
     )
 }
 
@@ -1538,7 +1524,7 @@ fn generator_layout_and_saved_local_names<'tcx>(
 
     let state_arg = mir::Local::new(1);
     for var in &body.var_debug_info {
-        let place = if let mir::VarDebugInfoContents::Place(p) = var.value { p } else { continue };
+        let mir::VarDebugInfoContents::Place(place) = &var.value else { continue };
         if place.local != state_arg {
             continue;
         }
@@ -1573,7 +1559,6 @@ struct EnumMemberDescriptionFactory<'ll, 'tcx> {
     layout: TyAndLayout<'tcx>,
     tag_type_metadata: Option<&'ll DIType>,
     common_members: Vec<Option<&'ll DIType>>,
-    span: Span,
 }
 
 impl<'ll, 'tcx> EnumMemberDescriptionFactory<'ll, 'tcx> {
@@ -1605,7 +1590,7 @@ impl<'ll, 'tcx> EnumMemberDescriptionFactory<'ll, 'tcx> {
         // msvc, then we need to use a different, fallback encoding of the debuginfo.
         let fallback = cpp_like_debuginfo(cx.tcx);
         // This will always find the metadata in the type map.
-        let self_metadata = type_metadata(cx, self.enum_type, self.span);
+        let self_metadata = type_metadata(cx, self.enum_type);
 
         match self.layout.variants {
             Variants::Single { index } => {
@@ -1617,16 +1602,17 @@ impl<'ll, 'tcx> EnumMemberDescriptionFactory<'ll, 'tcx> {
 
                 let variant_info = variant_info_for(index);
                 let (variant_type_metadata, member_description_factory) =
-                    describe_enum_variant(cx, self.layout, variant_info, self_metadata, self.span);
+                    describe_enum_variant(cx, self.layout, variant_info, self_metadata);
 
                 let member_descriptions = member_description_factory.create_member_descriptions(cx);
+                let type_params = compute_type_parameters(cx, self.enum_type);
 
                 set_members_of_composite_type(
                     cx,
-                    self.enum_type,
                     variant_type_metadata,
                     member_descriptions,
                     Some(&self.common_members),
+                    type_params,
                 );
                 vec![MemberDescription {
                     name: variant_info.variant_name(),
@@ -1682,23 +1668,19 @@ impl<'ll, 'tcx> EnumMemberDescriptionFactory<'ll, 'tcx> {
                     .map(|(i, _)| {
                         let variant = self.layout.for_variant(cx, i);
                         let variant_info = variant_info_for(i);
-                        let (variant_type_metadata, member_desc_factory) = describe_enum_variant(
-                            cx,
-                            variant,
-                            variant_info,
-                            self_metadata,
-                            self.span,
-                        );
+                        let (variant_type_metadata, member_desc_factory) =
+                            describe_enum_variant(cx, variant, variant_info, self_metadata);
 
                         let member_descriptions =
                             member_desc_factory.create_member_descriptions(cx);
+                        let type_params = compute_type_parameters(cx, self.enum_type);
 
                         set_members_of_composite_type(
                             cx,
-                            self.enum_type,
                             variant_type_metadata,
                             member_descriptions,
                             Some(&self.common_members),
+                            type_params,
                         );
 
                         MemberDescription {
@@ -1807,7 +1789,7 @@ impl<'ll, 'tcx> EnumMemberDescriptionFactory<'ll, 'tcx> {
                             tag.value.size(cx).bits(),
                             tag.value.align(cx).abi.bits() as u32,
                             create_DIArray(DIB(cx), &tags),
-                            type_metadata(cx, discr_enum_ty, self.span),
+                            type_metadata(cx, discr_enum_ty),
                             true,
                         )
                     };
@@ -1818,17 +1800,17 @@ impl<'ll, 'tcx> EnumMemberDescriptionFactory<'ll, 'tcx> {
                         dataful_variant_layout,
                         variant_info,
                         self_metadata,
-                        self.span,
                     );
 
                     let member_descriptions = member_desc_factory.create_member_descriptions(cx);
+                    let type_params = compute_type_parameters(cx, self.enum_type);
 
                     set_members_of_composite_type(
                         cx,
-                        self.enum_type,
                         variant_type_metadata,
                         member_descriptions,
                         Some(&self.common_members),
+                        type_params,
                     );
 
                     let (size, align) =
@@ -1864,23 +1846,18 @@ impl<'ll, 'tcx> EnumMemberDescriptionFactory<'ll, 'tcx> {
                             let variant = self.layout.for_variant(cx, i);
                             let variant_info = variant_info_for(i);
                             let (variant_type_metadata, member_desc_factory) =
-                                describe_enum_variant(
-                                    cx,
-                                    variant,
-                                    variant_info,
-                                    self_metadata,
-                                    self.span,
-                                );
+                                describe_enum_variant(cx, variant, variant_info, self_metadata);
 
                             let member_descriptions =
                                 member_desc_factory.create_member_descriptions(cx);
+                            let type_params = compute_type_parameters(cx, self.enum_type);
 
                             set_members_of_composite_type(
                                 cx,
-                                self.enum_type,
                                 variant_type_metadata,
                                 member_descriptions,
                                 Some(&self.common_members),
+                                type_params,
                             );
 
                             let niche_value = calculate_niche_value(i);
@@ -1908,7 +1885,6 @@ struct VariantMemberDescriptionFactory<'tcx> {
     /// Cloned from the `layout::Struct` describing the variant.
     offsets: Vec<Size>,
     args: Vec<(String, Ty<'tcx>)>,
-    span: Span,
 }
 
 impl<'tcx> VariantMemberDescriptionFactory<'tcx> {
@@ -1923,7 +1899,7 @@ impl<'tcx> VariantMemberDescriptionFactory<'tcx> {
                 let (size, align) = cx.size_and_align_of(ty);
                 MemberDescription {
                     name: name.to_string(),
-                    type_metadata: type_metadata(cx, ty, self.span),
+                    type_metadata: type_metadata(cx, ty),
                     offset: self.offsets[i],
                     size,
                     align,
@@ -1950,7 +1926,7 @@ enum VariantInfo<'a, 'tcx> {
 impl<'tcx> VariantInfo<'_, 'tcx> {
     fn map_struct_name<R>(&self, f: impl FnOnce(&str) -> R) -> R {
         match self {
-            VariantInfo::Adt(variant) => f(variant.ident.as_str()),
+            VariantInfo::Adt(variant) => f(variant.name.as_str()),
             VariantInfo::Generator { variant_index, .. } => {
                 f(&GeneratorSubsts::variant_name(*variant_index))
             }
@@ -1959,7 +1935,7 @@ impl<'tcx> VariantInfo<'_, 'tcx> {
 
     fn variant_name(&self) -> String {
         match self {
-            VariantInfo::Adt(variant) => variant.ident.to_string(),
+            VariantInfo::Adt(variant) => variant.name.to_string(),
             VariantInfo::Generator { variant_index, .. } => {
                 // Since GDB currently prints out the raw discriminant along
                 // with every variant, make each variant name be just the value
@@ -1973,7 +1949,7 @@ impl<'tcx> VariantInfo<'_, 'tcx> {
     fn field_name(&self, i: usize) -> String {
         let field_name = match *self {
             VariantInfo::Adt(variant) if variant.ctor_kind != CtorKind::Fn => {
-                Some(variant.fields[i].ident.name)
+                Some(variant.fields[i].name)
             }
             VariantInfo::Generator {
                 generator_layout,
@@ -2011,20 +1987,24 @@ fn describe_enum_variant<'ll, 'tcx>(
     layout: layout::TyAndLayout<'tcx>,
     variant: VariantInfo<'_, 'tcx>,
     containing_scope: &'ll DIScope,
-    span: Span,
 ) -> (&'ll DICompositeType, MemberDescriptionFactory<'ll, 'tcx>) {
     let metadata_stub = variant.map_struct_name(|variant_name| {
         let unique_type_id = debug_context(cx)
             .type_map
             .borrow_mut()
             .get_unique_type_id_of_enum_variant(cx, layout.ty, variant_name);
+
+        let (size, align) = cx.size_and_align_of(layout.ty);
+
         create_struct_stub(
             cx,
-            layout.ty,
+            size,
+            align,
             variant_name,
             unique_type_id,
             Some(containing_scope),
             DIFlags::FlagZero,
+            None,
         )
     });
 
@@ -2033,8 +2013,7 @@ fn describe_enum_variant<'ll, 'tcx>(
         .map(|i| (variant.field_name(i), layout.field(cx, i).ty))
         .collect();
 
-    let member_description_factory =
-        VariantMDF(VariantMemberDescriptionFactory { offsets, args, span });
+    let member_description_factory = VariantMDF(VariantMemberDescriptionFactory { offsets, args });
 
     (metadata_stub, member_description_factory)
 }
@@ -2044,7 +2023,6 @@ fn prepare_enum_metadata<'ll, 'tcx>(
     enum_type: Ty<'tcx>,
     enum_def_id: DefId,
     unique_type_id: UniqueTypeId,
-    span: Span,
     outer_field_tys: Vec<Ty<'tcx>>,
 ) -> RecursiveTypeDescription<'ll, 'tcx> {
     let tcx = cx.tcx;
@@ -2063,7 +2041,7 @@ fn prepare_enum_metadata<'ll, 'tcx>(
         let enumerators_metadata: Vec<_> = match enum_type.kind() {
             ty::Adt(def, _) => iter::zip(def.discriminants(tcx), &def.variants)
                 .map(|((_, discr), v)| {
-                    let name = v.ident.as_str();
+                    let name = v.name.as_str();
                     let is_unsigned = match discr.ty.kind() {
                         ty::Int(_) => false,
                         ty::Uint(_) => true,
@@ -2109,8 +2087,7 @@ fn prepare_enum_metadata<'ll, 'tcx>(
             Some(discriminant_type_metadata) => discriminant_type_metadata,
             None => {
                 let (discriminant_size, discriminant_align) = (discr.size(cx), discr.align(cx));
-                let discriminant_base_type_metadata =
-                    type_metadata(cx, discr.to_ty(tcx), rustc_span::DUMMY_SP);
+                let discriminant_base_type_metadata = type_metadata(cx, discr.to_ty(tcx));
 
                 let item_name;
                 let discriminant_name = match enum_type.kind() {
@@ -2202,7 +2179,6 @@ fn prepare_enum_metadata<'ll, 'tcx>(
                 layout,
                 tag_type_metadata: discriminant_type_metadata,
                 common_members: vec![],
-                span,
             }),
         );
     }
@@ -2272,11 +2248,8 @@ fn prepare_enum_metadata<'ll, 'tcx>(
     let outer_fields = match layout.variants {
         Variants::Single { .. } => vec![],
         Variants::Multiple { .. } => {
-            let tuple_mdf = TupleMemberDescriptionFactory {
-                ty: enum_type,
-                component_types: outer_field_tys,
-                span,
-            };
+            let tuple_mdf =
+                TupleMemberDescriptionFactory { ty: enum_type, component_types: outer_field_tys };
             tuple_mdf
                 .create_member_descriptions(cx)
                 .into_iter()
@@ -2352,7 +2325,6 @@ fn prepare_enum_metadata<'ll, 'tcx>(
             layout,
             tag_type_metadata: None,
             common_members: outer_fields,
-            span,
         }),
     )
 }
@@ -2368,28 +2340,28 @@ fn composite_type_metadata<'ll, 'tcx>(
     composite_type_unique_id: UniqueTypeId,
     member_descriptions: Vec<MemberDescription<'ll>>,
     containing_scope: Option<&'ll DIScope>,
-
-    // Ignore source location information as long as it
-    // can't be reconstructed for non-local crates.
-    _file_metadata: &'ll DIFile,
-    _definition_span: Span,
 ) -> &'ll DICompositeType {
+    let (size, align) = cx.size_and_align_of(composite_type);
+
     // Create the (empty) struct metadata node ...
     let composite_type_metadata = create_struct_stub(
         cx,
-        composite_type,
+        size,
+        align,
         composite_type_name,
         composite_type_unique_id,
         containing_scope,
         DIFlags::FlagZero,
+        None,
     );
+
     // ... and immediately create and add the member descriptions.
     set_members_of_composite_type(
         cx,
-        composite_type,
         composite_type_metadata,
         member_descriptions,
         None,
+        compute_type_parameters(cx, composite_type),
     );
 
     composite_type_metadata
@@ -2397,10 +2369,10 @@ fn composite_type_metadata<'ll, 'tcx>(
 
 fn set_members_of_composite_type<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
-    composite_type: Ty<'tcx>,
     composite_type_metadata: &'ll DICompositeType,
     member_descriptions: Vec<MemberDescription<'ll>>,
     common_members: Option<&Vec<Option<&'ll DIType>>>,
+    type_params: &'ll DIArray,
 ) {
     // In some rare cases LLVM metadata uniquing would lead to an existing type
     // description being used instead of a new one created in
@@ -2427,13 +2399,12 @@ fn set_members_of_composite_type<'ll, 'tcx>(
         member_metadata.extend(other_members.iter());
     }
 
-    let type_params = compute_type_parameters(cx, composite_type);
     unsafe {
-        let type_array = create_DIArray(DIB(cx), &member_metadata);
+        let field_array = create_DIArray(DIB(cx), &member_metadata);
         llvm::LLVMRustDICompositeTypeReplaceArrays(
             DIB(cx),
             composite_type_metadata,
-            Some(type_array),
+            Some(field_array),
             Some(type_params),
         );
     }
@@ -2450,8 +2421,7 @@ fn compute_type_parameters<'ll, 'tcx>(cx: &CodegenCx<'ll, 'tcx>, ty: Ty<'tcx>) -
                     if let GenericArgKind::Type(ty) = kind.unpack() {
                         let actual_type =
                             cx.tcx.normalize_erasing_regions(ParamEnv::reveal_all(), ty);
-                        let actual_type_metadata =
-                            type_metadata(cx, actual_type, rustc_span::DUMMY_SP);
+                        let actual_type_metadata = type_metadata(cx, actual_type);
                         let name = name.as_str();
                         Some(unsafe {
                             Some(llvm::LLVMRustDIBuilderCreateTemplateTypeParameter(
@@ -2487,14 +2457,14 @@ fn compute_type_parameters<'ll, 'tcx>(cx: &CodegenCx<'ll, 'tcx>, ty: Ty<'tcx>) -
 /// with `set_members_of_composite_type()`.
 fn create_struct_stub<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
-    struct_type: Ty<'tcx>,
-    struct_type_name: &str,
+    size: Size,
+    align: Align,
+    type_name: &str,
     unique_type_id: UniqueTypeId,
     containing_scope: Option<&'ll DIScope>,
     flags: DIFlags,
+    vtable_holder: Option<&'ll DIType>,
 ) -> &'ll DICompositeType {
-    let (struct_size, struct_align) = cx.size_and_align_of(struct_type);
-
     let type_map = debug_context(cx).type_map.borrow();
     let unique_type_id = type_map.get_unique_type_id_as_string(unique_type_id);
 
@@ -2507,17 +2477,17 @@ fn create_struct_stub<'ll, 'tcx>(
         llvm::LLVMRustDIBuilderCreateStructType(
             DIB(cx),
             containing_scope,
-            struct_type_name.as_ptr().cast(),
-            struct_type_name.len(),
+            type_name.as_ptr().cast(),
+            type_name.len(),
             unknown_file_metadata(cx),
             UNKNOWN_LINE_NUMBER,
-            struct_size.bits(),
-            struct_align.bits() as u32,
+            size.bits(),
+            align.bits() as u32,
             flags,
             None,
             empty_array,
             0,
-            None,
+            vtable_holder,
             unique_type_id.as_ptr().cast(),
             unique_type_id.len(),
         )
@@ -2593,7 +2563,7 @@ pub fn create_global_var_metadata<'ll>(cx: &CodegenCx<'ll, '_>, def_id: DefId, g
 
     let is_local_to_unit = is_node_local_to_unit(cx, def_id);
     let variable_type = Instance::mono(cx.tcx, def_id).ty(cx.tcx, ty::ParamEnv::reveal_all());
-    let type_metadata = type_metadata(cx, variable_type, span);
+    let type_metadata = type_metadata(cx, variable_type);
     let var_name = tcx.item_name(def_id);
     let var_name = var_name.as_str();
     let linkage_name = mangled_name_of_instance(cx, Instance::mono(tcx, def_id)).name;
@@ -2623,6 +2593,14 @@ pub fn create_global_var_metadata<'ll>(cx: &CodegenCx<'ll, '_>, def_id: DefId, g
 }
 
 /// Generates LLVM debuginfo for a vtable.
+///
+/// The vtable type looks like a struct with a field for each function pointer and super-trait
+/// pointer it contains (plus the `size` and `align` fields).
+///
+/// Except for `size`, `align`, and `drop_in_place`, the field names don't try to mirror
+/// the name of the method they implement. This can be implemented in the future once there
+/// is a proper disambiguation scheme for dealing with methods from different traits that have
+/// the same name.
 fn vtable_type_metadata<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
     ty: Ty<'tcx>,
@@ -2639,16 +2617,81 @@ fn vtable_type_metadata<'ll, 'tcx>(
         COMMON_VTABLE_ENTRIES
     };
 
-    // FIXME: We describe the vtable as an array of *const () pointers. The length of the array is
-    //        correct - but we could create a more accurate description, e.g. by describing it
-    //        as a struct where each field has a name that corresponds to the name of the method
-    //        it points to.
-    //        However, this is not entirely straightforward because there might be multiple
-    //        methods with the same name if the vtable is for multiple traits. So for now we keep
-    //        things simple instead of adding some ad-hoc disambiguation scheme.
-    let vtable_type = tcx.mk_array(tcx.mk_imm_ptr(tcx.types.unit), vtable_entries.len() as u64);
+    // All function pointers are described as opaque pointers. This could be improved in the future
+    // by describing them as actual function pointers.
+    let void_pointer_ty = tcx.mk_imm_ptr(tcx.types.unit);
+    let void_pointer_type_debuginfo = type_metadata(cx, void_pointer_ty);
+    let usize_debuginfo = type_metadata(cx, tcx.types.usize);
+    let (pointer_size, pointer_align) = cx.size_and_align_of(void_pointer_ty);
+    // If `usize` is not pointer-sized and -aligned then the size and alignment computations
+    // for the vtable as a whole would be wrong. Let's make sure this holds even on weird
+    // platforms.
+    assert_eq!(cx.size_and_align_of(tcx.types.usize), (pointer_size, pointer_align));
 
-    type_metadata(cx, vtable_type, rustc_span::DUMMY_SP)
+    let vtable_type_name =
+        compute_debuginfo_vtable_name(cx.tcx, ty, poly_trait_ref, VTableNameKind::Type);
+    let unique_type_id = debug_context(cx)
+        .type_map
+        .borrow_mut()
+        .get_unique_type_id_of_vtable_type(&vtable_type_name);
+    let size = pointer_size * vtable_entries.len() as u64;
+
+    // This gets mapped to a DW_AT_containing_type attribute which allows GDB to correlate
+    // the vtable to the type it is for.
+    let vtable_holder = type_metadata(cx, ty);
+
+    let vtable_type_metadata = create_struct_stub(
+        cx,
+        size,
+        pointer_align,
+        &vtable_type_name,
+        unique_type_id,
+        NO_SCOPE_METADATA,
+        DIFlags::FlagArtificial,
+        Some(vtable_holder),
+    );
+
+    // Create a field for each entry in the vtable.
+    let fields: Vec<_> = vtable_entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, vtable_entry)| {
+            let (field_name, field_type) = match vtable_entry {
+                ty::VtblEntry::MetadataDropInPlace => {
+                    ("drop_in_place".to_string(), void_pointer_type_debuginfo)
+                }
+                ty::VtblEntry::Method(_) => {
+                    // Note: This code does not try to give a proper name to each method
+                    //       because there might be multiple methods with the same name
+                    //       (coming from different traits).
+                    (format!("__method{}", index), void_pointer_type_debuginfo)
+                }
+                ty::VtblEntry::TraitVPtr(_) => {
+                    // Note: In the future we could try to set the type of this pointer
+                    //       to the type that we generate for the corresponding vtable.
+                    (format!("__super_trait_ptr{}", index), void_pointer_type_debuginfo)
+                }
+                ty::VtblEntry::MetadataAlign => ("align".to_string(), usize_debuginfo),
+                ty::VtblEntry::MetadataSize => ("size".to_string(), usize_debuginfo),
+                ty::VtblEntry::Vacant => return None,
+            };
+
+            Some(MemberDescription {
+                name: field_name,
+                type_metadata: field_type,
+                offset: pointer_size * index as u64,
+                size: pointer_size,
+                align: pointer_align,
+                flags: DIFlags::FlagZero,
+                discriminant: None,
+                source_info: None,
+            })
+        })
+        .collect();
+
+    let type_params = create_DIArray(DIB(cx), &[]);
+    set_members_of_composite_type(cx, vtable_type_metadata, fields, None, type_params);
+    vtable_type_metadata
 }
 
 /// Creates debug information for the given vtable, which is for the
@@ -2670,11 +2713,12 @@ pub fn create_vtable_metadata<'ll, 'tcx>(
         return;
     }
 
-    let vtable_name = compute_debuginfo_vtable_name(cx.tcx, ty, poly_trait_ref);
+    let vtable_name =
+        compute_debuginfo_vtable_name(cx.tcx, ty, poly_trait_ref, VTableNameKind::GlobalVariable);
     let vtable_type = vtable_type_metadata(cx, ty, poly_trait_ref);
+    let linkage_name = "";
 
     unsafe {
-        let linkage_name = "";
         llvm::LLVMRustDIBuilderCreateStaticVariable(
             DIB(cx),
             NO_SCOPE_METADATA,

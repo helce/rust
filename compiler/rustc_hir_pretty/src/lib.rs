@@ -6,7 +6,7 @@ use rustc_ast_pretty::pp::Breaks::{Consistent, Inconsistent};
 use rustc_ast_pretty::pp::{self, Breaks};
 use rustc_ast_pretty::pprust::{Comments, PrintState};
 use rustc_hir as hir;
-use rustc_hir::{GenericArg, GenericParam, GenericParamKind, Node};
+use rustc_hir::{GenericArg, GenericParam, GenericParamKind, Node, Term};
 use rustc_hir::{GenericBound, PatKind, RangeEnd, TraitBoundModifier};
 use rustc_span::source_map::{SourceMap, Spanned};
 use rustc_span::symbol::{kw, Ident, IdentPrinter, Symbol};
@@ -139,7 +139,7 @@ impl<'a> PrintState<'a> for State<'a> {
     }
 }
 
-pub const INDENT_UNIT: usize = 4;
+pub const INDENT_UNIT: isize = 4;
 
 /// Requires you to pass an input filename and reader so that
 /// it can scan the input text for comments to copy forward.
@@ -170,7 +170,7 @@ impl<'a> State<'a> {
         ann: &'a dyn PpAnn,
     ) -> State<'a> {
         State {
-            s: pp::mk_printer(),
+            s: pp::Printer::new(),
             comments: Some(Comments::new(sm, filename, input)),
             attrs,
             ann,
@@ -186,7 +186,7 @@ pub fn to_string<F>(ann: &dyn PpAnn, f: F) -> String
 where
     F: FnOnce(&mut State<'_>),
 {
-    let mut printer = State { s: pp::mk_printer(), comments: None, attrs: &|_| &[], ann };
+    let mut printer = State { s: pp::Printer::new(), comments: None, attrs: &|_| &[], ann };
     f(&mut printer);
     printer.s.eof()
 }
@@ -571,7 +571,7 @@ impl<'a> State<'a> {
                 self.ann.nested(self, Nested::Body(body));
             }
             hir::ItemKind::Macro(ref macro_def) => {
-                self.print_mac_def(macro_def, &item.ident, &item.span, |state| {
+                self.print_mac_def(macro_def, &item.ident, item.span, |state| {
                     state.print_visibility(&item.vis)
                 });
             }
@@ -705,9 +705,7 @@ impl<'a> State<'a> {
                 self.bclose(item.span);
             }
             hir::ItemKind::TraitAlias(ref generics, ref bounds) => {
-                self.head("");
-                self.print_visibility(&item.vis);
-                self.word_nbsp("trait");
+                self.head(visibility_qualified(&item.vis, "trait"));
                 self.print_ident(item.ident);
                 self.print_generic_params(&generics.params);
                 let mut real_bounds = Vec::with_capacity(bounds.len());
@@ -725,6 +723,8 @@ impl<'a> State<'a> {
                 self.print_bounds("=", real_bounds);
                 self.print_where_clause(&generics.where_clause);
                 self.word(";");
+                self.end(); // end inner head-block
+                self.end(); // end outer head-block
             }
         }
         self.ann.post(self, AnnNode::Item(item))
@@ -923,7 +923,6 @@ impl<'a> State<'a> {
         self.hardbreak_if_not_bol();
         self.maybe_print_comment(ii.span.lo());
         self.print_outer_attributes(self.attrs(ii.hir_id()));
-        self.print_defaultness(ii.defaultness);
 
         match ii.kind {
             hir::ImplItemKind::Const(ref ty, expr) => {
@@ -1427,7 +1426,7 @@ impl<'a> State<'a> {
             hir::ExprKind::Call(ref func, ref args) => {
                 self.print_expr_call(&func, args);
             }
-            hir::ExprKind::MethodCall(ref segment, _, ref args, _) => {
+            hir::ExprKind::MethodCall(ref segment, ref args, _) => {
                 self.print_expr_method_call(segment, args);
             }
             hir::ExprKind::Binary(op, ref lhs, ref rhs) => {
@@ -1580,67 +1579,6 @@ impl<'a> State<'a> {
             hir::ExprKind::InlineAsm(ref asm) => {
                 self.word("asm!");
                 self.print_inline_asm(asm);
-            }
-            hir::ExprKind::LlvmInlineAsm(ref a) => {
-                let i = &a.inner;
-                self.word("llvm_asm!");
-                self.popen();
-                self.print_symbol(i.asm, i.asm_str_style);
-                self.word_space(":");
-
-                let mut out_idx = 0;
-                self.commasep(Inconsistent, &i.outputs, |s, out| {
-                    let constraint = out.constraint.as_str();
-                    let mut ch = constraint.chars();
-                    match ch.next() {
-                        Some('=') if out.is_rw => {
-                            s.print_string(&format!("+{}", ch.as_str()), ast::StrStyle::Cooked)
-                        }
-                        _ => s.print_string(&constraint, ast::StrStyle::Cooked),
-                    }
-                    s.popen();
-                    s.print_expr(&a.outputs_exprs[out_idx]);
-                    s.pclose();
-                    out_idx += 1;
-                });
-                self.space();
-                self.word_space(":");
-
-                let mut in_idx = 0;
-                self.commasep(Inconsistent, &i.inputs, |s, &co| {
-                    s.print_symbol(co, ast::StrStyle::Cooked);
-                    s.popen();
-                    s.print_expr(&a.inputs_exprs[in_idx]);
-                    s.pclose();
-                    in_idx += 1;
-                });
-                self.space();
-                self.word_space(":");
-
-                self.commasep(Inconsistent, &i.clobbers, |s, &co| {
-                    s.print_symbol(co, ast::StrStyle::Cooked);
-                });
-
-                let mut options = vec![];
-                if i.volatile {
-                    options.push("volatile");
-                }
-                if i.alignstack {
-                    options.push("alignstack");
-                }
-                if i.dialect == ast::LlvmAsmDialect::Intel {
-                    options.push("intel");
-                }
-
-                if !options.is_empty() {
-                    self.space();
-                    self.word_space(":");
-                    self.commasep(Inconsistent, &options, |s, &co| {
-                        s.print_string(co, ast::StrStyle::Cooked);
-                    });
-                }
-
-                self.pclose();
             }
             hir::ExprKind::Yield(ref expr, _) => {
                 self.word_space("yield");
@@ -1813,9 +1751,12 @@ impl<'a> State<'a> {
                 self.print_generic_args(binding.gen_args, false, false);
                 self.space();
                 match generic_args.bindings[0].kind {
-                    hir::TypeBindingKind::Equality { ref ty } => {
+                    hir::TypeBindingKind::Equality { ref term } => {
                         self.word_space("=");
-                        self.print_type(ty);
+                        match term {
+                            Term::Ty(ref ty) => self.print_type(ty),
+                            Term::Const(ref c) => self.print_anon_const(c),
+                        }
                     }
                     hir::TypeBindingKind::Constraint { bounds } => {
                         self.print_bounds(":", bounds);

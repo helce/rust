@@ -93,61 +93,99 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         span: Span,
         trait_def_id: DefId,
         trait_segment: &'_ hir::PathSegment<'_>,
+        is_impl: bool,
     ) {
-        let trait_def = self.tcx().trait_def(trait_def_id);
+        if self.tcx().features().unboxed_closures {
+            return;
+        }
 
-        if !self.tcx().features().unboxed_closures
-            && trait_segment.args().parenthesized != trait_def.paren_sugar
-        {
-            let sess = &self.tcx().sess.parse_sess;
+        let trait_def = self.tcx().trait_def(trait_def_id);
+        if !trait_def.paren_sugar {
+            if trait_segment.args().parenthesized {
+                // For now, require that parenthetical notation be used only with `Fn()` etc.
+                let mut err = feature_err(
+                    &self.tcx().sess.parse_sess,
+                    sym::unboxed_closures,
+                    span,
+                    "parenthetical notation is only stable when used with `Fn`-family traits",
+                );
+                err.emit();
+            }
+
+            return;
+        }
+
+        let sess = self.tcx().sess;
+
+        if !trait_segment.args().parenthesized {
             // For now, require that parenthetical notation be used only with `Fn()` etc.
-            let (msg, sugg) = if trait_def.paren_sugar {
-                (
-                    "the precise format of `Fn`-family traits' type parameters is subject to \
-                     change",
-                    Some(format!(
-                        "{}{} -> {}",
-                        trait_segment.ident,
-                        trait_segment
-                            .args
-                            .as_ref()
-                            .and_then(|args| args.args.get(0))
-                            .and_then(|arg| match arg {
-                                hir::GenericArg::Type(ty) => match ty.kind {
-                                    hir::TyKind::Tup(t) => t
-                                        .iter()
-                                        .map(|e| sess.source_map().span_to_snippet(e.span))
-                                        .collect::<Result<Vec<_>, _>>()
-                                        .map(|a| a.join(", ")),
-                                    _ => sess.source_map().span_to_snippet(ty.span),
-                                }
-                                .map(|s| format!("({})", s))
-                                .ok(),
-                                _ => None,
-                            })
-                            .unwrap_or_else(|| "()".to_string()),
-                        trait_segment
-                            .args()
-                            .bindings
-                            .iter()
-                            .find_map(|b| match (b.ident.name == sym::Output, &b.kind) {
-                                (true, hir::TypeBindingKind::Equality { ty }) => {
-                                    sess.source_map().span_to_snippet(ty.span).ok()
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or_else(|| "()".to_string()),
-                    )),
-                )
-            } else {
-                ("parenthetical notation is only stable when used with `Fn`-family traits", None)
-            };
-            let mut err = feature_err(sess, sym::unboxed_closures, span, msg);
-            if let Some(sugg) = sugg {
-                let msg = "use parenthetical notation instead";
-                err.span_suggestion(span, msg, sugg, Applicability::MaybeIncorrect);
+            let mut err = feature_err(
+                &sess.parse_sess,
+                sym::unboxed_closures,
+                span,
+                "the precise format of `Fn`-family traits' type parameters is subject to change",
+            );
+            // Do not suggest the other syntax if we are in trait impl:
+            // the desugaring would contain an associated type constrait.
+            if !is_impl {
+                let args = trait_segment
+                    .args
+                    .as_ref()
+                    .and_then(|args| args.args.get(0))
+                    .and_then(|arg| match arg {
+                        hir::GenericArg::Type(ty) => match ty.kind {
+                            hir::TyKind::Tup(t) => t
+                                .iter()
+                                .map(|e| sess.source_map().span_to_snippet(e.span))
+                                .collect::<Result<Vec<_>, _>>()
+                                .map(|a| a.join(", ")),
+                            _ => sess.source_map().span_to_snippet(ty.span),
+                        }
+                        .map(|s| format!("({})", s))
+                        .ok(),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "()".to_string());
+                let ret = trait_segment
+                    .args()
+                    .bindings
+                    .iter()
+                    .find_map(|b| match (b.ident.name == sym::Output, &b.kind) {
+                        (true, hir::TypeBindingKind::Equality { term }) => {
+                            let span = match term {
+                                hir::Term::Ty(ty) => ty.span,
+                                hir::Term::Const(c) => self.tcx().hir().span(c.hir_id),
+                            };
+                            sess.source_map().span_to_snippet(span).ok()
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "()".to_string());
+                err.span_suggestion(
+                    span,
+                    "use parenthetical notation instead",
+                    format!("{}{} -> {}", trait_segment.ident, args, ret),
+                    Applicability::MaybeIncorrect,
+                );
             }
             err.emit();
+        }
+
+        if is_impl {
+            let trait_name = self.tcx().def_path_str(trait_def_id);
+            struct_span_err!(
+                self.tcx().sess,
+                span,
+                E0183,
+                "manual implementations of `{}` are experimental",
+                trait_name,
+            )
+            .span_label(
+                span,
+                format!("manual implementations of `{}` are experimental", trait_name),
+            )
+            .help("add `#![feature(unboxed_closures)]` to the crate attributes to enable")
+            .emit();
         }
     }
 
@@ -173,10 +211,9 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         );
 
         let all_candidate_names: Vec<_> = all_candidates()
-            .map(|r| self.tcx().associated_items(r.def_id()).in_definition_order())
-            .flatten()
+            .flat_map(|r| self.tcx().associated_items(r.def_id()).in_definition_order())
             .filter_map(
-                |item| if item.kind == ty::AssocKind::Type { Some(item.ident.name) } else { None },
+                |item| if item.kind == ty::AssocKind::Type { Some(item.name) } else { None },
             )
             .collect();
 
@@ -232,7 +269,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 let trait_def_id = assoc_item.container.id();
                 names.push(format!(
                     "`{}` (from trait `{}`)",
-                    assoc_item.ident,
+                    assoc_item.name,
                     tcx.def_path_str(trait_def_id),
                 ));
             }
@@ -289,11 +326,11 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
             let mut names: FxHashMap<_, usize> = FxHashMap::default();
             for item in assoc_items {
                 types_count += 1;
-                *names.entry(item.ident.name).or_insert(0) += 1;
+                *names.entry(item.name).or_insert(0) += 1;
             }
             let mut dupes = false;
             for item in assoc_items {
-                let prefix = if names[&item.ident.name] > 1 {
+                let prefix = if names[&item.name] > 1 {
                     let trait_def_id = item.container.id();
                     dupes = true;
                     format!("{}::", tcx.def_path_str(trait_def_id))
@@ -301,7 +338,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                     String::new()
                 };
                 if let Some(sp) = tcx.hir().span_if_local(item.def_id) {
-                    err.span_label(sp, format!("`{}{}` defined here", prefix, item.ident));
+                    err.span_label(sp, format!("`{}{}` defined here", prefix, item.name));
                 }
             }
             if potential_assoc_types.len() == assoc_items.len() {
@@ -312,14 +349,14 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 // `Iterator<Item = isize>`.
                 for (potential, item) in iter::zip(&potential_assoc_types, assoc_items) {
                     if let Ok(snippet) = tcx.sess.source_map().span_to_snippet(*potential) {
-                        suggestions.push((*potential, format!("{} = {}", item.ident, snippet)));
+                        suggestions.push((*potential, format!("{} = {}", item.name, snippet)));
                     }
                 }
             } else if let (Ok(snippet), false) =
                 (tcx.sess.source_map().span_to_snippet(*span), dupes)
             {
                 let types: Vec<_> =
-                    assoc_items.iter().map(|item| format!("{} = Type", item.ident)).collect();
+                    assoc_items.iter().map(|item| format!("{} = Type", item.name)).collect();
                 let code = if snippet.ends_with('>') {
                     // The user wrote `Trait<'a>` or similar and we don't have a type we can
                     // suggest, but at least we can clue them to the correct syntax
@@ -350,17 +387,17 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 let mut names: FxHashMap<_, usize> = FxHashMap::default();
                 for item in assoc_items {
                     types_count += 1;
-                    *names.entry(item.ident.name).or_insert(0) += 1;
+                    *names.entry(item.name).or_insert(0) += 1;
                 }
                 let mut label = vec![];
                 for item in assoc_items {
-                    let postfix = if names[&item.ident.name] > 1 {
+                    let postfix = if names[&item.name] > 1 {
                         let trait_def_id = item.container.id();
                         format!(" (from trait `{}`)", tcx.def_path_str(trait_def_id))
                     } else {
                         String::new()
                     };
-                    label.push(format!("`{}`{}", item.ident, postfix));
+                    label.push(format!("`{}`{}", item.name, postfix));
                 }
                 if !label.is_empty() {
                     err.span_label(

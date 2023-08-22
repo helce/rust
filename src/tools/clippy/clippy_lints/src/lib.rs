@@ -4,7 +4,6 @@
 #![feature(box_patterns)]
 #![feature(control_flow_enum)]
 #![feature(drain_filter)]
-#![feature(in_band_lifetimes)]
 #![feature(iter_intersperse)]
 #![feature(let_else)]
 #![feature(once_cell)]
@@ -18,6 +17,8 @@
 #![warn(rust_2018_idioms, unused_lifetimes)]
 // warn on rustc internal lints
 #![warn(rustc::internal)]
+// Disable this rustc lint for now, as it was also done in rustc
+#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
 
 // FIXME: switch to something more ergonomic here, once available.
 // (Currently there is no way to opt into sysroot crates without `extern crate`.)
@@ -153,12 +154,9 @@ macro_rules! declare_clippy_lint {
     };
 }
 
-#[cfg(feature = "metadata-collector-lint")]
+#[cfg(feature = "internal")]
 mod deprecated_lints;
-#[cfg_attr(
-    any(feature = "internal-lints", feature = "metadata-collector-lint"),
-    allow(clippy::missing_clippy_version_attribute)
-)]
+#[cfg_attr(feature = "internal", allow(clippy::missing_clippy_version_attribute))]
 mod utils;
 
 // begin lints modules, do not remove this comment, it’s used in `update_lints`
@@ -177,6 +175,7 @@ mod blacklisted_name;
 mod blocks_in_if_conditions;
 mod bool_assert_comparison;
 mod booleans;
+mod borrow_as_ptr;
 mod bytecount;
 mod cargo_common_metadata;
 mod case_sensitive_file_extension_comparisons;
@@ -192,6 +191,7 @@ mod create_dir;
 mod dbg_macro;
 mod default;
 mod default_numeric_fallback;
+mod default_union_representation;
 mod dereference;
 mod derivable_impls;
 mod derive;
@@ -264,6 +264,7 @@ mod macro_use;
 mod main_recursion;
 mod manual_assert;
 mod manual_async_fn;
+mod manual_bits;
 mod manual_map;
 mod manual_non_exhaustive;
 mod manual_ok_or;
@@ -351,6 +352,7 @@ mod self_named_constructors;
 mod semicolon_if_nothing_returned;
 mod serde_api;
 mod shadow;
+mod single_char_lifetime_names;
 mod single_component_path_imports;
 mod size_of_in_element_count;
 mod slow_vector_initialization;
@@ -471,7 +473,7 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
     include!("lib.register_restriction.rs");
     include!("lib.register_pedantic.rs");
 
-    #[cfg(feature = "internal-lints")]
+    #[cfg(feature = "internal")]
     include!("lib.register_internal.rs");
 
     include!("lib.register_all.rs");
@@ -483,7 +485,7 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
     include!("lib.register_cargo.rs");
     include!("lib.register_nursery.rs");
 
-    #[cfg(feature = "metadata-collector-lint")]
+    #[cfg(feature = "internal")]
     {
         if std::env::var("ENABLE_METADATA_COLLECTION").eq(&Ok("1".to_string())) {
             store.register_late_pass(|| Box::new(utils::internal_lints::metadata_collector::MetadataCollector::new()));
@@ -492,7 +494,7 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
     }
 
     // all the internal lints
-    #[cfg(feature = "internal-lints")]
+    #[cfg(feature = "internal")]
     {
         store.register_early_pass(|| Box::new(utils::internal_lints::ClippyLintsInternal));
         store.register_early_pass(|| Box::new(utils::internal_lints::ProduceIce));
@@ -582,6 +584,7 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
     store.register_late_pass(move || Box::new(needless_question_mark::NeedlessQuestionMark));
     store.register_late_pass(move || Box::new(casts::Casts::new(msrv)));
     store.register_early_pass(move || Box::new(unnested_or_patterns::UnnestedOrPatterns::new(msrv)));
+    store.register_late_pass(move || Box::new(map_clone::MapClone::new(msrv)));
 
     store.register_late_pass(|| Box::new(size_of_in_element_count::SizeOfInElementCount));
     store.register_late_pass(|| Box::new(same_name_method::SameNameMethod));
@@ -592,7 +595,6 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
             msrv,
         ))
     });
-    store.register_late_pass(|| Box::new(map_clone::MapClone));
     store.register_late_pass(|| Box::new(map_err_ignore::MapErrIgnore));
     store.register_late_pass(|| Box::new(shadow::Shadow::default()));
     store.register_late_pass(|| Box::new(unit_types::UnitTypes));
@@ -704,7 +706,6 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
     store.register_late_pass(|| Box::new(mut_key::MutableKeyType));
     store.register_late_pass(|| Box::new(modulo_arithmetic::ModuloArithmetic));
     store.register_early_pass(|| Box::new(reference::DerefAddrOf));
-    store.register_early_pass(|| Box::new(reference::RefInDeref));
     store.register_early_pass(|| Box::new(double_parens::DoubleParens));
     store.register_late_pass(|| Box::new(to_string_in_display::ToStringInDisplay::new()));
     store.register_early_pass(|| Box::new(unsafe_removed_from_name::UnsafeNameRemoval));
@@ -858,6 +859,10 @@ pub fn register_plugins(store: &mut rustc_lint::LintStore, sess: &Session, conf:
     store.register_late_pass(|| Box::new(needless_late_init::NeedlessLateInit));
     store.register_late_pass(|| Box::new(return_self_not_must_use::ReturnSelfNotMustUse));
     store.register_late_pass(|| Box::new(init_numbered_fields::NumberedFields));
+    store.register_early_pass(|| Box::new(single_char_lifetime_names::SingleCharLifetimeNames));
+    store.register_late_pass(move || Box::new(borrow_as_ptr::BorrowAsPtr::new(msrv)));
+    store.register_late_pass(move || Box::new(manual_bits::ManualBits::new(msrv)));
+    store.register_late_pass(|| Box::new(default_union_representation::DefaultUnionRepresentation));
     // add lints here, do not remove this comment, it's used in `new_lint`
 }
 
@@ -933,6 +938,7 @@ pub fn register_renamed(ls: &mut rustc_lint::LintStore) {
     ls.register_renamed("clippy::if_let_some_result", "clippy::match_result_ok");
     ls.register_renamed("clippy::disallowed_type", "clippy::disallowed_types");
     ls.register_renamed("clippy::disallowed_method", "clippy::disallowed_methods");
+    ls.register_renamed("clippy::ref_in_deref", "clippy::needless_borrow");
 
     // uplifted lints
     ls.register_renamed("clippy::invalid_ref", "invalid_value");

@@ -4,6 +4,7 @@
 #![feature(try_blocks)]
 #![feature(associated_type_defaults)]
 #![recursion_limit = "256"]
+#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
 
 use rustc_ast::MacroDef;
 use rustc_attr as attr;
@@ -11,12 +12,11 @@ use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::struct_span_err;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
-use rustc_hir::def_id::{DefId, LocalDefId, LocalDefIdSet};
-use rustc_hir::def_id::{CRATE_DEF_ID, CRATE_DEF_INDEX, LOCAL_CRATE};
-use rustc_hir::intravisit::{self, DeepVisitor, NestedVisitorMap, Visitor};
+use rustc_hir::def_id::{DefId, LocalDefId, LocalDefIdSet, CRATE_DEF_ID};
+use rustc_hir::intravisit::{self, DeepVisitor, Visitor};
 use rustc_hir::{AssocItemKind, HirIdSet, Node, PatKind};
 use rustc_middle::bug;
-use rustc_middle::hir::map::Map;
+use rustc_middle::hir::nested_filter;
 use rustc_middle::middle::privacy::{AccessLevel, AccessLevels};
 use rustc_middle::span_bug;
 use rustc_middle::thir::abstract_const::Node as ACNode;
@@ -26,7 +26,7 @@ use rustc_middle::ty::subst::InternalSubsts;
 use rustc_middle::ty::{self, Const, GenericParamDefKind, TraitRef, Ty, TyCtxt, TypeFoldable};
 use rustc_session::lint;
 use rustc_span::hygiene::Transparency;
-use rustc_span::symbol::{kw, sym, Ident};
+use rustc_span::symbol::{kw, Ident};
 use rustc_span::Span;
 use rustc_trait_selection::traits::const_evaluatable::{self, AbstractConst};
 
@@ -128,8 +128,8 @@ where
                 constness: _,
                 polarity: _,
             }) => self.visit_trait(trait_ref),
-            ty::PredicateKind::Projection(ty::ProjectionPredicate { projection_ty, ty }) => {
-                ty.visit_with(self)?;
+            ty::PredicateKind::Projection(ty::ProjectionPredicate { projection_ty, term }) => {
+                term.visit_with(self)?;
                 self.visit_projection_ty(projection_ty)
             }
             ty::PredicateKind::TypeOutlives(ty::OutlivesPredicate(ty, _region)) => {
@@ -177,10 +177,6 @@ where
     V: DefIdVisitor<'tcx> + ?Sized,
 {
     type BreakTy = V::BreakTy;
-
-    fn tcx_for_anon_const_substs(&self) -> Option<TyCtxt<'tcx>> {
-        Some(self.def_id_visitor.tcx())
-    }
 
     fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<V::BreakTy> {
         let tcx = self.def_id_visitor.tcx();
@@ -284,8 +280,8 @@ where
         }
     }
 
-    fn visit_const(&mut self, c: &'tcx Const<'tcx>) -> ControlFlow<Self::BreakTy> {
-        self.visit_ty(c.ty)?;
+    fn visit_const(&mut self, c: Const<'tcx>) -> ControlFlow<Self::BreakTy> {
+        self.visit_ty(c.ty())?;
         let tcx = self.def_id_visitor.tcx();
         if let Ok(Some(ct)) = AbstractConst::from_const(tcx, c) {
             self.visit_abstract_const_expr(tcx, ct)?;
@@ -310,10 +306,10 @@ struct PubRestrictedVisitor<'tcx> {
 }
 
 impl<'tcx> Visitor<'tcx> for PubRestrictedVisitor<'tcx> {
-    type Map = Map<'tcx>;
+    type NestedFilter = nested_filter::All;
 
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::All(self.tcx.hir())
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
     }
     fn visit_vis(&mut self, vis: &'tcx hir::Visibility<'tcx>) {
         self.has_pub_restricted = self.has_pub_restricted || vis.node.is_pub_restricted();
@@ -436,6 +432,15 @@ impl<'tcx> EmbargoVisitor<'tcx> {
         self.access_levels.map.get(&def_id).copied()
     }
 
+    fn update_with_hir_id(
+        &mut self,
+        hir_id: hir::HirId,
+        level: Option<AccessLevel>,
+    ) -> Option<AccessLevel> {
+        let def_id = self.tcx.hir().local_def_id(hir_id);
+        self.update(def_id, level)
+    }
+
     /// Updates node level and returns the updated level.
     fn update(&mut self, def_id: LocalDefId, level: Option<AccessLevel>) -> Option<AccessLevel> {
         let old_level = self.get(def_id);
@@ -520,7 +525,7 @@ impl<'tcx> EmbargoVisitor<'tcx> {
             let vis = self.tcx.visibility(item_id.def_id);
             self.update_macro_reachable_def(item_id.def_id, def_kind, vis, defining_mod);
         }
-        if let Some(exports) = self.tcx.module_exports(module_def_id) {
+        if let Some(exports) = self.tcx.module_reexports(module_def_id) {
             for export in exports {
                 if export.vis.is_accessible_from(defining_mod.to_def_id(), self.tcx) {
                     if let Res::Def(def_kind, def_id) = export.res {
@@ -623,116 +628,37 @@ impl<'tcx> EmbargoVisitor<'tcx> {
             | DefKind::Generator => (),
         }
     }
-
-    /// Given the path segments of an `ItemKind::Use`, then we need
-    /// to update the visibility of the intermediate use so that it isn't linted
-    /// by `unreachable_pub`.
-    ///
-    /// This isn't trivial as `path.res` has the `DefId` of the eventual target
-    /// of the use statement not of the next intermediate use statement.
-    ///
-    /// To do this, consider the last two segments of the path to our intermediate
-    /// use statement. We expect the penultimate segment to be a module and the
-    /// last segment to be the name of the item we are exporting. We can then
-    /// look at the items contained in the module for the use statement with that
-    /// name and update that item's visibility.
-    ///
-    /// FIXME: This solution won't work with glob imports and doesn't respect
-    /// namespaces. See <https://github.com/rust-lang/rust/pull/57922#discussion_r251234202>.
-    fn update_visibility_of_intermediate_use_statements(
-        &mut self,
-        segments: &[hir::PathSegment<'_>],
-    ) {
-        if let [.., module, segment] = segments {
-            if let Some(item) = module
-                .res
-                .and_then(|res| res.mod_def_id())
-                // If the module is `self`, i.e. the current crate,
-                // there will be no corresponding item.
-                .filter(|def_id| def_id.index != CRATE_DEF_INDEX || def_id.krate != LOCAL_CRATE)
-                .and_then(|def_id| def_id.as_local())
-                .map(|module_hir_id| self.tcx.hir().expect_item(module_hir_id))
-            {
-                if let hir::ItemKind::Mod(m) = &item.kind {
-                    for &item_id in m.item_ids {
-                        let item = self.tcx.hir().item(item_id);
-                        if !self.tcx.hygienic_eq(
-                            segment.ident,
-                            item.ident,
-                            item_id.def_id.to_def_id(),
-                        ) {
-                            continue;
-                        }
-                        if let hir::ItemKind::Use(..) = item.kind {
-                            self.update(item.def_id, Some(AccessLevel::Exported));
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 impl<'tcx> Visitor<'tcx> for EmbargoVisitor<'tcx> {
-    type Map = Map<'tcx>;
+    type NestedFilter = nested_filter::All;
 
     /// We want to visit items in the context of their containing
     /// module and so forth, so supply a crate for doing a deep walk.
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::All(self.tcx.hir())
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
     }
 
     fn visit_item(&mut self, item: &'tcx hir::Item<'tcx>) {
-        let inherited_item_level = match item.kind {
+        let item_level = match item.kind {
             hir::ItemKind::Impl { .. } => {
-                Option::<AccessLevel>::of_impl(item.def_id, self.tcx, &self.access_levels)
+                let impl_level =
+                    Option::<AccessLevel>::of_impl(item.def_id, self.tcx, &self.access_levels);
+                self.update(item.def_id, impl_level)
             }
-            // Only exported `macro_rules!` items are public, but they always are.
-            hir::ItemKind::Macro(MacroDef { macro_rules: true, .. }) => {
-                let def_id = item.def_id.to_def_id();
-                let is_macro_export = self.tcx.has_attr(def_id, sym::macro_export);
-                if is_macro_export { Some(AccessLevel::Public) } else { None }
-            }
-            // Foreign modules inherit level from parents.
-            hir::ItemKind::ForeignMod { .. } => self.prev_level,
-            // Other `pub` items inherit levels from parents.
-            hir::ItemKind::Const(..)
-            | hir::ItemKind::Enum(..)
-            | hir::ItemKind::ExternCrate(..)
-            | hir::ItemKind::GlobalAsm(..)
-            | hir::ItemKind::Fn(..)
-            | hir::ItemKind::Macro(..)
-            | hir::ItemKind::Mod(..)
-            | hir::ItemKind::Static(..)
-            | hir::ItemKind::Struct(..)
-            | hir::ItemKind::Trait(..)
-            | hir::ItemKind::TraitAlias(..)
-            | hir::ItemKind::OpaqueTy(..)
-            | hir::ItemKind::TyAlias(..)
-            | hir::ItemKind::Union(..)
-            | hir::ItemKind::Use(..) => {
-                if item.vis.node.is_pub() {
-                    self.prev_level
-                } else {
-                    None
-                }
-            }
+            _ => self.get(item.def_id),
         };
-
-        // Update level of the item itself.
-        let item_level = self.update(item.def_id, inherited_item_level);
 
         // Update levels of nested things.
         match item.kind {
             hir::ItemKind::Enum(ref def, _) => {
                 for variant in def.variants {
-                    let variant_level =
-                        self.update(self.tcx.hir().local_def_id(variant.id), item_level);
+                    let variant_level = self.update_with_hir_id(variant.id, item_level);
                     if let Some(ctor_hir_id) = variant.data.ctor_hir_id() {
-                        self.update(self.tcx.hir().local_def_id(ctor_hir_id), item_level);
+                        self.update_with_hir_id(ctor_hir_id, item_level);
                     }
                     for field in variant.data.fields() {
-                        self.update(self.tcx.hir().local_def_id(field.hir_id), variant_level);
+                        self.update_with_hir_id(field.hir_id, variant_level);
                     }
                 }
             }
@@ -752,11 +678,11 @@ impl<'tcx> Visitor<'tcx> for EmbargoVisitor<'tcx> {
             }
             hir::ItemKind::Struct(ref def, _) | hir::ItemKind::Union(ref def, _) => {
                 if let Some(ctor_hir_id) = def.ctor_hir_id() {
-                    self.update(self.tcx.hir().local_def_id(ctor_hir_id), item_level);
+                    self.update_with_hir_id(ctor_hir_id, item_level);
                 }
                 for field in def.fields() {
                     if field.vis.node.is_pub() {
-                        self.update(self.tcx.hir().local_def_id(field.hir_id), item_level);
+                        self.update_with_hir_id(field.hir_id, item_level);
                     }
                 }
             }
@@ -789,14 +715,8 @@ impl<'tcx> Visitor<'tcx> for EmbargoVisitor<'tcx> {
             hir::ItemKind::Macro(..) | hir::ItemKind::ExternCrate(..) => {}
             // All nested items are checked by `visit_item`.
             hir::ItemKind::Mod(..) => {}
-            // Re-exports are handled in `visit_mod`. However, in order to avoid looping over
-            // all of the items of a mod in `visit_mod` looking for use statements, we handle
-            // making sure that intermediate use statements have their visibilities updated here.
-            hir::ItemKind::Use(path, _) => {
-                if item_level.is_some() {
-                    self.update_visibility_of_intermediate_use_statements(path.segments.as_ref());
-                }
-            }
+            // Handled in the access level of in rustc_resolve
+            hir::ItemKind::Use(..) => {}
             // The interface is empty.
             hir::ItemKind::GlobalAsm(..) => {}
             hir::ItemKind::OpaqueTy(..) => {
@@ -920,27 +840,6 @@ impl<'tcx> Visitor<'tcx> for EmbargoVisitor<'tcx> {
         intravisit::walk_block(self, b);
         self.prev_level = orig_level;
     }
-
-    fn visit_mod(&mut self, m: &'tcx hir::Mod<'tcx>, _sp: Span, id: hir::HirId) {
-        // This code is here instead of in visit_item so that the
-        // crate module gets processed as well.
-        if self.prev_level.is_some() {
-            let def_id = self.tcx.hir().local_def_id(id);
-            if let Some(exports) = self.tcx.module_exports(def_id) {
-                for export in exports.iter() {
-                    if export.vis.is_public() {
-                        if let Some(def_id) = export.res.opt_def_id() {
-                            if let Some(def_id) = def_id.as_local() {
-                                self.update(def_id, Some(AccessLevel::Exported));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        intravisit::walk_mod(self, m, id);
-    }
 }
 
 impl ReachEverythingInTheInterfaceVisitor<'_, '_> {
@@ -1045,7 +944,7 @@ impl<'tcx> NamePrivacyVisitor<'tcx> {
         let def_id = self.tcx.adjust_ident_and_get_scope(ident, def.did, hir_id).1;
         if !field.vis.is_accessible_from(def_id, self.tcx) {
             let label = if in_update_syntax {
-                format!("field `{}` is private", field.ident)
+                format!("field `{}` is private", field.name)
             } else {
                 "private field".to_string()
             };
@@ -1055,7 +954,7 @@ impl<'tcx> NamePrivacyVisitor<'tcx> {
                 span,
                 E0451,
                 "field `{}` of {} `{}` is private",
-                field.ident,
+                field.name,
                 def.variant_descr(),
                 self.tcx.def_path_str(def.did)
             )
@@ -1066,12 +965,12 @@ impl<'tcx> NamePrivacyVisitor<'tcx> {
 }
 
 impl<'tcx> Visitor<'tcx> for NamePrivacyVisitor<'tcx> {
-    type Map = Map<'tcx>;
+    type NestedFilter = nested_filter::All;
 
     /// We want to visit items in the context of their containing
     /// module and so forth, so supply a crate for doing a deep walk.
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::All(self.tcx.hir())
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
     }
 
     fn visit_mod(&mut self, _m: &'tcx hir::Mod<'tcx>, _s: Span, _n: hir::HirId) {
@@ -1195,12 +1094,12 @@ impl<'tcx> TypePrivacyVisitor<'tcx> {
 }
 
 impl<'tcx> Visitor<'tcx> for TypePrivacyVisitor<'tcx> {
-    type Map = Map<'tcx>;
+    type NestedFilter = nested_filter::All;
 
     /// We want to visit items in the context of their containing
     /// module and so forth, so supply a crate for doing a deep walk.
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::All(self.tcx.hir())
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
     }
 
     fn visit_mod(&mut self, _m: &'tcx hir::Mod<'tcx>, _s: Span, _n: hir::HirId) {
@@ -1250,19 +1149,11 @@ impl<'tcx> Visitor<'tcx> for TypePrivacyVisitor<'tcx> {
                 if self.visit(ty).is_break() {
                     return;
                 }
+            } else {
+                // We don't do anything for const infers here.
             }
         } else {
-            let local_id = self.tcx.hir().local_def_id(inf.hir_id);
-            if let Some(did) = self.tcx.opt_const_param_of(local_id) {
-                if self.visit_def_id(did, "inferred", &"").is_break() {
-                    return;
-                }
-            }
-
-            // FIXME see above note for same issue.
-            if self.visit(rustc_typeck::hir_ty_to_ty(self.tcx, &inf.to_ty())).is_break() {
-                return;
-            }
+            bug!("visit_infer without typeck_results");
         }
         intravisit::walk_inf(self, inf);
     }
@@ -1287,10 +1178,10 @@ impl<'tcx> Visitor<'tcx> for TypePrivacyVisitor<'tcx> {
             }
 
             for (poly_predicate, _) in bounds.projection_bounds {
-                if self.visit(poly_predicate.skip_binder().ty).is_break()
-                    || self
-                        .visit_projection_ty(poly_predicate.skip_binder().projection_ty)
-                        .is_break()
+                let pred = poly_predicate.skip_binder();
+                let poly_pred_term = self.visit(pred.term);
+                if poly_pred_term.is_break()
+                    || self.visit_projection_ty(pred.projection_ty).is_break()
                 {
                     return;
                 }
@@ -1313,9 +1204,9 @@ impl<'tcx> Visitor<'tcx> for TypePrivacyVisitor<'tcx> {
                     return;
                 }
             }
-            hir::ExprKind::MethodCall(_, span, _, _) => {
+            hir::ExprKind::MethodCall(segment, ..) => {
                 // Method calls have to be checked specially.
-                self.span = span;
+                self.span = segment.ident.span;
                 if let Some(def_id) = self.typeck_results().type_dependent_def_id(expr.hir_id) {
                     if self.visit(self.tcx.type_of(def_id)).is_break() {
                         return;
@@ -1459,7 +1350,7 @@ struct ObsoleteCheckTypeForPrivatenessVisitor<'a, 'b, 'tcx> {
 impl<'a, 'tcx> ObsoleteVisiblePrivateTypesVisitor<'a, 'tcx> {
     fn path_is_private_type(&self, path: &hir::Path<'_>) -> bool {
         let did = match path.res {
-            Res::PrimTy(..) | Res::SelfTy(..) | Res::Err => return false,
+            Res::PrimTy(..) | Res::SelfTy { .. } | Res::Err => return false,
             res => res.def_id(),
         };
 
@@ -1497,12 +1388,6 @@ impl<'a, 'tcx> ObsoleteVisiblePrivateTypesVisitor<'a, 'tcx> {
 }
 
 impl<'a, 'b, 'tcx, 'v> Visitor<'v> for ObsoleteCheckTypeForPrivatenessVisitor<'a, 'b, 'tcx> {
-    type Map = intravisit::ErasedMap<'v>;
-
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::None
-    }
-
     fn visit_generic_arg(&mut self, generic_arg: &'v hir::GenericArg<'v>) {
         match generic_arg {
             hir::GenericArg::Type(t) => self.visit_ty(t),
@@ -1533,12 +1418,12 @@ impl<'a, 'b, 'tcx, 'v> Visitor<'v> for ObsoleteCheckTypeForPrivatenessVisitor<'a
 }
 
 impl<'a, 'tcx> Visitor<'tcx> for ObsoleteVisiblePrivateTypesVisitor<'a, 'tcx> {
-    type Map = Map<'tcx>;
+    type NestedFilter = nested_filter::All;
 
     /// We want to visit items in the context of their containing
     /// module and so forth, so supply a crate for doing a deep walk.
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::All(self.tcx.hir())
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
     }
 
     fn visit_item(&mut self, item: &'tcx hir::Item<'tcx>) {
@@ -1982,10 +1867,10 @@ impl<'tcx> PrivateItemsInPublicInterfacesVisitor<'tcx> {
 }
 
 impl<'tcx> Visitor<'tcx> for PrivateItemsInPublicInterfacesVisitor<'tcx> {
-    type Map = Map<'tcx>;
+    type NestedFilter = nested_filter::OnlyBodies;
 
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::OnlyBodies(self.tcx.hir())
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
     }
 
     fn visit_item(&mut self, item: &'tcx hir::Item<'tcx>) {
@@ -2122,7 +2007,7 @@ fn visibility(tcx: TyCtxt<'_>, def_id: DefId) -> ty::Visibility {
                 // Visibilities of trait impl items are inherited from their traits
                 // and are not filled in resolve.
                 Node::ImplItem(impl_item) => {
-                    match tcx.hir().get(tcx.hir().get_parent_item(hir_id)) {
+                    match tcx.hir().get_by_def_id(tcx.hir().get_parent_item(hir_id)) {
                         Node::Item(hir::Item {
                             kind: hir::ItemKind::Impl(hir::Impl { of_trait: Some(tr), .. }),
                             ..
@@ -2166,11 +2051,12 @@ fn privacy_access_levels(tcx: TyCtxt<'_>, (): ()) -> &AccessLevels {
     // items which are reachable from external crates based on visibility.
     let mut visitor = EmbargoVisitor {
         tcx,
-        access_levels: Default::default(),
+        access_levels: tcx.resolutions(()).access_levels.clone(),
         macro_reachable: Default::default(),
         prev_level: Some(AccessLevel::Public),
         changed: false,
     };
+
     loop {
         tcx.hir().walk_toplevel_module(&mut visitor);
         if visitor.changed {
@@ -2179,7 +2065,6 @@ fn privacy_access_levels(tcx: TyCtxt<'_>, (): ()) -> &AccessLevels {
             break;
         }
     }
-    visitor.update(CRATE_DEF_ID, Some(AccessLevel::Public));
 
     tcx.arena.alloc(visitor.access_levels)
 }

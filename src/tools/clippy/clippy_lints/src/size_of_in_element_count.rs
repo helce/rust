@@ -7,7 +7,7 @@ use if_chain::if_chain;
 use rustc_hir::BinOpKind;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::ty::{self, Ty, TyS, TypeAndMut};
+use rustc_middle::ty::{self, Ty, TypeAndMut};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
@@ -37,7 +37,7 @@ declare_clippy_lint! {
 
 declare_lint_pass!(SizeOfInElementCount => [SIZE_OF_IN_ELEMENT_COUNT]);
 
-fn get_size_of_ty(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>, inverted: bool) -> Option<Ty<'tcx>> {
+fn get_size_of_ty<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>, inverted: bool) -> Option<Ty<'tcx>> {
     match expr.kind {
         ExprKind::Call(count_func, _func_args) => {
             if_chain! {
@@ -64,7 +64,10 @@ fn get_size_of_ty(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>, inverted: bool) 
     }
 }
 
-fn get_pointee_ty_and_count_expr(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) -> Option<(Ty<'tcx>, &'tcx Expr<'tcx>)> {
+fn get_pointee_ty_and_count_expr<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &'tcx Expr<'_>,
+) -> Option<(Ty<'tcx>, &'tcx Expr<'tcx>)> {
     const FUNCTIONS: [&[&str]; 8] = [
         &paths::PTR_COPY_NONOVERLAPPING,
         &paths::PTR_COPY,
@@ -105,7 +108,7 @@ fn get_pointee_ty_and_count_expr(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) -
     };
     if_chain! {
         // Find calls to copy_{from,to}{,_nonoverlapping} and write_bytes methods
-        if let ExprKind::MethodCall(method_path, _, [ptr_self, .., count], _) = expr.kind;
+        if let ExprKind::MethodCall(method_path, [ptr_self, .., count], _) = expr.kind;
         let method_ident = method_path.ident.as_str();
         if METHODS.iter().any(|m| *m == &*method_ident);
 
@@ -113,7 +116,7 @@ fn get_pointee_ty_and_count_expr(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) -
         if let ty::RawPtr(TypeAndMut { ty: pointee_ty, .. }) =
             cx.typeck_results().expr_ty(ptr_self).kind();
         then {
-            return Some((pointee_ty, count));
+            return Some((*pointee_ty, count));
         }
     };
     None
@@ -135,7 +138,7 @@ impl<'tcx> LateLintPass<'tcx> for SizeOfInElementCount {
             // Find a size_of call in the count parameter expression and
             // check that it's the same type
             if let Some(ty_used_for_size_of) = get_size_of_ty(cx, count_expr, false);
-            if TyS::same_type(pointee_ty, ty_used_for_size_of);
+            if pointee_ty == ty_used_for_size_of;
             then {
                 span_lint_and_help(
                     cx,

@@ -77,7 +77,7 @@ impl VecPushSearcher {
     }
 }
 
-impl LateLintPass<'_> for VecInitThenPush {
+impl<'tcx> LateLintPass<'tcx> for VecInitThenPush {
     fn check_block(&mut self, _: &LateContext<'tcx>, _: &'tcx Block<'tcx>) {
         self.searcher = None;
     }
@@ -125,7 +125,7 @@ impl LateLintPass<'_> for VecInitThenPush {
         if let Some(searcher) = self.searcher.take() {
             if_chain! {
                 if let StmtKind::Expr(expr) | StmtKind::Semi(expr) = stmt.kind;
-                if let ExprKind::MethodCall(path, _, [self_arg, _], _) = expr.kind;
+                if let ExprKind::MethodCall(path, [self_arg, _], _) = expr.kind;
                 if path_to_local_id(self_arg, searcher.local_id);
                 if path.ident.name.as_str() == "push";
                 then {

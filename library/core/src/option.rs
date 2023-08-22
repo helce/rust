@@ -270,7 +270,7 @@
 //! let mut bt = BTreeMap::new();
 //! bt.insert(20u8, "foo");
 //! bt.insert(42u8, "bar");
-//! let res = vec![0u8, 1, 11, 200, 22]
+//! let res = [0u8, 1, 11, 200, 22]
 //!     .into_iter()
 //!     .map(|x| {
 //!         // `checked_sub()` returns `None` on error
@@ -390,10 +390,10 @@
 //! [impl-FromIterator]: Option#impl-FromIterator%3COption%3CA%3E%3E
 //!
 //! ```
-//! let v = vec![Some(2), Some(4), None, Some(8)];
+//! let v = [Some(2), Some(4), None, Some(8)];
 //! let res: Option<Vec<_>> = v.into_iter().collect();
 //! assert_eq!(res, None);
-//! let v = vec![Some(2), Some(4), Some(8)];
+//! let v = [Some(2), Some(4), Some(8)];
 //! let res: Option<Vec<_>> = v.into_iter().collect();
 //! assert_eq!(res, Some(vec![2, 4, 8]));
 //! ```
@@ -407,10 +407,10 @@
 //! [impl-Sum]: Option#impl-Sum%3COption%3CU%3E%3E
 //!
 //! ```
-//! let v = vec![None, Some(1), Some(2), Some(3)];
+//! let v = [None, Some(1), Some(2), Some(3)];
 //! let res: Option<i32> = v.into_iter().sum();
 //! assert_eq!(res, None);
-//! let v = vec![Some(1), Some(2), Some(21)];
+//! let v = [Some(1), Some(2), Some(21)];
 //! let res: Option<i32> = v.into_iter().product();
 //! assert_eq!(res, Some(42));
 //! ```
@@ -500,7 +500,7 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use crate::iter::{FromIterator, FusedIterator, TrustedLen};
+use crate::iter::{self, FromIterator, FusedIterator, TrustedLen};
 use crate::panicking::{panic, panic_str};
 use crate::pin::Pin;
 use crate::{
@@ -549,6 +549,29 @@ impl<T> Option<T> {
     #[rustc_const_stable(feature = "const_option", since = "1.48.0")]
     pub const fn is_some(&self) -> bool {
         matches!(*self, Some(_))
+    }
+
+    /// Returns `true` if the option is a [`Some`] wrapping a value matching the predicate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(is_some_with)]
+    ///
+    /// let x: Option<u32> = Some(2);
+    /// assert_eq!(x.is_some_with(|&x| x > 1), true);
+    ///
+    /// let x: Option<u32> = Some(0);
+    /// assert_eq!(x.is_some_with(|&x| x > 1), false);
+    ///
+    /// let x: Option<u32> = None;
+    /// assert_eq!(x.is_some_with(|&x| x > 1), false);
+    /// ```
+    #[must_use]
+    #[inline]
+    #[unstable(feature = "is_some_with", issue = "93050")]
+    pub fn is_some_with(&self, f: impl FnOnce(&T) -> bool) -> bool {
+        matches!(self, Some(x) if f(x))
     }
 
     /// Returns `true` if the option is a [`None`] value.
@@ -1184,13 +1207,25 @@ impl<T> Option<T> {
     /// # Examples
     ///
     /// ```
-    /// fn sq(x: u32) -> Option<u32> { Some(x * x) }
-    /// fn nope(_: u32) -> Option<u32> { None }
+    /// fn sq_then_to_string(x: u32) -> Option<String> {
+    ///     x.checked_mul(x).map(|sq| sq.to_string())
+    /// }
     ///
-    /// assert_eq!(Some(2).and_then(sq).and_then(sq), Some(16));
-    /// assert_eq!(Some(2).and_then(sq).and_then(nope), None);
-    /// assert_eq!(Some(2).and_then(nope).and_then(sq), None);
-    /// assert_eq!(None.and_then(sq).and_then(sq), None);
+    /// assert_eq!(Some(2).and_then(sq_then_to_string), Some(4.to_string()));
+    /// assert_eq!(Some(1_000_000).and_then(sq_then_to_string), None); // overflowed!
+    /// assert_eq!(None.and_then(sq_then_to_string), None);
+    /// ```
+    ///
+    /// Often used to chain fallible operations that may return [`None`].
+    ///
+    /// ```
+    /// let arr_2d = [["A0", "A1"], ["B0", "B1"]];
+    ///
+    /// let item_0_1 = arr_2d.get(0).and_then(|row| row.get(1));
+    /// assert_eq!(item_0_1, Some(&"A1"));
+    ///
+    /// let item_2_0 = arr_2d.get(2).and_then(|row| row.get(0));
+    /// assert_eq!(item_2_0, None);
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -2210,7 +2245,7 @@ impl<A, V: FromIterator<A>> FromIterator<Option<A>> for Option<V> {
         // FIXME(#11084): This could be replaced with Iterator::scan when this
         // performance bug is closed.
 
-        iter.into_iter().map(|x| x.ok_or(())).collect::<Result<_, _>>().ok()
+        iter::try_process(iter.into_iter(), |i| i.collect())
     }
 }
 

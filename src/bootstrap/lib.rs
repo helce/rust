@@ -106,8 +106,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::str;
@@ -339,6 +338,11 @@ impl Mode {
     }
 }
 
+pub enum CLang {
+    C,
+    Cxx,
+}
+
 impl Build {
     /// Creates a new set of build configuration from the `flags` on the command
     /// line and the filesystem `config`.
@@ -527,7 +531,7 @@ impl Build {
         // Try passing `--progress` to start, then run git again without if that fails.
         let update = |progress: bool| {
             let mut git = Command::new("git");
-            git.args(&["submodule", "update", "--init", "--recursive"]);
+            git.args(&["submodule", "update", "--init", "--recursive", "--depth=1"]);
             if progress {
                 git.arg("--progress");
             }
@@ -851,7 +855,7 @@ impl Build {
             return;
         }
         self.verbose(&format!("running: {:?}", cmd));
-        run(cmd)
+        run(cmd, self.is_verbose())
     }
 
     /// Runs a command, printing out nice contextual information if it fails.
@@ -871,7 +875,7 @@ impl Build {
             return true;
         }
         self.verbose(&format!("running: {:?}", cmd));
-        try_run(cmd)
+        try_run(cmd, self.is_verbose())
     }
 
     /// Runs a command, printing out nice contextual information if it fails.
@@ -941,10 +945,15 @@ impl Build {
 
     /// Returns a list of flags to pass to the C compiler for the target
     /// specified.
-    fn cflags(&self, target: TargetSelection, which: GitRepo) -> Vec<String> {
+    fn cflags(&self, target: TargetSelection, which: GitRepo, c: CLang) -> Vec<String> {
+        let base = match c {
+            CLang::C => &self.cc[&target],
+            CLang::Cxx => &self.cxx[&target],
+        };
+
         // Filter out -O and /O (the optimization flags) that we picked up from
         // cc-rs because the build scripts will determine that for themselves.
-        let mut base = self.cc[&target]
+        let mut base = base
             .args()
             .iter()
             .map(|s| s.to_string_lossy().into_owned())
@@ -1333,23 +1342,6 @@ impl Build {
             let mtime = FileTime::from_last_modification_time(&metadata);
             t!(filetime::set_file_times(dst, atime, mtime));
         }
-    }
-
-    /// Search-and-replaces within a file. (Not maximally efficiently: allocates a
-    /// new string for each replacement.)
-    pub fn replace_in_file(&self, path: &Path, replacements: &[(&str, &str)]) {
-        if self.config.dry_run {
-            return;
-        }
-        let mut contents = String::new();
-        let mut file = t!(OpenOptions::new().read(true).write(true).open(path));
-        t!(file.read_to_string(&mut contents));
-        for &(target, replacement) in replacements {
-            contents = contents.replace(target, replacement);
-        }
-        t!(file.seek(SeekFrom::Start(0)));
-        t!(file.set_len(0));
-        t!(file.write_all(contents.as_bytes()));
     }
 
     /// Copies the `src` directory recursively to `dst`. Both are assumed to exist

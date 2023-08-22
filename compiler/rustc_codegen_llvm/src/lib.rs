@@ -7,9 +7,11 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![feature(bool_to_option)]
 #![feature(crate_visibility_modifier)]
+#![feature(let_else)]
 #![feature(extern_types)]
 #![feature(nll)]
 #![recursion_limit = "256"]
+#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
 
 use back::write::{create_informational_target_machine, create_target_machine};
 

@@ -11,13 +11,13 @@ use rustc_hir::def_id::{
     CrateNum, DefId, DefIndex, LocalDefId, CRATE_DEF_ID, CRATE_DEF_INDEX, LOCAL_CRATE,
 };
 use rustc_hir::definitions::DefPathData;
-use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
+use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::itemlikevisit::ItemLikeVisitor;
 use rustc_hir::lang_items;
 use rustc_hir::{AnonConst, GenericParamKind};
 use rustc_index::bit_set::GrowableBitSet;
 use rustc_index::vec::Idx;
-use rustc_middle::hir::map::Map;
+use rustc_middle::hir::nested_filter;
 use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::middle::exported_symbols::{
     metadata_symbol_name, ExportedSymbol, SymbolExportLevel,
@@ -26,7 +26,7 @@ use rustc_middle::mir::interpret;
 use rustc_middle::thir;
 use rustc_middle::traits::specialization_graph;
 use rustc_middle::ty::codec::TyEncoder;
-use rustc_middle::ty::fast_reject::{self, SimplifiedType, SimplifyParams, StripReferences};
+use rustc_middle::ty::fast_reject::{self, SimplifiedType, SimplifyParams};
 use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::{self, SymbolName, Ty, TyCtxt};
 use rustc_serialize::{opaque, Encodable, Encoder};
@@ -404,24 +404,24 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         &mut self,
         lazy: Lazy<T>,
     ) -> Result<(), <Self as Encoder>::Error> {
-        let min_end = lazy.position.get() + T::min_size(lazy.meta);
+        let pos = lazy.position.get();
         let distance = match self.lazy_state {
             LazyState::NoNode => bug!("emit_lazy_distance: outside of a metadata node"),
             LazyState::NodeStart(start) => {
                 let start = start.get();
-                assert!(min_end <= start);
-                start - min_end
+                assert!(pos <= start);
+                start - pos
             }
-            LazyState::Previous(last_min_end) => {
+            LazyState::Previous(last_pos) => {
                 assert!(
-                    last_min_end <= lazy.position,
+                    last_pos <= lazy.position,
                     "make sure that the calls to `lazy*` \
                      are in the same order as the metadata fields",
                 );
-                lazy.position.get() - last_min_end.get()
+                lazy.position.get() - last_pos.get()
             }
         };
-        self.lazy_state = LazyState::Previous(NonZeroUsize::new(min_end).unwrap());
+        self.lazy_state = LazyState::Previous(NonZeroUsize::new(pos).unwrap());
         self.emit_usize(distance)
     }
 
@@ -436,7 +436,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         let meta = value.encode_contents_for_lazy(self);
         self.lazy_state = LazyState::NoNode;
 
-        assert!(pos.get() + <T>::min_size(meta) <= self.position());
+        assert!(pos.get() <= self.position());
 
         Lazy::from_position_and_meta(pos, meta)
     }
@@ -982,7 +982,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         for local_id in hir.iter_local_def_id() {
             let def_id = local_id.to_def_id();
             let def_kind = tcx.opt_def_kind(local_id);
-            let def_kind = if let Some(def_kind) = def_kind { def_kind } else { continue };
+            let Some(def_kind) = def_kind else { continue };
             record!(self.tables.def_kind[def_id] <- match def_kind {
                 // Replace Ctor by the enclosing object to avoid leaking details in children crates.
                 DefKind::Ctor(CtorOf::Struct, _) => DefKind::Struct,
@@ -1052,7 +1052,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             assert!(f.did.is_local());
             f.did.index
         }));
-        self.encode_ident_span(def_id, variant.ident);
+        self.encode_ident_span(def_id, variant.ident(tcx));
         self.encode_item_type(def_id);
         if variant.ctor_kind == CtorKind::Fn {
             // FIXME(eddyb) encode signature only in `encode_enum_variant_ctor`.
@@ -1094,7 +1094,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         // code uses it). However, we skip encoding anything relating to child
         // items - we encode information about proc-macros later on.
         let reexports = if !self.is_proc_macro {
-            match tcx.module_exports(local_def_id) {
+            match tcx.module_reexports(local_def_id) {
                 Some(exports) => self.lazy(exports),
                 _ => Lazy::empty(),
             }
@@ -1104,7 +1104,6 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
         record!(self.tables.kind[def_id] <- EntryKind::Mod(reexports));
         if self.is_proc_macro {
-            record!(self.tables.children[def_id] <- &[]);
             // Encode this here because we don't do it in encode_def_ids.
             record!(self.tables.expn_that_defined[def_id] <- tcx.expn_that_defined(local_def_id));
         } else {
@@ -1139,7 +1138,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         debug!("EncodeContext::encode_field({:?})", def_id);
 
         record!(self.tables.kind[def_id] <- EntryKind::Field);
-        self.encode_ident_span(def_id, field.ident);
+        self.encode_ident_span(def_id, field.ident(self.tcx));
         self.encode_item_type(def_id);
     }
 
@@ -1292,8 +1291,11 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 record!(self.tables.kind[def_id] <- EntryKind::AssocType(container));
             }
         }
-        self.encode_ident_span(def_id, impl_item.ident);
+        self.encode_ident_span(def_id, impl_item.ident(self.tcx));
         self.encode_item_type(def_id);
+        if let Some(trait_item_def_id) = impl_item.trait_item_def_id {
+            record!(self.tables.trait_item_def_id[def_id] <- trait_item_def_id);
+        }
         if impl_item.kind == ty::AssocKind::Fn {
             record!(self.tables.fn_sig[def_id] <- tcx.fn_sig(def_id));
         }
@@ -1312,7 +1314,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             return;
         }
 
-        let mut keys_and_jobs = self
+        let keys_and_jobs = self
             .tcx
             .mir_keys(())
             .iter()
@@ -1325,8 +1327,6 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 }
             })
             .collect::<Vec<_>>();
-        // Sort everything to ensure a stable order for diagnotics.
-        keys_and_jobs.sort_by_key(|&(def_id, _, _)| def_id.index());
         for (def_id, encode_const, encode_opt) in keys_and_jobs.into_iter() {
             debug_assert!(encode_const || encode_opt);
 
@@ -1511,6 +1511,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     is_marker: trait_def.is_marker,
                     skip_array_during_method_dispatch: trait_def.skip_array_during_method_dispatch,
                     specialization_kind: trait_def.specialization_kind,
+                    must_implement_one_of: trait_def.must_implement_one_of.clone(),
                 };
 
                 EntryKind::Trait(self.lazy(data))
@@ -1577,12 +1578,12 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         }
     }
 
-    fn encode_info_for_closure(&mut self, def_id: LocalDefId) {
+    fn encode_info_for_closure(&mut self, hir_id: hir::HirId) {
+        let def_id = self.tcx.hir().local_def_id(hir_id);
         debug!("EncodeContext::encode_info_for_closure({:?})", def_id);
 
         // NOTE(eddyb) `tcx.type_of(def_id)` isn't used because it's fully generic,
         // including on the signature, which is inferred in `typeck.
-        let hir_id = self.tcx.hir().local_def_id_to_hir_id(def_id);
         let ty = self.tcx.typeck(def_id).node_type(hir_id);
 
         match ty.kind() {
@@ -1603,9 +1604,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
         }
     }
 
-    fn encode_info_for_anon_const(&mut self, def_id: LocalDefId) {
+    fn encode_info_for_anon_const(&mut self, id: hir::HirId) {
+        let def_id = self.tcx.hir().local_def_id(id);
         debug!("EncodeContext::encode_info_for_anon_const({:?})", def_id);
-        let id = self.tcx.hir().local_def_id_to_hir_id(def_id);
         let body_id = self.tcx.hir().body_owned_by(id);
         let const_data = self.encode_rendered_const_for_body(body_id);
         let qualifs = self.tcx.mir_const_qualif(def_id);
@@ -1741,7 +1742,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     hash: self.tcx.crate_hash(cnum),
                     host_hash: self.tcx.crate_host_hash(cnum),
                     kind: self.tcx.dep_kind(cnum),
-                    extra_filename: self.tcx.extra_filename(cnum),
+                    extra_filename: self.tcx.extra_filename(cnum).clone(),
                 };
                 (cnum, dep)
             })
@@ -1915,10 +1916,10 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
 // FIXME(eddyb) make metadata encoding walk over all definitions, instead of HIR.
 impl<'a, 'tcx> Visitor<'tcx> for EncodeContext<'a, 'tcx> {
-    type Map = Map<'tcx>;
+    type NestedFilter = nested_filter::OnlyBodies;
 
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::OnlyBodies(self.tcx.hir())
+    fn nested_visit_map(&mut self) -> Self::Map {
+        self.tcx.hir()
     }
     fn visit_expr(&mut self, ex: &'tcx hir::Expr<'tcx>) {
         intravisit::walk_expr(self, ex);
@@ -1926,8 +1927,7 @@ impl<'a, 'tcx> Visitor<'tcx> for EncodeContext<'a, 'tcx> {
     }
     fn visit_anon_const(&mut self, c: &'tcx AnonConst) {
         intravisit::walk_anon_const(self, c);
-        let def_id = self.tcx.hir().local_def_id(c.hir_id);
-        self.encode_info_for_anon_const(def_id);
+        self.encode_info_for_anon_const(c.hir_id);
     }
     fn visit_item(&mut self, item: &'tcx hir::Item<'tcx>) {
         intravisit::walk_item(self, item);
@@ -1981,8 +1981,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
     fn encode_info_for_expr(&mut self, expr: &hir::Expr<'_>) {
         if let hir::ExprKind::Closure(..) = expr.kind {
-            let def_id = self.tcx.hir().local_def_id(expr.hir_id);
-            self.encode_info_for_closure(def_id);
+            self.encode_info_for_closure(expr.hir_id);
         }
     }
 
@@ -2067,7 +2066,6 @@ impl<'tcx, 'v> ItemLikeVisitor<'v> for ImplsVisitor<'tcx> {
                         self.tcx,
                         trait_ref.self_ty(),
                         SimplifyParams::No,
-                        StripReferences::No,
                     );
 
                     self.impls

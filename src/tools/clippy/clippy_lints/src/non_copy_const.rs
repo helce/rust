@@ -12,11 +12,10 @@ use rustc_hir::def_id::DefId;
 use rustc_hir::{
     BodyId, Expr, ExprKind, HirId, Impl, ImplItem, ImplItemKind, Item, ItemKind, Node, TraitItem, TraitItemKind, UnOp,
 };
-use rustc_infer::traits::specialization_graph;
 use rustc_lint::{LateContext, LateLintPass, Lint};
 use rustc_middle::mir::interpret::{ConstValue, ErrorHandled};
 use rustc_middle::ty::adjustment::Adjust;
-use rustc_middle::ty::{self, AssocKind, Const, Ty};
+use rustc_middle::ty::{self, Const, Ty};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::{InnerSpan, Span, DUMMY_SP};
 use rustc_typeck::hir_ty_to_ty;
@@ -137,14 +136,14 @@ fn is_value_unfrozen_raw<'tcx>(
     result: Result<ConstValue<'tcx>, ErrorHandled>,
     ty: Ty<'tcx>,
 ) -> bool {
-    fn inner<'tcx>(cx: &LateContext<'tcx>, val: &'tcx Const<'tcx>) -> bool {
-        match val.ty.kind() {
+    fn inner<'tcx>(cx: &LateContext<'tcx>, val: Const<'tcx>) -> bool {
+        match val.ty().kind() {
             // the fact that we have to dig into every structs to search enums
             // leads us to the point checking `UnsafeCell` directly is the only option.
             ty::Adt(ty_def, ..) if Some(ty_def.did) == cx.tcx.lang_items().unsafe_cell_type() => true,
             ty::Array(..) | ty::Adt(..) | ty::Tuple(..) => {
                 let val = cx.tcx.destructure_const(cx.param_env.and(val));
-                val.fields.iter().any(|field| inner(cx, field))
+                val.fields.iter().any(|field| inner(cx, *field))
             },
             _ => false,
         }
@@ -281,7 +280,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
 
     fn check_impl_item(&mut self, cx: &LateContext<'tcx>, impl_item: &'tcx ImplItem<'_>) {
         if let ImplItemKind::Const(hir_ty, body_id) = &impl_item.kind {
-            let item_def_id = cx.tcx.hir().get_parent_did(impl_item.hir_id());
+            let item_def_id = cx.tcx.hir().get_parent_item(impl_item.hir_id());
             let item = cx.tcx.hir().expect_item(item_def_id);
 
             match &item.kind {
@@ -293,8 +292,10 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                         // Lint a trait impl item only when the definition is a generic type,
                         // assuming an assoc const is not meant to be an interior mutable type.
                         if let Some(of_trait_def_id) = of_trait_ref.trait_def_id();
-                        if let Some(of_assoc_item) = specialization_graph::Node::Trait(of_trait_def_id)
-                            .item(cx.tcx, impl_item.ident, AssocKind::Const, of_trait_def_id);
+                        if let Some(of_assoc_item) = cx
+                            .tcx
+                            .associated_item(impl_item.def_id)
+                            .trait_item_def_id;
                         if cx
                             .tcx
                             .layout_of(cx.tcx.param_env(of_trait_def_id).and(
@@ -303,7 +304,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                                 // and, in that case, the definition is *not* generic.
                                 cx.tcx.normalize_erasing_regions(
                                     cx.tcx.param_env(of_trait_def_id),
-                                    cx.tcx.type_of(of_assoc_item.def_id),
+                                    cx.tcx.type_of(of_assoc_item),
                                 ),
                             ))
                             .is_err();

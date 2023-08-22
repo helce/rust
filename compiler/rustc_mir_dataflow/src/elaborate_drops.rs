@@ -8,7 +8,7 @@ use rustc_middle::ty::subst::SubstsRef;
 use rustc_middle::ty::util::IntTypeExt;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_target::abi::VariantIdx;
-use std::fmt;
+use std::{fmt, iter};
 
 /// The value of an inserted drop flag.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -329,8 +329,7 @@ where
         mut succ: BasicBlock,
         fields: &[(Place<'tcx>, Option<D::Path>)],
     ) -> Vec<BasicBlock> {
-        Some(succ)
-            .into_iter()
+        iter::once(succ)
             .chain(fields.iter().rev().zip(unwind_ladder).map(|(&(place, path), &unwind_succ)| {
                 succ = self.drop_subpath(place, path, succ, unwind_succ);
                 succ
@@ -491,7 +490,7 @@ where
             if let Some(variant_path) = subpath {
                 let base_place = tcx.mk_place_elem(
                     self.place,
-                    ProjectionElem::Downcast(Some(variant.ident.name), variant_index),
+                    ProjectionElem::Downcast(Some(variant.name), variant_index),
                 );
                 let fields = self.move_paths_for_fields(base_place, variant_path, &variant, substs);
                 values.push(discr.val);
@@ -881,9 +880,9 @@ where
             ty::Dynamic(..) => self.complete_drop(self.succ, self.unwind),
             ty::Array(ety, size) => {
                 let size = size.try_eval_usize(self.tcx(), self.elaborator.param_env());
-                self.open_drop_for_array(ety, size)
+                self.open_drop_for_array(*ety, size)
             }
-            ty::Slice(ety) => self.open_drop_for_array(ety, None),
+            ty::Slice(ety) => self.open_drop_for_array(*ety, None),
 
             _ => bug!("open drop from non-ADT `{:?}`", ty),
         }

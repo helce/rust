@@ -147,7 +147,7 @@ fn visit_implementation_of_dispatch_from_dyn<'tcx>(tcx: TyCtxt<'tcx>, impl_did: 
         use ty::TyKind::*;
         match (source.kind(), target.kind()) {
             (&Ref(r_a, _, mutbl_a), Ref(r_b, _, mutbl_b))
-                if infcx.at(&cause, param_env).eq(r_a, r_b).is_ok() && mutbl_a == *mutbl_b => {}
+                if infcx.at(&cause, param_env).eq(r_a, *r_b).is_ok() && mutbl_a == *mutbl_b => {}
             (&RawPtr(tm_a), &RawPtr(tm_b)) if tm_a.mutbl == tm_b.mutbl => (),
             (&Adt(def_a, substs_a), &Adt(def_b, substs_b))
                 if def_a.is_struct() && def_b.is_struct() =>
@@ -199,7 +199,7 @@ fn visit_implementation_of_dispatch_from_dyn<'tcx>(tcx: TyCtxt<'tcx>, impl_did: 
                                 )
                                 .note(&format!(
                                     "extra field `{}` of type `{}` is not allowed",
-                                    field.ident, ty_a,
+                                    field.name, ty_a,
                                 ))
                                 .emit();
 
@@ -235,7 +235,7 @@ fn visit_implementation_of_dispatch_from_dyn<'tcx>(tcx: TyCtxt<'tcx>, impl_did: 
                             .map(|field| {
                                 format!(
                                     "`{}` (`{}` to `{}`)",
-                                    field.ident,
+                                    field.name,
                                     field.ty(tcx, substs_a),
                                     field.ty(tcx, substs_b),
                                 )
@@ -479,7 +479,7 @@ pub fn coerce_unsized_info<'tcx>(tcx: TyCtxt<'tcx>, impl_did: DefId) -> CoerceUn
                         diff_fields
                             .iter()
                             .map(|&(i, a, b)| {
-                                format!("`{}` (`{}` to `{}`)", fields[i].ident, a, b)
+                                format!("`{}` (`{}` to `{}`)", fields[i].name, a, b)
                             })
                             .collect::<Vec<_>>()
                             .join(", ")

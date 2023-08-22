@@ -5,13 +5,10 @@
     clippy::no_effect,
     clippy::redundant_closure_call,
     clippy::needless_pass_by_value,
-    clippy::option_map_unit_fn
-)]
-#![warn(
-    clippy::redundant_closure,
-    clippy::redundant_closure_for_method_calls,
+    clippy::option_map_unit_fn,
     clippy::needless_borrow
 )]
+#![warn(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
 
 use std::path::{Path, PathBuf};
 
@@ -247,4 +244,15 @@ mod type_param_bound {
         take(|| X::fun());
         take(X::fun as fn());
     }
+}
+
+// #8073 Don't replace closure with `Arc<F>` or `Rc<F>`
+fn arc_fp() {
+    let rc = std::rc::Rc::new(|| 7);
+    let arc = std::sync::Arc::new(|n| n + 1);
+    let ref_arc = &std::sync::Arc::new(|_| 5);
+
+    true.then(|| rc());
+    (0..5).map(|n| arc(n));
+    Some(4).map(|n| ref_arc(n));
 }

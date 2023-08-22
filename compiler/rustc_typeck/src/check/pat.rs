@@ -15,7 +15,7 @@ use rustc_session::lint::builtin::NON_EXHAUSTIVE_OMITTED_PATTERNS;
 use rustc_span::hygiene::DesugaringKind;
 use rustc_span::lev_distance::find_best_match_for_name;
 use rustc_span::source_map::{Span, Spanned};
-use rustc_span::symbol::Ident;
+use rustc_span::symbol::{sym, Ident};
 use rustc_span::{BytePos, MultiSpan, DUMMY_SP};
 use rustc_trait_selection::autoderef::Autoderef;
 use rustc_trait_selection::traits::{ObligationCause, Pattern};
@@ -1029,7 +1029,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let field_def_spans = if fields.is_empty() {
             vec![res_span]
         } else {
-            fields.iter().map(|f| f.ident.span).collect()
+            fields.iter().map(|f| f.ident(self.tcx).span).collect()
         };
         let last_field_def_span = *field_def_spans.last().unwrap();
 
@@ -1231,7 +1231,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             .fields
             .iter()
             .enumerate()
-            .map(|(i, field)| (field.ident.normalize_to_macros_2_0(), (i, field)))
+            .map(|(i, field)| (field.ident(self.tcx).normalize_to_macros_2_0(), (i, field)))
             .collect::<FxHashMap<_, _>>();
 
         // Keep track of which fields have already appeared in the pattern.
@@ -1272,7 +1272,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let mut unmentioned_fields = variant
             .fields
             .iter()
-            .map(|field| (field, field.ident.normalize_to_macros_2_0()))
+            .map(|field| (field, field.ident(self.tcx).normalize_to_macros_2_0()))
             .filter(|(_, ident)| !used_fields.contains_key(ident))
             .collect::<Vec<_>>();
 
@@ -1579,7 +1579,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         fields: &[hir::PatField<'_>],
         variant: &VariantDef,
     ) -> String {
-        let variant_field_idents = variant.fields.iter().map(|f| f.ident).collect::<Vec<Ident>>();
+        let variant_field_idents =
+            variant.fields.iter().map(|f| f.ident(self.tcx)).collect::<Vec<Ident>>();
         fields
             .iter()
             .map(|field| {
@@ -1934,7 +1935,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         element_ty: Ty<'tcx>,
         arr_ty: Ty<'tcx>,
         slice: Option<&'tcx Pat<'tcx>>,
-        len: &ty::Const<'tcx>,
+        len: ty::Const<'tcx>,
         min_len: u64,
     ) -> (Option<Ty<'tcx>>, Ty<'tcx>) {
         if let Some(len) = len.try_eval_usize(self.tcx, self.param_env) {
@@ -2028,16 +2029,51 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 err.help("the semantics of slice patterns changed recently; see issue #62254");
             }
         } else if Autoderef::new(&self.infcx, self.param_env, self.body_id, span, expected_ty, span)
-            .any(|(ty, _)| matches!(ty.kind(), ty::Slice(..)))
+            .any(|(ty, _)| matches!(ty.kind(), ty::Slice(..) | ty::Array(..)))
         {
             if let (Some(span), true) = (ti.span, ti.origin_expr) {
                 if let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(span) {
-                    err.span_suggestion(
+                    let applicability = Autoderef::new(
+                        &self.infcx,
+                        self.param_env,
+                        self.body_id,
                         span,
-                        "consider slicing here",
-                        format!("{}[..]", snippet),
-                        Applicability::MachineApplicable,
-                    );
+                        self.resolve_vars_if_possible(ti.expected),
+                        span,
+                    )
+                    .find_map(|(ty, _)| {
+                        match ty.kind() {
+                            ty::Adt(adt_def, _)
+                                if self.tcx.is_diagnostic_item(sym::Option, adt_def.did)
+                                    || self.tcx.is_diagnostic_item(sym::Result, adt_def.did) =>
+                            {
+                                // Slicing won't work here, but `.as_deref()` might (issue #91328).
+                                err.span_suggestion(
+                                    span,
+                                    "consider using `as_deref` here",
+                                    format!("{}.as_deref()", snippet),
+                                    Applicability::MaybeIncorrect,
+                                );
+                                Some(None)
+                            }
+
+                            ty::Slice(..) | ty::Array(..) => {
+                                Some(Some(Applicability::MachineApplicable))
+                            }
+
+                            _ => None,
+                        }
+                    })
+                    .unwrap_or(Some(Applicability::MaybeIncorrect));
+
+                    if let Some(applicability) = applicability {
+                        err.span_suggestion(
+                            span,
+                            "consider slicing here",
+                            format!("{}[..]", snippet),
+                            applicability,
+                        );
+                    }
                 }
             }
         }
