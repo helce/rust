@@ -907,6 +907,30 @@ impl Passes {
     }
 }
 
+#[derive(Clone, Copy, Hash, Debug, PartialEq)]
+pub enum PAuthKey {
+    A,
+    B,
+}
+
+#[derive(Clone, Copy, Hash, Debug, PartialEq)]
+pub struct PacRet {
+    pub leaf: bool,
+    pub key: PAuthKey,
+}
+
+#[derive(Clone, Copy, Hash, Debug, PartialEq)]
+pub struct BranchProtection {
+    pub bti: bool,
+    pub pac_ret: Option<PacRet>,
+}
+
+impl Default for BranchProtection {
+    fn default() -> Self {
+        BranchProtection { bti: false, pac_ret: None }
+    }
+}
+
 pub const fn default_lib_output() -> CrateType {
     CrateType::Rlib
 }
@@ -2207,12 +2231,7 @@ pub fn build_session_options(matches: &getopts::Matches) -> Options {
 
     check_thread_count(&debugging_opts, error_format);
 
-    let incremental =
-        if std::env::var_os("RUSTC_FORCE_INCREMENTAL").map(|v| v == "1").unwrap_or(false) {
-            cg.incremental.as_ref().map(PathBuf::from)
-        } else {
-            None
-        };
+    let incremental = cg.incremental.as_ref().map(PathBuf::from);
 
     let assert_incr_state =
         parse_assert_incr_state(&debugging_opts.assert_incr_state, error_format);
@@ -2813,6 +2832,7 @@ crate mod dep_tracking {
         OutputType,
         RealFileName,
         LocationDetail,
+        BranchProtection,
     );
 
     impl<T1, T2> DepTrackingHash for (T1, T2)

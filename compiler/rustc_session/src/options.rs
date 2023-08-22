@@ -413,6 +413,8 @@ mod desc {
     pub const parse_gcc_ld: &str = "one of: no value, `lld`";
     pub const parse_stack_protector: &str =
         "one of (`none` (default), `basic`, `strong`, or `all`)";
+    pub const parse_branch_protection: &str =
+        "a `,` separated combination of `bti`, `b-key`, `pac-ret`, or `leaf`";
 }
 
 mod parse {
