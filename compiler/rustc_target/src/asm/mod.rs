@@ -376,7 +376,7 @@ impl InlineAsmReg {
                 Self::Bpf(BpfInlineAsmReg::parse(arch, target_features, target, is_clobber, name)?)
             }
             InlineAsmArch::E2k64 => {
-                Self::E2k64(E2k64InlineAsmReg::parse(arch, has_feature, target, name)?)
+                Self::E2k64(E2k64InlineAsmReg::parse(arch, target_features, target, is_clobber, name)?)
             }
             InlineAsmArch::Avr => {
                 Self::Avr(AvrInlineAsmReg::parse(arch, target_features, target, is_clobber, name)?)
@@ -831,7 +831,7 @@ pub fn allocatable_registers(
         }
         InlineAsmArch::E2k64 => {
             let mut map = e2k64::regclass_map();
-            e2k64::fill_reg_map(arch, has_feature, target, &mut map);
+            e2k64::fill_reg_map(arch, target_features, target, &mut map);
             map
         }
         InlineAsmArch::Avr => {

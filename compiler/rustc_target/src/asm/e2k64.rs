@@ -1,5 +1,6 @@
 use super::{InlineAsmArch, InlineAsmType};
 use rustc_macros::HashStable_Generic;
+use rustc_span::Symbol;
 
 def_reg_class! {
     E2k64 E2k64InlineAsmRegClass {
@@ -31,7 +32,7 @@ impl E2k64InlineAsmRegClass {
     pub fn supported_types(
         self,
         _arch: InlineAsmArch,
-    ) -> &'static [(InlineAsmType, Option<&'static str>)] {
+    ) -> &'static [(InlineAsmType, Option<Symbol>)] {
         match self {
             Self::reg => {
                 types! { _: I8, I16, I32, I64, F32, F64; }
