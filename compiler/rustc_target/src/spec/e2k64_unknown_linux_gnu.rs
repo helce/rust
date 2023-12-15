@@ -1,12 +1,9 @@
-use crate::spec::{LinkArgs, Target, TargetOptions, LinkerFlavor};
+use crate::spec::{LinkArgs, LinkerFlavor, Target, TargetOptions};
 
 pub fn target() -> Target {
     let mut base = super::linux_gnu_base::opts();
     base.max_atomic_width = Some(64);
-    base.pre_link_args
-        .entry(LinkerFlavor::Gcc)
-        .or_default()
-        .push("-fPIC".to_string());
+    base.pre_link_args.entry(LinkerFlavor::Gcc).or_default().push("-fPIC".to_string());
     let mut post_args = LinkArgs::new();
     post_args.insert(
         LinkerFlavor::Gcc,

@@ -375,9 +375,13 @@ impl InlineAsmReg {
             InlineAsmArch::Bpf => {
                 Self::Bpf(BpfInlineAsmReg::parse(arch, target_features, target, is_clobber, name)?)
             }
-            InlineAsmArch::E2k64 => {
-                Self::E2k64(E2k64InlineAsmReg::parse(arch, target_features, target, is_clobber, name)?)
-            }
+            InlineAsmArch::E2k64 => Self::E2k64(E2k64InlineAsmReg::parse(
+                arch,
+                target_features,
+                target,
+                is_clobber,
+                name,
+            )?),
             InlineAsmArch::Avr => {
                 Self::Avr(AvrInlineAsmReg::parse(arch, target_features, target, is_clobber, name)?)
             }
