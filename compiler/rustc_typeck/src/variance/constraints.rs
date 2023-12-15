@@ -278,12 +278,12 @@ impl<'a, 'tcx> ConstraintContext<'a, 'tcx> {
 
             ty::Tuple(subtys) => {
                 for subty in subtys {
-                    self.add_constraints_from_ty(current, subty.expect_ty(), variance);
+                    self.add_constraints_from_ty(current, subty, variance);
                 }
             }
 
             ty::Adt(def, substs) => {
-                self.add_constraints_from_substs(current, def.did, substs, variance);
+                self.add_constraints_from_substs(current, def.did(), substs, variance);
             }
 
             ty::Projection(ref data) => {

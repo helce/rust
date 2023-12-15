@@ -45,7 +45,9 @@ impl<'a, T: EarlyLintPass> EarlyContextAndPass<'a, T> {
             self.context.lookup_with_diagnostics(
                 lint_id.lint,
                 Some(span),
-                |lint| lint.build(&msg).emit(),
+                |lint| {
+                    lint.build(&msg).emit();
+                },
                 diagnostic,
             );
         }
@@ -59,7 +61,8 @@ impl<'a, T: EarlyLintPass> EarlyContextAndPass<'a, T> {
         F: FnOnce(&mut Self),
     {
         let is_crate_node = id == ast::CRATE_NODE_ID;
-        let push = self.context.builder.push(attrs, is_crate_node);
+        let push = self.context.builder.push(attrs, is_crate_node, None);
+
         self.check_id(id);
         self.enter_attrs(attrs);
         f(self);

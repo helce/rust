@@ -128,7 +128,7 @@ pub struct Block {
 #[derive(Debug, HashStable)]
 pub struct Adt<'tcx> {
     /// The ADT we're constructing.
-    pub adt_def: &'tcx AdtDef,
+    pub adt_def: AdtDef<'tcx>,
     /// The variant of the ADT.
     pub variant_index: VariantIdx,
     pub substs: SubstsRef<'tcx>,
@@ -369,7 +369,8 @@ pub enum ExprKind<'tcx> {
     },
     /// An inline `const` block, e.g. `const {}`.
     ConstBlock {
-        value: Const<'tcx>,
+        did: DefId,
+        substs: SubstsRef<'tcx>,
     },
     /// An array literal constructed from one repeated element, e.g. `[1; 5]`.
     Repeat {
@@ -408,13 +409,25 @@ pub enum ExprKind<'tcx> {
     },
     /// A literal.
     Literal {
-        literal: Const<'tcx>,
-        user_ty: Option<Canonical<'tcx, UserType<'tcx>>>,
-        /// The `DefId` of the `const` item this literal
-        /// was produced from, if this is not a user-written
-        /// literal value.
-        const_id: Option<DefId>,
+        lit: &'tcx hir::Lit,
+        neg: bool,
     },
+    /// For literals that don't correspond to anything in the HIR
+    NonHirLiteral {
+        lit: ty::ScalarInt,
+        user_ty: Option<Canonical<'tcx, UserType<'tcx>>>,
+    },
+    /// Associated constants and named constants
+    NamedConst {
+        def_id: DefId,
+        substs: SubstsRef<'tcx>,
+        user_ty: Option<Canonical<'tcx, UserType<'tcx>>>,
+    },
+    ConstParam {
+        param: ty::ParamConst,
+        def_id: DefId,
+    },
+    // FIXME improve docs for `StaticRef` by distinguishing it from `NamedConst`
     /// A literal containing the address of a `static`.
     ///
     /// This is only distinguished from `Literal` so that we can register some
@@ -437,6 +450,12 @@ pub enum ExprKind<'tcx> {
     Yield {
         value: ExprId,
     },
+}
+
+impl<'tcx> ExprKind<'tcx> {
+    pub fn zero_sized_literal(user_ty: Option<Canonical<'tcx, UserType<'tcx>>>) -> Self {
+        ExprKind::NonHirLiteral { lit: ty::ScalarInt::ZST, user_ty }
+    }
 }
 
 /// Represents the association of a field identifier and an expression.
@@ -617,7 +636,7 @@ pub enum PatKind<'tcx> {
     /// `Foo(...)` or `Foo{...}` or `Foo`, where `Foo` is a variant name from an ADT with
     /// multiple variants.
     Variant {
-        adt_def: &'tcx AdtDef,
+        adt_def: AdtDef<'tcx>,
         substs: SubstsRef<'tcx>,
         variant_index: VariantIdx,
         subpatterns: Vec<FieldPat<'tcx>>,
@@ -637,7 +656,7 @@ pub enum PatKind<'tcx> {
     /// One of the following:
     /// * `&str`, which will be handled as a string pattern and thus exhaustiveness
     ///   checking will detect if you use the same string twice in different patterns.
-    /// * integer, bool, char or float, which will be handled by exhaustivenes to cover exactly
+    /// * integer, bool, char or float, which will be handled by exhaustiveness to cover exactly
     ///   its own value, similar to `&str`, but these values are much simpler.
     /// * Opaque constants, that must not be matched structurally. So anything that does not derive
     ///   `PartialEq` and `Eq`.
@@ -714,7 +733,7 @@ impl<'tcx> fmt::Display for Pat<'tcx> {
             PatKind::Variant { ref subpatterns, .. } | PatKind::Leaf { ref subpatterns } => {
                 let variant = match *self.kind {
                     PatKind::Variant { adt_def, variant_index, .. } => {
-                        Some(&adt_def.variants[variant_index])
+                        Some(adt_def.variant(variant_index))
                     }
                     _ => self.ty.ty_adt_def().and_then(|adt| {
                         if !adt.is_enum() { Some(adt.non_enum_variant()) } else { None }

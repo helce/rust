@@ -6,7 +6,7 @@ use crate::Namespace::{self, MacroNS, TypeNS};
 use crate::{module_to_string, names_to_string};
 use crate::{AmbiguityError, AmbiguityErrorMisc, AmbiguityKind};
 use crate::{BindingKey, ModuleKind, ResolutionError, Resolver, Segment};
-use crate::{CrateLint, Module, ModuleOrUniformRoot, ParentScope, PerNS, ScopeSet, Weak};
+use crate::{Finalize, Module, ModuleOrUniformRoot, ParentScope, PerNS, ScopeSet, Weak};
 use crate::{NameBinding, NameBindingKind, PathResult, PrivacyError, ToNameBinding};
 
 use rustc_ast::NodeId;
@@ -74,7 +74,7 @@ crate struct Import<'a> {
     /// In the case where the `Import` was expanded from a "nested" use tree,
     /// this id is the ID of the leaf tree. For example:
     ///
-    /// ```ignore (pacify the mercilous tidy)
+    /// ```ignore (pacify the merciless tidy)
     /// use foo::bar::{a, b}
     /// ```
     ///
@@ -122,10 +122,6 @@ impl<'a> Import<'a> {
             ImportKind::Single { nested, .. } => nested,
             _ => false,
         }
-    }
-
-    crate fn crate_lint(&self) -> CrateLint {
-        CrateLint::UsePath { root_id: self.root_id, root_span: self.root_span }
     }
 }
 
@@ -179,8 +175,7 @@ impl<'a> Resolver<'a> {
         ident: Ident,
         ns: Namespace,
         parent_scope: &ParentScope<'a>,
-        record_used: bool,
-        path_span: Span,
+        finalize: Option<Span>,
     ) -> Result<&'a NameBinding<'a>, Determinacy> {
         self.resolve_ident_in_module_unadjusted_ext(
             module,
@@ -188,14 +183,13 @@ impl<'a> Resolver<'a> {
             ns,
             parent_scope,
             false,
-            record_used,
-            path_span,
+            finalize,
         )
         .map_err(|(determinacy, _)| determinacy)
     }
 
     /// Attempts to resolve `ident` in namespaces `ns` of `module`.
-    /// Invariant: if `record_used` is `Some`, expansion and import resolution must be complete.
+    /// Invariant: if `finalize` is `Some`, expansion and import resolution must be complete.
     crate fn resolve_ident_in_module_unadjusted_ext(
         &mut self,
         module: ModuleOrUniformRoot<'a>,
@@ -203,8 +197,7 @@ impl<'a> Resolver<'a> {
         ns: Namespace,
         parent_scope: &ParentScope<'a>,
         restricted_shadowing: bool,
-        record_used: bool,
-        path_span: Span,
+        finalize: Option<Span>,
     ) -> Result<&'a NameBinding<'a>, (Determinacy, Weak)> {
         let module = match module {
             ModuleOrUniformRoot::Module(module) => module,
@@ -214,9 +207,8 @@ impl<'a> Resolver<'a> {
                     ident,
                     ScopeSet::AbsolutePath(ns),
                     parent_scope,
-                    record_used,
-                    record_used,
-                    path_span,
+                    finalize,
+                    finalize.is_some(),
                 );
                 return binding.map_err(|determinacy| (determinacy, Weak::No));
             }
@@ -224,7 +216,7 @@ impl<'a> Resolver<'a> {
                 assert!(!restricted_shadowing);
                 return if ns != TypeNS {
                     Err((Determined, Weak::No))
-                } else if let Some(binding) = self.extern_prelude_get(ident, !record_used) {
+                } else if let Some(binding) = self.extern_prelude_get(ident, finalize.is_some()) {
                     Ok(binding)
                 } else if !self.graph_root.unexpanded_invocations.borrow().is_empty() {
                     // Macro-expanded `extern crate` items can add names to extern prelude.
@@ -254,9 +246,8 @@ impl<'a> Resolver<'a> {
                     ident,
                     scopes,
                     parent_scope,
-                    record_used,
-                    record_used,
-                    path_span,
+                    finalize,
+                    finalize.is_some(),
                 );
                 return binding.map_err(|determinacy| (determinacy, Weak::No));
             }
@@ -266,7 +257,7 @@ impl<'a> Resolver<'a> {
         let resolution =
             self.resolution(module, key).try_borrow_mut().map_err(|_| (Determined, Weak::No))?; // This happens when there is a cycle of imports.
 
-        if let Some(binding) = resolution.binding {
+        if let Some(binding) = resolution.binding && let Some(path_span) = finalize {
             if !restricted_shadowing && binding.expansion != LocalExpnId::ROOT {
                 if let NameBindingKind::Res(_, true) = binding.kind {
                     self.macro_expanded_macro_export_errors.insert((path_span, binding.span));
@@ -284,7 +275,7 @@ impl<'a> Resolver<'a> {
             if usable { Ok(binding) } else { Err((Determined, Weak::No)) }
         };
 
-        if record_used {
+        if let Some(path_span) = finalize {
             return resolution
                 .binding
                 .and_then(|binding| {
@@ -351,22 +342,14 @@ impl<'a> Resolver<'a> {
             if !self.is_accessible_from(single_import.vis.get(), parent_scope.module) {
                 continue;
             }
-            let module = match single_import.imported_module.get() {
-                Some(x) => x,
-                None => return Err((Undetermined, Weak::No)),
+            let Some(module) = single_import.imported_module.get() else {
+                return Err((Undetermined, Weak::No));
             };
-            let ident = match single_import.kind {
-                ImportKind::Single { source, .. } => source,
-                _ => unreachable!(),
+            let ImportKind::Single { source: ident, .. } = single_import.kind else {
+                unreachable!();
             };
-            match self.resolve_ident_in_module(
-                module,
-                ident,
-                ns,
-                &single_import.parent_scope,
-                false,
-                path_span,
-            ) {
+            match self.resolve_ident_in_module(module, ident, ns, &single_import.parent_scope, None)
+            {
                 Err(Determined) => continue,
                 Ok(binding)
                     if !self.is_accessible_from(binding.vis, single_import.parent_scope.module) =>
@@ -440,8 +423,7 @@ impl<'a> Resolver<'a> {
                 ident,
                 ns,
                 adjusted_parent_scope,
-                false,
-                path_span,
+                None,
             );
 
             match result {
@@ -722,7 +704,9 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
                     note: Vec::new(),
                     suggestion: None,
                 };
-                errors.push((path, err));
+                if path.contains("::") {
+                    errors.push((path, err))
+                }
             }
         }
 
@@ -787,14 +771,8 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
             // For better failure detection, pretend that the import will
             // not define any names while resolving its module path.
             let orig_vis = import.vis.replace(ty::Visibility::Invisible);
-            let path_res = self.r.resolve_path(
-                &import.module_path,
-                None,
-                &import.parent_scope,
-                false,
-                import.span,
-                import.crate_lint(),
-            );
+            let path_res =
+                self.r.resolve_path(&import.module_path, None, &import.parent_scope, Finalize::No);
             import.vis.set(orig_vis);
 
             match path_res {
@@ -833,8 +811,7 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
                         source,
                         ns,
                         &import.parent_scope,
-                        false,
-                        import.span,
+                        None,
                     );
                     import.vis.set(orig_vis);
                     source_bindings[ns].set(binding);
@@ -887,14 +864,13 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
             _ => None,
         };
         let prev_ambiguity_errors_len = self.r.ambiguity_errors.len();
-        let path_res = self.r.resolve_path(
-            &import.module_path,
-            None,
-            &import.parent_scope,
-            true,
-            import.span,
-            import.crate_lint(),
-        );
+        let finalize = Finalize::UsePath {
+            root_id: import.root_id,
+            root_span: import.root_span,
+            path_span: import.span,
+        };
+        let path_res =
+            self.r.resolve_path(&import.module_path, None, &import.parent_scope, finalize);
         let no_ambiguity = self.r.ambiguity_errors.len() == prev_ambiguity_errors_len;
         if let Some(orig_unusable_binding) = orig_unusable_binding {
             self.r.unusable_binding = orig_unusable_binding;
@@ -981,12 +957,7 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
                     // 2 segments, so the `resolve_path` above won't trigger it.
                     let mut full_path = import.module_path.clone();
                     full_path.push(Segment::from_ident(Ident::empty()));
-                    self.r.lint_if_path_starts_with_module(
-                        import.crate_lint(),
-                        &full_path,
-                        import.span,
-                        None,
-                    );
+                    self.r.lint_if_path_starts_with_module(finalize, &full_path, None);
                 }
 
                 if let ModuleOrUniformRoot::Module(module) = module {
@@ -1024,8 +995,7 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
                     ident,
                     ns,
                     &import.parent_scope,
-                    true,
-                    import.span,
+                    Some(import.span),
                 );
                 this.last_import_segment = orig_last_import_segment;
                 this.unusable_binding = orig_unusable_binding;
@@ -1086,8 +1056,7 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
                         ident,
                         ns,
                         &import.parent_scope,
-                        true,
-                        import.span,
+                        Some(import.span),
                     );
                     if binding.is_ok() {
                         all_ns_failed = false;
@@ -1253,12 +1222,7 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
             full_path.push(Segment::from_ident(ident));
             self.r.per_ns(|this, ns| {
                 if let Ok(binding) = source_bindings[ns].get() {
-                    this.lint_if_path_starts_with_module(
-                        import.crate_lint(),
-                        &full_path,
-                        import.span,
-                        Some(binding),
-                    );
+                    this.lint_if_path_starts_with_module(finalize, &full_path, Some(binding));
                 }
             });
         }
@@ -1314,9 +1278,8 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
                     target,
                     ScopeSet::All(ns, false),
                     &import.parent_scope,
+                    None,
                     false,
-                    false,
-                    import.span,
                 ) {
                     Ok(other_binding) => {
                         is_redundant[ns] = Some(
@@ -1347,12 +1310,9 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
     }
 
     fn resolve_glob_import(&mut self, import: &'b Import<'b>) {
-        let module = match import.imported_module.get().unwrap() {
-            ModuleOrUniformRoot::Module(module) => module,
-            _ => {
-                self.r.session.span_err(import.span, "cannot glob-import all possible crates");
-                return;
-            }
+        let ModuleOrUniformRoot::Module(module) = import.imported_module.get().unwrap() else {
+            self.r.session.span_err(import.span, "cannot glob-import all possible crates");
+            return;
         };
 
         if module.is_trait() {
@@ -1404,14 +1364,22 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
         let mut reexports = Vec::new();
 
         module.for_each_child(self.r, |_, ident, _, binding| {
-            // Filter away ambiguous imports and anything that has def-site hygiene.
-            // FIXME: Implement actual cross-crate hygiene.
-            let is_good_import =
-                binding.is_import() && !binding.is_ambiguity() && !ident.span.from_expansion();
-            if is_good_import || binding.is_macro_def() {
+            // FIXME: Consider changing the binding inserted by `#[macro_export] macro_rules`
+            // into the crate root to actual `NameBindingKind::Import`.
+            if binding.is_import()
+                || matches!(binding.kind, NameBindingKind::Res(_, _is_macro_export @ true))
+            {
                 let res = binding.res().expect_non_local();
-                if res != def::Res::Err {
-                    reexports.push(ModChild { ident, res, vis: binding.vis, span: binding.span });
+                // Ambiguous imports are treated as errors at this point and are
+                // not exposed to other crates (see #36837 for more details).
+                if res != def::Res::Err && !binding.is_ambiguity() {
+                    reexports.push(ModChild {
+                        ident,
+                        res,
+                        vis: binding.vis,
+                        span: binding.span,
+                        macro_rules: false,
+                    });
                 }
             }
         });

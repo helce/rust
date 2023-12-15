@@ -10,12 +10,14 @@ use rustc_hir::def_id::DefId;
 use rustc_hir::{Expr, TyKind, Unsafety};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::LateContext;
+use rustc_middle::mir::interpret::{ConstValue, Scalar};
 use rustc_middle::ty::subst::{GenericArg, GenericArgKind, Subst};
 use rustc_middle::ty::{
-    self, AdtDef, Binder, FnSig, IntTy, Predicate, PredicateKind, Ty, TyCtxt, TypeFoldable, UintTy,
+    self, AdtDef, Binder, FnSig, IntTy, Predicate, PredicateKind, Ty, TyCtxt, TypeFoldable, UintTy, VariantDiscr,
 };
 use rustc_span::symbol::Ident;
 use rustc_span::{sym, Span, Symbol, DUMMY_SP};
+use rustc_target::abi::{Size, VariantIdx};
 use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::traits::query::normalize::AtExt;
 use std::iter;
@@ -49,7 +51,7 @@ pub fn contains_ty(ty: Ty<'_>, other_ty: Ty<'_>) -> bool {
 
 /// Walks into `ty` and returns `true` if any inner type is an instance of the given adt
 /// constructor.
-pub fn contains_adt_constructor(ty: Ty<'_>, adt: &AdtDef) -> bool {
+pub fn contains_adt_constructor(ty: Ty<'_>, adt: AdtDef<'_>) -> bool {
     ty.walk().any(|inner| match inner.unpack() {
         GenericArgKind::Type(inner_ty) => inner_ty.ty_adt_def() == Some(adt),
         GenericArgKind::Lifetime(_) | GenericArgKind::Const(_) => false,
@@ -110,7 +112,7 @@ pub fn has_iter_method(cx: &LateContext<'_>, probably_ref_ty: Ty<'_>) -> Option<
     let def_id = match ty_to_check.kind() {
         ty::Array(..) => return Some(sym::array),
         ty::Slice(..) => return Some(sym::slice),
-        ty::Adt(adt, _) => adt.did,
+        ty::Adt(adt, _) => adt.did(),
         _ => return None,
     };
 
@@ -162,14 +164,14 @@ pub fn has_drop<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
 // Returns whether the type has #[must_use] attribute
 pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     match ty.kind() {
-        ty::Adt(adt, _) => must_use_attr(cx.tcx.get_attrs(adt.did)).is_some(),
+        ty::Adt(adt, _) => must_use_attr(cx.tcx.get_attrs(adt.did())).is_some(),
         ty::Foreign(ref did) => must_use_attr(cx.tcx.get_attrs(*did)).is_some(),
         ty::Slice(ty) | ty::Array(ty, _) | ty::RawPtr(ty::TypeAndMut { ty, .. }) | ty::Ref(_, ty, _) => {
             // for the Array case we don't need to care for the len == 0 case
             // because we don't want to lint functions returning empty arrays
             is_must_use_ty(cx, *ty)
         },
-        ty::Tuple(substs) => substs.types().any(|ty| is_must_use_ty(cx, ty)),
+        ty::Tuple(substs) => substs.iter().any(|ty| is_must_use_ty(cx, ty)),
         ty::Opaque(ref def_id, _) => {
             for (predicate, _) in cx.tcx.explicit_item_bounds(*def_id) {
                 if let ty::PredicateKind::Trait(trait_predicate) = predicate.kind().skip_binder() {
@@ -218,7 +220,7 @@ fn is_normalizable_helper<'tcx>(
         let cause = rustc_middle::traits::ObligationCause::dummy();
         if infcx.at(&cause, param_env).normalize(ty).is_ok() {
             match ty.kind() {
-                ty::Adt(def, substs) => def.variants.iter().all(|variant| {
+                ty::Adt(def, substs) => def.variants().iter().all(|variant| {
                     variant
                         .fields
                         .iter()
@@ -249,11 +251,11 @@ pub fn is_non_aggregate_primitive_type(ty: Ty<'_>) -> bool {
 /// Returns `true` if the given type is a primitive (a `bool` or `char`, any integer or
 /// floating-point number type, a `str`, or an array, slice, or tuple of those types).
 pub fn is_recursively_primitive_type(ty: Ty<'_>) -> bool {
-    match ty.kind() {
+    match *ty.kind() {
         ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Str => true,
         ty::Ref(_, inner, _) if *inner.kind() == ty::Str => true,
-        ty::Array(inner_type, _) | ty::Slice(inner_type) => is_recursively_primitive_type(*inner_type),
-        ty::Tuple(inner_types) => inner_types.types().all(is_recursively_primitive_type),
+        ty::Array(inner_type, _) | ty::Slice(inner_type) => is_recursively_primitive_type(inner_type),
+        ty::Tuple(inner_types) => inner_types.iter().all(is_recursively_primitive_type),
         _ => false,
     }
 }
@@ -262,7 +264,7 @@ pub fn is_recursively_primitive_type(ty: Ty<'_>) -> bool {
 pub fn is_type_ref_to_diagnostic_item(cx: &LateContext<'_>, ty: Ty<'_>, diag_item: Symbol) -> bool {
     match ty.kind() {
         ty::Ref(_, ref_ty, _) => match ref_ty.kind() {
-            ty::Adt(adt, _) => cx.tcx.is_diagnostic_item(diag_item, adt.did),
+            ty::Adt(adt, _) => cx.tcx.is_diagnostic_item(diag_item, adt.did()),
             _ => false,
         },
         _ => false,
@@ -282,7 +284,7 @@ pub fn is_type_ref_to_diagnostic_item(cx: &LateContext<'_>, ty: Ty<'_>, diag_ite
 /// [Diagnostic Items]: https://rustc-dev-guide.rust-lang.org/diagnostics/diagnostic-items.html
 pub fn is_type_diagnostic_item(cx: &LateContext<'_>, ty: Ty<'_>, diag_item: Symbol) -> bool {
     match ty.kind() {
-        ty::Adt(adt, _) => cx.tcx.is_diagnostic_item(diag_item, adt.did),
+        ty::Adt(adt, _) => cx.tcx.is_diagnostic_item(diag_item, adt.did()),
         _ => false,
     }
 }
@@ -292,7 +294,11 @@ pub fn is_type_diagnostic_item(cx: &LateContext<'_>, ty: Ty<'_>, diag_item: Symb
 /// Returns `false` if the `LangItem` is not defined.
 pub fn is_type_lang_item(cx: &LateContext<'_>, ty: Ty<'_>, lang_item: hir::LangItem) -> bool {
     match ty.kind() {
-        ty::Adt(adt, _) => cx.tcx.lang_items().require(lang_item).map_or(false, |li| li == adt.did),
+        ty::Adt(adt, _) => cx
+            .tcx
+            .lang_items()
+            .require(lang_item)
+            .map_or(false, |li| li == adt.did()),
         _ => false,
     }
 }
@@ -308,7 +314,7 @@ pub fn is_isize_or_usize(typ: Ty<'_>) -> bool {
 /// If you change the signature, remember to update the internal lint `MatchTypeOnDiagItem`
 pub fn match_type(cx: &LateContext<'_>, ty: Ty<'_>, path: &[&str]) -> bool {
     match ty.kind() {
-        ty::Adt(adt, _) => match_def_path(cx, adt.did, path),
+        ty::Adt(adt, _) => match_def_path(cx, adt.did(), path),
         _ => false,
     }
 }
@@ -393,10 +399,10 @@ pub fn same_type_and_consts<'tcx>(a: Ty<'tcx>, b: Ty<'tcx>) -> bool {
 
 /// Checks if a given type looks safe to be uninitialized.
 pub fn is_uninit_value_valid_for_ty(cx: &LateContext<'_>, ty: Ty<'_>) -> bool {
-    match ty.kind() {
-        ty::Array(component, _) => is_uninit_value_valid_for_ty(cx, *component),
-        ty::Tuple(types) => types.types().all(|ty| is_uninit_value_valid_for_ty(cx, ty)),
-        ty::Adt(adt, _) => cx.tcx.lang_items().maybe_uninit() == Some(adt.did),
+    match *ty.kind() {
+        ty::Array(component, _) => is_uninit_value_valid_for_ty(cx, component),
+        ty::Tuple(types) => types.iter().all(|ty| is_uninit_value_valid_for_ty(cx, ty)),
+        ty::Adt(adt, _) => cx.tcx.lang_items().maybe_uninit() == Some(adt.did()),
         _ => false,
     }
 }
@@ -426,8 +432,8 @@ impl<'tcx> ExprFnSig<'tcx> {
     pub fn input(self, i: usize) -> Binder<'tcx, Ty<'tcx>> {
         match self {
             Self::Sig(sig) => sig.input(i),
-            Self::Closure(sig) => sig.input(0).map_bound(|ty| ty.tuple_element_ty(i).unwrap()),
-            Self::Trait(inputs, _) => inputs.map_bound(|ty| ty.tuple_element_ty(i).unwrap()),
+            Self::Closure(sig) => sig.input(0).map_bound(|ty| ty.tuple_fields()[i]),
+            Self::Trait(inputs, _) => inputs.map_bound(|ty| ty.tuple_fields()[i]),
         }
     }
 
@@ -513,5 +519,74 @@ pub fn expr_sig<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'_>) -> Option<ExprFnS
             },
             _ => None,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum EnumValue {
+    Unsigned(u128),
+    Signed(i128),
+}
+impl core::ops::Add<u32> for EnumValue {
+    type Output = Self;
+    fn add(self, n: u32) -> Self::Output {
+        match self {
+            Self::Unsigned(x) => Self::Unsigned(x + u128::from(n)),
+            Self::Signed(x) => Self::Signed(x + i128::from(n)),
+        }
+    }
+}
+
+/// Attempts to read the given constant as though it were an an enum value.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+pub fn read_explicit_enum_value(tcx: TyCtxt<'_>, id: DefId) -> Option<EnumValue> {
+    if let Ok(ConstValue::Scalar(Scalar::Int(value))) = tcx.const_eval_poly(id) {
+        match tcx.type_of(id).kind() {
+            ty::Int(_) => Some(EnumValue::Signed(match value.size().bytes() {
+                1 => i128::from(value.assert_bits(Size::from_bytes(1)) as u8 as i8),
+                2 => i128::from(value.assert_bits(Size::from_bytes(2)) as u16 as i16),
+                4 => i128::from(value.assert_bits(Size::from_bytes(4)) as u32 as i32),
+                8 => i128::from(value.assert_bits(Size::from_bytes(8)) as u64 as i64),
+                16 => value.assert_bits(Size::from_bytes(16)) as i128,
+                _ => return None,
+            })),
+            ty::Uint(_) => Some(EnumValue::Unsigned(match value.size().bytes() {
+                1 => value.assert_bits(Size::from_bytes(1)),
+                2 => value.assert_bits(Size::from_bytes(2)),
+                4 => value.assert_bits(Size::from_bytes(4)),
+                8 => value.assert_bits(Size::from_bytes(8)),
+                16 => value.assert_bits(Size::from_bytes(16)),
+                _ => return None,
+            })),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// Gets the value of the given variant.
+pub fn get_discriminant_value(tcx: TyCtxt<'_>, adt: AdtDef<'_>, i: VariantIdx) -> EnumValue {
+    let variant = &adt.variant(i);
+    match variant.discr {
+        VariantDiscr::Explicit(id) => read_explicit_enum_value(tcx, id).unwrap(),
+        VariantDiscr::Relative(x) => match adt.variant((i.as_usize() - x as usize).into()).discr {
+            VariantDiscr::Explicit(id) => read_explicit_enum_value(tcx, id).unwrap() + x,
+            VariantDiscr::Relative(_) => EnumValue::Unsigned(x.into()),
+        },
+    }
+}
+
+/// Check if the given type is either `core::ffi::c_void`, `std::os::raw::c_void`, or one of the
+/// platform specific `libc::<platform>::c_void` types in libc.
+pub fn is_c_void(cx: &LateContext<'_>, ty: Ty<'_>) -> bool {
+    if let ty::Adt(adt, _) = ty.kind()
+        && let &[krate, .., name] = &*cx.get_def_path(adt.did())
+        && let sym::libc | sym::core | sym::std = krate
+        && name.as_str() == "c_void"
+    {
+        true
+    } else {
+        false
     }
 }

@@ -104,8 +104,8 @@ pub(super) const MIN_LEN: usize = node::MIN_LEN_AFTER_SPLIT;
 /// let to_find = ["Up!", "Office Space"];
 /// for movie in &to_find {
 ///     match movie_reviews.get(movie) {
-///        Some(review) => println!("{}: {}", movie, review),
-///        None => println!("{} is unreviewed.", movie)
+///        Some(review) => println!("{movie}: {review}"),
+///        None => println!("{movie} is unreviewed.")
 ///     }
 /// }
 ///
@@ -114,7 +114,7 @@ pub(super) const MIN_LEN: usize = node::MIN_LEN_AFTER_SPLIT;
 ///
 /// // iterate over everything.
 /// for (movie, review) in &movie_reviews {
-///     println!("{}: \"{}\"", movie, review);
+///     println!("{movie}: \"{review}\"");
 /// }
 /// ```
 ///
@@ -212,7 +212,7 @@ impl<K: Clone, V: Clone> Clone for BTreeMap<K, V> {
                     let mut out_tree = clone_subtree(internal.first_edge().descend());
 
                     {
-                        let out_root = BTreeMap::ensure_is_owned(&mut out_tree.root);
+                        let out_root = out_tree.root.as_mut().unwrap();
                         let mut out_node = out_root.push_internal_level();
                         let mut in_edge = internal.first_edge();
                         while let Ok(kv) = in_edge.right_kv() {
@@ -278,11 +278,12 @@ where
 
     fn replace(&mut self, key: K) -> Option<K> {
         let (map, dormant_map) = DormantMutRef::new(self);
-        let root_node = Self::ensure_is_owned(&mut map.root).borrow_mut();
+        let root_node = map.root.get_or_insert_with(Root::new).borrow_mut();
         match root_node.search_tree::<K>(&key) {
             Found(mut kv) => Some(mem::replace(kv.key_mut(), key)),
             GoDown(handle) => {
-                VacantEntry { key, handle, dormant_map, _marker: PhantomData }.insert(());
+                VacantEntry { key, handle: Some(handle), dormant_map, _marker: PhantomData }
+                    .insert(());
                 None
             }
         }
@@ -963,7 +964,7 @@ impl<K, V> BTreeMap<K, V> {
 
     /// Retains only the elements specified by the predicate.
     ///
-    /// In other words, remove all pairs `(k, v)` such that `f(&k, &mut v)` returns `false`.
+    /// In other words, remove all pairs `(k, v)` for which `f(&k, &mut v)` returns `false`.
     /// The elements are visited in ascending key order.
     ///
     /// # Examples
@@ -986,7 +987,7 @@ impl<K, V> BTreeMap<K, V> {
         self.drain_filter(|k, v| !f(k, v));
     }
 
-    /// Moves all elements from `other` into `Self`, leaving `other` empty.
+    /// Moves all elements from `other` into `self`, leaving `other` empty.
     ///
     /// # Examples
     ///
@@ -1032,7 +1033,7 @@ impl<K, V> BTreeMap<K, V> {
 
         let self_iter = mem::take(self).into_iter();
         let other_iter = mem::take(other).into_iter();
-        let root = BTreeMap::ensure_is_owned(&mut self.root);
+        let root = self.root.get_or_insert_with(Root::new);
         root.append_from_sorted_iters(self_iter, other_iter, &mut self.length)
     }
 
@@ -1061,7 +1062,7 @@ impl<K, V> BTreeMap<K, V> {
     /// map.insert(5, "b");
     /// map.insert(8, "c");
     /// for (&key, &value) in map.range((Included(&4), Included(&8))) {
-    ///     println!("{}: {}", key, value);
+    ///     println!("{key}: {value}");
     /// }
     /// assert_eq!(Some((&5, &"b")), map.range(4..).next());
     /// ```
@@ -1104,7 +1105,7 @@ impl<K, V> BTreeMap<K, V> {
     ///     *balance += 100;
     /// }
     /// for (name, balance) in &map {
-    ///     println!("{} => {}", name, balance);
+    ///     println!("{name} => {balance}");
     /// }
     /// ```
     #[stable(feature = "btree_range", since = "1.17.0")]
@@ -1144,14 +1145,20 @@ impl<K, V> BTreeMap<K, V> {
     where
         K: Ord,
     {
-        // FIXME(@porglezomp) Avoid allocating if we don't insert
         let (map, dormant_map) = DormantMutRef::new(self);
-        let root_node = Self::ensure_is_owned(&mut map.root).borrow_mut();
-        match root_node.search_tree(&key) {
-            Found(handle) => Occupied(OccupiedEntry { handle, dormant_map, _marker: PhantomData }),
-            GoDown(handle) => {
-                Vacant(VacantEntry { key, handle, dormant_map, _marker: PhantomData })
-            }
+        match map.root {
+            None => Vacant(VacantEntry { key, handle: None, dormant_map, _marker: PhantomData }),
+            Some(ref mut root) => match root.borrow_mut().search_tree(&key) {
+                Found(handle) => {
+                    Occupied(OccupiedEntry { handle, dormant_map, _marker: PhantomData })
+                }
+                GoDown(handle) => Vacant(VacantEntry {
+                    key,
+                    handle: Some(handle),
+                    dormant_map,
+                    _marker: PhantomData,
+                }),
+            },
         }
     }
 
@@ -2088,7 +2095,7 @@ impl<K, V> BTreeMap<K, V> {
     /// map.insert(1, "a");
     ///
     /// for (key, value) in map.iter() {
-    ///     println!("{}: {}", key, value);
+    ///     println!("{key}: {value}");
     /// }
     ///
     /// let (first_key, first_value) = map.iter().next().unwrap();
@@ -2246,12 +2253,6 @@ impl<K, V> BTreeMap<K, V> {
     #[rustc_const_unstable(feature = "const_btree_new", issue = "71835")]
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    /// If the root node is the empty (non-allocated) root node, allocate our
-    /// own node. Is an associated function to avoid borrowing the entire BTreeMap.
-    fn ensure_is_owned(root: &mut Option<Root<K, V>>) -> &mut Root<K, V> {
-        root.get_or_insert_with(Root::new)
     }
 }
 

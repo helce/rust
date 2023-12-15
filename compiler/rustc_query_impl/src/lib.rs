@@ -7,7 +7,7 @@
 #![feature(once_cell)]
 #![feature(rustc_attrs)]
 #![recursion_limit = "256"]
-#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
+#![allow(rustc::potential_query_instability)]
 
 #[macro_use]
 extern crate rustc_macros;
@@ -43,8 +43,6 @@ pub use on_disk_cache::OnDiskCache;
 
 mod profiling_support;
 pub use self::profiling_support::alloc_self_profile_query_strings;
-
-mod util;
 
 fn describe_as_module(def_id: LocalDefId, tcx: TyCtxt<'_>) -> String {
     if def_id.is_top_level_module() {

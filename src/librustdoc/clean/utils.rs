@@ -57,10 +57,8 @@ crate fn krate(cx: &mut DocContext<'_>) -> Crate {
     let primitives = local_crate.primitives(cx.tcx);
     let keywords = local_crate.keywords(cx.tcx);
     {
-        let m = match *module.kind {
-            ItemKind::ModuleItem(ref mut m) => m,
-            _ => unreachable!(),
-        };
+        let ItemKind::ModuleItem(ref mut m) = *module.kind
+        else { unreachable!() };
         m.items.extend(primitives.iter().map(|&(def_id, prim)| {
             Item::from_def_id_and_parts(
                 def_id,
@@ -77,16 +75,12 @@ crate fn krate(cx: &mut DocContext<'_>) -> Crate {
     Crate { module, primitives, external_traits: cx.external_traits.clone() }
 }
 
-fn external_generic_args(
+crate fn substs_to_args(
     cx: &mut DocContext<'_>,
-    did: DefId,
-    has_self: bool,
-    bindings: Vec<TypeBinding>,
-    substs: SubstsRef<'_>,
-) -> GenericArgs {
-    let mut skip_self = has_self;
-    let mut ty_kind = None;
-    let args: Vec<_> = substs
+    substs: &[ty::subst::GenericArg<'_>],
+    mut skip_first: bool,
+) -> Vec<GenericArg> {
+    substs
         .iter()
         .filter_map(|kind| match kind.unpack() {
             GenericArgKind::Lifetime(lt) => match *lt {
@@ -95,23 +89,32 @@ fn external_generic_args(
                 }
                 _ => lt.clean(cx).map(GenericArg::Lifetime),
             },
-            GenericArgKind::Type(_) if skip_self => {
-                skip_self = false;
+            GenericArgKind::Type(_) if skip_first => {
+                skip_first = false;
                 None
             }
-            GenericArgKind::Type(ty) => {
-                ty_kind = Some(ty.kind());
-                Some(GenericArg::Type(ty.clean(cx)))
-            }
+            GenericArgKind::Type(ty) => Some(GenericArg::Type(ty.clean(cx))),
             GenericArgKind::Const(ct) => Some(GenericArg::Const(Box::new(ct.clean(cx)))),
         })
-        .collect();
+        .collect()
+}
+
+fn external_generic_args(
+    cx: &mut DocContext<'_>,
+    did: DefId,
+    has_self: bool,
+    bindings: Vec<TypeBinding>,
+    substs: SubstsRef<'_>,
+) -> GenericArgs {
+    let args = substs_to_args(cx, &substs, has_self);
 
     if cx.tcx.fn_trait_kind_from_lang_item(did).is_some() {
-        let inputs = match ty_kind.unwrap() {
-            ty::Tuple(tys) => tys.iter().map(|t| t.expect_ty().clean(cx)).collect(),
-            _ => return GenericArgs::AngleBracketed { args, bindings: bindings.into() },
-        };
+        let inputs =
+            // The trait's first substitution is the one after self, if there is one.
+            match substs.iter().nth(if has_self { 1 } else { 0 }).unwrap().expect_ty().kind() {
+                ty::Tuple(tys) => tys.iter().map(|t| t.clean(cx)).collect(),
+                _ => return GenericArgs::AngleBracketed { args, bindings: bindings.into() },
+            };
         let output = None;
         // FIXME(#20299) return type comes from a projection now
         // match types[1].kind {
@@ -181,7 +184,7 @@ crate fn build_deref_target_impls(cx: &mut DocContext<'_>, items: &[Item], ret: 
 
         if let Some(prim) = target.primitive_type() {
             let _prof_timer = cx.tcx.sess.prof.generic_activity("build_primitive_inherent_impls");
-            for &did in prim.impls(tcx).iter().filter(|did| !did.is_local()) {
+            for did in prim.impls(tcx).filter(|did| !did.is_local()) {
                 inline::build_impl(cx, None, did, None, ret);
             }
         } else if let Type::Path { path } = target {
@@ -394,7 +397,7 @@ crate fn register_res(cx: &mut DocContext<'_>, res: Res) -> DefId {
         // These should be added to the cache using `record_extern_fqn`.
         Res::Def(
             kind @ (AssocTy | AssocFn | AssocConst | Variant | Fn | TyAlias | Enum | Trait | Struct
-            | Union | Mod | ForeignTy | Const | Static | Macro(..) | TraitAlias),
+            | Union | Mod | ForeignTy | Const | Static(_) | Macro(..) | TraitAlias),
             i,
         ) => (i, kind.into()),
         // This is part of a trait definition or trait impl; document the trait.

@@ -6,7 +6,7 @@ use crate::iter;
 use crate::mem;
 use crate::ops;
 
-#[lang = "slice_u8"]
+#[cfg_attr(bootstrap, lang = "slice_u8")]
 #[cfg(not(test))]
 impl [u8] {
     /// Checks if all bytes in this slice are within the ASCII range.
@@ -79,6 +79,84 @@ impl [u8] {
     pub fn escape_ascii(&self) -> EscapeAscii<'_> {
         EscapeAscii { inner: self.iter().flat_map(EscapeByte) }
     }
+
+    /// Returns a byte slice with leading ASCII whitespace bytes removed.
+    ///
+    /// 'Whitespace' refers to the definition used by
+    /// `u8::is_ascii_whitespace`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(byte_slice_trim_ascii)]
+    ///
+    /// assert_eq!(b" \t hello world\n".trim_ascii_start(), b"hello world\n");
+    /// assert_eq!(b"  ".trim_ascii_start(), b"");
+    /// assert_eq!(b"".trim_ascii_start(), b"");
+    /// ```
+    #[unstable(feature = "byte_slice_trim_ascii", issue = "94035")]
+    pub const fn trim_ascii_start(&self) -> &[u8] {
+        let mut bytes = self;
+        // Note: A pattern matching based approach (instead of indexing) allows
+        // making the function const.
+        while let [first, rest @ ..] = bytes {
+            if first.is_ascii_whitespace() {
+                bytes = rest;
+            } else {
+                break;
+            }
+        }
+        bytes
+    }
+
+    /// Returns a byte slice with trailing ASCII whitespace bytes removed.
+    ///
+    /// 'Whitespace' refers to the definition used by
+    /// `u8::is_ascii_whitespace`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(byte_slice_trim_ascii)]
+    ///
+    /// assert_eq!(b"\r hello world\n ".trim_ascii_end(), b"\r hello world");
+    /// assert_eq!(b"  ".trim_ascii_end(), b"");
+    /// assert_eq!(b"".trim_ascii_end(), b"");
+    /// ```
+    #[unstable(feature = "byte_slice_trim_ascii", issue = "94035")]
+    pub const fn trim_ascii_end(&self) -> &[u8] {
+        let mut bytes = self;
+        // Note: A pattern matching based approach (instead of indexing) allows
+        // making the function const.
+        while let [rest @ .., last] = bytes {
+            if last.is_ascii_whitespace() {
+                bytes = rest;
+            } else {
+                break;
+            }
+        }
+        bytes
+    }
+
+    /// Returns a byte slice with leading and trailing ASCII whitespace bytes
+    /// removed.
+    ///
+    /// 'Whitespace' refers to the definition used by
+    /// `u8::is_ascii_whitespace`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(byte_slice_trim_ascii)]
+    ///
+    /// assert_eq!(b"\r hello world\n ".trim_ascii(), b"hello world");
+    /// assert_eq!(b"  ".trim_ascii(), b"");
+    /// assert_eq!(b"".trim_ascii(), b"");
+    /// ```
+    #[unstable(feature = "byte_slice_trim_ascii", issue = "94035")]
+    pub const fn trim_ascii(&self) -> &[u8] {
+        self.trim_ascii_start().trim_ascii_end()
+    }
 }
 
 impl_fn_for_zst! {
@@ -94,6 +172,7 @@ impl_fn_for_zst! {
 /// documentation for more information.
 #[stable(feature = "inherent_ascii_escape", since = "1.60.0")]
 #[derive(Clone)]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct EscapeAscii<'a> {
     inner: iter::FlatMap<super::Iter<'a, u8>, ascii::EscapeDefault, EscapeByte>,
 }
@@ -215,7 +294,7 @@ fn is_ascii(s: &[u8]) -> bool {
     // Paranoia check about alignment, since we're about to do a bunch of
     // unaligned loads. In practice this should be impossible barring a bug in
     // `align_offset` though.
-    debug_assert_eq!((word_ptr as usize) % mem::align_of::<usize>(), 0);
+    debug_assert_eq!(word_ptr.addr() % mem::align_of::<usize>(), 0);
 
     // Read subsequent words until the last aligned word, excluding the last
     // aligned word by itself to be done in tail check later, to ensure that
@@ -223,9 +302,9 @@ fn is_ascii(s: &[u8]) -> bool {
     while byte_pos < len - USIZE_SIZE {
         debug_assert!(
             // Sanity check that the read is in bounds
-            (word_ptr as usize + USIZE_SIZE) <= (start.wrapping_add(len) as usize) &&
+            (word_ptr.addr() + USIZE_SIZE) <= start.addr().wrapping_add(len) &&
             // And that our assumptions about `byte_pos` hold.
-            (word_ptr as usize) - (start as usize) == byte_pos
+            (word_ptr.addr() - start.addr()) == byte_pos
         );
 
         // SAFETY: We know `word_ptr` is properly aligned (because of

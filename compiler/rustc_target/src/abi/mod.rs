@@ -10,6 +10,7 @@ use std::num::NonZeroUsize;
 use std::ops::{Add, AddAssign, Deref, Mul, RangeInclusive, Sub};
 use std::str::FromStr;
 
+use rustc_data_structures::intern::Interned;
 use rustc_index::vec::{Idx, IndexVec};
 use rustc_macros::HashStable_Generic;
 use rustc_serialize::json::{Json, ToJson};
@@ -121,12 +122,9 @@ impl TargetDataLayout {
                     dl.pointer_align = align(a, p)?;
                 }
                 [s, ref a @ ..] if s.starts_with('i') => {
-                    let bits = match s[1..].parse::<u64>() {
-                        Ok(bits) => bits,
-                        Err(_) => {
-                            size(&s[1..], "i")?; // For the user error.
-                            continue;
-                        }
+                    let Ok(bits) = s[1..].parse::<u64>() else {
+                        size(&s[1..], "i")?; // For the user error.
+                        continue;
                     };
                     let a = align(a, s)?;
                     match bits {
@@ -281,7 +279,6 @@ impl ToJson for Endian {
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Encodable, Decodable)]
 #[derive(HashStable_Generic)]
 pub struct Size {
-    // The top 3 bits are ALWAYS zero.
     raw: u64,
 }
 
@@ -289,22 +286,9 @@ impl Size {
     pub const ZERO: Size = Size { raw: 0 };
 
     /// Rounds `bits` up to the next-higher byte boundary, if `bits` is
-    /// is not aligned.
+    /// not a multiple of 8.
     pub fn from_bits(bits: impl TryInto<u64>) -> Size {
         let bits = bits.try_into().ok().unwrap();
-
-        #[cold]
-        fn overflow(bits: u64) -> ! {
-            panic!("Size::from_bits({}) has overflowed", bits);
-        }
-
-        // This is the largest value of `bits` that does not cause overflow
-        // during rounding, and guarantees that the resulting number of bytes
-        // cannot cause overflow when multiplied by 8.
-        if bits > 0xffff_ffff_ffff_fff8 {
-            overflow(bits);
-        }
-
         // Avoid potential overflow from `bits + 7`.
         Size { raw: bits / 8 + ((bits % 8) + 7) / 8 }
     }
@@ -327,7 +311,12 @@ impl Size {
 
     #[inline]
     pub fn bits(self) -> u64 {
-        self.raw << 3
+        #[cold]
+        fn overflow(bytes: u64) -> ! {
+            panic!("Size::bits: {} bytes in bits doesn't fit in u64", bytes)
+        }
+
+        self.bytes().checked_mul(8).unwrap_or_else(|| overflow(self.bytes()))
     }
 
     #[inline]
@@ -1027,7 +1016,7 @@ rustc_index::newtype_index! {
 }
 
 #[derive(PartialEq, Eq, Hash, Debug, HashStable_Generic)]
-pub enum Variants {
+pub enum Variants<'a> {
     /// Single enum variants, structs/tuples, unions, and all non-ADTs.
     Single { index: VariantIdx },
 
@@ -1041,7 +1030,7 @@ pub enum Variants {
         tag: Scalar,
         tag_encoding: TagEncoding,
         tag_field: usize,
-        variants: IndexVec<VariantIdx, Layout>,
+        variants: IndexVec<VariantIdx, Layout<'a>>,
     },
 }
 
@@ -1107,7 +1096,7 @@ impl Niche {
 
         // Extend the range of valid values being reserved by moving either `v.start` or `v.end` bound.
         // Given an eventual `Option<T>`, we try to maximize the chance for `None` to occupy the niche of zero.
-        // This is accomplished by prefering enums with 2 variants(`count==1`) and always taking the shortest path to niche zero.
+        // This is accomplished by preferring enums with 2 variants(`count==1`) and always taking the shortest path to niche zero.
         // Having `None` in niche zero can enable some special optimizations.
         //
         // Bound selection criteria:
@@ -1149,8 +1138,8 @@ impl Niche {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Debug, HashStable_Generic)]
-pub struct Layout {
+#[derive(PartialEq, Eq, Hash, HashStable_Generic)]
+pub struct LayoutS<'a> {
     /// Says where the fields are located within the layout.
     pub fields: FieldsShape,
 
@@ -1161,7 +1150,7 @@ pub struct Layout {
     ///
     /// To access all fields of this layout, both `fields` and the fields of the active variant
     /// must be taken into account.
-    pub variants: Variants,
+    pub variants: Variants<'a>,
 
     /// The `abi` defines how this data is passed between functions, and it defines
     /// value restrictions via `valid_range`.
@@ -1180,12 +1169,12 @@ pub struct Layout {
     pub size: Size,
 }
 
-impl Layout {
+impl<'a> LayoutS<'a> {
     pub fn scalar<C: HasDataLayout>(cx: &C, scalar: Scalar) -> Self {
         let largest_niche = Niche::from_scalar(cx, Size::ZERO, scalar);
         let size = scalar.value.size(cx);
         let align = scalar.value.align(cx);
-        Layout {
+        LayoutS {
             variants: Variants::Single { index: VariantIdx::new(0) },
             fields: FieldsShape::Primitive,
             abi: Abi::Scalar(scalar),
@@ -1193,6 +1182,59 @@ impl Layout {
             size,
             align,
         }
+    }
+}
+
+impl<'a> fmt::Debug for LayoutS<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // This is how `Layout` used to print before it become
+        // `Interned<LayoutS>`. We print it like this to avoid having to update
+        // expected output in a lot of tests.
+        f.debug_struct("Layout")
+            .field("fields", &self.fields)
+            .field("variants", &self.variants)
+            .field("abi", &self.abi)
+            .field("largest_niche", &self.largest_niche)
+            .field("align", &self.align)
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, HashStable_Generic)]
+#[cfg_attr(not(bootstrap), rustc_pass_by_value)]
+pub struct Layout<'a>(pub Interned<'a, LayoutS<'a>>);
+
+impl<'a> fmt::Debug for Layout<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // See comment on `<LayoutS as Debug>::fmt` above.
+        self.0.0.fmt(f)
+    }
+}
+
+impl<'a> Layout<'a> {
+    pub fn fields(self) -> &'a FieldsShape {
+        &self.0.0.fields
+    }
+
+    pub fn variants(self) -> &'a Variants<'a> {
+        &self.0.0.variants
+    }
+
+    pub fn abi(self) -> Abi {
+        self.0.0.abi
+    }
+
+    pub fn largest_niche(self) -> Option<Niche> {
+        self.0.0.largest_niche
+    }
+
+    pub fn align(self) -> AbiAndPrefAlign {
+        self.0.0.align
+    }
+
+    pub fn size(self) -> Size {
+        self.0.0.size
     }
 }
 
@@ -1206,13 +1248,13 @@ impl Layout {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, HashStable_Generic)]
 pub struct TyAndLayout<'a, Ty> {
     pub ty: Ty,
-    pub layout: &'a Layout,
+    pub layout: Layout<'a>,
 }
 
 impl<'a, Ty> Deref for TyAndLayout<'a, Ty> {
-    type Target = &'a Layout;
-    fn deref(&self) -> &&'a Layout {
-        &self.layout
+    type Target = &'a LayoutS<'a>;
+    fn deref(&self) -> &&'a LayoutS<'a> {
+        &self.layout.0.0
     }
 }
 

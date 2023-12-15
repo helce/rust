@@ -1,5 +1,6 @@
 use crate::common::*;
 use crate::context::TypeLowering;
+use crate::llvm_util::get_version;
 use crate::type_::Type;
 use rustc_codegen_ssa::traits::*;
 use rustc_middle::bug;
@@ -42,14 +43,18 @@ fn uncached_llvm_type<'a, 'tcx>(
         // FIXME(eddyb) producing readable type names for trait objects can result
         // in problematically distinct types due to HRTB and subtyping (see #47638).
         // ty::Dynamic(..) |
-        ty::Adt(..) | ty::Closure(..) | ty::Foreign(..) | ty::Generator(..) | ty::Str => {
-            let mut name =
-                with_no_visible_paths(|| with_no_trimmed_paths(|| layout.ty.to_string()));
+        ty::Adt(..) | ty::Closure(..) | ty::Foreign(..) | ty::Generator(..) | ty::Str
+            // For performance reasons we use names only when emitting LLVM IR. Unless we are on
+            // LLVM < 14, where the use of unnamed types resulted in various issues, e.g., #76213,
+            // #79564, and #79246.
+            if get_version() < (14, 0, 0) || !cx.sess().fewer_names() =>
+        {
+            let mut name = with_no_visible_paths!(with_no_trimmed_paths!(layout.ty.to_string()));
             if let (&ty::Adt(def, _), &Variants::Single { index }) =
                 (layout.ty.kind(), &layout.variants)
             {
-                if def.is_enum() && !def.variants.is_empty() {
-                    write!(&mut name, "::{}", def.variants[index].name).unwrap();
+                if def.is_enum() && !def.variants().is_empty() {
+                    write!(&mut name, "::{}", def.variant(index).name).unwrap();
                 }
             }
             if let (&ty::Generator(_, _, _), &Variants::Single { index }) =
@@ -59,6 +64,9 @@ fn uncached_llvm_type<'a, 'tcx>(
             }
             Some(name)
         }
+        // Use identified structure types for ADT. Due to pointee types in LLVM IR their definition
+        // might be recursive. Other cases are non-recursive and we can use literal structure types.
+        ty::Adt(..) => Some(String::new()),
         _ => None,
     };
 
@@ -339,9 +347,8 @@ impl<'tcx> LayoutLlvmExt<'tcx> for TyAndLayout<'tcx> {
             _ => {}
         }
 
-        let (a, b) = match self.abi {
-            Abi::ScalarPair(a, b) => (a, b),
-            _ => bug!("TyAndLayout::scalar_pair_element_llty({:?}): not applicable", self),
+        let Abi::ScalarPair(a, b) = self.abi else {
+            bug!("TyAndLayout::scalar_pair_element_llty({:?}): not applicable", self);
         };
         let scalar = [a, b][index];
 

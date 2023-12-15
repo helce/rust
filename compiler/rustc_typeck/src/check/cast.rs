@@ -32,7 +32,7 @@ use super::FnCtxt;
 
 use crate::hir::def_id::DefId;
 use crate::type_error_struct;
-use rustc_errors::{struct_span_err, Applicability, DiagnosticBuilder, ErrorReported};
+use rustc_errors::{struct_span_err, Applicability, DiagnosticBuilder, ErrorGuaranteed};
 use rustc_hir as hir;
 use rustc_hir::lang_items::LangItem;
 use rustc_middle::mir::Mutability;
@@ -86,13 +86,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         t: Ty<'tcx>,
         span: Span,
-    ) -> Result<Option<PointerKind<'tcx>>, ErrorReported> {
+    ) -> Result<Option<PointerKind<'tcx>>, ErrorGuaranteed> {
         debug!("pointer_kind({:?}, {:?})", t, span);
 
         let t = self.resolve_vars_if_possible(t);
 
-        if t.references_error() {
-            return Err(ErrorReported);
+        if let Some(reported) = t.error_reported() {
+            return Err(reported);
         }
 
         if self.type_is_known_to_be_sized_modulo_regions(t, span) {
@@ -111,7 +111,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             },
             ty::Tuple(fields) => match fields.last() {
                 None => Some(PointerKind::Thin),
-                Some(f) => self.pointer_kind(f.expect_ty(), span)?,
+                Some(&f) => self.pointer_kind(f, span)?,
             },
 
             // Pointers to foreign types are thin, despite being unsized
@@ -139,10 +139,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             | ty::Adt(..)
             | ty::Never
             | ty::Error(_) => {
-                self.tcx
+                let reported = self
+                    .tcx
                     .sess
                     .delay_span_bug(span, &format!("`{:?}` should be sized but is not?", t));
-                return Err(ErrorReported);
+                return Err(reported);
             }
         })
     }
@@ -150,7 +151,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
 #[derive(Copy, Clone)]
 pub enum CastError {
-    ErrorReported,
+    ErrorGuaranteed,
 
     CastToBool,
     CastToChar,
@@ -165,11 +166,17 @@ pub enum CastError {
     NonScalar,
     UnknownExprPtrKind,
     UnknownCastPtrKind,
+    /// Cast of int to (possibly) fat raw pointer.
+    ///
+    /// Argument is the specific name of the metadata in plain words, such as "a vtable"
+    /// or "a length". If this argument is None, then the metadata is unknown, for example,
+    /// when we're typechecking a type parameter with a ?Sized bound.
+    IntToFatCast(Option<&'static str>),
 }
 
-impl From<ErrorReported> for CastError {
-    fn from(ErrorReported: ErrorReported) -> Self {
-        CastError::ErrorReported
+impl From<ErrorGuaranteed> for CastError {
+    fn from(_: ErrorGuaranteed) -> Self {
+        CastError::ErrorGuaranteed
     }
 }
 
@@ -179,7 +186,7 @@ fn make_invalid_casting_error<'a, 'tcx>(
     expr_ty: Ty<'tcx>,
     cast_ty: Ty<'tcx>,
     fcx: &FnCtxt<'a, 'tcx>,
-) -> DiagnosticBuilder<'a> {
+) -> DiagnosticBuilder<'a, ErrorGuaranteed> {
     type_error_struct!(
         sess,
         span,
@@ -199,7 +206,7 @@ impl<'a, 'tcx> CastCheck<'tcx> {
         cast_ty: Ty<'tcx>,
         cast_span: Span,
         span: Span,
-    ) -> Result<CastCheck<'tcx>, ErrorReported> {
+    ) -> Result<CastCheck<'tcx>, ErrorGuaranteed> {
         let check = CastCheck { expr, expr_ty, cast_ty, cast_span, span };
 
         // For better error messages, check for some obviously unsized
@@ -207,8 +214,8 @@ impl<'a, 'tcx> CastCheck<'tcx> {
         // inference is more completely known.
         match cast_ty.kind() {
             ty::Dynamic(..) | ty::Slice(..) => {
-                check.report_cast_to_unsized_type(fcx);
-                Err(ErrorReported)
+                let reported = check.report_cast_to_unsized_type(fcx);
+                Err(reported)
             }
             _ => Ok(check),
         }
@@ -216,7 +223,7 @@ impl<'a, 'tcx> CastCheck<'tcx> {
 
     fn report_cast_error(&self, fcx: &FnCtxt<'a, 'tcx>, e: CastError) {
         match e {
-            CastError::ErrorReported => {
+            CastError::ErrorGuaranteed => {
                 // an error has already been reported
             }
             CastError::NeedDeref => {
@@ -522,6 +529,35 @@ impl<'a, 'tcx> CastCheck<'tcx> {
                 .diagnostic()
                 .emit();
             }
+            CastError::IntToFatCast(known_metadata) => {
+                let mut err = struct_span_err!(
+                    fcx.tcx.sess,
+                    self.cast_span,
+                    E0606,
+                    "cannot cast `{}` to a pointer that {} wide",
+                    fcx.ty_to_string(self.expr_ty),
+                    if known_metadata.is_some() { "is" } else { "may be" }
+                );
+
+                err.span_label(
+                    self.cast_span,
+                    format!(
+                        "creating a `{}` requires both an address and {}",
+                        self.cast_ty,
+                        known_metadata.unwrap_or("type-specific metadata"),
+                    ),
+                );
+
+                if fcx.tcx.sess.is_nightly_build() {
+                    err.span_label(
+                        self.expr.span,
+                        "consider casting this expression to `*const ()`, \
+                        then using `core::ptr::from_raw_parts`",
+                    );
+                }
+
+                err.emit();
+            }
             CastError::UnknownCastPtrKind | CastError::UnknownExprPtrKind => {
                 let unknown_cast_to = match e {
                     CastError::UnknownCastPtrKind => true,
@@ -553,9 +589,11 @@ impl<'a, 'tcx> CastCheck<'tcx> {
         }
     }
 
-    fn report_cast_to_unsized_type(&self, fcx: &FnCtxt<'a, 'tcx>) {
-        if self.cast_ty.references_error() || self.expr_ty.references_error() {
-            return;
+    fn report_cast_to_unsized_type(&self, fcx: &FnCtxt<'a, 'tcx>) -> ErrorGuaranteed {
+        if let Some(reported) =
+            self.cast_ty.error_reported().or_else(|| self.expr_ty.error_reported())
+        {
+            return reported;
         }
 
         let tstr = fcx.ty_to_string(self.cast_ty);
@@ -616,7 +654,7 @@ impl<'a, 'tcx> CastCheck<'tcx> {
                 err.span_help(self.expr.span, "consider using a box or reference as appropriate");
             }
         }
-        err.emit();
+        err.emit()
     }
 
     fn trivial_cast_lint(&self, fcx: &FnCtxt<'a, 'tcx>) {
@@ -799,10 +837,9 @@ impl<'a, 'tcx> CastCheck<'tcx> {
         let expr_kind = fcx.pointer_kind(m_expr.ty, self.span)?;
         let cast_kind = fcx.pointer_kind(m_cast.ty, self.span)?;
 
-        let cast_kind = match cast_kind {
+        let Some(cast_kind) = cast_kind else {
             // We can't cast if target pointer kind is unknown
-            None => return Err(CastError::UnknownCastPtrKind),
-            Some(cast_kind) => cast_kind,
+            return Err(CastError::UnknownCastPtrKind);
         };
 
         // Cast to thin pointer is OK
@@ -810,10 +847,9 @@ impl<'a, 'tcx> CastCheck<'tcx> {
             return Ok(CastKind::PtrPtrCast);
         }
 
-        let expr_kind = match expr_kind {
+        let Some(expr_kind) = expr_kind else {
             // We can't cast to fat pointer if source pointer kind is unknown
-            None => return Err(CastError::UnknownExprPtrKind),
-            Some(expr_kind) => expr_kind,
+            return Err(CastError::UnknownExprPtrKind);
         };
 
         // thin -> fat? report invalid cast (don't complain about vtable kinds)
@@ -902,7 +938,13 @@ impl<'a, 'tcx> CastCheck<'tcx> {
         match fcx.pointer_kind(m_cast.ty, self.span)? {
             None => Err(CastError::UnknownCastPtrKind),
             Some(PointerKind::Thin) => Ok(CastKind::AddrPtrCast),
-            _ => Err(CastError::IllegalCast),
+            Some(PointerKind::Vtable(_)) => Err(CastError::IntToFatCast(Some("a vtable"))),
+            Some(PointerKind::Length) => Err(CastError::IntToFatCast(Some("a length"))),
+            Some(
+                PointerKind::OfProjection(_)
+                | PointerKind::OfOpaque(_, _)
+                | PointerKind::OfParam(_),
+            ) => Err(CastError::IntToFatCast(None)),
         }
     }
 

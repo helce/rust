@@ -12,15 +12,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::Mode;
-use build_helper::{t, up_to_date};
-
 use crate::builder::{Builder, Compiler, Kind, RunConfig, ShouldRun, Step};
 use crate::cache::{Interned, INTERNER};
 use crate::compile;
 use crate::config::{Config, TargetSelection};
 use crate::tool::{self, prepare_tool_cargo, SourceType, Tool};
-use crate::util::symlink_dir;
+use crate::util::{symlink_dir, t, up_to_date};
+use crate::Mode;
 
 macro_rules! submodule_helper {
     ($path:expr, submodule) => {
@@ -434,6 +432,12 @@ impl Step for Std {
         let stage = self.stage;
         let target = self.target;
         builder.info(&format!("Documenting stage{} std ({})", stage, target));
+        if builder.no_std(target) == Some(true) {
+            panic!(
+                "building std documentation for no_std target {target} is not supported\n\
+                 Set `docs = false` in the config to disable documentation."
+            );
+        }
         let out = builder.doc_out(target);
         t!(fs::create_dir_all(&out));
         let compiler = builder.compiler(stage, builder.config.build);

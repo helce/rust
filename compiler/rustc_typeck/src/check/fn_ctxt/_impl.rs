@@ -8,7 +8,7 @@ use crate::check::{BreakableCtxt, Diverges, Expectation, FnCtxt, LocalTy};
 
 use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_errors::{Applicability, DiagnosticBuilder, ErrorReported};
+use rustc_errors::{Applicability, Diagnostic, ErrorGuaranteed};
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::DefId;
@@ -158,7 +158,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     pub(in super::super) fn write_resolution(
         &self,
         hir_id: hir::HirId,
-        r: Result<(DefKind, DefId), ErrorReported>,
+        r: Result<(DefKind, DefId), ErrorGuaranteed>,
     ) {
         self.typeck_results.borrow_mut().type_dependent_defs_mut().insert(hir_id, r);
     }
@@ -315,16 +315,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                     // FIXME: currently we never try to compose autoderefs
                     // and ReifyFnPointer/UnsafeFnPointer, but we could.
-                    _ => self.tcx.sess.delay_span_bug(
-                        expr.span,
-                        &format!(
-                            "while adjusting {:?}, can't compose {:?} and {:?}",
-                            expr,
-                            entry.get(),
-                            adj
-                        ),
-                    ),
-                };
+                    _ => {
+                        self.tcx.sess.delay_span_bug(
+                            expr.span,
+                            &format!(
+                                "while adjusting {:?}, can't compose {:?} and {:?}",
+                                expr,
+                                entry.get(),
+                                adj
+                            ),
+                        );
+                    }
+                }
                 *entry.get_mut() = adj;
             }
         }
@@ -370,23 +372,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         (result, spans)
     }
 
-    /// Replaces the opaque types from the given value with type variables,
-    /// and records the `OpaqueTypeMap` for later use during writeback. See
-    /// `InferCtxt::instantiate_opaque_types` for more details.
-    #[instrument(skip(self, value_span), level = "debug")]
-    pub(in super::super) fn instantiate_opaque_types_from_value<T: TypeFoldable<'tcx>>(
-        &self,
-        value: T,
-        value_span: Span,
-    ) -> T {
-        self.register_infer_ok_obligations(self.instantiate_opaque_types(
-            self.body_id,
-            self.param_env,
-            value,
-            value_span,
-        ))
-    }
-
     /// Convenience method which tracks extra diagnostic information for normalization
     /// that occurs as a result of WF checking. The `hir_id` is the `HirId` of the hir item
     /// whose type is being wf-checked - this is used to construct a more precise span if
@@ -427,6 +412,30 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     {
         self.inh.partially_normalize_associated_types_in(
             ObligationCause::misc(span, self.body_id),
+            self.param_env,
+            value,
+        )
+    }
+
+    pub(in super::super) fn normalize_op_associated_types_in_as_infer_ok<T>(
+        &self,
+        span: Span,
+        value: T,
+        opt_input_expr: Option<&hir::Expr<'_>>,
+    ) -> InferOk<'tcx, T>
+    where
+        T: TypeFoldable<'tcx>,
+    {
+        self.inh.partially_normalize_associated_types_in(
+            ObligationCause::new(
+                span,
+                self.body_id,
+                traits::BinOp {
+                    rhs_span: opt_input_expr.map(|expr| expr.span),
+                    is_lit: opt_input_expr
+                        .map_or(false, |expr| matches!(expr.kind, ExprKind::Lit(_))),
+                },
+            ),
             self.param_env,
             value,
         )
@@ -748,10 +757,35 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         formal_args: &[Ty<'tcx>],
     ) -> Vec<Ty<'tcx>> {
         let formal_ret = self.resolve_vars_with_obligations(formal_ret);
-        let ret_ty = match expected_ret.only_has_type(self) {
-            Some(ret) => ret,
-            None => return Vec::new(),
-        };
+        let Some(ret_ty) = expected_ret.only_has_type(self) else { return Vec::new() };
+
+        // HACK(oli-obk): This is a hack to keep RPIT and TAIT in sync wrt their behaviour.
+        // Without it, the inference
+        // variable will get instantiated with the opaque type. The inference variable often
+        // has various helpful obligations registered for it that help closures figure out their
+        // signature. If we infer the inference var to the opaque type, the closure won't be able
+        // to find those obligations anymore, and it can't necessarily find them from the opaque
+        // type itself. We could be more powerful with inference if we *combined* the obligations
+        // so that we got both the obligations from the opaque type and the ones from the inference
+        // variable. That will accept more code than we do right now, so we need to carefully consider
+        // the implications.
+        // Note: this check is pessimistic, as the inference type could be matched with something other
+        // than the opaque type, but then we need a new `TypeRelation` just for this specific case and
+        // can't re-use `sup` below.
+        // See src/test/ui/impl-trait/hidden-type-is-opaque.rs and
+        // src/test/ui/impl-trait/hidden-type-is-opaque-2.rs for examples that hit this path.
+        if formal_ret.has_infer_types() {
+            for ty in ret_ty.walk() {
+                if let ty::subst::GenericArgKind::Type(ty) = ty.unpack() {
+                    if let ty::Opaque(def_id, _) = *ty.kind() {
+                        if self.infcx.opaque_type_origin(def_id, DUMMY_SP).is_some() {
+                            return Vec::new();
+                        }
+                    }
+                }
+            }
+        }
+
         let expect_args = self
             .fudge_inference_if_ok(|| {
                 // Attempt to apply a subtyping relationship between the formal
@@ -882,7 +916,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             .or_else(|error| {
                 let result = match error {
                     method::MethodError::PrivateMatch(kind, def_id, _) => Ok((kind, def_id)),
-                    _ => Err(ErrorReported),
+                    _ => Err(ErrorGuaranteed::unchecked_claim_error_was_emitted()),
                 };
 
                 // If we have a path like `MyTrait::missing_method`, then don't register
@@ -959,7 +993,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     pub(in super::super) fn note_internal_mutation_in_method(
         &self,
-        err: &mut DiagnosticBuilder<'_>,
+        err: &mut Diagnostic,
         expr: &hir::Expr<'_>,
         expected: Ty<'tcx>,
         found: Ty<'tcx>,
@@ -1004,7 +1038,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     pub(in super::super) fn note_need_for_fn_pointer(
         &self,
-        err: &mut DiagnosticBuilder<'_>,
+        err: &mut Diagnostic,
         expected: Ty<'tcx>,
         found: Ty<'tcx>,
     ) {
@@ -1047,9 +1081,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // Be helpful when the user wrote `{... expr;}` and
         // taking the `;` off is enough to fix the error.
         let last_stmt = blk.stmts.last()?;
-        let last_expr = match last_stmt.kind {
-            hir::StmtKind::Semi(ref e) => e,
-            _ => return None,
+        let hir::StmtKind::Semi(ref last_expr) = last_stmt.kind else {
+            return None;
         };
         let last_expr_ty = self.node_ty(last_expr.hir_id);
         let needs_box = match (last_expr_ty.kind(), expected_ty.kind()) {
@@ -1064,11 +1097,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     last_def_id, last_bounds, exp_def_id, exp_bounds
                 );
 
-                let (last_local_id, exp_local_id) =
-                    match (last_def_id.as_local(), exp_def_id.as_local()) {
-                        (Some(last_hir_id), Some(exp_hir_id)) => (last_hir_id, exp_hir_id),
-                        (_, _) => return None,
-                    };
+                let last_local_id = last_def_id.as_local()?;
+                let exp_local_id = exp_def_id.as_local()?;
 
                 match (
                     &self.tcx.hir().expect_item(last_local_id).kind,
@@ -1149,7 +1179,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 if let Some(self_ty) = self_ty =>
             {
                 let adt_def = self_ty.ty_adt_def().unwrap();
-                user_self_ty = Some(UserSelfTy { impl_def_id: adt_def.did, self_ty });
+                user_self_ty = Some(UserSelfTy { impl_def_id: adt_def.did(), self_ty });
                 is_alias_variant_ctor = true;
             }
             Res::Def(DefKind::AssocFn | DefKind::AssocConst, def_id) => {
@@ -1386,7 +1416,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             self.fcx.var_for_def(self.span, param)
                         }
                     }
-                    GenericParamDefKind::Const { has_default, .. } => {
+                    GenericParamDefKind::Const { has_default } => {
                         if !infer_args && has_default {
                             tcx.const_param_default(param.def_id)
                                 .subst_spanned(tcx, substs.unwrap(), Some(self.span))

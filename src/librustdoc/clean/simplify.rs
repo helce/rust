@@ -54,14 +54,8 @@ crate fn where_clauses(cx: &DocContext<'_>, clauses: Vec<WP>) -> Vec<WP> {
         let Some((self_, trait_did, name)) = lhs.projection() else {
             return true;
         };
-        let generic = match self_ {
-            clean::Generic(s) => s,
-            _ => return true,
-        };
-        let (bounds, _) = match params.get_mut(generic) {
-            Some(bound) => bound,
-            None => return true,
-        };
+        let clean::Generic(generic) = self_ else { return true };
+        let Some((bounds, _)) = params.get_mut(generic) else { return true };
 
         merge_bounds(cx, bounds, trait_did, name, rhs)
     });
@@ -89,7 +83,7 @@ crate fn merge_bounds(
     cx: &clean::DocContext<'_>,
     bounds: &mut Vec<clean::GenericBound>,
     trait_did: DefId,
-    name: Symbol,
+    assoc: clean::PathSegment,
     rhs: &clean::Term,
 ) -> bool {
     !bounds.iter_mut().any(|b| {
@@ -107,7 +101,7 @@ crate fn merge_bounds(
         match last.args {
             PP::AngleBracketed { ref mut bindings, .. } => {
                 bindings.push(clean::TypeBinding {
-                    name,
+                    assoc: assoc.clone(),
                     kind: clean::TypeBindingKind::Equality { term: rhs.clone() },
                 });
             }

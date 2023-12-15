@@ -4,8 +4,9 @@ use rustc_errors::{emitter::Emitter, Applicability, Diagnostic, Handler};
 use rustc_middle::lint::LintDiagnosticBuilder;
 use rustc_parse::parse_stream_from_source_str;
 use rustc_session::parse::ParseSess;
+use rustc_span::hygiene::{AstPass, ExpnData, ExpnKind, LocalExpnId};
 use rustc_span::source_map::{FilePathMapping, SourceMap};
-use rustc_span::{hygiene::AstPass, ExpnData, ExpnKind, FileName, InnerSpan, DUMMY_SP};
+use rustc_span::{FileName, InnerSpan, DUMMY_SP};
 
 use crate::clean;
 use crate::core::DocContext;
@@ -46,7 +47,8 @@ impl<'a, 'tcx> SyntaxChecker<'a, 'tcx> {
             None,
             None,
         );
-        let span = DUMMY_SP.fresh_expansion(expn_data, self.cx.tcx.create_stable_hashing_context());
+        let expn_id = LocalExpnId::fresh(expn_data, self.cx.tcx.create_stable_hashing_context());
+        let span = DUMMY_SP.fresh_expansion(expn_id);
 
         let is_empty = rustc_driver::catch_fatal_errors(|| {
             parse_stream_from_source_str(
@@ -65,11 +67,11 @@ impl<'a, 'tcx> SyntaxChecker<'a, 'tcx> {
             return;
         }
 
-        let local_id = match item.def_id.as_def_id().and_then(|x| x.as_local()) {
-            Some(id) => id,
+        let Some(local_id) = item.def_id.as_def_id().and_then(|x| x.as_local())
+        else {
             // We don't need to check the syntax for other crates so returning
             // without doing anything should not be a problem.
-            None => return,
+            return;
         };
 
         let hir_id = self.cx.tcx.hir().local_def_id_to_hir_id(local_id);
@@ -89,7 +91,7 @@ impl<'a, 'tcx> SyntaxChecker<'a, 'tcx> {
 
         // lambda that will use the lint to start a new diagnostic and add
         // a suggestion to it when needed.
-        let diag_builder = |lint: LintDiagnosticBuilder<'_>| {
+        let diag_builder = |lint: LintDiagnosticBuilder<'_, ()>| {
             let explanation = if is_ignore {
                 "`ignore` code blocks require valid Rust code for syntax highlighting; \
                     mark blocks that do not contain Rust code as text"

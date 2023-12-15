@@ -200,7 +200,7 @@ macro_rules! acquire {
 ///     let five = Arc::clone(&five);
 ///
 ///     thread::spawn(move || {
-///         println!("{:?}", five);
+///         println!("{five:?}");
 ///     });
 /// }
 /// ```
@@ -221,7 +221,7 @@ macro_rules! acquire {
 ///
 ///     thread::spawn(move || {
 ///         let v = val.fetch_add(1, Ordering::SeqCst);
-///         println!("{:?}", v);
+///         println!("{v:?}");
 ///     });
 /// }
 /// ```
@@ -895,7 +895,8 @@ impl<T: ?Sized> Arc<T> {
             let offset = data_offset(ptr);
 
             // Reverse the offset to find the original ArcInner.
-            let arc_ptr = (ptr as *mut ArcInner<T>).set_ptr_value((ptr as *mut u8).offset(-offset));
+            let arc_ptr =
+                (ptr as *mut u8).offset(-offset).with_metadata_of(ptr as *mut ArcInner<T>);
 
             Self::from_ptr(arc_ptr)
         }
@@ -1182,7 +1183,7 @@ impl<T: ?Sized> Arc<T> {
             Self::allocate_for_layout(
                 Layout::for_value(&*ptr),
                 |layout| Global.allocate(layout),
-                |mem| (ptr as *mut ArcInner<T>).set_ptr_value(mem) as *mut ArcInner<T>,
+                |mem| mem.with_metadata_of(ptr as *mut ArcInner<T>),
             )
         }
     }
@@ -1742,9 +1743,10 @@ impl<T> Weak<T> {
     /// assert!(empty.upgrade().is_none());
     /// ```
     #[stable(feature = "downgraded_weak", since = "1.10.0")]
+    #[rustc_const_unstable(feature = "const_weak_new", issue = "95091", reason = "recently added")]
     #[must_use]
-    pub fn new() -> Weak<T> {
-        Weak { ptr: NonNull::new(usize::MAX as *mut ArcInner<T>).expect("MAX is not 0") }
+    pub const fn new() -> Weak<T> {
+        Weak { ptr: unsafe { NonNull::new_unchecked(ptr::invalid_mut::<ArcInner<T>>(usize::MAX)) } }
     }
 }
 
@@ -1887,7 +1889,7 @@ impl<T: ?Sized> Weak<T> {
             let offset = unsafe { data_offset(ptr) };
             // Thus, we reverse the offset to get the whole RcBox.
             // SAFETY: the pointer originated from a Weak, so this offset is safe.
-            unsafe { (ptr as *mut ArcInner<T>).set_ptr_value((ptr as *mut u8).offset(-offset)) }
+            unsafe { (ptr as *mut u8).offset(-offset).with_metadata_of(ptr as *mut ArcInner<T>) }
         };
 
         // SAFETY: we now have recovered the original Weak pointer, so can create the Weak.

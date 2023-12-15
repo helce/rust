@@ -14,7 +14,7 @@
 
 use either::Either;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_errors::DiagnosticBuilder;
+use rustc_errors::Diagnostic;
 use rustc_hir as hir;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::lang_items::LangItem;
@@ -336,7 +336,7 @@ impl<'tcx> UniversalRegions<'tcx> {
     /// that this region imposes on others. The methods in this file
     /// handle the part about dumping the inference context internal
     /// state.
-    crate fn annotate(&self, tcx: TyCtxt<'tcx>, err: &mut DiagnosticBuilder<'_>) {
+    crate fn annotate(&self, tcx: TyCtxt<'tcx>, err: &mut Diagnostic) {
         match self.defining_ty {
             DefiningTy::Closure(def_id, substs) => {
                 err.note(&format!(
@@ -524,7 +524,7 @@ impl<'cx, 'tcx> UniversalRegionsBuilder<'cx, 'tcx> {
         let tcx = self.infcx.tcx;
         let typeck_root_def_id = tcx.typeck_root_def_id(self.mir_def.did.to_def_id());
 
-        match tcx.hir().body_owner_kind(self.mir_hir_id) {
+        match tcx.hir().body_owner_kind(self.mir_def.did) {
             BodyOwnerKind::Closure | BodyOwnerKind::Fn => {
                 let defining_ty = if self.mir_def.did.to_def_id() == typeck_root_def_id {
                     tcx.type_of(typeck_root_def_id)
@@ -641,16 +641,13 @@ impl<'cx, 'tcx> UniversalRegionsBuilder<'cx, 'tcx> {
                 let (&output, tuplized_inputs) =
                     inputs_and_output.skip_binder().split_last().unwrap();
                 assert_eq!(tuplized_inputs.len(), 1, "multiple closure inputs");
-                let inputs = match tuplized_inputs[0].kind() {
-                    ty::Tuple(inputs) => inputs,
-                    _ => bug!("closure inputs not a tuple: {:?}", tuplized_inputs[0]),
+                let &ty::Tuple(inputs) = tuplized_inputs[0].kind() else {
+                    bug!("closure inputs not a tuple: {:?}", tuplized_inputs[0]);
                 };
 
                 ty::Binder::bind_with_vars(
                     tcx.mk_type_list(
-                        iter::once(closure_ty)
-                            .chain(inputs.iter().map(|k| k.expect_ty()))
-                            .chain(iter::once(output)),
+                        iter::once(closure_ty).chain(inputs).chain(iter::once(output)),
                     ),
                     bound_vars,
                 )
@@ -728,6 +725,7 @@ impl<'cx, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'cx, 'tcx> {
         self.tcx.fold_regions(value, &mut false, |_region, _depth| self.next_nll_region_var(origin))
     }
 
+    #[instrument(level = "debug", skip(self, indices))]
     fn replace_bound_regions_with_nll_infer_vars<T>(
         &self,
         origin: NllRegionVariableOrigin,
@@ -738,22 +736,15 @@ impl<'cx, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'cx, 'tcx> {
     where
         T: TypeFoldable<'tcx>,
     {
-        debug!(
-            "replace_bound_regions_with_nll_infer_vars(value={:?}, all_outlive_scope={:?})",
-            value, all_outlive_scope,
-        );
         let (value, _map) = self.tcx.replace_late_bound_regions(value, |br| {
-            debug!("replace_bound_regions_with_nll_infer_vars: br={:?}", br);
+            debug!(?br);
             let liberated_region = self.tcx.mk_region(ty::ReFree(ty::FreeRegion {
                 scope: all_outlive_scope.to_def_id(),
                 bound_region: br.kind,
             }));
             let region_vid = self.next_nll_region_var(origin);
             indices.insert_late_bound_region(liberated_region, region_vid.to_region_vid());
-            debug!(
-                "replace_bound_regions_with_nll_infer_vars: liberated_region={:?} => {:?}",
-                liberated_region, region_vid
-            );
+            debug!(?liberated_region, ?region_vid);
             region_vid
         });
         value
@@ -768,6 +759,7 @@ impl<'cx, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'cx, 'tcx> {
     /// entries for them and store them in the indices map. This code iterates over the complete
     /// set of late-bound regions and checks for any that we have not yet seen, adding them to the
     /// inputs vector.
+    #[instrument(skip(self, indices))]
     fn replace_late_bound_regions_with_nll_infer_vars(
         &self,
         mir_def_id: LocalDefId,
@@ -779,6 +771,7 @@ impl<'cx, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'cx, 'tcx> {
             debug!("replace_late_bound_regions_with_nll_infer_vars: r={:?}", r);
             if !indices.indices.contains_key(&r) {
                 let region_vid = self.next_nll_region_var(FR);
+                debug!(?region_vid);
                 indices.insert_late_bound_region(r, region_vid.to_region_vid());
             }
         });

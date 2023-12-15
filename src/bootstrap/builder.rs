@@ -11,8 +11,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use build_helper::{output, t};
-
 use crate::cache::{Cache, Interned, INTERNER};
 use crate::check;
 use crate::compile;
@@ -25,7 +23,8 @@ use crate::native;
 use crate::run;
 use crate::test;
 use crate::tool::{self, SourceType};
-use crate::util::{self, add_dylib_path, add_link_lib_path, exe, libdir};
+use crate::util::{self, add_dylib_path, add_link_lib_path, exe, libdir, output, t};
+use crate::EXTRA_CHECK_CFGS;
 use crate::{Build, CLang, DocTests, GitRepo, Mode};
 
 pub use crate::Compiler;
@@ -170,7 +169,7 @@ impl PathSet {
 
     fn one<P: Into<PathBuf>>(path: P, kind: Kind) -> PathSet {
         let mut set = BTreeSet::new();
-        set.insert(TaskPath { path: path.into(), kind: Some(kind.into()) });
+        set.insert(TaskPath { path: path.into(), kind: Some(kind) });
         PathSet::Set(set)
     }
 
@@ -232,10 +231,10 @@ impl StepDescription {
         }
 
         if !builder.config.exclude.is_empty() {
-            eprintln!(
+            builder.verbose(&format!(
                 "{:?} not skipped for {:?} -- not in {:?}",
                 pathset, self.name, builder.config.exclude
-            );
+            ));
         }
         false
     }
@@ -373,10 +372,7 @@ impl<'a> ShouldRun<'a> {
     // multiple aliases for the same job
     pub fn paths(mut self, paths: &[&str]) -> Self {
         self.paths.insert(PathSet::Set(
-            paths
-                .iter()
-                .map(|p| TaskPath { path: p.into(), kind: Some(self.kind.into()) })
-                .collect(),
+            paths.iter().map(|p| TaskPath { path: p.into(), kind: Some(self.kind) }).collect(),
         ));
         self
     }
@@ -389,8 +385,7 @@ impl<'a> ShouldRun<'a> {
     }
 
     pub fn suite_path(mut self, suite: &str) -> Self {
-        self.paths
-            .insert(PathSet::Suite(TaskPath { path: suite.into(), kind: Some(self.kind.into()) }));
+        self.paths.insert(PathSet::Suite(TaskPath { path: suite.into(), kind: Some(self.kind) }));
         self
     }
 
@@ -599,7 +594,7 @@ impl<'a> Builder<'a> {
                 dist::RustDev,
                 dist::Extended,
                 // It seems that PlainSourceTarball somehow changes how some of the tools
-                // perceive their dependencies (see #93033) which would invaliate fingerprints
+                // perceive their dependencies (see #93033) which would invalidate fingerprints
                 // and force us to rebuild tools after vendoring dependencies.
                 // To work around this, create the Tarball after building all the tools.
                 dist::PlainSourceTarball,
@@ -884,7 +879,7 @@ impl<'a> Builder<'a> {
     }
 
     pub fn rustdoc_cmd(&self, compiler: Compiler) -> Command {
-        let mut cmd = Command::new(&self.out.join("bootstrap/debug/rustdoc"));
+        let mut cmd = Command::new(&self.bootstrap_out.join("rustdoc"));
         cmd.env("RUSTC_STAGE", compiler.stage.to_string())
             .env("RUSTC_SYSROOT", self.sysroot(compiler))
             // Note that this is *not* the sysroot_libdir because rustdoc must be linked
@@ -1010,7 +1005,7 @@ impl<'a> Builder<'a> {
             // the rustc_llvm cache. That will always work, even though it
             // may mean that on the next non-check build we'll need to rebuild
             // rustc_llvm. But if LLVM is stale, that'll be a tiny amount
-            // of work comparitively, and we'd likely need to rebuild it anyway,
+            // of work comparatively, and we'd likely need to rebuild it anyway,
             // so that's okay.
             if crate::native::prebuilt_llvm_config(self, target).is_err() {
                 cargo.env("RUST_CHECK", "1");
@@ -1093,6 +1088,38 @@ impl<'a> Builder<'a> {
         } else {
             rustflags.arg("-Csymbol-mangling-version=legacy");
             rustflags.arg("-Zunstable-options");
+        }
+
+        // #[cfg(not(bootstrap)]
+        if stage != 0 {
+            // Enable cfg checking of cargo features
+            // FIXME: De-comment this when cargo beta get support for it
+            // cargo.arg("-Zcheck-cfg-features");
+
+            // Enable cfg checking of rustc well-known names
+            rustflags
+                .arg("-Zunstable-options")
+                // Enable checking of well known names
+                .arg("--check-cfg=names()")
+                // Enable checking of well known values
+                .arg("--check-cfg=values()");
+
+            // Add extra cfg not defined in rustc
+            for (restricted_mode, name, values) in EXTRA_CHECK_CFGS {
+                if *restricted_mode == None || *restricted_mode == Some(mode) {
+                    // Creating a string of the values by concatenating each value:
+                    // ',"tvos","watchos"' or '' (nothing) when there are no values
+                    let values = match values {
+                        Some(values) => values
+                            .iter()
+                            .map(|val| [",", "\"", val, "\""])
+                            .flatten()
+                            .collect::<String>(),
+                        None => String::new(),
+                    };
+                    rustflags.arg(&format!("--check-cfg=values({name}{values})"));
+                }
+            }
         }
 
         // FIXME: It might be better to use the same value for both `RUSTFLAGS` and `RUSTDOCFLAGS`,
@@ -1223,7 +1250,7 @@ impl<'a> Builder<'a> {
             .env("RUSTC_STAGE", stage.to_string())
             .env("RUSTC_SYSROOT", &sysroot)
             .env("RUSTC_LIBDIR", &libdir)
-            .env("RUSTDOC", self.out.join("bootstrap/debug/rustdoc"))
+            .env("RUSTDOC", self.bootstrap_out.join("rustdoc"))
             .env(
                 "RUSTDOC_REAL",
                 if cmd == "doc" || cmd == "rustdoc" || (cmd == "test" && want_rustdoc) {
@@ -1237,7 +1264,7 @@ impl<'a> Builder<'a> {
         // Clippy support is a hack and uses the default `cargo-clippy` in path.
         // Don't override RUSTC so that the `cargo-clippy` in path will be run.
         if cmd != "clippy" {
-            cargo.env("RUSTC", self.out.join("bootstrap/debug/rustc"));
+            cargo.env("RUSTC", self.bootstrap_out.join("rustc"));
         }
 
         // Dealing with rpath here is a little special, so let's go into some
@@ -1743,7 +1770,7 @@ impl<'a> Builder<'a> {
             if should_run.paths.iter().any(|s| s.has(path, Some(desc.kind)))
                 && !desc.is_excluded(
                     self,
-                    &PathSet::Suite(TaskPath { path: path.clone(), kind: Some(desc.kind.into()) }),
+                    &PathSet::Suite(TaskPath { path: path.clone(), kind: Some(desc.kind) }),
                 )
             {
                 return true;
@@ -1768,7 +1795,7 @@ impl Rustflags {
     }
 
     /// By default, cargo will pick up on various variables in the environment. However, bootstrap
-    /// reuses those variables to pass additional flags to rustdoc, so by default they get overriden.
+    /// reuses those variables to pass additional flags to rustdoc, so by default they get overridden.
     /// Explicitly add back any previous value in the environment.
     ///
     /// `prefix` is usually `RUSTFLAGS` or `RUSTDOCFLAGS`.

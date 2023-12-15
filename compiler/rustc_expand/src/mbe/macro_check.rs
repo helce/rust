@@ -278,8 +278,10 @@ fn check_binders(
                 binders.insert(name, BinderInfo { span, ops: ops.into() });
             }
         }
+        // `MetaVarExpr` can not appear in the LHS of a macro arm
+        TokenTree::MetaVarExpr(..) => {}
         TokenTree::Delimited(_, ref del) => {
-            for tt in &del.tts {
+            for tt in del.inner_tts() {
                 check_binders(sess, node_id, tt, macros, binders, ops, valid);
             }
         }
@@ -335,8 +337,14 @@ fn check_occurrences(
             let name = MacroRulesNormalizedIdent::new(name);
             check_ops_is_prefix(sess, node_id, macros, binders, ops, span, name);
         }
+        TokenTree::MetaVarExpr(dl, ref mve) => {
+            let Some(name) = mve.ident().map(MacroRulesNormalizedIdent::new) else {
+                return;
+            };
+            check_ops_is_prefix(sess, node_id, macros, binders, ops, dl.entire(), name);
+        }
         TokenTree::Delimited(_, ref del) => {
-            check_nested_occurrences(sess, node_id, &del.tts, macros, binders, ops, valid);
+            check_nested_occurrences(sess, node_id, del.inner_tts(), macros, binders, ops, valid);
         }
         TokenTree::Sequence(_, ref seq) => {
             let ops = ops.push(seq.kleene);
@@ -423,14 +431,20 @@ fn check_nested_occurrences(
             {
                 let macro_rules = state == NestedMacroState::MacroRulesNotName;
                 state = NestedMacroState::Empty;
-                let rest =
-                    check_nested_macro(sess, node_id, macro_rules, &del.tts, &nested_macros, valid);
+                let rest = check_nested_macro(
+                    sess,
+                    node_id,
+                    macro_rules,
+                    del.inner_tts(),
+                    &nested_macros,
+                    valid,
+                );
                 // If we did not check the whole macro definition, then check the rest as if outside
                 // the macro definition.
                 check_nested_occurrences(
                     sess,
                     node_id,
-                    &del.tts[rest..],
+                    &del.inner_tts()[rest..],
                     macros,
                     binders,
                     ops,

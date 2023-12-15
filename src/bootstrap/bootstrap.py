@@ -1234,16 +1234,18 @@ def bootstrap(help_triggered):
     build.verbose = args.verbose
     build.clean = args.clean
 
-    # Read from `--config`, then `RUST_BOOTSTRAP_CONFIG`, then fallback to `config.toml` (if it
-    # exists).
+    # Read from `--config`, then `RUST_BOOTSTRAP_CONFIG`, then `./config.toml`,
+    # then `config.toml` in the root directory.
     toml_path = args.config or os.getenv('RUST_BOOTSTRAP_CONFIG')
-    if not toml_path and os.path.exists('config.toml'):
+    using_default_path = toml_path is None
+    if using_default_path:
         toml_path = 'config.toml'
-
-    if toml_path:
         if not os.path.exists(toml_path):
             toml_path = os.path.join(build.rust_root, toml_path)
 
+    # Give a hard error if `--config` or `RUST_BOOTSTRAP_CONFIG` are set to a missing path,
+    # but not if `config.toml` hasn't been created.
+    if not using_default_path or os.path.exists(toml_path):
         with open(toml_path) as config:
             build.config_toml = config.read()
 
@@ -1268,7 +1270,7 @@ def bootstrap(help_triggered):
     build.check_vendored_status()
 
     build_dir = build.get_toml('build-dir', 'build') or 'build'
-    build.build_dir = os.path.abspath(build_dir.replace("$ROOT", build.rust_root))
+    build.build_dir = os.path.abspath(build_dir)
 
     with open(os.path.join(build.rust_root, "src", "stage0.json")) as f:
         data = json.load(f)
@@ -1303,10 +1305,7 @@ def bootstrap(help_triggered):
     env = os.environ.copy()
     env["BOOTSTRAP_PARENT_ID"] = str(os.getpid())
     env["BOOTSTRAP_PYTHON"] = sys.executable
-    env["BUILD_DIR"] = build.build_dir
     env["RUSTC_BOOTSTRAP"] = '1'
-    if toml_path:
-        env["BOOTSTRAP_CONFIG"] = toml_path
     if build.rustc_commit is not None:
         env["BOOTSTRAP_DOWNLOAD_RUSTC"] = '1'
     run(args, env=env, verbose=build.verbose, is_bootstrap=True)

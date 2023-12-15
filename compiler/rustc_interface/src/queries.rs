@@ -3,9 +3,9 @@ use crate::passes::{self, BoxedResolver, QueryContext};
 
 use rustc_ast as ast;
 use rustc_codegen_ssa::traits::CodegenBackend;
+use rustc_codegen_ssa::CodegenResults;
 use rustc_data_structures::svh::Svh;
 use rustc_data_structures::sync::{Lrc, OnceCell, WorkerLocal};
-use rustc_errors::ErrorReported;
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_incremental::DepGraphFuture;
 use rustc_lint::LintStore;
@@ -121,10 +121,8 @@ impl<'tcx> Queries<'tcx> {
 
     pub fn parse(&self) -> Result<&Query<ast::Crate>> {
         self.parse.compute(|| {
-            passes::parse(self.session(), &self.compiler.input).map_err(|mut parse_error| {
-                parse_error.emit();
-                ErrorReported
-            })
+            passes::parse(self.session(), &self.compiler.input)
+                .map_err(|mut parse_error| parse_error.emit())
         })
     }
 
@@ -259,10 +257,7 @@ impl<'tcx> Queries<'tcx> {
     /// to write UI tests that actually test that compilation succeeds without reporting
     /// an error.
     fn check_for_rustc_errors_attr(tcx: TyCtxt<'_>) {
-        let def_id = match tcx.entry_fn(()) {
-            Some((def_id, _)) => def_id,
-            _ => return,
-        };
+        let Some((def_id, _)) = tcx.entry_fn(()) else { return };
 
         let attrs = &*tcx.get_attrs(def_id);
         let attrs = attrs.iter().filter(|attr| attr.has_name(sym::rustc_error));
@@ -366,10 +361,9 @@ impl Linker {
         }
 
         if sess.opts.debugging_opts.no_link {
-            let mut encoder = rustc_serialize::opaque::Encoder::new(Vec::new());
-            rustc_serialize::Encodable::encode(&codegen_results, &mut encoder).unwrap();
+            let encoded = CodegenResults::serialize_rlink(&codegen_results);
             let rlink_file = self.prepare_outputs.with_extension(config::RLINK_EXT);
-            std::fs::write(&rlink_file, encoder.into_inner()).map_err(|err| {
+            std::fs::write(&rlink_file, encoded).map_err(|err| {
                 sess.fatal(&format!("failed to write file {}: {}", rlink_file.display(), err));
             })?;
             return Ok(());

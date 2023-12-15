@@ -1,13 +1,13 @@
 //! Parsing and validation of builtin attributes
 
 use rustc_ast as ast;
-use rustc_ast::node_id::CRATE_NODE_ID;
-use rustc_ast::{Attribute, Lit, LitKind, MetaItem, MetaItemKind, NestedMetaItem};
+use rustc_ast::{Attribute, Lit, LitKind, MetaItem, MetaItemKind, NestedMetaItem, NodeId};
 use rustc_ast_pretty::pprust;
 use rustc_errors::{struct_span_err, Applicability};
 use rustc_feature::{find_gated_cfg, is_builtin_attr_name, Features, GatedCfg};
 use rustc_macros::HashStable_Generic;
 use rustc_session::lint::builtin::UNEXPECTED_CFGS;
+use rustc_session::lint::BuiltinLintDiagnostics;
 use rustc_session::parse::{feature_err, ParseSess};
 use rustc_session::Session;
 use rustc_span::hygiene::Transparency;
@@ -435,7 +435,12 @@ pub fn find_crate_name(sess: &Session, attrs: &[Attribute]) -> Option<Symbol> {
 }
 
 /// Tests if a cfg-pattern matches the cfg set
-pub fn cfg_matches(cfg: &ast::MetaItem, sess: &ParseSess, features: Option<&Features>) -> bool {
+pub fn cfg_matches(
+    cfg: &ast::MetaItem,
+    sess: &ParseSess,
+    lint_node_id: NodeId,
+    features: Option<&Features>,
+) -> bool {
     eval_condition(cfg, sess, features, &mut |cfg| {
         try_gate_cfg(cfg, sess, features);
         let error = |span, msg| {
@@ -461,27 +466,34 @@ pub fn cfg_matches(cfg: &ast::MetaItem, sess: &ParseSess, features: Option<&Feat
                 true
             }
             MetaItemKind::NameValue(..) | MetaItemKind::Word => {
-                let name = cfg.ident().expect("multi-segment cfg predicate").name;
+                let ident = cfg.ident().expect("multi-segment cfg predicate");
+                let name = ident.name;
                 let value = cfg.value_str();
-                if sess.check_config.names_checked && !sess.check_config.names_valid.contains(&name)
-                {
-                    sess.buffer_lint(
-                        UNEXPECTED_CFGS,
-                        cfg.span,
-                        CRATE_NODE_ID,
-                        "unexpected `cfg` condition name",
-                    );
-                }
-                if let Some(val) = value {
-                    if sess.check_config.values_checked.contains(&name)
-                        && !sess.check_config.values_valid.contains(&(name, val))
-                    {
-                        sess.buffer_lint(
+                if let Some(names_valid) = &sess.check_config.names_valid {
+                    if !names_valid.contains(&name) {
+                        sess.buffer_lint_with_diagnostic(
                             UNEXPECTED_CFGS,
                             cfg.span,
-                            CRATE_NODE_ID,
-                            "unexpected `cfg` condition value",
+                            lint_node_id,
+                            "unexpected `cfg` condition name",
+                            BuiltinLintDiagnostics::UnexpectedCfg((name, ident.span), None),
                         );
+                    }
+                }
+                if let Some(value) = value {
+                    if let Some(values) = &sess.check_config.values_valid.get(&name) {
+                        if !values.contains(&value) {
+                            sess.buffer_lint_with_diagnostic(
+                                UNEXPECTED_CFGS,
+                                cfg.span,
+                                lint_node_id,
+                                "unexpected `cfg` condition value",
+                                BuiltinLintDiagnostics::UnexpectedCfg(
+                                    (name, ident.span),
+                                    Some((value, cfg.name_value_literal_span().unwrap())),
+                                ),
+                            );
+                        }
                     }
                 }
                 sess.config.contains(&(name, value))
@@ -556,17 +568,14 @@ pub fn eval_condition(
                     return false;
                 }
             };
-            let min_version = match parse_version(min_version.as_str(), false) {
-                Some(ver) => ver,
-                None => {
-                    sess.span_diagnostic
-                        .struct_span_warn(
-                            *span,
-                            "unknown version literal format, assuming it refers to a future version",
-                        )
-                        .emit();
-                    return false;
-                }
+            let Some(min_version) = parse_version(min_version.as_str(), false) else {
+                sess.span_diagnostic
+                    .struct_span_warn(
+                        *span,
+                        "unknown version literal format, assuming it refers to a future version",
+                    )
+                    .emit();
+                return false;
             };
             let rustc_version = parse_version(env!("CFG_RELEASE"), true).unwrap();
 
@@ -594,10 +603,18 @@ pub fn eval_condition(
             match cfg.name_or_empty() {
                 sym::any => mis
                     .iter()
-                    .any(|mi| eval_condition(mi.meta_item().unwrap(), sess, features, eval)),
+                    // We don't use any() here, because we want to evaluate all cfg condition
+                    // as eval_condition can (and does) extra checks
+                    .fold(false, |res, mi| {
+                        res | eval_condition(mi.meta_item().unwrap(), sess, features, eval)
+                    }),
                 sym::all => mis
                     .iter()
-                    .all(|mi| eval_condition(mi.meta_item().unwrap(), sess, features, eval)),
+                    // We don't use all() here, because we want to evaluate all cfg condition
+                    // as eval_condition can (and does) extra checks
+                    .fold(true, |res, mi| {
+                        res & eval_condition(mi.meta_item().unwrap(), sess, features, eval)
+                    }),
                 sym::not => {
                     if mis.len() != 1 {
                         struct_span_err!(
@@ -655,6 +672,7 @@ where
 {
     let mut depr: Option<(Deprecation, Span)> = None;
     let diagnostic = &sess.parse_sess.span_diagnostic;
+    let is_rustc = sess.features_untracked().staged_api;
 
     'outer: for attr in attrs_iter {
         if !(attr.has_name(sym::deprecated) || attr.has_name(sym::rustc_deprecated)) {
@@ -669,9 +687,8 @@ where
             break;
         }
 
-        let meta = match attr.meta() {
-            Some(meta) => meta,
-            None => continue,
+        let Some(meta) = attr.meta() else {
+            continue;
         };
         let mut since = None;
         let mut note = None;
@@ -720,17 +737,30 @@ where
                                     continue 'outer;
                                 }
                             }
-                            sym::note if attr.has_name(sym::deprecated) => {
+                            sym::note => {
                                 if !get(mi, &mut note) {
                                     continue 'outer;
                                 }
                             }
+                            // FIXME(jhpratt) remove this after a bootstrap occurs. Emitting an
+                            // error specific to the renaming would be a good idea as well.
                             sym::reason if attr.has_name(sym::rustc_deprecated) => {
                                 if !get(mi, &mut note) {
                                     continue 'outer;
                                 }
                             }
-                            sym::suggestion if attr.has_name(sym::rustc_deprecated) => {
+                            sym::suggestion => {
+                                if !sess.features_untracked().deprecated_suggestion {
+                                    let mut diag = sess.struct_span_err(
+                                        mi.span,
+                                        "suggestions on deprecated items are unstable",
+                                    );
+                                    if sess.is_nightly_build() {
+                                        diag.help("add `#![feature(deprecated_suggestion)]` to the crate root");
+                                    }
+                                    diag.note("see #94785 for more details").emit();
+                                }
+
                                 if !get(mi, &mut suggestion) {
                                     continue 'outer;
                                 }
@@ -741,10 +771,10 @@ where
                                     meta.span(),
                                     AttrError::UnknownMetaItem(
                                         pprust::path_to_string(&mi.path),
-                                        if attr.has_name(sym::deprecated) {
-                                            &["since", "note"]
+                                        if sess.features_untracked().deprecated_suggestion {
+                                            &["since", "note", "suggestion"]
                                         } else {
-                                            &["since", "reason", "suggestion"]
+                                            &["since", "note"]
                                         },
                                     ),
                                 );
@@ -767,24 +797,22 @@ where
             }
         }
 
-        if suggestion.is_some() && attr.has_name(sym::deprecated) {
-            unreachable!("only allowed on rustc_deprecated")
-        }
-
-        if attr.has_name(sym::rustc_deprecated) {
+        if is_rustc {
             if since.is_none() {
                 handle_errors(&sess.parse_sess, attr.span, AttrError::MissingSince);
                 continue;
             }
 
             if note.is_none() {
-                struct_span_err!(diagnostic, attr.span, E0543, "missing 'reason'").emit();
+                struct_span_err!(diagnostic, attr.span, E0543, "missing 'note'").emit();
                 continue;
             }
         }
 
-        let is_since_rustc_version = attr.has_name(sym::rustc_deprecated);
-        depr = Some((Deprecation { since, note, suggestion, is_since_rustc_version }, attr.span));
+        depr = Some((
+            Deprecation { since, note, suggestion, is_since_rustc_version: is_rustc },
+            attr.span,
+        ));
     }
 
     depr

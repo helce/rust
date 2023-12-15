@@ -6,10 +6,10 @@
 macro_rules! arena_types {
     ($macro:path) => (
         $macro!([
-            [] layout: rustc_target::abi::Layout,
+            [] layout: rustc_target::abi::LayoutS<'tcx>,
             [] fn_abi: rustc_target::abi::call::FnAbi<'tcx, rustc_middle::ty::Ty<'tcx>>,
             // AdtDef are interned and compared by address
-            [decode] adt_def: rustc_middle::ty::AdtDef,
+            [decode] adt_def: rustc_middle::ty::AdtDefData,
             [] steal_thir: rustc_data_structures::steal::Steal<rustc_middle::thir::Thir<'tcx>>,
             [] steal_mir: rustc_data_structures::steal::Steal<rustc_middle::mir::Body<'tcx>>,
             [decode] mir: rustc_middle::mir::Body<'tcx>,
@@ -52,7 +52,7 @@ macro_rules! arena_types {
                         Vec<rustc_middle::traits::query::OutlivesBound<'tcx>>
                     >
                 >,
-            [] dtorck_constraint: rustc_middle::traits::query::DtorckConstraint<'tcx>,
+            [] dtorck_constraint: rustc_middle::traits::query::DropckConstraint<'tcx>,
             [] candidate_step: rustc_middle::traits::query::CandidateStep<'tcx>,
             [] autoderef_bad_ty: rustc_middle::traits::query::MethodAutoderefBadTy<'tcx>,
             [] type_op_subtype:

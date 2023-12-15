@@ -16,13 +16,12 @@ pub mod alloc;
 pub mod args;
 pub mod c;
 pub mod cmath;
-pub mod condvar;
 pub mod env;
 pub mod fs;
 pub mod handle;
 pub mod io;
+pub mod locks;
 pub mod memchr;
-pub mod mutex;
 pub mod net;
 pub mod os;
 pub mod os_str;
@@ -30,7 +29,6 @@ pub mod path;
 pub mod pipe;
 pub mod process;
 pub mod rand;
-pub mod rwlock;
 pub mod thread;
 pub mod thread_local_dtor;
 pub mod thread_local_key;
@@ -138,7 +136,7 @@ pub fn unrolled_find_u16s(needle: u16, haystack: &[u16]) -> Option<usize> {
             ($($n:literal,)+) => {
                 $(
                     if start[$n] == needle {
-                        return Some((&start[$n] as *const u16 as usize - ptr as usize) / 2);
+                        return Some(((&start[$n] as *const u16).addr() - ptr.addr()) / 2);
                     }
                 )+
             }
@@ -151,7 +149,7 @@ pub fn unrolled_find_u16s(needle: u16, haystack: &[u16]) -> Option<usize> {
 
     for c in start {
         if *c == needle {
-            return Some((c as *const u16 as usize - ptr as usize) / 2);
+            return Some(((c as *const u16).addr() - ptr.addr()) / 2);
         }
     }
     None
@@ -224,8 +222,14 @@ where
             } as usize;
             if k == n && c::GetLastError() == c::ERROR_INSUFFICIENT_BUFFER {
                 n *= 2;
-            } else if k >= n {
+            } else if k > n {
                 n = k;
+            } else if k == n {
+                // It is impossible to reach this point.
+                // On success, k is the returned string length excluding the null.
+                // On failure, k is the required buffer length including the null.
+                // Therefore k never equals n.
+                unreachable!();
             } else {
                 return Ok(f2(&buf[..k]));
             }

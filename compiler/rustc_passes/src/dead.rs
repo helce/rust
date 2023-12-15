@@ -259,7 +259,7 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
                 if self.tcx.has_attr(trait_of, sym::rustc_trivial_field_reads) {
                     let trait_ref = self.tcx.impl_trait_ref(impl_of).unwrap();
                     if let ty::Adt(adt_def, _) = trait_ref.self_ty().kind() {
-                        if let Some(adt_def_id) = adt_def.did.as_local() {
+                        if let Some(adt_def_id) = adt_def.did().as_local() {
                             self.ignored_derived_traits
                                 .entry(adt_def_id)
                                 .or_default()
@@ -297,7 +297,7 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
                 match item.kind {
                     hir::ItemKind::Struct(..) | hir::ItemKind::Union(..) => {
                         let def = self.tcx.adt_def(item.def_id);
-                        self.repr_has_repr_c = def.repr.c();
+                        self.repr_has_repr_c = def.repr().c();
 
                         intravisit::walk_item(self, &item);
                     }
@@ -328,8 +328,8 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
         self.repr_has_repr_c = had_repr_c;
     }
 
-    fn mark_as_used_if_union(&mut self, adt: &ty::AdtDef, fields: &[hir::ExprField<'_>]) {
-        if adt.is_union() && adt.non_enum_variant().fields.len() > 1 && adt.did.is_local() {
+    fn mark_as_used_if_union(&mut self, adt: ty::AdtDef<'tcx>, fields: &[hir::ExprField<'_>]) {
+        if adt.is_union() && adt.non_enum_variant().fields.len() > 1 && adt.did().is_local() {
             for field in fields {
                 let index = self.tcx.field_index(field.hir_id, self.typeck_results());
                 self.insert_def_id(adt.non_enum_variant().fields[index].did);
@@ -382,8 +382,8 @@ impl<'tcx> Visitor<'tcx> for MarkSymbolVisitor<'tcx> {
             hir::ExprKind::Struct(ref qpath, ref fields, _) => {
                 let res = self.typeck_results().qpath_res(qpath, expr.hir_id);
                 self.handle_res(res);
-                if let ty::Adt(ref adt, _) = self.typeck_results().expr_ty(expr).kind() {
-                    self.mark_as_used_if_union(adt, fields);
+                if let ty::Adt(adt, _) = self.typeck_results().expr_ty(expr).kind() {
+                    self.mark_as_used_if_union(*adt, fields);
                 }
             }
             _ => (),
@@ -683,34 +683,33 @@ impl<'tcx> DeadVisitor<'tcx> {
                 let descr = self.tcx.def_kind(def_id).descr(def_id.to_def_id());
                 let mut err = lint.build(&format!("{} is never {}: `{}`", descr, participle, name));
                 let hir = self.tcx.hir();
-                if let Some(encl_scope) = hir.get_enclosing_scope(id) {
-                    if let Some(encl_def_id) = hir.opt_local_def_id(encl_scope) {
-                        if let Some(ign_traits) = self.ignored_derived_traits.get(&encl_def_id) {
-                            let traits_str = ign_traits
-                                .iter()
-                                .map(|(trait_id, _)| format!("`{}`", self.tcx.item_name(*trait_id)))
-                                .collect::<Vec<_>>()
-                                .join(" and ");
-                            let plural_s = pluralize!(ign_traits.len());
-                            let article = if ign_traits.len() > 1 { "" } else { "a " };
-                            let is_are = if ign_traits.len() > 1 { "these are" } else { "this is" };
-                            let msg = format!(
-                                "`{}` has {}derived impl{} for the trait{} {}, but {} \
-                                 intentionally ignored during dead code analysis",
-                                self.tcx.item_name(encl_def_id.to_def_id()),
-                                article,
-                                plural_s,
-                                plural_s,
-                                traits_str,
-                                is_are
-                            );
-                            let multispan = ign_traits
-                                .iter()
-                                .map(|(_, impl_id)| self.tcx.def_span(*impl_id))
-                                .collect::<Vec<_>>();
-                            err.span_note(multispan, &msg);
-                        }
-                    }
+                if let Some(encl_scope) = hir.get_enclosing_scope(id)
+                    && let Some(encl_def_id) = hir.opt_local_def_id(encl_scope)
+                    && let Some(ign_traits) = self.ignored_derived_traits.get(&encl_def_id)
+                {
+                    let traits_str = ign_traits
+                        .iter()
+                        .map(|(trait_id, _)| format!("`{}`", self.tcx.item_name(*trait_id)))
+                        .collect::<Vec<_>>()
+                        .join(" and ");
+                    let plural_s = pluralize!(ign_traits.len());
+                    let article = if ign_traits.len() > 1 { "" } else { "a " };
+                    let is_are = if ign_traits.len() > 1 { "these are" } else { "this is" };
+                    let msg = format!(
+                        "`{}` has {}derived impl{} for the trait{} {}, but {} \
+                        intentionally ignored during dead code analysis",
+                        self.tcx.item_name(encl_def_id.to_def_id()),
+                        article,
+                        plural_s,
+                        plural_s,
+                        traits_str,
+                        is_are
+                    );
+                    let multispan = ign_traits
+                        .iter()
+                        .map(|(_, impl_id)| self.tcx.def_span(*impl_id))
+                        .collect::<Vec<_>>();
+                    err.span_note(multispan, &msg);
                 }
                 err.emit();
             });

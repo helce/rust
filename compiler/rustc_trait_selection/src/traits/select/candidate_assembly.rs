@@ -5,6 +5,7 @@
 //! candidates. See the [rustc dev guide] for more details.
 //!
 //! [rustc dev guide]:https://rustc-dev-guide.rust-lang.org/traits/resolution.html#candidate-assembly
+use hir::LangItem;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_infer::traits::TraitEngine;
@@ -92,7 +93,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     if !candidate_set.ambiguous && no_candidates_apply {
                         let trait_ref = stack.obligation.predicate.skip_binder().trait_ref;
                         let self_ty = trait_ref.self_ty();
-                        let (trait_desc, self_desc) = with_no_trimmed_paths(|| {
+                        let (trait_desc, self_desc) = with_no_trimmed_paths!({
                             let trait_desc = trait_ref.print_only_trait_path().to_string();
                             let self_desc = if self_ty.has_concrete_skeleton() {
                                 Some(self_ty.to_string())
@@ -163,8 +164,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     Ok(Some(EvaluatedCandidate { candidate: c, evaluation: eval }))
                 }
                 Ok(_) => Ok(None),
-                Err(OverflowError::Canonical) => Err(Overflow),
+                Err(OverflowError::Canonical) => Err(Overflow(OverflowError::Canonical)),
                 Err(OverflowError::ErrorReporting) => Err(ErrorReporting),
+                Err(OverflowError::Error(e)) => Err(Overflow(OverflowError::Error(e))),
             })
             .flat_map(Result::transpose)
             .collect::<Result<Vec<_>, _>>()?;
@@ -172,9 +174,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         debug!(?stack, ?candidates, "winnowed to {} candidates", candidates.len());
 
         let needs_infer = stack.obligation.predicate.has_infer_types_or_consts();
-
-        let sized_predicate = self.tcx().lang_items().sized_trait()
-            == Some(stack.obligation.predicate.skip_binder().def_id());
 
         // If there are STILL multiple candidates, we can further
         // reduce the list by dropping duplicates -- including
@@ -184,7 +183,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             while i < candidates.len() {
                 let is_dup = (0..candidates.len()).filter(|&j| i != j).any(|j| {
                     self.candidate_should_be_dropped_in_favor_of(
-                        sized_predicate,
                         &candidates[i],
                         &candidates[j],
                         needs_infer,
@@ -254,6 +252,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         };
 
         if obligation.predicate.skip_binder().self_ty().is_ty_var() {
+            debug!(ty = ?obligation.predicate.skip_binder().self_ty(), "ambiguous inference var or opaque type");
             // Self is a type variable (e.g., `_: AsRef<str>`).
             //
             // This is somewhat problematic, as the current scheme can't really
@@ -307,7 +306,16 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             } else if lang_items.drop_trait() == Some(def_id)
                 && obligation.predicate.is_const_if_const()
             {
-                self.assemble_const_drop_candidates(obligation, &mut candidates);
+                // holds to make it easier to transition
+                // FIXME(fee1-dead): add a note for selection error of `~const Drop`
+                // when beta is bumped
+                // FIXME: remove this when beta is bumped
+                #[cfg(bootstrap)]
+                {}
+
+                candidates.vec.push(SelectionCandidate::ConstDestructCandidate(None))
+            } else if lang_items.destruct_trait() == Some(def_id) {
+                self.assemble_const_destruct_candidates(obligation, &mut candidates);
             } else {
                 if lang_items.clone_trait() == Some(def_id) {
                     // Same builtin conditions as `Copy`, i.e., every type which has builtin support
@@ -389,7 +397,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         for bound in matching_bounds {
             // FIXME(oli-obk): it is suspicious that we are dropping the constness and
             // polarity here.
-            let wc = self.evaluate_where_clause(stack, bound.map_bound(|t| t.trait_ref))?;
+            let wc = self.where_clause_may_apply(stack, bound.map_bound(|t| t.trait_ref))?;
             if wc.may_apply() {
                 candidates.vec.push(ParamCandidate(bound));
             }
@@ -436,11 +444,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         obligation: &TraitObligation<'tcx>,
         candidates: &mut SelectionCandidateSet<'tcx>,
     ) {
-        let kind = match self.tcx().fn_trait_kind_from_lang_item(obligation.predicate.def_id()) {
-            Some(k) => k,
-            None => {
-                return;
-            }
+        let Some(kind) = self.tcx().fn_trait_kind_from_lang_item(obligation.predicate.def_id()) else {
+            return;
         };
 
         // Okay to skip binder because the substs on closure types never
@@ -763,12 +768,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         //     T: Trait
         // so it seems ok if we (conservatively) fail to accept that `Unsize`
         // obligation above. Should be possible to extend this in the future.
-        let source = match obligation.self_ty().no_bound_vars() {
-            Some(t) => t,
-            None => {
-                // Don't add any candidates if there are bound regions.
-                return;
-            }
+        let Some(source) = obligation.self_ty().no_bound_vars() else {
+            // Don't add any candidates if there are bound regions.
+            return;
         };
         let target = obligation.predicate.skip_binder().trait_ref.substs.type_at(1);
 
@@ -912,15 +914,15 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         }
     }
 
-    fn assemble_const_drop_candidates(
+    fn assemble_const_destruct_candidates(
         &mut self,
         obligation: &TraitObligation<'tcx>,
         candidates: &mut SelectionCandidateSet<'tcx>,
     ) {
-        // If the predicate is `~const Drop` in a non-const environment, we don't actually need
+        // If the predicate is `~const Destruct` in a non-const environment, we don't actually need
         // to check anything. We'll short-circuit checking any obligations in confirmation, too.
-        if obligation.param_env.constness() == hir::Constness::NotConst {
-            candidates.vec.push(ConstDropCandidate(None));
+        if !obligation.is_const() {
+            candidates.vec.push(ConstDestructCandidate(None));
             return;
         }
 
@@ -933,7 +935,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             | ty::Param(_)
             | ty::Placeholder(_)
             | ty::Projection(_) => {
-                // We don't know if these are `~const Drop`, at least
+                // We don't know if these are `~const Destruct`, at least
                 // not structurally... so don't push a candidate.
             }
 
@@ -957,14 +959,14 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             | ty::Generator(..)
             | ty::Tuple(_)
             | ty::GeneratorWitness(_) => {
-                // These are built-in, and cannot have a custom `impl const Drop`.
-                candidates.vec.push(ConstDropCandidate(None));
+                // These are built-in, and cannot have a custom `impl const Destruct`.
+                candidates.vec.push(ConstDestructCandidate(None));
             }
 
             ty::Adt(..) => {
                 // Find a custom `impl Drop` impl, if it exists
                 let relevant_impl = self.tcx().find_map_relevant_impl(
-                    obligation.predicate.def_id(),
+                    self.tcx().require_lang_item(LangItem::Drop, None),
                     obligation.predicate.skip_binder().trait_ref.self_ty(),
                     Some,
                 );
@@ -972,11 +974,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 if let Some(impl_def_id) = relevant_impl {
                     // Check that `impl Drop` is actually const, if there is a custom impl
                     if self.tcx().impl_constness(impl_def_id) == hir::Constness::Const {
-                        candidates.vec.push(ConstDropCandidate(Some(impl_def_id)));
+                        candidates.vec.push(ConstDestructCandidate(Some(impl_def_id)));
                     }
                 } else {
                     // Otherwise check the ADT like a built-in type (structurally)
-                    candidates.vec.push(ConstDropCandidate(None));
+                    candidates.vec.push(ConstDestructCandidate(None));
                 }
             }
 

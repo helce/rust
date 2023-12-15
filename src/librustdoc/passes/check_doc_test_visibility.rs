@@ -62,7 +62,7 @@ crate fn should_have_doc_example(cx: &DocContext<'_>, item: &clean::Item) -> boo
             clean::StructFieldItem(_)
                 | clean::VariantItem(_)
                 | clean::AssocConstItem(_, _)
-                | clean::AssocTypeItem(_, _)
+                | clean::AssocTypeItem(..)
                 | clean::TypedefItem(_, _)
                 | clean::StaticItem(_)
                 | clean::ConstantItem(_)
@@ -107,12 +107,10 @@ crate fn should_have_doc_example(cx: &DocContext<'_>, item: &clean::Item) -> boo
 }
 
 crate fn look_for_tests<'tcx>(cx: &DocContext<'tcx>, dox: &str, item: &Item) {
-    let hir_id = match DocContext::as_local_hir_id(cx.tcx, item.def_id) {
-        Some(hir_id) => hir_id,
-        None => {
-            // If non-local, no need to check anything.
-            return;
-        }
+    let Some(hir_id) = DocContext::as_local_hir_id(cx.tcx, item.def_id)
+    else {
+        // If non-local, no need to check anything.
+        return;
     };
 
     let mut tests = Tests { found_tests: 0 };
@@ -127,7 +125,9 @@ crate fn look_for_tests<'tcx>(cx: &DocContext<'tcx>, dox: &str, item: &Item) {
                 crate::lint::MISSING_DOC_CODE_EXAMPLES,
                 hir_id,
                 sp,
-                |lint| lint.build("missing code example in this documentation").emit(),
+                |lint| {
+                    lint.build("missing code example in this documentation").emit();
+                },
             );
         }
     } else if tests.found_tests > 0
@@ -137,7 +137,9 @@ crate fn look_for_tests<'tcx>(cx: &DocContext<'tcx>, dox: &str, item: &Item) {
             crate::lint::PRIVATE_DOC_TESTS,
             hir_id,
             item.attr_span(cx.tcx),
-            |lint| lint.build("documentation test in private item").emit(),
+            |lint| {
+                lint.build("documentation test in private item").emit();
+            },
         );
     }
 }

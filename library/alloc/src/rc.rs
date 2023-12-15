@@ -895,7 +895,7 @@ impl<T: ?Sized> Rc<T> {
 
         // Reverse the offset to find the original RcBox.
         let rc_ptr =
-            unsafe { (ptr as *mut RcBox<T>).set_ptr_value((ptr as *mut u8).offset(-offset)) };
+            unsafe { (ptr as *mut u8).offset(-offset).with_metadata_of(ptr as *mut RcBox<T>) };
 
         unsafe { Self::from_ptr(rc_ptr) }
     }
@@ -1338,7 +1338,7 @@ impl<T: ?Sized> Rc<T> {
             Self::allocate_for_layout(
                 Layout::for_value(&*ptr),
                 |layout| Global.allocate(layout),
-                |mem| (ptr as *mut RcBox<T>).set_ptr_value(mem),
+                |mem| mem.with_metadata_of(ptr as *mut RcBox<T>),
             )
         }
     }
@@ -2112,15 +2112,15 @@ impl<T> Weak<T> {
     /// assert!(empty.upgrade().is_none());
     /// ```
     #[stable(feature = "downgraded_weak", since = "1.10.0")]
+    #[rustc_const_unstable(feature = "const_weak_new", issue = "95091", reason = "recently added")]
     #[must_use]
-    pub fn new() -> Weak<T> {
-        Weak { ptr: NonNull::new(usize::MAX as *mut RcBox<T>).expect("MAX is not 0") }
+    pub const fn new() -> Weak<T> {
+        Weak { ptr: unsafe { NonNull::new_unchecked(ptr::invalid_mut::<RcBox<T>>(usize::MAX)) } }
     }
 }
 
 pub(crate) fn is_dangling<T: ?Sized>(ptr: *mut T) -> bool {
-    let address = ptr as *mut () as usize;
-    address == usize::MAX
+    (ptr as *mut ()).addr() == usize::MAX
 }
 
 /// Helper type to allow accessing the reference counts without
@@ -2263,7 +2263,7 @@ impl<T: ?Sized> Weak<T> {
             let offset = unsafe { data_offset(ptr) };
             // Thus, we reverse the offset to get the whole RcBox.
             // SAFETY: the pointer originated from a Weak, so this offset is safe.
-            unsafe { (ptr as *mut RcBox<T>).set_ptr_value((ptr as *mut u8).offset(-offset)) }
+            unsafe { (ptr as *mut u8).offset(-offset).with_metadata_of(ptr as *mut RcBox<T>) }
         };
 
         // SAFETY: we now have recovered the original Weak pointer, so can create the Weak.

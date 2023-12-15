@@ -41,9 +41,11 @@
 #![feature(new_uninit)]
 #![feature(nll)]
 #![feature(once_cell)]
+#![feature(let_chains)]
 #![feature(let_else)]
 #![feature(min_specialization)]
 #![feature(trusted_len)]
+#![feature(type_alias_impl_trait)]
 #![feature(crate_visibility_modifier)]
 #![feature(associated_type_bounds)]
 #![feature(rustc_attrs)]
@@ -55,8 +57,10 @@
 #![feature(try_reserve_kind)]
 #![feature(nonzero_ops)]
 #![feature(unwrap_infallible)]
+#![feature(decl_macro)]
+#![feature(drain_filter)]
 #![recursion_limit = "512"]
-#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
+#![allow(rustc::potential_query_instability)]
 
 #[macro_use]
 extern crate bitflags;

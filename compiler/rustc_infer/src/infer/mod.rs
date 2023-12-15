@@ -5,7 +5,7 @@ pub use self::RegionVariableOrigin::*;
 pub use self::SubregionOrigin::*;
 pub use self::ValuePairs::*;
 
-use self::opaque_types::OpaqueTypeMap;
+use self::opaque_types::OpaqueTypeStorage;
 pub(crate) use self::undo_log::{InferCtxtUndoLogs, Snapshot, UndoLog};
 
 use crate::traits::{self, ObligationCause, PredicateObligations, TraitEngine};
@@ -14,14 +14,13 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::sync::Lrc;
 use rustc_data_structures::undo_log::Rollback;
 use rustc_data_structures::unify as ut;
-use rustc_errors::DiagnosticBuilder;
+use rustc_errors::{DiagnosticBuilder, ErrorGuaranteed};
 use rustc_hir as hir;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_middle::infer::canonical::{Canonical, CanonicalVarValues};
 use rustc_middle::infer::unify_key::{ConstVarValue, ConstVariableValue};
 use rustc_middle::infer::unify_key::{ConstVariableOrigin, ConstVariableOriginKind, ToType};
-use rustc_middle::mir::interpret::ErrorHandled;
-use rustc_middle::mir::interpret::EvalToConstValueResult;
+use rustc_middle::mir::interpret::{ErrorHandled, EvalToConstValueResult};
 use rustc_middle::traits::select;
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
 use rustc_middle::ty::fold::{TypeFoldable, TypeFolder};
@@ -70,9 +69,6 @@ pub mod resolve;
 mod sub;
 pub mod type_variable;
 mod undo_log;
-
-use crate::infer::canonical::OriginalQueryValues;
-pub use rustc_middle::infer::unify_key;
 
 #[must_use]
 #[derive(Debug)]
@@ -193,18 +189,8 @@ pub struct InferCtxtInner<'tcx> {
 
     undo_log: InferCtxtUndoLogs<'tcx>,
 
-    // Opaque types found in explicit return types and their
-    // associated fresh inference variable. Writeback resolves these
-    // variables to get the concrete type, which can be used to
-    // 'de-opaque' OpaqueTypeDecl outside of type inference.
-    pub opaque_types: OpaqueTypeMap<'tcx>,
-
-    /// A map from inference variables created from opaque
-    /// type instantiations (`ty::Infer`) to the actual opaque
-    /// type (`ty::Opaque`). Used during fallback to map unconstrained
-    /// opaque type inference variables to their corresponding
-    /// opaque type.
-    pub opaque_types_vars: FxHashMap<Ty<'tcx>, Ty<'tcx>>,
+    /// Caches for opaque type inference.
+    pub opaque_type_storage: OpaqueTypeStorage<'tcx>,
 }
 
 impl<'tcx> InferCtxtInner<'tcx> {
@@ -218,8 +204,7 @@ impl<'tcx> InferCtxtInner<'tcx> {
             float_unification_storage: ut::UnificationTableStorage::new(),
             region_constraint_storage: Some(RegionConstraintStorage::new()),
             region_obligations: vec![],
-            opaque_types: Default::default(),
-            opaque_types_vars: Default::default(),
+            opaque_type_storage: Default::default(),
         }
     }
 
@@ -236,6 +221,11 @@ impl<'tcx> InferCtxtInner<'tcx> {
     #[inline]
     fn type_variables(&mut self) -> type_variable::TypeVariableTable<'_, 'tcx> {
         self.type_variable_storage.with_log(&mut self.undo_log)
+    }
+
+    #[inline]
+    pub fn opaque_types(&mut self) -> opaque_types::OpaqueTypeTable<'_, 'tcx> {
+        self.opaque_type_storage.with_log(&mut self.undo_log)
     }
 
     #[inline]
@@ -347,7 +337,7 @@ pub struct InferCtxt<'a, 'tcx> {
 
     /// Track how many errors were reported when this infcx is created.
     /// If the number of errors increases, that's also a sign (line
-    /// `tained_by_errors`) to avoid reporting certain kinds of errors.
+    /// `tainted_by_errors`) to avoid reporting certain kinds of errors.
     // FIXME(matthewjasper) Merge into `tainted_by_errors_flag`
     err_count_on_creation: usize,
 
@@ -433,16 +423,20 @@ pub enum SubregionOrigin<'tcx> {
 
     /// Comparing the signature and requirements of an impl method against
     /// the containing trait.
-    CompareImplMethodObligation { span: Span, impl_item_def_id: DefId, trait_item_def_id: DefId },
+    CompareImplMethodObligation {
+        span: Span,
+        impl_item_def_id: LocalDefId,
+        trait_item_def_id: DefId,
+    },
 
     /// Comparing the signature and requirements of an impl associated type
     /// against the containing trait
-    CompareImplTypeObligation { span: Span, impl_item_def_id: DefId, trait_item_def_id: DefId },
+    CompareImplTypeObligation { span: Span, impl_item_def_id: LocalDefId, trait_item_def_id: DefId },
 
     /// Checking that the bounds of a trait's associated type hold for a given impl
     CheckAssociatedTypeBounds {
         parent: Box<SubregionOrigin<'tcx>>,
-        impl_item_def_id: DefId,
+        impl_item_def_id: LocalDefId,
         trait_item_def_id: DefId,
     },
 }
@@ -566,9 +560,9 @@ impl<'tcx> fmt::Display for FixupError<'tcx> {
     }
 }
 
-/// Helper type of a temporary returned by `tcx.infer_ctxt()`.
-/// Necessary because we can't write the following bound:
-/// `F: for<'b, 'tcx> where 'tcx FnOnce(InferCtxt<'b, 'tcx>)`.
+/// A temporary returned by `tcx.infer_ctxt()`. This is necessary
+/// for multiple `InferCtxt` to share the same `in_progress_typeck_results`
+/// without using `Rc` or something similar.
 pub struct InferCtxtBuilder<'tcx> {
     tcx: TyCtxt<'tcx>,
     fresh_typeck_results: Option<RefCell<ty::TypeckResults<'tcx>>>,
@@ -687,15 +681,28 @@ pub struct CombinedSnapshot<'a, 'tcx> {
 impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     /// calls `tcx.try_unify_abstract_consts` after
     /// canonicalizing the consts.
+    #[instrument(skip(self), level = "debug")]
     pub fn try_unify_abstract_consts(
         &self,
         a: ty::Unevaluated<'tcx, ()>,
         b: ty::Unevaluated<'tcx, ()>,
+        param_env: ty::ParamEnv<'tcx>,
     ) -> bool {
-        let canonical = self.canonicalize_query((a, b), &mut OriginalQueryValues::default());
-        debug!("canonical consts: {:?}", &canonical.value);
+        // Reject any attempt to unify two unevaluated constants that contain inference
+        // variables, since inference variables in queries lead to ICEs.
+        if a.substs.has_infer_types_or_consts()
+            || b.substs.has_infer_types_or_consts()
+            || param_env.has_infer_types_or_consts()
+        {
+            debug!("a or b or param_env contain infer vars in its substs -> cannot unify");
+            return false;
+        }
 
-        self.tcx.try_unify_abstract_consts(canonical.value)
+        let param_env_and = param_env.and((a, b));
+        let erased = self.tcx.erase_regions(param_env_and);
+        debug!("after erase_regions: {:?}", erased);
+
+        self.tcx.try_unify_abstract_consts(erased)
     }
 
     pub fn is_in_snapshot(&self) -> bool {
@@ -755,6 +762,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         &'a self,
         trace: TypeTrace<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
+        define_opaque_types: bool,
     ) -> CombineFields<'a, 'tcx> {
         CombineFields {
             infcx: self,
@@ -762,6 +770,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             cause: None,
             param_env,
             obligations: PredicateObligations::new(),
+            define_opaque_types,
         }
     }
 
@@ -1077,12 +1086,20 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         self.tcx.mk_ty_var(self.next_ty_var_id(origin))
     }
 
+    pub fn next_ty_var_id_in_universe(
+        &self,
+        origin: TypeVariableOrigin,
+        universe: ty::UniverseIndex,
+    ) -> TyVid {
+        self.inner.borrow_mut().type_variables().new_var(universe, origin)
+    }
+
     pub fn next_ty_var_in_universe(
         &self,
         origin: TypeVariableOrigin,
         universe: ty::UniverseIndex,
     ) -> Ty<'tcx> {
-        let vid = self.inner.borrow_mut().type_variables().new_var(universe, origin);
+        let vid = self.next_ty_var_id_in_universe(origin, universe);
         self.tcx.mk_ty_var(vid)
     }
 
@@ -1423,6 +1440,17 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         value.fold_with(&mut r)
     }
 
+    pub fn resolve_numeric_literals_with_default<T>(&self, value: T) -> T
+    where
+        T: TypeFoldable<'tcx>,
+    {
+        if !value.needs_infer() {
+            return value; // Avoid duplicated subst-folding.
+        }
+        let mut r = InferenceLiteralEraser { tcx: self.tcx };
+        value.fold_with(&mut r)
+    }
+
     /// Returns the first unresolved variable contained in `T`. In the
     /// process of visiting `T`, this will resolve (where possible)
     /// type variables in `T`, but it never constructs the final,
@@ -1475,19 +1503,21 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         sp: Span,
         mk_diag: M,
         actual_ty: Ty<'tcx>,
-    ) -> DiagnosticBuilder<'tcx>
+    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed>
     where
-        M: FnOnce(String) -> DiagnosticBuilder<'tcx>,
+        M: FnOnce(String) -> DiagnosticBuilder<'tcx, ErrorGuaranteed>,
     {
         let actual_ty = self.resolve_vars_if_possible(actual_ty);
         debug!("type_error_struct_with_diag({:?}, {:?})", sp, actual_ty);
 
+        let mut err = mk_diag(self.ty_to_string(actual_ty));
+
         // Don't report an error if actual type is `Error`.
         if actual_ty.references_error() {
-            return self.tcx.sess.diagnostic().struct_dummy();
+            err.downgrade_to_delayed_bug();
         }
 
-        mk_diag(self.ty_to_string(actual_ty))
+        err
     }
 
     pub fn report_mismatched_types(
@@ -1496,7 +1526,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         expected: Ty<'tcx>,
         actual: Ty<'tcx>,
         err: TypeError<'tcx>,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
         let trace = TypeTrace::types(cause, true, expected, actual);
         self.report_and_explain_type_error(trace, &err)
     }
@@ -1507,7 +1537,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         expected: ty::Const<'tcx>,
         actual: ty::Const<'tcx>,
         err: TypeError<'tcx>,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
         let trace = TypeTrace::consts(cause, true, expected, actual);
         self.report_and_explain_type_error(trace, &err)
     }
@@ -1596,6 +1626,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     ///
     /// This handles inferences variables within both `param_env` and `substs` by
     /// performing the operation on their respective canonical forms.
+    #[instrument(skip(self), level = "debug")]
     pub fn const_eval_resolve(
         &self,
         param_env: ty::ParamEnv<'tcx>,
@@ -1603,15 +1634,19 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         span: Option<Span>,
     ) -> EvalToConstValueResult<'tcx> {
         let substs = self.resolve_vars_if_possible(unevaluated.substs);
+        debug!(?substs);
 
         // Postpone the evaluation of constants whose substs depend on inference
         // variables
         if substs.has_infer_types_or_consts() {
+            debug!("substs have infer types or consts: {:?}", substs);
             return Err(ErrorHandled::TooGeneric);
         }
 
         let param_env_erased = self.tcx.erase_regions(param_env);
         let substs_erased = self.tcx.erase_regions(substs);
+        debug!(?param_env_erased);
+        debug!(?substs_erased);
 
         let unevaluated = ty::Unevaluated {
             def: unevaluated.def,
@@ -1763,6 +1798,26 @@ impl<'tcx> TyOrConstInferVar<'tcx> {
         match ct.val() {
             ty::ConstKind::Infer(InferConst::Var(v)) => Some(TyOrConstInferVar::Const(v)),
             _ => None,
+        }
+    }
+}
+
+/// Replace `{integer}` with `i32` and `{float}` with `f64`.
+/// Used only for diagnostics.
+struct InferenceLiteralEraser<'tcx> {
+    tcx: TyCtxt<'tcx>,
+}
+
+impl<'tcx> TypeFolder<'tcx> for InferenceLiteralEraser<'tcx> {
+    fn tcx(&self) -> TyCtxt<'tcx> {
+        self.tcx
+    }
+
+    fn fold_ty(&mut self, ty: Ty<'tcx>) -> Ty<'tcx> {
+        match ty.kind() {
+            ty::Infer(ty::IntVar(_) | ty::FreshIntTy(_)) => self.tcx.types.i32,
+            ty::Infer(ty::FloatVar(_) | ty::FreshFloatTy(_)) => self.tcx.types.f64,
+            _ => ty.super_fold_with(self),
         }
     }
 }

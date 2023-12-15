@@ -139,11 +139,13 @@ pub use self::Expectation::*;
 #[macro_export]
 macro_rules! type_error_struct {
     ($session:expr, $span:expr, $typ:expr, $code:ident, $($message:tt)*) => ({
+        let mut err = rustc_errors::struct_span_err!($session, $span, $code, $($message)*);
+
         if $typ.references_error() {
-            $session.diagnostic().struct_dummy()
-        } else {
-            rustc_errors::struct_span_err!($session, $span, $code, $($message)*)
+            err.downgrade_to_delayed_bug();
         }
+
+        err
     })
 }
 
@@ -341,6 +343,7 @@ fn diagnostic_only_typeck<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &ty::T
     typeck_with_fallback(tcx, def_id, fallback)
 }
 
+#[instrument(skip(tcx, fallback))]
 fn typeck_with_fallback<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: LocalDefId,
@@ -551,7 +554,7 @@ fn maybe_check_static_with_link_section(tcx: TyCtxt<'_>, id: LocalDefId, span: S
     // the consumer's responsibility to ensure all bytes that have been read
     // have defined values.
     if let Ok(alloc) = tcx.eval_static_initializer(id.to_def_id()) {
-        if alloc.relocations().len() != 0 {
+        if alloc.inner().relocations().len() != 0 {
             let msg = "statics with a custom `#[link_section]` must be a \
                            simple list of bytes on the wasm target with no \
                            extra levels of indirection such as references";
@@ -662,7 +665,7 @@ fn missing_items_must_implement_one_of_err(
     err.emit();
 }
 
-/// Resugar `ty::GenericPredicates` in a way suitable to be used in structured suggestions.
+/// Re-sugar `ty::GenericPredicates` in a way suitable to be used in structured suggestions.
 fn bounds_from_generic_predicates<'tcx>(
     tcx: TyCtxt<'tcx>,
     predicates: ty::GenericPredicates<'tcx>,
@@ -820,13 +823,13 @@ fn suggestion_signature(assoc: &ty::AssocItem, tcx: TyCtxt<'_>) -> String {
 }
 
 /// Emit an error when encountering two or more variants in a transparent enum.
-fn bad_variant_count<'tcx>(tcx: TyCtxt<'tcx>, adt: &'tcx ty::AdtDef, sp: Span, did: DefId) {
+fn bad_variant_count<'tcx>(tcx: TyCtxt<'tcx>, adt: ty::AdtDef<'tcx>, sp: Span, did: DefId) {
     let variant_spans: Vec<_> = adt
-        .variants
+        .variants()
         .iter()
         .map(|variant| tcx.hir().span_if_local(variant.def_id).unwrap())
         .collect();
-    let msg = format!("needs exactly one variant, but has {}", adt.variants.len(),);
+    let msg = format!("needs exactly one variant, but has {}", adt.variants().len(),);
     let mut err = struct_span_err!(tcx.sess, sp, E0731, "transparent enum {}", msg);
     err.span_label(sp, &msg);
     if let [start @ .., end] = &*variant_spans {
@@ -842,7 +845,7 @@ fn bad_variant_count<'tcx>(tcx: TyCtxt<'tcx>, adt: &'tcx ty::AdtDef, sp: Span, d
 /// enum.
 fn bad_non_zero_sized_fields<'tcx>(
     tcx: TyCtxt<'tcx>,
-    adt: &'tcx ty::AdtDef,
+    adt: ty::AdtDef<'tcx>,
     field_count: usize,
     field_spans: impl Iterator<Item = Span>,
     sp: Span,

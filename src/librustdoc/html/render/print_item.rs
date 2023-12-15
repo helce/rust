@@ -365,8 +365,9 @@ fn item_module(w: &mut Buffer, cx: &Context<'_>, item: &clean::Item, items: &[cl
                 }
 
                 let unsafety_flag = match *myitem.kind {
-                    clean::FunctionItem(ref func) | clean::ForeignFunctionItem(ref func)
-                        if func.header.unsafety == hir::Unsafety::Unsafe =>
+                    clean::FunctionItem(_) | clean::ForeignFunctionItem(_)
+                        if myitem.fn_header(cx.tcx()).unwrap().unsafety
+                            == hir::Unsafety::Unsafe =>
                     {
                         "<a title=\"unsafe function\" href=\"#\"><sup>⚠</sup></a>"
                     }
@@ -376,17 +377,26 @@ fn item_module(w: &mut Buffer, cx: &Context<'_>, item: &clean::Item, items: &[cl
                 let stab = myitem.stability_class(cx.tcx());
                 let add = if stab.is_some() { " " } else { "" };
 
+                let visibility_emoji = match myitem.visibility {
+                    clean::Visibility::Restricted(_) => {
+                        "<span title=\"Restricted Visibility\">&nbsp;🔒</span> "
+                    }
+                    _ => "",
+                };
+
                 let doc_value = myitem.doc_value().unwrap_or_default();
                 w.write_str(ITEM_TABLE_ROW_OPEN);
                 write!(
                     w,
                     "<div class=\"item-left {stab}{add}module-item\">\
-                         <a class=\"{class}\" href=\"{href}\" title=\"{title}\">{name}</a>\
-                             {unsafety_flag}\
-                             {stab_tags}\
+                            <a class=\"{class}\" href=\"{href}\" title=\"{title}\">{name}</a>\
+                            {visibility_emoji}\
+                            {unsafety_flag}\
+                            {stab_tags}\
                      </div>\
                      <div class=\"item-right docblock-short\">{docs}</div>",
                     name = myitem.name.unwrap(),
+                    visibility_emoji = visibility_emoji,
                     stab_tags = extra_info_tags(myitem, item, cx.tcx()),
                     docs = MarkdownSummaryLine(&doc_value, &myitem.links(cx)).into_string(),
                     class = myitem.type_(),
@@ -453,16 +463,17 @@ fn extra_info_tags(item: &clean::Item, parent: &clean::Item, tcx: TyCtxt<'_>) ->
 }
 
 fn item_function(w: &mut Buffer, cx: &Context<'_>, it: &clean::Item, f: &clean::Function) {
-    let vis = it.visibility.print_with_space(it.def_id, cx).to_string();
-    let constness = print_constness_with_space(&f.header.constness, it.const_stability(cx.tcx()));
-    let asyncness = f.header.asyncness.print_with_space();
-    let unsafety = f.header.unsafety.print_with_space();
-    let abi = print_abi_with_space(f.header.abi).to_string();
+    let header = it.fn_header(cx.tcx()).expect("printing a function which isn't a function");
+    let constness = print_constness_with_space(&header.constness, it.const_stability(cx.tcx()));
+    let unsafety = header.unsafety.print_with_space();
+    let abi = print_abi_with_space(header.abi).to_string();
+    let asyncness = header.asyncness.print_with_space();
+    let visibility = it.visibility.print_with_space(it.def_id, cx).to_string();
     let name = it.name.unwrap();
 
     let generics_len = format!("{:#}", f.generics.print(cx)).len();
     let header_len = "fn ".len()
-        + vis.len()
+        + visibility.len()
         + constness.len()
         + asyncness.len()
         + unsafety.len()
@@ -478,7 +489,7 @@ fn item_function(w: &mut Buffer, cx: &Context<'_>, it: &clean::Item, f: &clean::
                 w,
                 "{vis}{constness}{asyncness}{unsafety}{abi}fn \
                  {name}{generics}{decl}{notable_traits}{where_clause}",
-                vis = vis,
+                vis = visibility,
                 constness = constness,
                 asyncness = asyncness,
                 unsafety = unsafety,
@@ -486,7 +497,7 @@ fn item_function(w: &mut Buffer, cx: &Context<'_>, it: &clean::Item, f: &clean::
                 name = name,
                 generics = f.generics.print(cx),
                 where_clause = print_where_clause(&f.generics, cx, 0, true),
-                decl = f.decl.full_print(header_len, 0, f.header.asyncness, cx),
+                decl = f.decl.full_print(header_len, 0, header.asyncness, cx),
                 notable_traits = notable_traits_decl(&f.decl, cx),
             );
         });
@@ -604,7 +615,7 @@ fn item_trait(w: &mut Buffer, cx: &Context<'_>, it: &clean::Item, t: &clean::Tra
                     w.write_str(";\n");
 
                     if pos < required.len() - 1 {
-                        w.write_str("<div class=\"item-spacer\"></div>");
+                        w.write_str("<span class=\"item-spacer\"></span>");
                     }
                 }
                 if !required.is_empty() && !provided.is_empty() {
@@ -630,7 +641,7 @@ fn item_trait(w: &mut Buffer, cx: &Context<'_>, it: &clean::Item, t: &clean::Tra
                         }
                     }
                     if pos < provided.len() - 1 {
-                        w.write_str("<div class=\"item-spacer\"></div>");
+                        w.write_str("<span class=\"item-spacer\"></span>");
                     }
                 }
                 if toggle {
@@ -1710,11 +1721,11 @@ fn document_non_exhaustive(w: &mut Buffer, item: &clean::Item) {
 }
 
 fn document_type_layout(w: &mut Buffer, cx: &Context<'_>, ty_def_id: DefId) {
-    fn write_size_of_layout(w: &mut Buffer, layout: &Layout, tag_size: u64) {
-        if layout.abi.is_unsized() {
+    fn write_size_of_layout(w: &mut Buffer, layout: Layout<'_>, tag_size: u64) {
+        if layout.abi().is_unsized() {
             write!(w, "(unsized)");
         } else {
-            let bytes = layout.size.bytes() - tag_size;
+            let bytes = layout.size().bytes() - tag_size;
             write!(w, "{size} byte{pl}", size = bytes, pl = if bytes == 1 { "" } else { "s" },);
         }
     }
@@ -1744,7 +1755,7 @@ fn document_type_layout(w: &mut Buffer, cx: &Context<'_>, ty_def_id: DefId) {
             write_size_of_layout(w, ty_layout.layout, 0);
             writeln!(w, "</p>");
             if let Variants::Multiple { variants, tag, tag_encoding, .. } =
-                &ty_layout.layout.variants
+                &ty_layout.layout.variants()
             {
                 if !variants.is_empty() {
                     w.write_str(
@@ -1765,9 +1776,9 @@ fn document_type_layout(w: &mut Buffer, cx: &Context<'_>, ty_def_id: DefId) {
                     };
 
                     for (index, layout) in variants.iter_enumerated() {
-                        let name = adt.variants[index].name;
+                        let name = adt.variant(index).name;
                         write!(w, "<li><code>{name}</code>: ", name = name);
-                        write_size_of_layout(w, layout, tag_size);
+                        write_size_of_layout(w, *layout, tag_size);
                         writeln!(w, "</li>");
                     }
                     w.write_str("</ul>");

@@ -11,8 +11,6 @@ use std::iter;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use build_helper::{self, output, t};
-
 use crate::builder::{Builder, Compiler, Kind, RunConfig, ShouldRun, Step};
 use crate::cache::Interned;
 use crate::compile;
@@ -22,7 +20,7 @@ use crate::flags::Subcommand;
 use crate::native;
 use crate::tool::{self, SourceType, Tool};
 use crate::toolstate::ToolState;
-use crate::util::{self, add_link_lib_path, dylib_path, dylib_path_var};
+use crate::util::{self, add_link_lib_path, dylib_path, dylib_path_var, output, t};
 use crate::Crate as CargoCrate;
 use crate::{envify, CLang, DocTests, GitRepo, Mode};
 
@@ -732,7 +730,7 @@ impl Step for RustdocTheme {
     }
 
     fn run(self, builder: &Builder<'_>) {
-        let rustdoc = builder.out.join("bootstrap/debug/rustdoc");
+        let rustdoc = builder.bootstrap_out.join("rustdoc");
         let mut cmd = builder.tool_cmd(Tool::RustdocTheme);
         cmd.arg(rustdoc.to_str().unwrap())
             .arg(builder.src.join("src/librustdoc/html/static/css/themes").to_str().unwrap())
@@ -838,9 +836,9 @@ impl Step for RustdocJSNotStd {
     }
 }
 
-fn check_if_browser_ui_test_is_installed_global(npm: &Path, global: bool) -> bool {
+fn get_browser_ui_test_version_inner(npm: &Path, global: bool) -> Option<String> {
     let mut command = Command::new(&npm);
-    command.arg("list").arg("--depth=0");
+    command.arg("list").arg("--parseable").arg("--long").arg("--depth=0");
     if global {
         command.arg("--global");
     }
@@ -848,12 +846,29 @@ fn check_if_browser_ui_test_is_installed_global(npm: &Path, global: bool) -> boo
         .output()
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or(String::new());
-    lines.contains(&" browser-ui-test@")
+    lines.lines().find_map(|l| l.split(":browser-ui-test@").skip(1).next()).map(|v| v.to_owned())
 }
 
-fn check_if_browser_ui_test_is_installed(npm: &Path) -> bool {
-    check_if_browser_ui_test_is_installed_global(npm, false)
-        || check_if_browser_ui_test_is_installed_global(npm, true)
+fn get_browser_ui_test_version(npm: &Path) -> Option<String> {
+    get_browser_ui_test_version_inner(npm, false)
+        .or_else(|| get_browser_ui_test_version_inner(npm, true))
+}
+
+fn compare_browser_ui_test_version(installed_version: &str, src: &Path) {
+    match fs::read_to_string(
+        src.join("src/ci/docker/host-x86_64/x86_64-gnu-tools/browser-ui-test.version"),
+    ) {
+        Ok(v) => {
+            if v.trim() != installed_version {
+                eprintln!(
+                    "⚠️ Installed version of browser-ui-test (`{}`) is different than the \
+                     one used in the CI (`{}`)",
+                    installed_version, v
+                );
+            }
+        }
+        Err(e) => eprintln!("Couldn't find the CI browser-ui-test version: {:?}", e),
+    }
 }
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -876,7 +891,7 @@ impl Step for RustdocGUI {
                     .config
                     .npm
                     .as_ref()
-                    .map(|p| check_if_browser_ui_test_is_installed(p))
+                    .map(|p| get_browser_ui_test_version(p).is_some())
                     .unwrap_or(false)
         }))
     }
@@ -894,16 +909,23 @@ impl Step for RustdocGUI {
 
         // The goal here is to check if the necessary packages are installed, and if not, we
         // panic.
-        if !check_if_browser_ui_test_is_installed(&npm) {
-            eprintln!(
-                "error: rustdoc-gui test suite cannot be run because npm `browser-ui-test` \
-                 dependency is missing",
-            );
-            eprintln!(
-                "If you want to install the `{0}` dependency, run `npm install {0}`",
-                "browser-ui-test",
-            );
-            panic!("Cannot run rustdoc-gui tests");
+        match get_browser_ui_test_version(&npm) {
+            Some(version) => {
+                // We also check the version currently used in CI and emit a warning if it's not the
+                // same one.
+                compare_browser_ui_test_version(&version, &builder.build.src);
+            }
+            None => {
+                eprintln!(
+                    "error: rustdoc-gui test suite cannot be run because npm `browser-ui-test` \
+                     dependency is missing",
+                );
+                eprintln!(
+                    "If you want to install the `{0}` dependency, run `npm install {0}`",
+                    "browser-ui-test",
+                );
+                panic!("Cannot run rustdoc-gui tests");
+            }
         }
 
         let out_dir = builder.test_out(self.target).join("rustdoc-gui");
@@ -1980,7 +2002,6 @@ impl Step for Crate {
                 compile::std_cargo(builder, target, compiler.stage, &mut cargo);
             }
             Mode::Rustc => {
-                builder.ensure(compile::Rustc { compiler, target });
                 compile::rustc_cargo(builder, &mut cargo, target);
             }
             _ => panic!("can only test libraries"),
@@ -2310,9 +2331,7 @@ impl Step for Distcheck {
                 .current_dir(&dir),
         );
         builder.run(
-            Command::new(build_helper::make(&builder.config.build.triple))
-                .arg("check")
-                .current_dir(&dir),
+            Command::new(util::make(&builder.config.build.triple)).arg("check").current_dir(&dir),
         );
 
         // Now make sure that rust-src has all of libstd's dependencies
@@ -2354,6 +2373,8 @@ impl Step for Bootstrap {
             .current_dir(builder.src.join("src/bootstrap"))
             .env("RUSTFLAGS", "-Cdebuginfo=2")
             .env("CARGO_TARGET_DIR", builder.out.join("bootstrap"))
+            // HACK: bootstrap's tests want to know the output directory, but there's no way to set
+            // it except through config.toml. Set it through an env variable instead.
             .env("BOOTSTRAP_OUTPUT_DIRECTORY", &builder.config.out)
             .env("BOOTSTRAP_INITIAL_CARGO", &builder.config.initial_cargo)
             .env("RUSTC_BOOTSTRAP", "1")

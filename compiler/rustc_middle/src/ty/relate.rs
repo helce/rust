@@ -7,7 +7,7 @@
 use crate::mir::interpret::{get_slice_bytes, ConstValue, GlobalAlloc, Scalar};
 use crate::ty::error::{ExpectedFound, TypeError};
 use crate::ty::subst::{GenericArg, GenericArgKind, Subst, SubstsRef};
-use crate::ty::{self, Term, Ty, TyCtxt, TypeFoldable};
+use crate::ty::{self, ImplSubject, Term, Ty, TyCtxt, TypeFoldable};
 use rustc_hir as ast;
 use rustc_hir::def_id::DefId;
 use rustc_span::DUMMY_SP;
@@ -356,6 +356,30 @@ impl<'tcx> Relate<'tcx> for GeneratorWitness<'tcx> {
     }
 }
 
+impl<'tcx> Relate<'tcx> for ImplSubject<'tcx> {
+    #[inline]
+    fn relate<R: TypeRelation<'tcx>>(
+        relation: &mut R,
+        a: ImplSubject<'tcx>,
+        b: ImplSubject<'tcx>,
+    ) -> RelateResult<'tcx, ImplSubject<'tcx>> {
+        match (a, b) {
+            (ImplSubject::Trait(trait_ref_a), ImplSubject::Trait(trait_ref_b)) => {
+                let trait_ref = ty::TraitRef::relate(relation, trait_ref_a, trait_ref_b)?;
+                Ok(ImplSubject::Trait(trait_ref))
+            }
+            (ImplSubject::Inherent(ty_a), ImplSubject::Inherent(ty_b)) => {
+                let ty = Ty::relate(relation, ty_a, ty_b)?;
+                Ok(ImplSubject::Inherent(ty))
+            }
+            (ImplSubject::Trait(_), ImplSubject::Inherent(_))
+            | (ImplSubject::Inherent(_), ImplSubject::Trait(_)) => {
+                bug!("can not relate TraitRef and Ty");
+            }
+        }
+    }
+}
+
 impl<'tcx> Relate<'tcx> for Ty<'tcx> {
     #[inline]
     fn relate<R: TypeRelation<'tcx>>(
@@ -406,7 +430,7 @@ pub fn super_relate_tys<'tcx, R: TypeRelation<'tcx>>(
         (ty::Placeholder(p1), ty::Placeholder(p2)) if p1 == p2 => Ok(a),
 
         (&ty::Adt(a_def, a_substs), &ty::Adt(b_def, b_substs)) if a_def == b_def => {
-            let substs = relation.relate_item_substs(a_def.did, a_substs, b_substs)?;
+            let substs = relation.relate_item_substs(a_def.did(), a_substs, b_substs)?;
             Ok(tcx.mk_adt(a_def, substs))
         }
 
@@ -501,9 +525,7 @@ pub fn super_relate_tys<'tcx, R: TypeRelation<'tcx>>(
 
         (&ty::Tuple(as_), &ty::Tuple(bs)) => {
             if as_.len() == bs.len() {
-                Ok(tcx.mk_tup(
-                    iter::zip(as_, bs).map(|(a, b)| relation.relate(a.expect_ty(), b.expect_ty())),
-                )?)
+                Ok(tcx.mk_tup(iter::zip(as_, bs).map(|(a, b)| relation.relate(a, b)))?)
             } else if !(as_.is_empty() || bs.is_empty()) {
                 Err(TypeError::TupleSize(expected_found(relation, as_.len(), bs.len())))
             } else {
@@ -587,7 +609,7 @@ pub fn super_relate_consts<'tcx, R: TypeRelation<'tcx>>(
         (ty::ConstKind::Unevaluated(au), ty::ConstKind::Unevaluated(bu))
             if tcx.features().generic_const_exprs =>
         {
-            tcx.try_unify_abstract_consts((au.shrink(), bu.shrink()))
+            tcx.try_unify_abstract_consts(relation.param_env().and((au.shrink(), bu.shrink())))
         }
 
         // While this is slightly incorrect, it shouldn't matter for `min_const_generics`

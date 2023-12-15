@@ -14,7 +14,6 @@ use rustc_hir::*;
 use rustc_index::vec::Idx;
 use rustc_middle::hir::nested_filter;
 use rustc_span::def_id::StableCrateId;
-use rustc_span::hygiene::MacroKind;
 use rustc_span::source_map::Spanned;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::Span;
@@ -219,7 +218,7 @@ impl<'hir> Map<'hir> {
     }
 
     pub fn iter_local_def_id(self) -> impl Iterator<Item = LocalDefId> + 'hir {
-        // Create a dependency to the crate to be sure we reexcute this when the amount of
+        // Create a dependency to the crate to be sure we re-execute this when the amount of
         // definitions change.
         self.tcx.ensure().hir_crate(());
         self.tcx.untracked_resolutions.definitions.iter_local_def_id()
@@ -229,10 +228,10 @@ impl<'hir> Map<'hir> {
         let hir_id = self.local_def_id_to_hir_id(local_def_id);
         let def_kind = match self.find(hir_id)? {
             Node::Item(item) => match item.kind {
-                ItemKind::Static(..) => DefKind::Static,
+                ItemKind::Static(_, mt, _) => DefKind::Static(mt),
                 ItemKind::Const(..) => DefKind::Const,
                 ItemKind::Fn(..) => DefKind::Fn,
-                ItemKind::Macro(..) => DefKind::Macro(MacroKind::Bang),
+                ItemKind::Macro(_, macro_kind) => DefKind::Macro(macro_kind),
                 ItemKind::Mod(..) => DefKind::Mod,
                 ItemKind::OpaqueTy(..) => DefKind::OpaqueTy,
                 ItemKind::TyAlias(..) => DefKind::TyAlias,
@@ -249,7 +248,7 @@ impl<'hir> Map<'hir> {
             },
             Node::ForeignItem(item) => match item.kind {
                 ForeignItemKind::Fn(..) => DefKind::Fn,
-                ForeignItemKind::Static(..) => DefKind::Static,
+                ForeignItemKind::Static(_, mt) => DefKind::Static(mt),
                 ForeignItemKind::Type => DefKind::ForeignTy,
             },
             Node::TraitItem(item) => match item.kind {
@@ -472,19 +471,15 @@ impl<'hir> Map<'hir> {
     /// Returns the `BodyOwnerKind` of this `LocalDefId`.
     ///
     /// Panics if `LocalDefId` does not have an associated body.
-    pub fn body_owner_kind(self, id: HirId) -> BodyOwnerKind {
-        match self.get(id) {
-            Node::Item(&Item { kind: ItemKind::Const(..), .. })
-            | Node::TraitItem(&TraitItem { kind: TraitItemKind::Const(..), .. })
-            | Node::ImplItem(&ImplItem { kind: ImplItemKind::Const(..), .. })
-            | Node::AnonConst(_) => BodyOwnerKind::Const,
-            Node::Ctor(..)
-            | Node::Item(&Item { kind: ItemKind::Fn(..), .. })
-            | Node::TraitItem(&TraitItem { kind: TraitItemKind::Fn(..), .. })
-            | Node::ImplItem(&ImplItem { kind: ImplItemKind::Fn(..), .. }) => BodyOwnerKind::Fn,
-            Node::Item(&Item { kind: ItemKind::Static(_, m, _), .. }) => BodyOwnerKind::Static(m),
-            Node::Expr(&Expr { kind: ExprKind::Closure(..), .. }) => BodyOwnerKind::Closure,
-            node => bug!("{:#?} is not a body node", node),
+    pub fn body_owner_kind(self, def_id: LocalDefId) -> BodyOwnerKind {
+        match self.tcx.def_kind(def_id) {
+            DefKind::Const | DefKind::AssocConst | DefKind::InlineConst | DefKind::AnonConst => {
+                BodyOwnerKind::Const
+            }
+            DefKind::Ctor(..) | DefKind::Fn | DefKind::AssocFn => BodyOwnerKind::Fn,
+            DefKind::Closure | DefKind::Generator => BodyOwnerKind::Closure,
+            DefKind::Static(mt) => BodyOwnerKind::Static(mt),
+            dk => bug!("{:?} is not a body node: {:?}", def_id, dk),
         }
     }
 
@@ -495,16 +490,17 @@ impl<'hir> Map<'hir> {
     /// This should only be used for determining the context of a body, a return
     /// value of `Some` does not always suggest that the owner of the body is `const`,
     /// just that it has to be checked as if it were.
-    pub fn body_const_context(self, did: LocalDefId) -> Option<ConstContext> {
-        let hir_id = self.local_def_id_to_hir_id(did);
-        let ccx = match self.body_owner_kind(hir_id) {
+    pub fn body_const_context(self, def_id: LocalDefId) -> Option<ConstContext> {
+        let ccx = match self.body_owner_kind(def_id) {
             BodyOwnerKind::Const => ConstContext::Const,
             BodyOwnerKind::Static(mt) => ConstContext::Static(mt),
 
-            BodyOwnerKind::Fn if self.tcx.is_constructor(did.to_def_id()) => return None,
-            BodyOwnerKind::Fn if self.tcx.is_const_fn_raw(did.to_def_id()) => ConstContext::ConstFn,
+            BodyOwnerKind::Fn if self.tcx.is_constructor(def_id.to_def_id()) => return None,
+            BodyOwnerKind::Fn if self.tcx.is_const_fn_raw(def_id.to_def_id()) => {
+                ConstContext::ConstFn
+            }
             BodyOwnerKind::Fn
-                if self.tcx.has_attr(did.to_def_id(), sym::default_method_body_is_const) =>
+                if self.tcx.has_attr(def_id.to_def_id(), sym::default_method_body_is_const) =>
             {
                 ConstContext::ConstFn
             }
@@ -578,6 +574,10 @@ impl<'hir> Map<'hir> {
     /// dep-graph access.
     pub fn krate_attrs(self) -> &'hir [ast::Attribute] {
         self.attrs(CRATE_HIR_ID)
+    }
+
+    pub fn rustc_coherence_is_core(self) -> bool {
+        self.krate_attrs().iter().any(|attr| attr.has_name(sym::rustc_coherence_is_core))
     }
 
     pub fn get_module(self, module: LocalDefId) -> (&'hir Mod<'hir>, Span, HirId) {

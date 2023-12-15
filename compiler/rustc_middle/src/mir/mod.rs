@@ -3,7 +3,7 @@
 //! [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/mir/index.html
 
 use crate::mir::coverage::{CodeRegion, CoverageKind};
-use crate::mir::interpret::{Allocation, ConstValue, GlobalAlloc, Scalar};
+use crate::mir::interpret::{ConstAllocation, ConstValue, GlobalAlloc, Scalar};
 use crate::mir::visit::MirVisitable;
 use crate::ty::adjustment::PointerCast;
 use crate::ty::codec::{TyDecoder, TyEncoder};
@@ -13,7 +13,7 @@ use crate::ty::subst::{Subst, SubstsRef};
 use crate::ty::{self, List, Ty, TyCtxt};
 use crate::ty::{AdtDef, InstanceDef, Region, ScalarInt, UserTypeAnnotationIndex};
 
-use rustc_errors::ErrorReported;
+use rustc_errors::ErrorGuaranteed;
 use rustc_hir::def::{CtorKind, Namespace};
 use rustc_hir::def_id::{DefId, CRATE_DEF_INDEX};
 use rustc_hir::{self, GeneratorKind};
@@ -45,6 +45,7 @@ use std::{iter, mem, option};
 use self::graph_cyclic_cache::GraphIsCyclicCache;
 use self::predecessors::{PredecessorCache, Predecessors};
 pub use self::query::*;
+use self::switch_sources::{SwitchSourceCache, SwitchSources};
 
 pub mod coverage;
 mod generic_graph;
@@ -58,6 +59,7 @@ mod predecessors;
 pub mod pretty;
 mod query;
 pub mod spanview;
+mod switch_sources;
 pub mod tcx;
 pub mod terminator;
 pub use terminator::*;
@@ -127,14 +129,11 @@ pub trait MirPass<'tcx> {
 /// These phases all describe dialects of MIR. Since all MIR uses the same datastructures, the
 /// dialects forbid certain variants or values in certain phases.
 ///
-/// Note: Each phase's validation checks all invariants of the *previous* phases' dialects. A phase
-/// that changes the dialect documents what invariants must be upheld *after* that phase finishes.
-///
 /// Warning: ordering of variants is significant.
 #[derive(Copy, Clone, TyEncodable, TyDecodable, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[derive(HashStable)]
 pub enum MirPhase {
-    Build = 0,
+    Built = 0,
     // FIXME(oli-obk): it's unclear whether we still need this phase (and its corresponding query).
     // We used to have this for pre-miri MIR based const eval.
     Const = 1,
@@ -142,17 +141,32 @@ pub enum MirPhase {
     /// by creating a new MIR body per promoted element. After this phase (and thus the termination
     /// of the `mir_promoted` query), these promoted elements are available in the `promoted_mir`
     /// query.
-    ConstPromotion = 2,
-    /// After this phase
-    /// * the only `AggregateKind`s allowed are `Array` and `Generator`,
-    /// * `DropAndReplace` is gone for good
-    /// * `Drop` now uses explicit drop flags visible in the MIR and reaching a `Drop` terminator
-    ///   means that the auto-generated drop glue will be invoked.
-    DropLowering = 3,
-    /// After this phase, generators are explicit state machines (no more `Yield`).
-    /// `AggregateKind::Generator` is gone for good.
-    GeneratorLowering = 4,
-    Optimization = 5,
+    ConstsPromoted = 2,
+    /// Beginning with this phase, the following variants are disallowed:
+    /// * [`TerminatorKind::DropAndReplace`](terminator::TerminatorKind::DropAndReplace)
+    /// * [`TerminatorKind::FalseUnwind`](terminator::TerminatorKind::FalseUnwind)
+    /// * [`TerminatorKind::FalseEdge`](terminator::TerminatorKind::FalseEdge)
+    /// * [`StatementKind::FakeRead`]
+    /// * [`StatementKind::AscribeUserType`]
+    /// * [`Rvalue::Ref`] with `BorrowKind::Shallow`
+    ///
+    /// And the following variant is allowed:
+    /// * [`StatementKind::Retag`]
+    ///
+    /// Furthermore, `Drop` now uses explicit drop flags visible in the MIR and reaching a `Drop`
+    /// terminator means that the auto-generated drop glue will be invoked.
+    DropsLowered = 3,
+    /// Beginning with this phase, the following variant is disallowed:
+    /// * [`Rvalue::Aggregate`] for any `AggregateKind` except `Array`
+    ///
+    /// And the following variant is allowed:
+    /// * [`StatementKind::SetDiscriminant`]
+    Deaggregated = 4,
+    /// Beginning with this phase, the following variants are disallowed:
+    /// * [`TerminatorKind::Yield`](terminator::TerminatorKind::Yield)
+    /// * [`TerminatorKind::GeneratorDrop](terminator::TerminatorKind::GeneratorDrop)
+    GeneratorsLowered = 5,
+    Optimized = 6,
 }
 
 impl MirPhase {
@@ -284,9 +298,10 @@ pub struct Body<'tcx> {
     pub is_polymorphic: bool,
 
     predecessor_cache: PredecessorCache,
+    switch_source_cache: SwitchSourceCache,
     is_cyclic: GraphIsCyclicCache,
 
-    pub tainted_by_errors: Option<ErrorReported>,
+    pub tainted_by_errors: Option<ErrorGuaranteed>,
 }
 
 impl<'tcx> Body<'tcx> {
@@ -300,7 +315,7 @@ impl<'tcx> Body<'tcx> {
         var_debug_info: Vec<VarDebugInfo<'tcx>>,
         span: Span,
         generator_kind: Option<GeneratorKind>,
-        tainted_by_errors: Option<ErrorReported>,
+        tainted_by_errors: Option<ErrorGuaranteed>,
     ) -> Self {
         // We need `arg_count` locals, and one for the return place.
         assert!(
@@ -311,7 +326,7 @@ impl<'tcx> Body<'tcx> {
         );
 
         let mut body = Body {
-            phase: MirPhase::Build,
+            phase: MirPhase::Built,
             source,
             basic_blocks,
             source_scopes,
@@ -332,6 +347,7 @@ impl<'tcx> Body<'tcx> {
             required_consts: Vec::new(),
             is_polymorphic: false,
             predecessor_cache: PredecessorCache::new(),
+            switch_source_cache: SwitchSourceCache::new(),
             is_cyclic: GraphIsCyclicCache::new(),
             tainted_by_errors,
         };
@@ -346,7 +362,7 @@ impl<'tcx> Body<'tcx> {
     /// crate.
     pub fn new_cfg_only(basic_blocks: IndexVec<BasicBlock, BasicBlockData<'tcx>>) -> Self {
         let mut body = Body {
-            phase: MirPhase::Build,
+            phase: MirPhase::Built,
             source: MirSource::item(DefId::local(CRATE_DEF_INDEX)),
             basic_blocks,
             source_scopes: IndexVec::new(),
@@ -360,6 +376,7 @@ impl<'tcx> Body<'tcx> {
             var_debug_info: Vec::new(),
             is_polymorphic: false,
             predecessor_cache: PredecessorCache::new(),
+            switch_source_cache: SwitchSourceCache::new(),
             is_cyclic: GraphIsCyclicCache::new(),
             tainted_by_errors: None,
         };
@@ -380,6 +397,7 @@ impl<'tcx> Body<'tcx> {
         // FIXME: Use a finer-grained API for this, so only transformations that alter terminators
         // invalidate the caches.
         self.predecessor_cache.invalidate();
+        self.switch_source_cache.invalidate();
         self.is_cyclic.invalidate();
         &mut self.basic_blocks
     }
@@ -389,6 +407,7 @@ impl<'tcx> Body<'tcx> {
         &mut self,
     ) -> (&mut IndexVec<BasicBlock, BasicBlockData<'tcx>>, &mut LocalDecls<'tcx>) {
         self.predecessor_cache.invalidate();
+        self.switch_source_cache.invalidate();
         self.is_cyclic.invalidate();
         (&mut self.basic_blocks, &mut self.local_decls)
     }
@@ -402,6 +421,7 @@ impl<'tcx> Body<'tcx> {
         &mut Vec<VarDebugInfo<'tcx>>,
     ) {
         self.predecessor_cache.invalidate();
+        self.switch_source_cache.invalidate();
         self.is_cyclic.invalidate();
         (&mut self.basic_blocks, &mut self.local_decls, &mut self.var_debug_info)
     }
@@ -527,6 +547,11 @@ impl<'tcx> Body<'tcx> {
     #[inline]
     pub fn predecessors(&self) -> &Predecessors {
         self.predecessor_cache.compute(&self.basic_blocks)
+    }
+
+    #[inline]
+    pub fn switch_sources(&self) -> &SwitchSources {
+        self.switch_source_cache.compute(&self.basic_blocks)
     }
 
     #[inline]
@@ -1292,6 +1317,8 @@ pub enum InlineAsmOperand<'tcx> {
 /// Type for MIR `Assert` terminator error messages.
 pub type AssertMessage<'tcx> = AssertKind<Operand<'tcx>>;
 
+// FIXME: Change `Successors` to `impl Iterator<Item = BasicBlock>`.
+#[allow(rustc::pass_by_value)]
 pub type Successors<'a> =
     iter::Chain<option::IntoIter<&'a BasicBlock>, slice::Iter<'a, BasicBlock>>;
 pub type SuccessorsMut<'a> =
@@ -1539,9 +1566,16 @@ impl Statement<'_> {
     }
 }
 
+/// The various kinds of statements that can appear in MIR.
+///
+/// Not all of these are allowed at every [`MirPhase`]. Check the documentation there to see which
+/// ones you do not have to worry about. The MIR validator will generally enforce such restrictions,
+/// causing an ICE if they are violated.
 #[derive(Clone, Debug, PartialEq, TyEncodable, TyDecodable, Hash, HashStable, TypeFoldable)]
 pub enum StatementKind<'tcx> {
     /// Write the RHS Rvalue to the LHS Place.
+    ///
+    /// The LHS place may not overlap with any memory accessed on the RHS.
     Assign(Box<(Place<'tcx>, Rvalue<'tcx>)>),
 
     /// This represents all the reading that a pattern match may do
@@ -1759,6 +1793,19 @@ static_assert_size!(Place<'_>, 16);
 pub enum ProjectionElem<V, T> {
     Deref,
     Field(Field, T),
+    /// Index into a slice/array.
+    ///
+    /// Note that this does not also dereference, and so it does not exactly correspond to slice
+    /// indexing in Rust. In other words, in the below Rust code:
+    ///
+    /// ```rust
+    /// let x = &[1, 2, 3, 4];
+    /// let i = 2;
+    /// x[i];
+    /// ```
+    ///
+    /// The `x[i]` is turned into a `Deref` followed by an `Index`, not just an `Index`. The same
+    /// thing is true of the `ConstantIndex` and `Subslice` projections below.
     Index(V),
 
     /// These indices are generated by slice patterns. Easiest to explain
@@ -1832,7 +1879,8 @@ impl<V, T> ProjectionElem<V, T> {
 /// and the index is a local.
 pub type PlaceElem<'tcx> = ProjectionElem<Local, Ty<'tcx>>;
 
-// At least on 64 bit systems, `PlaceElem` should not be larger than two pointers.
+// This type is fairly frequently used, so we shouldn't unintentionally increase
+// its size.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 static_assert_size!(PlaceElem<'_>, 24);
 
@@ -1841,6 +1889,16 @@ static_assert_size!(PlaceElem<'_>, 24);
 pub type ProjectionKind = ProjectionElem<(), ()>;
 
 rustc_index::newtype_index! {
+    /// A [newtype'd][wrapper] index type in the MIR [control-flow graph][CFG]
+    ///
+    /// A field (e.g., `f` in `_1.f`) is one variant of [`ProjectionElem`]. Conceptually,
+    /// rustc can identify that a field projection refers to either two different regions of memory
+    /// or the same one between the base and the 'projection element'.
+    /// Read more about projections in the [rustc-dev-guide][mir-datatypes]
+    ///
+    /// [wrapper]: https://rustc-dev-guide.rust-lang.org/appendix/glossary.html#newtype
+    /// [CFG]: https://rustc-dev-guide.rust-lang.org/appendix/background.html#cfg
+    /// [mir-datatypes]: https://rustc-dev-guide.rust-lang.org/mir/index.html#mir-data-types
     pub struct Field {
         derive [HashStable]
         DEBUG_FORMAT = "field[{}]"
@@ -1901,6 +1959,27 @@ impl<'tcx> Place<'tcx> {
             let base = PlaceRef { local: self.local, projection: &self.projection[..i] };
             (base, proj)
         })
+    }
+
+    /// Generates a new place by appending `more_projections` to the existing ones
+    /// and interning the result.
+    pub fn project_deeper(self, more_projections: &[PlaceElem<'tcx>], tcx: TyCtxt<'tcx>) -> Self {
+        if more_projections.is_empty() {
+            return self;
+        }
+
+        let mut v: Vec<PlaceElem<'tcx>>;
+
+        let new_projections = if self.projection.is_empty() {
+            more_projections
+        } else {
+            v = Vec::with_capacity(self.projection.len() + more_projections.len());
+            v.extend(self.projection);
+            v.extend(more_projections);
+            &v
+        };
+
+        Place { local: self.local, projection: tcx.intern_place_elems(new_projections) }
     }
 }
 
@@ -2174,12 +2253,26 @@ impl<'tcx> Operand<'tcx> {
             Operand::Copy(_) | Operand::Move(_) => None,
         }
     }
+
+    /// Gets the `ty::FnDef` from an operand if it's a constant function item.
+    ///
+    /// While this is unlikely in general, it's the normal case of what you'll
+    /// find as the `func` in a [`TerminatorKind::Call`].
+    pub fn const_fn_def(&self) -> Option<(DefId, SubstsRef<'tcx>)> {
+        let const_ty = self.constant()?.literal.ty();
+        if let ty::FnDef(def_id, substs) = *const_ty.kind() { Some((def_id, substs)) } else { None }
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////
 /// Rvalues
 
 #[derive(Clone, TyEncodable, TyDecodable, Hash, HashStable, PartialEq)]
+/// The various kinds of rvalues that can appear in MIR.
+///
+/// Not all of these are allowed at every [`MirPhase`]. Check the documentation there to see which
+/// ones you do not have to worry about. The MIR validator will generally enforce such restrictions,
+/// causing an ICE if they are violated.
 pub enum Rvalue<'tcx> {
     /// x (either a move or copy, depending on type of x)
     Use(Operand<'tcx>),
@@ -2412,11 +2505,11 @@ impl<'tcx> Debug for Rvalue<'tcx> {
 
                     AggregateKind::Adt(adt_did, variant, substs, _user_ty, _) => {
                         ty::tls::with(|tcx| {
-                            let mut name = String::new();
-                            let variant_def = &tcx.adt_def(adt_did).variants[variant];
+                            let variant_def = &tcx.adt_def(adt_did).variant(variant);
                             let substs = tcx.lift(substs).expect("could not lift for printing");
-                            FmtPrinter::new(tcx, &mut name, Namespace::ValueNS)
-                                .print_def_path(variant_def.def_id, substs)?;
+                            let name = FmtPrinter::new(tcx, Namespace::ValueNS)
+                                .print_def_path(variant_def.def_id, substs)?
+                                .into_buffer();
 
                             match variant_def.ctor_kind {
                                 CtorKind::Const => fmt.write_str(&name),
@@ -2544,7 +2637,14 @@ impl<'tcx> Constant<'tcx> {
 impl<'tcx> From<ty::Const<'tcx>> for ConstantKind<'tcx> {
     #[inline]
     fn from(ct: ty::Const<'tcx>) -> Self {
-        Self::Ty(ct)
+        match ct.val() {
+            ty::ConstKind::Value(cv) => {
+                // FIXME Once valtrees are introduced we need to convert those
+                // into `ConstValue` instances here
+                Self::Val(cv, ct.ty())
+            }
+            _ => Self::Ty(ct),
+        }
     }
 }
 
@@ -2624,6 +2724,27 @@ impl<'tcx> ConstantKind<'tcx> {
             Self::Ty(ct) => ct.try_eval_usize(tcx, param_env),
             Self::Val(val, _) => val.try_to_machine_usize(tcx),
         }
+    }
+
+    pub fn from_bool(tcx: TyCtxt<'tcx>, v: bool) -> Self {
+        let cv = ConstValue::from_bool(v);
+        Self::Val(cv, tcx.types.bool)
+    }
+
+    pub fn from_zero_sized(ty: Ty<'tcx>) -> Self {
+        let cv = ConstValue::Scalar(Scalar::ZST);
+        Self::Val(cv, ty)
+    }
+
+    pub fn from_usize(tcx: TyCtxt<'tcx>, n: u64) -> Self {
+        let ty = tcx.types.usize;
+        let size = tcx
+            .layout_of(ty::ParamEnv::empty().and(ty))
+            .unwrap_or_else(|e| bug!("could not compute layout for {:?}: {:?}", ty, e))
+            .size;
+        let cv = ConstValue::Scalar(Scalar::from_uint(n as u128, size));
+
+        Self::Val(cv, ty)
     }
 }
 
@@ -2712,14 +2833,14 @@ impl<'tcx> UserTypeProjections {
         self.map_projections(|pat_ty_proj| pat_ty_proj.leaf(field))
     }
 
-    pub fn variant(self, adt_def: &'tcx AdtDef, variant_index: VariantIdx, field: Field) -> Self {
+    pub fn variant(self, adt_def: AdtDef<'tcx>, variant_index: VariantIdx, field: Field) -> Self {
         self.map_projections(|pat_ty_proj| pat_ty_proj.variant(adt_def, variant_index, field))
     }
 }
 
 /// Encodes the effect of a user-supplied type annotation on the
 /// subcomponents of a pattern. The effect is determined by applying the
-/// given list of proejctions to some underlying base type. Often,
+/// given list of projections to some underlying base type. Often,
 /// the projection element list `projs` is empty, in which case this
 /// directly encodes a type in `base`. But in the case of complex patterns with
 /// subpatterns and bindings, we want to apply only a *part* of the type to a variable,
@@ -2763,12 +2884,12 @@ impl UserTypeProjection {
 
     pub(crate) fn variant(
         mut self,
-        adt_def: &AdtDef,
+        adt_def: AdtDef<'_>,
         variant_index: VariantIdx,
         field: Field,
     ) -> Self {
         self.projs.push(ProjectionElem::Downcast(
-            Some(adt_def.variants[variant_index].name),
+            Some(adt_def.variant(variant_index).name),
             variant_index,
         ));
         self.projs.push(ProjectionElem::Field(field, ()));
@@ -2838,9 +2959,10 @@ fn pretty_print_const<'tcx>(
     use crate::ty::print::PrettyPrinter;
     ty::tls::with(|tcx| {
         let literal = tcx.lift(c).unwrap();
-        let mut cx = FmtPrinter::new(tcx, fmt, Namespace::ValueNS);
+        let mut cx = FmtPrinter::new(tcx, Namespace::ValueNS);
         cx.print_alloc_ids = true;
-        cx.pretty_print_const(literal, print_types)?;
+        let cx = cx.pretty_print_const(literal, print_types)?;
+        fmt.write_str(&cx.into_buffer())?;
         Ok(())
     })
 }
@@ -2855,9 +2977,10 @@ fn pretty_print_const_value<'tcx>(
     ty::tls::with(|tcx| {
         let val = tcx.lift(val).unwrap();
         let ty = tcx.lift(ty).unwrap();
-        let mut cx = FmtPrinter::new(tcx, fmt, Namespace::ValueNS);
+        let mut cx = FmtPrinter::new(tcx, Namespace::ValueNS);
         cx.print_alloc_ids = true;
-        cx.pretty_print_const_value(val, ty, print_types)?;
+        let cx = cx.pretty_print_const_value(val, ty, print_types)?;
+        fmt.write_str(&cx.into_buffer())?;
         Ok(())
     })
 }

@@ -333,7 +333,7 @@ impl Duration {
     ///
     /// [`subsec_nanos`]: Duration::subsec_nanos
     #[stable(feature = "duration", since = "1.3.0")]
-    #[rustc_const_stable(feature = "duration", since = "1.32.0")]
+    #[rustc_const_stable(feature = "duration_consts", since = "1.32.0")]
     #[must_use]
     #[inline]
     pub const fn as_secs(&self) -> u64 {
@@ -356,7 +356,7 @@ impl Duration {
     /// assert_eq!(duration.subsec_millis(), 432);
     /// ```
     #[stable(feature = "duration_extras", since = "1.27.0")]
-    #[rustc_const_stable(feature = "duration_extras", since = "1.32.0")]
+    #[rustc_const_stable(feature = "duration_consts", since = "1.32.0")]
     #[must_use]
     #[inline]
     pub const fn subsec_millis(&self) -> u32 {
@@ -379,7 +379,7 @@ impl Duration {
     /// assert_eq!(duration.subsec_micros(), 234_567);
     /// ```
     #[stable(feature = "duration_extras", since = "1.27.0")]
-    #[rustc_const_stable(feature = "duration_extras", since = "1.32.0")]
+    #[rustc_const_stable(feature = "duration_consts", since = "1.32.0")]
     #[must_use]
     #[inline]
     pub const fn subsec_micros(&self) -> u32 {
@@ -402,7 +402,7 @@ impl Duration {
     /// assert_eq!(duration.subsec_nanos(), 10_000_000);
     /// ```
     #[stable(feature = "duration", since = "1.3.0")]
-    #[rustc_const_stable(feature = "duration", since = "1.32.0")]
+    #[rustc_const_stable(feature = "duration_consts", since = "1.32.0")]
     #[must_use]
     #[inline]
     pub const fn subsec_nanos(&self) -> u32 {
@@ -1214,7 +1214,7 @@ impl fmt::Debug for Duration {
 /// use std::time::Duration;
 ///
 /// if let Err(e) = Duration::try_from_secs_f32(-1.0) {
-///     println!("Failed conversion to Duration: {}", e);
+///     println!("Failed conversion to Duration: {e}");
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]

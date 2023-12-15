@@ -787,7 +787,6 @@ pub fn visit_interpolated<T: MutVisitor>(nt: &mut token::Nonterminal, vis: &mut 
             visit_lazy_tts(tokens, vis);
         }
         token::NtPath(path) => vis.visit_path(path),
-        token::NtTT(tt) => visit_tt(tt, vis),
         token::NtVis(visib) => vis.visit_vis(visib),
     }
 }
@@ -1009,8 +1008,9 @@ pub fn noop_visit_item_kind<T: MutVisitor>(kind: &mut ItemKind, vis: &mut T) {
         ItemKind::Mod(unsafety, mod_kind) => {
             visit_unsafety(unsafety, vis);
             match mod_kind {
-                ModKind::Loaded(items, _inline, inner_span) => {
+                ModKind::Loaded(items, _inline, ModSpans { inner_span, inject_use_span }) => {
                     vis.visit_span(inner_span);
+                    vis.visit_span(inject_use_span);
                     items.flat_map_in_place(|item| vis.flat_map_item(item));
                 }
                 ModKind::Unloaded => {}
@@ -1018,9 +1018,13 @@ pub fn noop_visit_item_kind<T: MutVisitor>(kind: &mut ItemKind, vis: &mut T) {
         }
         ItemKind::ForeignMod(nm) => vis.visit_foreign_mod(nm),
         ItemKind::GlobalAsm(asm) => noop_visit_inline_asm(asm, vis),
-        ItemKind::TyAlias(box TyAlias { defaultness, generics, bounds, ty }) => {
+        ItemKind::TyAlias(box TyAlias {
+            defaultness, generics, where_clauses, bounds, ty, ..
+        }) => {
             visit_defaultness(defaultness, vis);
             vis.visit_generics(generics);
+            vis.visit_span(&mut where_clauses.0.1);
+            vis.visit_span(&mut where_clauses.1.1);
             visit_bounds(bounds, vis);
             visit_opt(ty, |ty| vis.visit_ty(ty));
         }
@@ -1087,9 +1091,18 @@ pub fn noop_flat_map_assoc_item<T: MutVisitor>(
             visit_fn_sig(sig, visitor);
             visit_opt(body, |body| visitor.visit_block(body));
         }
-        AssocItemKind::TyAlias(box TyAlias { defaultness, generics, bounds, ty }) => {
+        AssocItemKind::TyAlias(box TyAlias {
+            defaultness,
+            generics,
+            where_clauses,
+            bounds,
+            ty,
+            ..
+        }) => {
             visit_defaultness(defaultness, visitor);
             visitor.visit_generics(generics);
+            visitor.visit_span(&mut where_clauses.0.1);
+            visitor.visit_span(&mut where_clauses.1.1);
             visit_bounds(bounds, visitor);
             visit_opt(ty, |ty| visitor.visit_ty(ty));
         }
@@ -1108,11 +1121,13 @@ pub fn noop_visit_fn_header<T: MutVisitor>(header: &mut FnHeader, vis: &mut T) {
 }
 
 pub fn noop_visit_crate<T: MutVisitor>(krate: &mut Crate, vis: &mut T) {
-    let Crate { attrs, items, span, id, is_placeholder: _ } = krate;
+    let Crate { attrs, items, spans, id, is_placeholder: _ } = krate;
     vis.visit_id(id);
     visit_attrs(attrs, vis);
     items.flat_map_in_place(|item| vis.flat_map_item(item));
-    vis.visit_span(span);
+    let ModSpans { inner_span, inject_use_span } = spans;
+    vis.visit_span(inner_span);
+    vis.visit_span(inject_use_span);
 }
 
 // Mutates one item into possibly many items.
@@ -1152,9 +1167,18 @@ pub fn noop_flat_map_foreign_item<T: MutVisitor>(
             visit_fn_sig(sig, visitor);
             visit_opt(body, |body| visitor.visit_block(body));
         }
-        ForeignItemKind::TyAlias(box TyAlias { defaultness, generics, bounds, ty }) => {
+        ForeignItemKind::TyAlias(box TyAlias {
+            defaultness,
+            generics,
+            where_clauses,
+            bounds,
+            ty,
+            ..
+        }) => {
             visit_defaultness(defaultness, visitor);
             visitor.visit_generics(generics);
+            visitor.visit_span(&mut where_clauses.0.1);
+            visitor.visit_span(&mut where_clauses.1.1);
             visit_bounds(bounds, visitor);
             visit_opt(ty, |ty| visitor.visit_ty(ty));
         }
@@ -1536,7 +1560,7 @@ impl DummyAstNode for Crate {
         Crate {
             attrs: Default::default(),
             items: Default::default(),
-            span: Default::default(),
+            spans: Default::default(),
             id: DUMMY_NODE_ID,
             is_placeholder: Default::default(),
         }

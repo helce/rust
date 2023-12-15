@@ -35,7 +35,7 @@ fn build_with_zero2() {
 #[test]
 fn formatted() {
     let s = CString::new(&b"abc\x01\x02\n\xE2\x80\xA6\xFF"[..]).unwrap();
-    assert_eq!(format!("{:?}", s), r#""abc\x01\x02\n\xe2\x80\xa6\xff""#);
+    assert_eq!(format!("{s:?}"), r#""abc\x01\x02\n\xe2\x80\xa6\xff""#);
 }
 
 #[test]
@@ -115,6 +115,43 @@ fn from_bytes_with_nul_interior() {
     let data = b"1\023\0";
     let cstr = CStr::from_bytes_with_nul(data);
     assert!(cstr.is_err());
+}
+
+#[test]
+fn cstr_from_bytes_until_nul() {
+    // Test an empty slice. This should fail because it
+    // does not contain a nul byte.
+    let b = b"";
+    assert_eq!(CStr::from_bytes_until_nul(&b[..]), Err(FromBytesUntilNulError(())));
+
+    // Test a non-empty slice, that does not contain a nul byte.
+    let b = b"hello";
+    assert_eq!(CStr::from_bytes_until_nul(&b[..]), Err(FromBytesUntilNulError(())));
+
+    // Test an empty nul-terminated string
+    let b = b"\0";
+    let r = CStr::from_bytes_until_nul(&b[..]).unwrap();
+    assert_eq!(r.to_bytes(), b"");
+
+    // Test a slice with the nul byte in the middle
+    let b = b"hello\0world!";
+    let r = CStr::from_bytes_until_nul(&b[..]).unwrap();
+    assert_eq!(r.to_bytes(), b"hello");
+
+    // Test a slice with the nul byte at the end
+    let b = b"hello\0";
+    let r = CStr::from_bytes_until_nul(&b[..]).unwrap();
+    assert_eq!(r.to_bytes(), b"hello");
+
+    // Test a slice with two nul bytes at the end
+    let b = b"hello\0\0";
+    let r = CStr::from_bytes_until_nul(&b[..]).unwrap();
+    assert_eq!(r.to_bytes(), b"hello");
+
+    // Test a slice containing lots of nul bytes
+    let b = b"\0\0\0\0";
+    let r = CStr::from_bytes_until_nul(&b[..]).unwrap();
+    assert_eq!(r.to_bytes(), b"");
 }
 
 #[test]

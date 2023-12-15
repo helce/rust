@@ -252,11 +252,12 @@ impl<'a> PostExpansionVisitor<'a> {
                     "wasm ABI is experimental and subject to change"
                 );
             }
-            abi => self
-                .sess
-                .parse_sess
-                .span_diagnostic
-                .delay_span_bug(span, &format!("unrecognized ABI not caught in lowering: {}", abi)),
+            abi => {
+                self.sess.parse_sess.span_diagnostic.delay_span_bug(
+                    span,
+                    &format!("unrecognized ABI not caught in lowering: {}", abi),
+                );
+            }
         }
     }
 
@@ -386,13 +387,6 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
         if attr.has_name(sym::link) {
             for nested_meta in attr.meta_item_list().unwrap_or_default() {
                 if nested_meta.has_name(sym::modifiers) {
-                    gate_feature_post!(
-                        self,
-                        native_link_modifiers,
-                        nested_meta.span(),
-                        "native link modifiers are experimental"
-                    );
-
                     if let Some(modifiers) = nested_meta.value_str() {
                         for modifier in modifiers.as_str().split(',') {
                             if let Some(modifier) = modifier.strip_prefix(&['+', '-']) {
@@ -411,13 +405,30 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                                 gate_modifier!(
                                     "bundle" => native_link_modifiers_bundle
                                     "verbatim" => native_link_modifiers_verbatim
-                                    "whole-archive" => native_link_modifiers_whole_archive
                                     "as-needed" => native_link_modifiers_as_needed
                                 );
                             }
                         }
                     }
                 }
+            }
+        }
+
+        // Emit errors for non-staged-api crates.
+        if !self.features.staged_api {
+            if attr.has_name(sym::rustc_deprecated)
+                || attr.has_name(sym::unstable)
+                || attr.has_name(sym::stable)
+                || attr.has_name(sym::rustc_const_unstable)
+                || attr.has_name(sym::rustc_const_stable)
+            {
+                struct_span_err!(
+                    self.sess,
+                    attr.span,
+                    E0734,
+                    "stability attributes may not be used outside of the standard library",
+                )
+                .emit();
             }
         }
     }

@@ -3,7 +3,7 @@ use rustc_ast as ast;
 use rustc_ast::attr;
 use rustc_ast::token::{self, Nonterminal};
 use rustc_ast_pretty::pprust;
-use rustc_errors::{error_code, DiagnosticBuilder, PResult};
+use rustc_errors::{error_code, Diagnostic, PResult};
 use rustc_span::{sym, BytePos, Span};
 use std::convert::TryInto;
 
@@ -139,7 +139,7 @@ impl<'a> Parser<'a> {
                 Ok(attr::mk_attr_from_item(item, None, style, attr_sp))
             } else {
                 let token_str = pprust::token_to_string(&this.token);
-                let msg = &format!("expected `#`, found `{}`", token_str);
+                let msg = &format!("expected `#`, found `{token_str}`");
                 Err(this.struct_span_err(this.token.span, msg))
             }
         })
@@ -147,11 +147,11 @@ impl<'a> Parser<'a> {
 
     fn annotate_following_item_if_applicable(
         &self,
-        err: &mut DiagnosticBuilder<'_>,
+        err: &mut Diagnostic,
         span: Span,
         attr_type: OuterAttributeType,
     ) -> Option<Span> {
-        let mut snapshot = self.clone();
+        let mut snapshot = self.create_snapshot_for_diagnostic();
         let lo = span.lo()
             + BytePos(match attr_type {
                 OuterAttributeType::Attribute => 1,
@@ -165,7 +165,7 @@ impl<'a> Parser<'a> {
         loop {
             // skip any other attributes, we want the item
             if snapshot.token.kind == token::Pound {
-                if let Err(mut err) = snapshot.parse_attribute(InnerAttrPolicy::Permitted) {
+                if let Err(err) = snapshot.parse_attribute(InnerAttrPolicy::Permitted) {
                     err.cancel();
                     return Some(replacement_span);
                 }
@@ -206,7 +206,7 @@ impl<'a> Parser<'a> {
                 );
                 return None;
             }
-            Err(mut item_err) => {
+            Err(item_err) => {
                 item_err.cancel();
             }
             Ok(None) => {}
@@ -304,7 +304,7 @@ impl<'a> Parser<'a> {
                 // this replace range with it, removing the inner attribute from the final
                 // `AttrAnnotatedTokenStream`. Inner attributes are stored in the parsed AST note.
                 // During macro expansion, they are selectively inserted back into the
-                // token stream (the first inner attribute is remoevd each time we invoke the
+                // token stream (the first inner attribute is removed each time we invoke the
                 // corresponding macro).
                 let range = start_pos..end_pos;
                 if let Capturing::Yes = self.capture_state.capturing {
@@ -412,16 +412,16 @@ impl<'a> Parser<'a> {
     fn parse_meta_item_inner(&mut self) -> PResult<'a, ast::NestedMetaItem> {
         match self.parse_unsuffixed_lit() {
             Ok(lit) => return Ok(ast::NestedMetaItem::Literal(lit)),
-            Err(ref mut err) => err.cancel(),
+            Err(err) => err.cancel(),
         }
 
         match self.parse_meta_item() {
             Ok(mi) => return Ok(ast::NestedMetaItem::MetaItem(mi)),
-            Err(ref mut err) => err.cancel(),
+            Err(err) => err.cancel(),
         }
 
         let found = pprust::token_to_string(&self.token);
-        let msg = format!("expected unsuffixed literal or identifier, found `{}`", found);
+        let msg = format!("expected unsuffixed literal or identifier, found `{found}`");
         Err(self.struct_span_err(self.token.span, &msg))
     }
 }

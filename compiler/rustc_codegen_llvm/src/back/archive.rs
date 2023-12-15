@@ -151,7 +151,9 @@ impl<'a> ArchiveBuilder<'a> for LlvmArchiveBuilder<'a> {
             output_path.with_extension("lib")
         };
 
-        let mingw_gnu_toolchain = self.config.sess.target.llvm_target.ends_with("pc-windows-gnu");
+        let target = &self.config.sess.target;
+        let mingw_gnu_toolchain =
+            target.vendor == "pc" && target.os == "windows" && target.env == "gnu";
 
         let import_name_and_ordinal_vector: Vec<(String, Option<u16>)> = dll_imports
             .iter()
@@ -310,10 +312,7 @@ impl<'a> LlvmArchiveBuilder<'a> {
             if let Some(archive) = self.src_archive() {
                 for child in archive.iter() {
                     let child = child.map_err(string_to_io_error)?;
-                    let child_name = match child.name() {
-                        Some(s) => s,
-                        None => continue,
-                    };
+                    let Some(child_name) = child.name() else { continue };
                     if removals.iter().any(|r| r == child_name) {
                         continue;
                     }

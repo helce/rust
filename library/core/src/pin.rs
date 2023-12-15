@@ -805,7 +805,7 @@ impl<T: ?Sized> Pin<&'static T> {
     ///
     /// This is safe, because `T` is borrowed for the `'static` lifetime, which
     /// never ends.
-    #[unstable(feature = "pin_static_ref", issue = "78186")]
+    #[stable(feature = "pin_static_ref", since = "1.61.0")]
     #[rustc_const_unstable(feature = "const_pin", issue = "76654")]
     pub const fn static_ref(r: &'static T) -> Pin<&'static T> {
         // SAFETY: The 'static borrow guarantees the data will not be
@@ -858,7 +858,7 @@ impl<T: ?Sized> Pin<&'static mut T> {
     ///
     /// This is safe, because `T` is borrowed for the `'static` lifetime, which
     /// never ends.
-    #[unstable(feature = "pin_static_ref", issue = "78186")]
+    #[stable(feature = "pin_static_ref", since = "1.61.0")]
     #[rustc_const_unstable(feature = "const_pin", issue = "76654")]
     pub const fn static_mut(r: &'static mut T) -> Pin<&'static mut T> {
         // SAFETY: The 'static borrow guarantees the data will not be
@@ -954,7 +954,7 @@ impl<P, U> DispatchFromDyn<Pin<U>> for Pin<P> where P: DispatchFromDyn<U> {}
 /// stuff(pin!(Foo { /* … */ }));
 /// ```
 ///
-/// ### Manually polling a `Future` (wihout `Unpin` bounds)
+/// ### Manually polling a `Future` (without `Unpin` bounds)
 ///
 /// ```rust
 /// #![feature(pin_macro)]
@@ -1100,8 +1100,8 @@ pub macro pin($value:expr $(,)?) {
     //     that would break `Pin`'s invariants.
     //   - `{ $value }` is braced, making it a _block expression_, thus **moving**
     //     the given `$value`, and making it _become an **anonymous** temporary_.
-    //     By virtue of being anonynomous, it can no longer be accessed, thus
-    //     preventing any attemps to `mem::replace` it or `mem::forget` it, _etc._
+    //     By virtue of being anonymous, it can no longer be accessed, thus
+    //     preventing any attempts to `mem::replace` it or `mem::forget` it, _etc._
     //
     // This gives us a `pin!` definition that is sound, and which works, but only
     // in certain scenarios:

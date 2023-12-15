@@ -19,8 +19,7 @@
 #![feature(bench_black_box)]
 #![feature(internal_output_capture)]
 #![feature(staged_api)]
-#![feature(termination_trait_lib)]
-#![feature(process_exitcode_placeholder)]
+#![feature(process_exitcode_internals)]
 #![feature(test)]
 #![feature(total_cmp)]
 
@@ -99,7 +98,7 @@ pub fn test_main(args: &[String], tests: Vec<TestDescAndFn>, options: Option<Opt
     let mut opts = match cli::parse_opts(args) {
         Some(Ok(o)) => o,
         Some(Err(msg)) => {
-            eprintln!("error: {}", msg);
+            eprintln!("error: {msg}");
             process::exit(ERROR_EXIT_CODE);
         }
         None => return,
@@ -109,7 +108,7 @@ pub fn test_main(args: &[String], tests: Vec<TestDescAndFn>, options: Option<Opt
     }
     if opts.list {
         if let Err(e) = console::list_tests_console(&opts, tests) {
-            eprintln!("error: io error when listing tests: {:?}", e);
+            eprintln!("error: io error when listing tests: {e:?}");
             process::exit(ERROR_EXIT_CODE);
         }
     } else {
@@ -117,7 +116,7 @@ pub fn test_main(args: &[String], tests: Vec<TestDescAndFn>, options: Option<Opt
             Ok(true) => {}
             Ok(false) => process::exit(ERROR_EXIT_CODE),
             Err(e) => {
-                eprintln!("error: io error when listing tests: {:?}", e);
+                eprintln!("error: io error when listing tests: {e:?}");
                 process::exit(ERROR_EXIT_CODE);
             }
         }
@@ -153,7 +152,7 @@ pub fn test_main_static_abort(tests: &[&TestDescAndFn]) {
             .filter(|test| test.desc.name.as_slice() == name)
             .map(make_owned_test)
             .next()
-            .unwrap_or_else(|| panic!("couldn't find a test with the provided name '{}'", name));
+            .unwrap_or_else(|| panic!("couldn't find a test with the provided name '{name}'"));
         let TestDescAndFn { desc, testfn } = test;
         let testfn = match testfn {
             StaticTestFn(f) => f,
@@ -524,7 +523,7 @@ pub fn run_test(
                     Arc::get_mut(&mut runtest).unwrap().get_mut().unwrap().take().unwrap()();
                     None
                 }
-                Err(e) => panic!("failed to spawn thread to run test: {}", e),
+                Err(e) => panic!("failed to spawn thread to run test: {e}"),
             }
         } else {
             runtest();
@@ -678,7 +677,7 @@ fn run_test_in_spawned_subprocess(desc: TestDesc, testfn: Box<dyn FnOnce() + Sen
         // We don't support serializing TrFailedMsg, so just
         // print the message out to stderr.
         if let TrFailedMsg(msg) = &test_result {
-            eprintln!("{}", msg);
+            eprintln!("{msg}");
         }
 
         if let Some(info) = panic_info {

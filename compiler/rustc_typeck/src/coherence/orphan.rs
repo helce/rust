@@ -3,7 +3,7 @@
 
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::struct_span_err;
-use rustc_errors::ErrorReported;
+use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
 use rustc_index::bit_set::GrowableBitSet;
 use rustc_infer::infer::TyCtxtInferExt;
@@ -21,7 +21,7 @@ pub(super) fn orphan_check_crate(tcx: TyCtxt<'_>, (): ()) -> &[LocalDefId] {
         for &impl_of_trait in impls_of_trait {
             match orphan_check_impl(tcx, impl_of_trait) {
                 Ok(()) => {}
-                Err(ErrorReported) => errors.push(impl_of_trait),
+                Err(_) => errors.push(impl_of_trait),
             }
         }
 
@@ -33,14 +33,13 @@ pub(super) fn orphan_check_crate(tcx: TyCtxt<'_>, (): ()) -> &[LocalDefId] {
 }
 
 #[instrument(skip(tcx), level = "debug")]
-fn orphan_check_impl(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Result<(), ErrorReported> {
+fn orphan_check_impl(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Result<(), ErrorGuaranteed> {
     let trait_ref = tcx.impl_trait_ref(def_id).unwrap();
     let trait_def_id = trait_ref.def_id;
 
     let item = tcx.hir().item(hir::ItemId { def_id });
-    let impl_ = match item.kind {
-        hir::ItemKind::Impl(ref impl_) => impl_,
-        _ => bug!("{:?} is not an impl: {:?}", def_id, item),
+    let hir::ItemKind::Impl(ref impl_) = item.kind else {
+        bug!("{:?} is not an impl: {:?}", def_id, item);
     };
     let sp = tcx.sess.source_map().guess_head_span(item.span);
     let tr = impl_.of_trait.as_ref().unwrap();
@@ -98,7 +97,7 @@ fn orphan_check_impl(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Result<(), ErrorRep
     if tcx.trait_is_auto(trait_def_id) && !trait_def_id.is_local() {
         let self_ty = trait_ref.self_ty();
         let opt_self_def_id = match *self_ty.kind() {
-            ty::Adt(self_def, _) => Some(self_def.did),
+            ty::Adt(self_def, _) => Some(self_def.did()),
             ty::Foreign(did) => Some(did),
             _ => None,
         };
@@ -136,17 +135,19 @@ fn orphan_check_impl(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Result<(), ErrorRep
         };
 
         if let Some((msg, label)) = msg {
-            struct_span_err!(tcx.sess, sp, E0321, "{}", msg).span_label(sp, label).emit();
-            return Err(ErrorReported);
+            let reported =
+                struct_span_err!(tcx.sess, sp, E0321, "{}", msg).span_label(sp, label).emit();
+            return Err(reported);
         }
     }
 
     if let ty::Opaque(def_id, _) = *trait_ref.self_ty().kind() {
-        tcx.sess
+        let reported = tcx
+            .sess
             .struct_span_err(sp, "cannot implement trait on type alias impl trait")
             .span_note(tcx.def_span(def_id), "type alias impl trait defined here")
             .emit();
-        return Err(ErrorReported);
+        return Err(reported);
     }
 
     Ok(())
@@ -159,8 +160,8 @@ fn emit_orphan_check_error<'tcx>(
     self_ty_span: Span,
     generics: &hir::Generics<'tcx>,
     err: traits::OrphanCheckErr<'tcx>,
-) -> Result<!, ErrorReported> {
-    match err {
+) -> Result<!, ErrorGuaranteed> {
+    Err(match err {
         traits::OrphanCheckErr::NonLocalInputType(tys) => {
             let mut err = struct_span_err!(
                 tcx.sess,
@@ -182,7 +183,7 @@ fn emit_orphan_check_error<'tcx>(
                     // That way if we had `Vec<MyType>`, we will properly attribute the
                     // problem to `Vec<T>` and avoid confusing the user if they were to see
                     // `MyType` in the error.
-                    ty::Adt(def, _) => tcx.mk_adt(def, ty::List::empty()),
+                    ty::Adt(def, _) => tcx.mk_adt(*def, ty::List::empty()),
                     _ => ty,
                 };
                 let this = "this".to_string();
@@ -270,9 +271,7 @@ fn emit_orphan_check_error<'tcx>(
                 .emit(),
             }
         }
-    }
-
-    Err(ErrorReported)
+    })
 }
 
 #[derive(Default)]
@@ -337,7 +336,7 @@ fn lint_auto_trait_impls(tcx: TyCtxt<'_>, trait_def_id: DefId, impls: &[LocalDef
         assert_eq!(trait_ref.substs.len(), 1);
         let self_ty = trait_ref.self_ty();
         let (self_type_did, substs) = match self_ty.kind() {
-            ty::Adt(def, substs) => (def.did, substs),
+            ty::Adt(def, substs) => (def.did(), substs),
             _ => {
                 // FIXME: should also lint for stuff like `&i32` but
                 // considering that auto traits are unstable, that
@@ -440,7 +439,7 @@ fn fast_reject_auto_impl<'tcx>(tcx: TyCtxt<'tcx>, trait_def_id: DefId, self_ty: 
                     // by only visiting each `DefId` once.
                     //
                     // This will be is incorrect in subtle cases, but I don't care :)
-                    if self.seen.insert(def.did) {
+                    if self.seen.insert(def.did()) {
                         for ty in def.all_fields().map(|field| field.ty(tcx, substs)) {
                             ty.visit_with(self)?;
                         }
@@ -454,7 +453,7 @@ fn fast_reject_auto_impl<'tcx>(tcx: TyCtxt<'tcx>, trait_def_id: DefId, self_ty: 
     }
 
     let self_ty_root = match self_ty.kind() {
-        ty::Adt(def, _) => tcx.mk_adt(def, InternalSubsts::identity_for_item(tcx, def.did)),
+        ty::Adt(def, _) => tcx.mk_adt(*def, InternalSubsts::identity_for_item(tcx, def.did())),
         _ => unimplemented!("unexpected self ty {:?}", self_ty),
     };
 

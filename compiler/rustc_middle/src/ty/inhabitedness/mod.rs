@@ -105,21 +105,21 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 }
 
-impl<'tcx> AdtDef {
+impl<'tcx> AdtDef<'tcx> {
     /// Calculates the forest of `DefId`s from which this ADT is visibly uninhabited.
     fn uninhabited_from(
-        &self,
+        self,
         tcx: TyCtxt<'tcx>,
         substs: SubstsRef<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
     ) -> DefIdForest<'tcx> {
         // Non-exhaustive ADTs from other crates are always considered inhabited.
-        if self.is_variant_list_non_exhaustive() && !self.did.is_local() {
+        if self.is_variant_list_non_exhaustive() && !self.did().is_local() {
             DefIdForest::empty()
         } else {
             DefIdForest::intersection(
                 tcx,
-                self.variants
+                self.variants()
                     .iter()
                     .map(|v| v.uninhabited_from(tcx, substs, self.adt_kind(), param_env)),
             )
@@ -207,10 +207,9 @@ pub(crate) fn type_uninhabited_from<'tcx>(
 
         Never => DefIdForest::full(),
 
-        Tuple(ref tys) => DefIdForest::union(
-            tcx,
-            tys.iter().map(|ty| ty.expect_ty().uninhabited_from(tcx, param_env)),
-        ),
+        Tuple(ref tys) => {
+            DefIdForest::union(tcx, tys.iter().map(|ty| ty.uninhabited_from(tcx, param_env)))
+        }
 
         Array(ty, len) => match len.try_eval_usize(tcx, param_env) {
             Some(0) | None => DefIdForest::empty(),

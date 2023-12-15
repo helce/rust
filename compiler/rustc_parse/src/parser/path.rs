@@ -1,5 +1,5 @@
 use super::ty::{AllowPlus, RecoverQPath, RecoverReturnSign};
-use super::{Parser, TokenType};
+use super::{Parser, Restrictions, TokenType};
 use crate::maybe_whole;
 use rustc_ast::ptr::P;
 use rustc_ast::token::{self, Token};
@@ -272,7 +272,23 @@ impl<'a> Parser<'a> {
                         lo,
                         ty_generics,
                     )?;
-                    self.expect_gt()?;
+                    self.expect_gt().map_err(|mut err| {
+                        // Attempt to find places where a missing `>` might belong.
+                        if let Some(arg) = args
+                            .iter()
+                            .rev()
+                            .skip_while(|arg| matches!(arg, AngleBracketedArg::Constraint(_)))
+                            .next()
+                        {
+                            err.span_suggestion_verbose(
+                                arg.span().shrink_to_hi(),
+                                "you might have meant to end the type parameters here",
+                                ">".to_string(),
+                                Applicability::MaybeIncorrect,
+                            );
+                        }
+                        err
+                    })?;
                     let span = lo.to(self.prev_token.span);
                     AngleBracketedArgs { args, span }.into()
                 } else {
@@ -394,7 +410,7 @@ impl<'a> Parser<'a> {
         debug!("parse_generic_args_with_leading_angle_bracket_recovery: (snapshotting)");
         match self.parse_angle_args(ty_generics) {
             Ok(args) => Ok(args),
-            Err(mut e) if is_first_invocation && self.unmatched_angle_bracket_count > 0 => {
+            Err(e) if is_first_invocation && self.unmatched_angle_bracket_count > 0 => {
                 // Swap `self` with our backup of the parser state before attempting to parse
                 // generic arguments.
                 let snapshot = mem::replace(self, snapshot.unwrap());
@@ -462,6 +478,23 @@ impl<'a> Parser<'a> {
         while let Some(arg) = self.parse_angle_arg(ty_generics)? {
             args.push(arg);
             if !self.eat(&token::Comma) {
+                if self.token.kind == token::Semi
+                    && self.look_ahead(1, |t| t.is_ident() || t.is_lifetime())
+                {
+                    // Add `>` to the list of expected tokens.
+                    self.check(&token::Gt);
+                    // Handle `,` to `;` substitution
+                    let mut err = self.unexpected::<()>().unwrap_err();
+                    self.bump();
+                    err.span_suggestion_verbose(
+                        self.prev_token.span.until(self.token.span),
+                        "use a comma to separate type parameters",
+                        ", ".to_string(),
+                        Applicability::MachineApplicable,
+                    );
+                    err.emit();
+                    continue;
+                }
                 if !self.token.kind.should_end_const_arg() {
                     if self.handle_ambiguous_unbraced_const_arg(&mut args)? {
                         // We've managed to (partially) recover, so continue trying to parse
@@ -624,9 +657,22 @@ impl<'a> Parser<'a> {
             GenericArg::Const(self.parse_const_arg()?)
         } else if self.check_type() {
             // Parse type argument.
+            let is_const_fn = self.look_ahead(1, |t| t.kind == token::OpenDelim(token::Paren));
+            let mut snapshot = self.create_snapshot_for_diagnostic();
             match self.parse_ty() {
                 Ok(ty) => GenericArg::Type(ty),
                 Err(err) => {
+                    if is_const_fn {
+                        match (*snapshot).parse_expr_res(Restrictions::CONST_EXPR, None) {
+                            Ok(expr) => {
+                                self.restore_snapshot(snapshot);
+                                return Ok(Some(self.dummy_const_arg_needs_braces(err, expr.span)));
+                            }
+                            Err(err) => {
+                                err.cancel();
+                            }
+                        }
+                    }
                     // Try to recover from possible `const` arg without braces.
                     return self.recover_const_arg(start, err).map(Some);
                 }
@@ -634,7 +680,22 @@ impl<'a> Parser<'a> {
         } else if self.token.is_keyword(kw::Const) {
             return self.recover_const_param_declaration(ty_generics);
         } else {
-            return Ok(None);
+            // Fall back by trying to parse a const-expr expression. If we successfully do so,
+            // then we should report an error that it needs to be wrapped in braces.
+            let snapshot = self.create_snapshot_for_diagnostic();
+            match self.parse_expr_res(Restrictions::CONST_EXPR, None) {
+                Ok(expr) => {
+                    return Ok(Some(self.dummy_const_arg_needs_braces(
+                        self.struct_span_err(expr.span, "invalid const generic expression"),
+                        expr.span,
+                    )));
+                }
+                Err(err) => {
+                    self.restore_snapshot(snapshot);
+                    err.cancel();
+                    return Ok(None);
+                }
+            }
         };
         Ok(Some(arg))
     }
@@ -643,13 +704,13 @@ impl<'a> Parser<'a> {
         &self,
         gen_arg: GenericArg,
     ) -> Result<(Ident, Option<GenericArgs>), GenericArg> {
-        if let GenericArg::Type(ty) = &gen_arg {
-            if let ast::TyKind::Path(qself, path) = &ty.kind {
-                if qself.is_none() && path.segments.len() == 1 {
-                    let seg = &path.segments[0];
-                    return Ok((seg.ident, seg.args.as_deref().cloned()));
-                }
-            }
+        if let GenericArg::Type(ty) = &gen_arg
+            && let ast::TyKind::Path(qself, path) = &ty.kind
+            && qself.is_none()
+            && path.segments.len() == 1
+        {
+            let seg = &path.segments[0];
+            return Ok((seg.ident, seg.args.as_deref().cloned()));
         }
         Err(gen_arg)
     }

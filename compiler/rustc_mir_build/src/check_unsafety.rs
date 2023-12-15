@@ -162,7 +162,7 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for LayoutConstrainedPlaceVisitor<'a, 'tcx> {
             ExprKind::Field { lhs, .. } => {
                 if let ty::Adt(adt_def, _) = self.thir[lhs].ty.kind() {
                     if (Bound::Unbounded, Bound::Unbounded)
-                        != self.tcx.layout_scalar_valid_range(adt_def.did)
+                        != self.tcx.layout_scalar_valid_range(adt_def.did())
                     {
                         self.found = true;
                     }
@@ -242,7 +242,7 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                         visit::walk_pat(self, pat);
                         self.in_union_destructure = old_in_union_destructure;
                     } else if (Bound::Unbounded, Bound::Unbounded)
-                        != self.tcx.layout_scalar_valid_range(adt_def.did)
+                        != self.tcx.layout_scalar_valid_range(adt_def.did())
                     {
                         let old_inside_adt = std::mem::replace(&mut self.inside_adt, true);
                         visit::walk_pat(self, pat);
@@ -303,6 +303,9 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
             | ExprKind::Block { .. }
             | ExprKind::Borrow { .. }
             | ExprKind::Literal { .. }
+            | ExprKind::NamedConst { .. }
+            | ExprKind::NonHirLiteral { .. }
+            | ExprKind::ConstParam { .. }
             | ExprKind::ConstBlock { .. }
             | ExprKind::Deref { .. }
             | ExprKind::Index { .. }
@@ -386,7 +389,7 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                 user_ty: _,
                 fields: _,
                 base: _,
-            }) => match self.tcx.layout_scalar_valid_range(adt_def.did) {
+            }) => match self.tcx.layout_scalar_valid_range(adt_def.did()) {
                 (Bound::Unbounded, Bound::Unbounded) => {}
                 _ => self.requires_unsafe(expr.span, InitializingTypeWith),
             },
@@ -405,7 +408,9 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                 } else {
                     ty::WithOptConstParam::unknown(closure_id)
                 };
-                let (closure_thir, expr) = self.tcx.thir_body(closure_def);
+                let (closure_thir, expr) = self.tcx.thir_body(closure_def).unwrap_or_else(|_| {
+                    (self.tcx.alloc_steal_thir(Thir::new()), ExprId::from_u32(0))
+                });
                 let closure_thir = &closure_thir.borrow();
                 let hir_context = self.tcx.hir().local_def_id_to_hir_id(closure_id);
                 let mut closure_visitor =
@@ -416,23 +421,21 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
             }
             ExprKind::Field { lhs, .. } => {
                 let lhs = &self.thir[lhs];
-                if let ty::Adt(adt_def, _) = lhs.ty.kind() {
-                    if adt_def.is_union() {
-                        if let Some((assigned_ty, assignment_span)) = self.assignment_info {
-                            // To avoid semver hazard, we only consider `Copy` and `ManuallyDrop` non-dropping.
-                            if !(assigned_ty
-                                .ty_adt_def()
-                                .map_or(false, |adt| adt.is_manually_drop())
-                                || assigned_ty
-                                    .is_copy_modulo_regions(self.tcx.at(expr.span), self.param_env))
-                            {
-                                self.requires_unsafe(assignment_span, AssignToDroppingUnionField);
-                            } else {
-                                // write to non-drop union field, safe
-                            }
+                if let ty::Adt(adt_def, _) = lhs.ty.kind() && adt_def.is_union() {
+                    if let Some((assigned_ty, assignment_span)) = self.assignment_info {
+                        // To avoid semver hazard, we only consider `Copy` and `ManuallyDrop` non-dropping.
+                        if !(assigned_ty
+                            .ty_adt_def()
+                            .map_or(false, |adt| adt.is_manually_drop())
+                            || assigned_ty
+                                .is_copy_modulo_regions(self.tcx.at(expr.span), self.param_env))
+                        {
+                            self.requires_unsafe(assignment_span, AssignToDroppingUnionField);
                         } else {
-                            self.requires_unsafe(expr.span, AccessToUnionField);
+                            // write to non-drop union field, safe
                         }
+                    } else {
+                        self.requires_unsafe(expr.span, AccessToUnionField);
                     }
                 }
             }
@@ -476,10 +479,8 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
             }
             ExprKind::Let { expr: expr_id, .. } => {
                 let let_expr = &self.thir[expr_id];
-                if let ty::Adt(adt_def, _) = let_expr.ty.kind() {
-                    if adt_def.is_union() {
-                        self.requires_unsafe(expr.span, AccessToUnionField);
-                    }
+                if let ty::Adt(adt_def, _) = let_expr.ty.kind() && adt_def.is_union() {
+                    self.requires_unsafe(expr.span, AccessToUnionField);
                 }
             }
             _ => {}
@@ -610,9 +611,12 @@ pub fn check_unsafety<'tcx>(tcx: TyCtxt<'tcx>, def: ty::WithOptConstParam<LocalD
         return;
     }
 
-    let (thir, expr) = tcx.thir_body(def);
+    let (thir, expr) = match tcx.thir_body(def) {
+        Ok(body) => body,
+        Err(_) => return,
+    };
     let thir = &thir.borrow();
-    // If `thir` is empty, a type error occured, skip this body.
+    // If `thir` is empty, a type error occurred, skip this body.
     if thir.exprs.is_empty() {
         return;
     }

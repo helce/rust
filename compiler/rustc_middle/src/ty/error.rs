@@ -3,7 +3,7 @@ use crate::ty::diagnostics::suggest_constraining_type_param;
 use crate::ty::print::{FmtPrinter, Printer};
 use crate::ty::{self, BoundRegionKind, Region, Ty, TyCtxt};
 use rustc_errors::Applicability::{MachineApplicable, MaybeIncorrect};
-use rustc_errors::{pluralize, DiagnosticBuilder};
+use rustc_errors::{pluralize, Diagnostic};
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_span::symbol::{sym, Symbol};
@@ -247,7 +247,7 @@ impl<'tcx> Ty<'tcx> {
             }
             ty::Tuple(ref tys) if tys.is_empty() => format!("`{}`", self).into(),
 
-            ty::Adt(def, _) => format!("{} `{}`", def.descr(), tcx.def_path_str(def.did)).into(),
+            ty::Adt(def, _) => format!("{} `{}`", def.descr(), tcx.def_path_str(def.did())).into(),
             ty::Foreign(def_id) => format!("extern type `{}`", tcx.def_path_str(def_id)).into(),
             ty::Array(t, n) => {
                 if t.is_simple_ty() {
@@ -347,7 +347,8 @@ impl<'tcx> Ty<'tcx> {
 impl<'tcx> TyCtxt<'tcx> {
     pub fn note_and_explain_type_err(
         self,
-        db: &mut DiagnosticBuilder<'_>,
+        // FIXME(eddyb) rename this since it's no longer a `DiagnosticBuilder`.
+        db: &mut Diagnostic,
         err: &TypeError<'tcx>,
         cause: &ObligationCause<'tcx>,
         sp: Span,
@@ -584,7 +585,8 @@ impl<T> Trait<T> for X {
 
     fn suggest_constraint(
         self,
-        db: &mut DiagnosticBuilder<'_>,
+        // FIXME(eddyb) rename this since it's no longer a `DiagnosticBuilder`.
+        db: &mut Diagnostic,
         msg: &str,
         body_owner_def_id: DefId,
         proj_ty: &ty::ProjectionTy<'tcx>,
@@ -671,7 +673,8 @@ impl<T> Trait<T> for X {
     ///    fn that returns the type.
     fn expected_projection(
         self,
-        db: &mut DiagnosticBuilder<'_>,
+        // FIXME(eddyb) rename this since it's no longer a `DiagnosticBuilder`.
+        db: &mut Diagnostic,
         proj_ty: &ty::ProjectionTy<'tcx>,
         values: &ExpectedFound<Ty<'tcx>>,
         body_owner_def_id: DefId,
@@ -766,7 +769,8 @@ fn foo(&self) -> Self::T { String::new() }
     /// a return type. This can occur when dealing with `TryStream` (#71035).
     fn suggest_constraining_opaque_associated_type(
         self,
-        db: &mut DiagnosticBuilder<'_>,
+        // FIXME(eddyb) rename this since it's no longer a `DiagnosticBuilder`.
+        db: &mut Diagnostic,
         msg: &str,
         proj_ty: &ty::ProjectionTy<'tcx>,
         ty: Ty<'tcx>,
@@ -802,7 +806,8 @@ fn foo(&self) -> Self::T { String::new() }
 
     fn point_at_methods_that_satisfy_associated_type(
         self,
-        db: &mut DiagnosticBuilder<'_>,
+        // FIXME(eddyb) rename this since it's no longer a `DiagnosticBuilder`.
+        db: &mut Diagnostic,
         assoc_container_id: DefId,
         current_method_ident: Option<Symbol>,
         proj_ty_item_def_id: DefId,
@@ -842,7 +847,7 @@ fn foo(&self) -> Self::T { String::new() }
                 "{some} method{s} {are} available that return{r} `{ty}`",
                 some = if methods.len() == 1 { "a" } else { "some" },
                 s = pluralize!(methods.len()),
-                are = if methods.len() == 1 { "is" } else { "are" },
+                are = pluralize!("is", methods.len()),
                 r = if methods.len() == 1 { "s" } else { "" },
                 ty = expected
             );
@@ -857,15 +862,15 @@ fn foo(&self) -> Self::T { String::new() }
 
     fn point_at_associated_type(
         self,
-        db: &mut DiagnosticBuilder<'_>,
+        // FIXME(eddyb) rename this since it's no longer a `DiagnosticBuilder`.
+        db: &mut Diagnostic,
         body_owner_def_id: DefId,
         found: Ty<'tcx>,
     ) -> bool {
-        let hir_id =
-            match body_owner_def_id.as_local().map(|id| self.hir().local_def_id_to_hir_id(id)) {
-                Some(hir_id) => hir_id,
-                None => return false,
-            };
+        let Some(hir_id) = body_owner_def_id.as_local() else {
+            return false;
+        };
+        let hir_id = self.hir().local_def_id_to_hir_id(hir_id);
         // When `body_owner` is an `impl` or `trait` item, look in its associated types for
         // `expected` and point at it.
         let parent_id = self.hir().get_parent_item(hir_id);
@@ -922,7 +927,8 @@ fn foo(&self) -> Self::T { String::new() }
     /// type is defined on a supertrait of the one present in the bounds.
     fn constrain_generic_bound_associated_type_structured_suggestion(
         self,
-        db: &mut DiagnosticBuilder<'_>,
+        // FIXME(eddyb) rename this since it's no longer a `DiagnosticBuilder`.
+        db: &mut Diagnostic,
         trait_ref: &ty::TraitRef<'tcx>,
         bounds: hir::GenericBounds<'_>,
         assoc: &ty::AssocItem,
@@ -959,7 +965,8 @@ fn foo(&self) -> Self::T { String::new() }
     /// associated type to a given type `ty`.
     fn constrain_associated_type_structured_suggestion(
         self,
-        db: &mut DiagnosticBuilder<'_>,
+        // FIXME(eddyb) rename this since it's no longer a `DiagnosticBuilder`.
+        db: &mut Diagnostic,
         span: Span,
         assoc: &ty::AssocItem,
         assoc_substs: &[ty::GenericArg<'tcx>],
@@ -984,10 +991,9 @@ fn foo(&self) -> Self::T { String::new() }
     }
 
     fn format_generic_args(self, args: &[ty::GenericArg<'tcx>]) -> String {
-        let mut item_args = String::new();
-        FmtPrinter::new(self, &mut item_args, hir::def::Namespace::TypeNS)
+        FmtPrinter::new(self, hir::def::Namespace::TypeNS)
             .path_generic_args(Ok, args)
-            .expect("could not write to `String`.");
-        item_args
+            .expect("could not write to `String`.")
+            .into_buffer()
     }
 }

@@ -567,7 +567,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let tcx = self.tcx;
         if let LintLevel::Explicit(current_hir_id) = lint_level {
             // Use `maybe_lint_level_root_bounded` with `root_lint_level` as a bound
-            // to avoid adding Hir dependences on our parents.
+            // to avoid adding Hir dependencies on our parents.
             // We estimate the true lint roots here to avoid creating a lot of source scopes.
 
             let parent_root = tcx.maybe_lint_level_root_bounded(
@@ -671,7 +671,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 // a Coverage code region can be generated, `continue` needs no `Assign`; but
                 // without one, the `InstrumentCoverage` MIR pass cannot generate a code region for
                 // `continue`. Coverage will be missing unless we add a dummy `Assign` to MIR.
-                self.add_dummy_assignment(&span, block, source_info);
+                self.add_dummy_assignment(span, block, source_info);
             }
         }
 
@@ -730,8 +730,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
     // Add a dummy `Assign` statement to the CFG, with the span for the source code's `continue`
     // statement.
-    fn add_dummy_assignment(&mut self, span: &Span, block: BasicBlock, source_info: SourceInfo) {
-        let local_decl = LocalDecl::new(self.tcx.mk_unit(), *span).internal();
+    fn add_dummy_assignment(&mut self, span: Span, block: BasicBlock, source_info: SourceInfo) {
+        let local_decl = LocalDecl::new(self.tcx.mk_unit(), span).internal();
         let temp_place = Place::from(self.local_decls.push(local_decl));
         self.cfg.push_assign_unit(block, source_info, temp_place, self.tcx);
     }
@@ -965,7 +965,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// However, `_X` is still registered to be dropped, and so if we
     /// do nothing else, we would generate a `DROP(_X)` that occurs
     /// after the call. This will later be optimized out by the
-    /// drop-elaboation code, but in the meantime it can lead to
+    /// drop-elaboration code, but in the meantime it can lead to
     /// spurious borrow-check errors -- the problem, ironically, is
     /// not the `DROP(_X)` itself, but the (spurious) unwind pathways
     /// that it creates. See #64391 for an example.

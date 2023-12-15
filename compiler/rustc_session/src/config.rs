@@ -8,11 +8,12 @@ use crate::search_paths::SearchPath;
 use crate::utils::{CanonicalizedPath, NativeLib, NativeLibKind};
 use crate::{early_error, early_warn, Session};
 
-use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::impl_stable_hash_via_hash;
 
 use rustc_target::abi::{Align, TargetDataLayout};
 use rustc_target::spec::{LinkerFlavor, SplitDebuginfo, Target, TargetTriple, TargetWarnings};
+use rustc_target::spec::{PanicStrategy, SanitizerSet, TARGETS};
 
 use rustc_serialize::json;
 
@@ -658,7 +659,7 @@ impl OutputFilenames {
             single_output_file,
             temps_directory,
             outputs,
-            filestem: format!("{}{}", out_filestem, extra),
+            filestem: format!("{out_filestem}{extra}"),
         }
     }
 
@@ -955,7 +956,7 @@ fn default_configuration(sess: &Session) -> CrateConfig {
     ret.reserve(7); // the minimum number of insertions
     // Target bindings.
     ret.insert((sym::target_os, Some(Symbol::intern(os))));
-    for fam in &sess.target.families {
+    for fam in sess.target.families.as_ref() {
         ret.insert((sym::target_family, Some(Symbol::intern(fam))));
         if fam == "windows" {
             ret.insert((sym::windows, None));
@@ -1023,23 +1024,20 @@ pub fn to_crate_config(cfg: FxHashSet<(String, Option<String>)>) -> CrateConfig 
 
 /// The parsed `--check-cfg` options
 pub struct CheckCfg<T = String> {
-    /// Set if `names()` checking is enabled
-    pub names_checked: bool,
-    /// The union of all `names()`
-    pub names_valid: FxHashSet<T>,
-    /// The set of names for which `values()` was used
-    pub values_checked: FxHashSet<T>,
-    /// The set of all (name, value) pairs passed in `values()`
-    pub values_valid: FxHashSet<(T, T)>,
+    /// The set of all `names()`, if None no name checking is performed
+    pub names_valid: Option<FxHashSet<T>>,
+    /// Is well known values activated
+    pub well_known_values: bool,
+    /// The set of all `values()`
+    pub values_valid: FxHashMap<T, FxHashSet<T>>,
 }
 
 impl<T> Default for CheckCfg<T> {
     fn default() -> Self {
         CheckCfg {
-            names_checked: false,
-            names_valid: FxHashSet::default(),
-            values_checked: FxHashSet::default(),
-            values_valid: FxHashSet::default(),
+            names_valid: Default::default(),
+            values_valid: Default::default(),
+            well_known_values: false,
         }
     }
 }
@@ -1047,10 +1045,16 @@ impl<T> Default for CheckCfg<T> {
 impl<T> CheckCfg<T> {
     fn map_data<O: Eq + Hash>(&self, f: impl Fn(&T) -> O) -> CheckCfg<O> {
         CheckCfg {
-            names_checked: self.names_checked,
-            names_valid: self.names_valid.iter().map(|a| f(a)).collect(),
-            values_checked: self.values_checked.iter().map(|a| f(a)).collect(),
-            values_valid: self.values_valid.iter().map(|(a, b)| (f(a), f(b))).collect(),
+            names_valid: self
+                .names_valid
+                .as_ref()
+                .map(|names_valid| names_valid.iter().map(|a| f(a)).collect()),
+            values_valid: self
+                .values_valid
+                .iter()
+                .map(|(a, b)| (f(a), b.iter().map(|b| f(b)).collect()))
+                .collect(),
+            well_known_values: self.well_known_values,
         }
     }
 }
@@ -1064,9 +1068,11 @@ pub fn to_crate_check_config(cfg: CheckCfg) -> CrateCheckConfig {
 
 impl CrateCheckConfig {
     /// Fills a `CrateCheckConfig` with well-known configuration names.
-    pub fn fill_well_known(&mut self) {
-        // NOTE: This should be kept in sync with `default_configuration`
+    fn fill_well_known_names(&mut self) {
+        // NOTE: This should be kept in sync with `default_configuration` and
+        // `fill_well_known_values`
         const WELL_KNOWN_NAMES: &[Symbol] = &[
+            // rustc
             sym::unix,
             sym::windows,
             sym::target_os,
@@ -1086,21 +1092,126 @@ impl CrateCheckConfig {
             sym::debug_assertions,
             sym::proc_macro,
             sym::test,
+            sym::feature,
+            // rustdoc
             sym::doc,
             sym::doctest,
-            sym::feature,
+            // miri
+            sym::miri,
         ];
-        for &name in WELL_KNOWN_NAMES {
-            self.names_valid.insert(name);
+
+        // We only insert well-known names if `names()` was activated
+        if let Some(names_valid) = &mut self.names_valid {
+            names_valid.extend(WELL_KNOWN_NAMES);
         }
+    }
+
+    /// Fills a `CrateCheckConfig` with well-known configuration values.
+    fn fill_well_known_values(&mut self) {
+        if !self.well_known_values {
+            return;
+        }
+
+        // NOTE: This should be kept in sync with `default_configuration` and
+        // `fill_well_known_names`
+
+        let panic_values = &PanicStrategy::all();
+
+        let atomic_values = &[
+            sym::ptr,
+            sym::integer(8usize),
+            sym::integer(16usize),
+            sym::integer(32usize),
+            sym::integer(64usize),
+            sym::integer(128usize),
+        ];
+
+        let sanitize_values = SanitizerSet::all()
+            .into_iter()
+            .map(|sanitizer| Symbol::intern(sanitizer.as_str().unwrap()));
+
+        // No-values
+        for name in [
+            sym::doc,
+            sym::miri,
+            sym::unix,
+            sym::test,
+            sym::doctest,
+            sym::windows,
+            sym::proc_macro,
+            sym::debug_assertions,
+            sym::target_thread_local,
+        ] {
+            self.values_valid.entry(name).or_default();
+        }
+
+        // Pre-defined values
+        self.values_valid.entry(sym::panic).or_default().extend(panic_values);
+        self.values_valid.entry(sym::sanitize).or_default().extend(sanitize_values);
+        self.values_valid.entry(sym::target_has_atomic).or_default().extend(atomic_values);
+        self.values_valid
+            .entry(sym::target_has_atomic_load_store)
+            .or_default()
+            .extend(atomic_values);
+        self.values_valid
+            .entry(sym::target_has_atomic_equal_alignment)
+            .or_default()
+            .extend(atomic_values);
+
+        // Target specific values
+        for target in
+            TARGETS.iter().map(|target| Target::expect_builtin(&TargetTriple::from_triple(target)))
+        {
+            self.values_valid
+                .entry(sym::target_os)
+                .or_default()
+                .insert(Symbol::intern(&target.options.os));
+            self.values_valid
+                .entry(sym::target_family)
+                .or_default()
+                .extend(target.options.families.iter().map(|family| Symbol::intern(family)));
+            self.values_valid
+                .entry(sym::target_arch)
+                .or_default()
+                .insert(Symbol::intern(&target.arch));
+            self.values_valid
+                .entry(sym::target_endian)
+                .or_default()
+                .insert(Symbol::intern(&target.options.endian.as_str()));
+            self.values_valid
+                .entry(sym::target_env)
+                .or_default()
+                .insert(Symbol::intern(&target.options.env));
+            self.values_valid
+                .entry(sym::target_abi)
+                .or_default()
+                .insert(Symbol::intern(&target.options.abi));
+            self.values_valid
+                .entry(sym::target_vendor)
+                .or_default()
+                .insert(Symbol::intern(&target.options.vendor));
+            self.values_valid
+                .entry(sym::target_pointer_width)
+                .or_default()
+                .insert(sym::integer(target.pointer_width));
+        }
+    }
+
+    pub fn fill_well_known(&mut self) {
+        self.fill_well_known_names();
+        self.fill_well_known_values();
     }
 
     /// Fills a `CrateCheckConfig` with configuration names and values that are actually active.
     pub fn fill_actual(&mut self, cfg: &CrateConfig) {
         for &(k, v) in cfg {
-            self.names_valid.insert(k);
+            if let Some(names_valid) = &mut self.names_valid {
+                names_valid.insert(k);
+            }
             if let Some(v) = v {
-                self.values_valid.insert((k, v));
+                self.values_valid.entry(k).and_modify(|values| {
+                    values.insert(v);
+                });
             }
         }
     }
@@ -1403,7 +1514,7 @@ pub fn get_cmd_lint_options(
 
     let lint_cap = matches.opt_str("cap-lints").map(|cap| {
         lint::Level::from_str(&cap)
-            .unwrap_or_else(|| early_error(error_format, &format!("unknown lint level: `{}`", cap)))
+            .unwrap_or_else(|| early_error(error_format, &format!("unknown lint level: `{cap}`")))
     });
 
     (lint_opts, describe_lints, lint_cap)
@@ -1422,8 +1533,7 @@ pub fn parse_color(matches: &getopts::Matches) -> ColorConfig {
             ErrorOutputType::default(),
             &format!(
                 "argument for `--color` must be auto, \
-                 always or never (instead was `{}`)",
-                arg
+                 always or never (instead was `{arg}`)"
             ),
         ),
     }
@@ -1468,7 +1578,7 @@ pub fn parse_json(matches: &getopts::Matches) -> JsonConfig {
                 "future-incompat" => json_future_incompat = true,
                 s => early_error(
                     ErrorOutputType::default(),
-                    &format!("unknown `--json` option `{}`", s),
+                    &format!("unknown `--json` option `{s}`"),
                 ),
             }
         }
@@ -1508,8 +1618,7 @@ pub fn parse_error_format(
                 ErrorOutputType::HumanReadable(HumanReadableErrorType::Default(color)),
                 &format!(
                     "argument for `--error-format` must be `human`, `json` or \
-                     `short` (instead was `{}`)",
-                    arg
+                     `short` (instead was `{arg}`)"
                 ),
             ),
         }
@@ -1543,8 +1652,7 @@ pub fn parse_crate_edition(matches: &getopts::Matches) -> Edition {
                 ErrorOutputType::default(),
                 &format!(
                     "argument for `--edition` must be one of: \
-                     {}. (instead was `{}`)",
-                    EDITION_NAME_LIST, arg
+                     {EDITION_NAME_LIST}. (instead was `{arg}`)"
                 ),
             )
         }),
@@ -1559,7 +1667,7 @@ pub fn parse_crate_edition(matches: &getopts::Matches) -> Edition {
                 edition, LATEST_STABLE_EDITION
             )
         } else {
-            format!("edition {} is unstable and only available with -Z unstable-options", edition)
+            format!("edition {edition} is unstable and only available with -Z unstable-options")
         };
         early_error(ErrorOutputType::default(), &msg)
     }
@@ -1607,9 +1715,8 @@ fn parse_output_types(
                     early_error(
                         error_format,
                         &format!(
-                            "unknown emission type: `{}` - expected one of: {}",
-                            shorthand,
-                            OutputType::shorthands_display(),
+                            "unknown emission type: `{shorthand}` - expected one of: {display}",
+                            display = OutputType::shorthands_display(),
                         ),
                     )
                 });
@@ -1647,9 +1754,8 @@ fn should_override_cgus_and_disable_thinlto(
                         early_warn(
                             error_format,
                             &format!(
-                                "`--emit={}` with `-o` incompatible with \
+                                "`--emit={ot}` with `-o` incompatible with \
                                  `-C codegen-units=N` for N > 1",
-                                ot
                             ),
                         );
                     }
@@ -1724,7 +1830,7 @@ fn collect_print_requests(
             }
         }
         "link-args" => PrintRequest::LinkArgs,
-        req => early_error(error_format, &format!("unknown print request `{}`", req)),
+        req => early_error(error_format, &format!("unknown print request `{req}`")),
     }));
 
     prints
@@ -1738,7 +1844,7 @@ pub fn parse_target_triple(
         Some(target) if target.ends_with(".json") => {
             let path = Path::new(&target);
             TargetTriple::from_path(&path).unwrap_or_else(|_| {
-                early_error(error_format, &format!("target file {:?} does not exist", path))
+                early_error(error_format, &format!("target file {path:?} does not exist"))
             })
         }
         Some(target) => TargetTriple::TargetTriple(target),
@@ -1781,8 +1887,7 @@ fn parse_opt_level(
                     error_format,
                     &format!(
                         "optimization level needs to be \
-                            between 0-3, s or z (instead was `{}`)",
-                        arg
+                            between 0-3, s or z (instead was `{arg}`)"
                     ),
                 );
             }
@@ -1816,8 +1921,7 @@ fn select_debuginfo(
                     error_format,
                     &format!(
                         "debug info level needs to be between \
-                         0-2 (instead was `{}`)",
-                        arg
+                         0-2 (instead was `{arg}`)"
                     ),
                 );
             }
@@ -1832,10 +1936,9 @@ crate fn parse_assert_incr_state(
     match opt_assertion {
         Some(s) if s.as_str() == "loaded" => Some(IncrementalStateAssertion::Loaded),
         Some(s) if s.as_str() == "not-loaded" => Some(IncrementalStateAssertion::NotLoaded),
-        Some(s) => early_error(
-            error_format,
-            &format!("unexpected incremental state assertion value: {}", s),
-        ),
+        Some(s) => {
+            early_error(error_format, &format!("unexpected incremental state assertion value: {s}"))
+        }
         None => None,
     }
 }
@@ -1845,9 +1948,6 @@ fn parse_native_lib_kind(
     kind: &str,
     error_format: ErrorOutputType,
 ) -> (NativeLibKind, Option<bool>) {
-    let is_nightly = nightly_options::match_is_nightly_build(matches);
-    let enable_unstable = nightly_options::is_unstable_enabled(matches);
-
     let (kind, modifiers) = match kind.split_once(':') {
         None => (kind, None),
         Some((kind, modifiers)) => (kind, Some(modifiers)),
@@ -1869,7 +1969,7 @@ fn parse_native_lib_kind(
                     "linking modifier can't be used with library kind `static-nobundle`",
                 )
             }
-            if !is_nightly {
+            if !nightly_options::match_is_nightly_build(matches) {
                 early_error(
                     error_format,
                     "library kind `static-nobundle` are currently unstable and only accepted on \
@@ -1880,28 +1980,12 @@ fn parse_native_lib_kind(
         }
         s => early_error(
             error_format,
-            &format!("unknown library kind `{}`, expected one of dylib, framework, or static", s),
+            &format!("unknown library kind `{s}`, expected one of dylib, framework, or static"),
         ),
     };
     match modifiers {
         None => (kind, None),
-        Some(modifiers) => {
-            if !is_nightly {
-                early_error(
-                    error_format,
-                    "linking modifiers are currently unstable and only accepted on \
-                the nightly compiler",
-                );
-            }
-            if !enable_unstable {
-                early_error(
-                    error_format,
-                    "linking modifiers are currently unstable, \
-                the `-Z unstable-options` flag must also be passed to use it",
-                )
-            }
-            parse_native_lib_modifiers(kind, modifiers, error_format)
-        }
+        Some(modifiers) => parse_native_lib_modifiers(kind, modifiers, error_format, matches),
     }
 }
 
@@ -1909,7 +1993,23 @@ fn parse_native_lib_modifiers(
     mut kind: NativeLibKind,
     modifiers: &str,
     error_format: ErrorOutputType,
+    matches: &getopts::Matches,
 ) -> (NativeLibKind, Option<bool>) {
+    let report_unstable_modifier = |modifier| {
+        if !nightly_options::is_unstable_enabled(matches) {
+            let why = if nightly_options::match_is_nightly_build(matches) {
+                " and only accepted on the nightly compiler"
+            } else {
+                ", the `-Z unstable-options` flag must also be passed to use it"
+            };
+            early_error(
+                error_format,
+                &format!("{modifier} linking modifier is currently unstable{why}"),
+            )
+        }
+    };
+
+    let mut has_duplicate_modifiers = false;
     let mut verbatim = None;
     for modifier in modifiers.split(',') {
         let (modifier, value) = match modifier.strip_prefix(&['+', '-']) {
@@ -1923,6 +2023,10 @@ fn parse_native_lib_modifiers(
 
         match (modifier, &mut kind) {
             ("bundle", NativeLibKind::Static { bundle, .. }) => {
+                report_unstable_modifier(modifier);
+                if bundle.is_some() {
+                    has_duplicate_modifiers = true;
+                }
                 *bundle = Some(value);
             }
             ("bundle", _) => early_error(
@@ -1931,9 +2035,18 @@ fn parse_native_lib_modifiers(
                     `static` linking kind",
             ),
 
-            ("verbatim", _) => verbatim = Some(value),
+            ("verbatim", _) => {
+                report_unstable_modifier(modifier);
+                if verbatim.is_some() {
+                    has_duplicate_modifiers = true;
+                }
+                verbatim = Some(value);
+            }
 
             ("whole-archive", NativeLibKind::Static { whole_archive, .. }) => {
+                if whole_archive.is_some() {
+                    has_duplicate_modifiers = true;
+                }
                 *whole_archive = Some(value);
             }
             ("whole-archive", _) => early_error(
@@ -1944,6 +2057,10 @@ fn parse_native_lib_modifiers(
 
             ("as-needed", NativeLibKind::Dylib { as_needed })
             | ("as-needed", NativeLibKind::Framework { as_needed }) => {
+                report_unstable_modifier(modifier);
+                if as_needed.is_some() {
+                    has_duplicate_modifiers = true;
+                }
                 *as_needed = Some(value);
             }
             ("as-needed", _) => early_error(
@@ -1952,15 +2069,19 @@ fn parse_native_lib_modifiers(
                     `dylib` and `framework` linking kinds",
             ),
 
+            // Note: this error also excludes the case with empty modifier
+            // string, like `modifiers = ""`.
             _ => early_error(
                 error_format,
                 &format!(
-                    "unrecognized linking modifier `{}`, expected one \
-                    of: bundle, verbatim, whole-archive, as-needed",
-                    modifier
+                    "unrecognized linking modifier `{modifier}`, expected one \
+                    of: bundle, verbatim, whole-archive, as-needed"
                 ),
             ),
         }
+    }
+    if has_duplicate_modifiers {
+        report_unstable_modifier("duplicating")
     }
 
     (kind, verbatim)
@@ -1998,7 +2119,7 @@ fn parse_borrowck_mode(dopts: &DebuggingOptions, error_format: ErrorOutputType) 
     match dopts.borrowck.as_ref() {
         "migrate" => BorrowckMode::Migrate,
         "mir" => BorrowckMode::Mir,
-        m => early_error(error_format, &format!("unknown borrowck mode `{}`", m)),
+        m => early_error(error_format, &format!("unknown borrowck mode `{m}`")),
     }
 }
 
@@ -2086,7 +2207,7 @@ pub fn parse_externs(
                             );
                         }
                     }
-                    _ => early_error(error_format, &format!("unknown --extern option `{}`", opt)),
+                    _ => early_error(error_format, &format!("unknown --extern option `{opt}`")),
                 }
             }
         }
@@ -2123,7 +2244,7 @@ fn parse_extern_dep_specs(
         let loc = parts.next().unwrap_or_else(|| {
             early_error(
                 error_format,
-                &format!("`--extern-location`: specify location for extern crate `{}`", name),
+                &format!("`--extern-location`: specify location for extern crate `{name}`"),
             )
         });
 
@@ -2144,14 +2265,14 @@ fn parse_extern_dep_specs(
                 let json = json::from_str(raw).unwrap_or_else(|_| {
                     early_error(
                         error_format,
-                        &format!("`--extern-location`: malformed json location `{}`", raw),
+                        &format!("`--extern-location`: malformed json location `{raw}`"),
                     )
                 });
                 ExternDepSpec::Json(json)
             }
             [bad, ..] => early_error(
                 error_format,
-                &format!("unknown location type `{}`: use `raw` or `json`", bad),
+                &format!("unknown location type `{bad}`: use `raw` or `json`"),
             ),
             [] => early_error(error_format, "missing location specification"),
         };
@@ -2416,9 +2537,7 @@ pub fn build_session_options(matches: &getopts::Matches) -> Options {
         && !target_triple.triple().contains("apple")
         && cg.split_debuginfo.is_some()
     {
-        {
-            early_error(error_format, "`-Csplit-debuginfo` is unstable on this platform");
-        }
+        early_error(error_format, "`-Csplit-debuginfo` is unstable on this platform");
     }
 
     // Try to find a directory containing the Rust `src`, for more details see
@@ -2450,7 +2569,7 @@ pub fn build_session_options(matches: &getopts::Matches) -> Options {
     };
 
     let working_dir = std::env::current_dir().unwrap_or_else(|e| {
-        early_error(error_format, &format!("Current directory is invalid: {}", e));
+        early_error(error_format, &format!("Current directory is invalid: {e}"));
     });
 
     let (path, remapped) =
@@ -2507,7 +2626,6 @@ fn parse_pretty(debugging_opts: &DebuggingOptions, efmt: ErrorOutputType) -> Opt
     let first = match debugging_opts.unpretty.as_deref()? {
         "normal" => Source(PpSourceMode::Normal),
         "identified" => Source(PpSourceMode::Identified),
-        "everybody_loops" => Source(PpSourceMode::EveryBodyLoops),
         "expanded" => Source(PpSourceMode::Expanded),
         "expanded,identified" => Source(PpSourceMode::ExpandedIdentified),
         "expanded,hygiene" => Source(PpSourceMode::ExpandedHygiene),
@@ -2523,16 +2641,14 @@ fn parse_pretty(debugging_opts: &DebuggingOptions, efmt: ErrorOutputType) -> Opt
         name => early_error(
             efmt,
             &format!(
-                "argument to `unpretty` must be one of `normal`, \
-                            `expanded`, `identified`, `expanded,identified`, \
-                            `expanded,hygiene`, `everybody_loops`, \
+                "argument to `unpretty` must be one of `normal`, `identified`, \
+                            `expanded`, `expanded,identified`, `expanded,hygiene`, \
                             `ast-tree`, `ast-tree,expanded`, `hir`, `hir,identified`, \
-                            `hir,typed`, `hir-tree`, `mir` or `mir-cfg`; got {}",
-                name
+                            `hir,typed`, `hir-tree`, `thir-tree`, `mir` or `mir-cfg`; got {name}"
             ),
         ),
     };
-    tracing::debug!("got unpretty option: {:?}", first);
+    tracing::debug!("got unpretty option: {first:?}");
     Some(first)
 }
 
@@ -2558,7 +2674,7 @@ pub fn parse_crate_types_from_list(list_list: Vec<String>) -> Result<Vec<CrateTy
                 "cdylib" => CrateType::Cdylib,
                 "bin" => CrateType::Executable,
                 "proc-macro" => CrateType::ProcMacro,
-                _ => return Err(format!("unknown crate type: `{}`", part)),
+                _ => return Err(format!("unknown crate type: `{part}`")),
             };
             if !crate_types.contains(&new_part) {
                 crate_types.push(new_part)
@@ -2643,8 +2759,6 @@ impl fmt::Display for CrateType {
 pub enum PpSourceMode {
     /// `-Zunpretty=normal`
     Normal,
-    /// `-Zunpretty=everybody_loops`
-    EveryBodyLoops,
     /// `-Zunpretty=expanded`
     Expanded,
     /// `-Zunpretty=identified`
@@ -2676,7 +2790,7 @@ pub enum PpHirMode {
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum PpMode {
     /// Options that print the source code, i.e.
-    /// `-Zunpretty=normal` and `-Zunpretty=everybody_loops`
+    /// `-Zunpretty=normal` and `-Zunpretty=expanded`
     Source(PpSourceMode),
     AstTree(PpAstTreeMode),
     /// Options that print the HIR, i.e. `-Zunpretty=hir`
@@ -2698,7 +2812,7 @@ impl PpMode {
         match *self {
             Source(Normal | Identified) | AstTree(PpAstTreeMode::Normal) => false,
 
-            Source(Expanded | EveryBodyLoops | ExpandedIdentified | ExpandedHygiene)
+            Source(Expanded | ExpandedIdentified | ExpandedHygiene)
             | AstTree(PpAstTreeMode::Expanded)
             | Hir(_)
             | HirTree
@@ -2735,9 +2849,9 @@ impl PpMode {
 crate mod dep_tracking {
     use super::{
         BranchProtection, CFGuard, CFProtection, CrateType, DebugInfo, ErrorOutputType,
-        InstrumentCoverage, LdImpl, LinkerPluginLto, LocationDetail, LtoCli, OptLevel, OutputType,
-        OutputTypes, Passes, SourceFileHashAlgorithm, SwitchWithOptPath, SymbolManglingVersion,
-        TrimmedDefPaths,
+        InstrumentCoverage, LdImpl, LinkerPluginLto, LocationDetail, LtoCli, OomStrategy, OptLevel,
+        OutputType, OutputTypes, Passes, SourceFileHashAlgorithm, SwitchWithOptPath,
+        SymbolManglingVersion, TrimmedDefPaths,
     };
     use crate::lint;
     use crate::options::WasiExecModel;
@@ -2833,6 +2947,7 @@ crate mod dep_tracking {
         RealFileName,
         LocationDetail,
         BranchProtection,
+        OomStrategy,
     );
 
     impl<T1, T2> DepTrackingHash for (T1, T2)
@@ -2919,6 +3034,27 @@ crate mod dep_tracking {
             Hash::hash(&key.len(), hasher);
             Hash::hash(key, hasher);
             sub_hash.hash(hasher, error_format, for_crate_hash);
+        }
+    }
+}
+
+/// Default behavior to use in out-of-memory situations.
+#[derive(Clone, Copy, PartialEq, Hash, Debug, Encodable, Decodable, HashStable_Generic)]
+pub enum OomStrategy {
+    /// Generate a panic that can be caught by `catch_unwind`.
+    Panic,
+
+    /// Abort the process immediately.
+    Abort,
+}
+
+impl OomStrategy {
+    pub const SYMBOL: &'static str = "__rust_alloc_error_handler_should_panic";
+
+    pub fn should_panic(self) -> u8 {
+        match self {
+            OomStrategy::Panic => 1,
+            OomStrategy::Abort => 0,
         }
     }
 }

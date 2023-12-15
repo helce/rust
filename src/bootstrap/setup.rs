@@ -1,5 +1,5 @@
-use crate::TargetSelection;
 use crate::{t, VERSION};
+use crate::{Config, TargetSelection};
 use std::env::consts::EXE_SUFFIX;
 use std::fmt::Write as _;
 use std::fs::File;
@@ -81,24 +81,22 @@ impl fmt::Display for Profile {
     }
 }
 
-pub fn setup(src_path: &Path, profile: Profile) {
-    let cfg_file = env::var_os("BOOTSTRAP_CONFIG").map(PathBuf::from);
+pub fn setup(config: &Config, profile: Profile) {
+    let path = &config.config;
 
-    if cfg_file.as_ref().map_or(false, |f| f.exists()) {
-        let file = cfg_file.unwrap();
+    if path.exists() {
         println!(
             "error: you asked `x.py` to setup a new config file, but one already exists at `{}`",
-            file.display()
+            path.display()
         );
-        println!("help: try adding `profile = \"{}\"` at the top of {}", profile, file.display());
+        println!("help: try adding `profile = \"{}\"` at the top of {}", profile, path.display());
         println!(
             "note: this will use the configuration in {}",
-            profile.include_path(src_path).display()
+            profile.include_path(&config.src).display()
         );
         std::process::exit(1);
     }
 
-    let path = cfg_file.unwrap_or_else(|| "config.toml".into());
     let settings = format!(
         "# Includes one of the default files in src/bootstrap/defaults\n\
     profile = \"{}\"\n\
@@ -107,7 +105,7 @@ pub fn setup(src_path: &Path, profile: Profile) {
     );
     t!(fs::write(path, settings));
 
-    let include_path = profile.include_path(src_path);
+    let include_path = profile.include_path(&config.src);
     println!("`x.py` will now use the configuration at {}", include_path.display());
 
     let build = TargetSelection::from_user(&env!("BUILD_TRIPLE"));
@@ -138,7 +136,7 @@ pub fn setup(src_path: &Path, profile: Profile) {
 
     println!();
 
-    t!(install_git_hook_maybe(src_path));
+    t!(install_git_hook_maybe(&config.src));
 
     println!();
 
@@ -163,9 +161,9 @@ fn rustup_installed() -> bool {
 }
 
 fn stage_dir_exists(stage_path: &str) -> bool {
-    match fs::create_dir(&stage_path[..]) {
+    match fs::create_dir(&stage_path) {
         Ok(_) => true,
-        Err(_) => Path::new(&stage_path[..]).exists(),
+        Err(_) => Path::new(&stage_path).exists(),
     }
 }
 
@@ -181,7 +179,7 @@ fn attempt_toolchain_link(stage_path: &str) {
         return;
     }
 
-    if try_link_toolchain(&stage_path[..]) {
+    if try_link_toolchain(&stage_path) {
         println!(
             "Added `stage1` rustup toolchain; try `cargo +stage1 build` on a separate rust project to run a newly-built toolchain"
         );
@@ -190,7 +188,7 @@ fn attempt_toolchain_link(stage_path: &str) {
         println!(
             "To manually link stage 1 build to `stage1` toolchain, run:\n
             `rustup toolchain link stage1 {}`",
-            &stage_path[..]
+            &stage_path
         );
     }
 }
@@ -224,7 +222,7 @@ fn toolchain_is_linked() -> bool {
 fn try_link_toolchain(stage_path: &str) -> bool {
     Command::new("rustup")
         .stdout(std::process::Stdio::null())
-        .args(&["toolchain", "link", "stage1", &stage_path[..]])
+        .args(&["toolchain", "link", "stage1", &stage_path])
         .output()
         .map_or(false, |output| output.status.success())
 }

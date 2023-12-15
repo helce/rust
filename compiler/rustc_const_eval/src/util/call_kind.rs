@@ -45,7 +45,7 @@ pub enum CallKind<'tcx> {
     },
     /// A call to `Fn(..)::call(..)`, desugared from `my_closure(a, b, c)`
     FnCall { fn_trait_id: DefId, self_ty: Ty<'tcx> },
-    /// A call to an operator trait, desuraged from operator syntax (e.g. `a << b`)
+    /// A call to an operator trait, desugared from operator syntax (e.g. `a << b`)
     Operator { self_arg: Option<Ident>, trait_id: DefId, self_ty: Ty<'tcx> },
     DerefCoercion {
         /// The `Span` of the `Target` associated type
@@ -132,7 +132,7 @@ pub fn call_kind<'tcx>(
             .parent(method_did)
             .filter(|did| tcx.def_kind(*did) == rustc_hir::def::DefKind::Impl)
             .and_then(|did| match tcx.type_of(did).kind() {
-                ty::Adt(def, ..) => Some(def.did),
+                ty::Adt(def, ..) => Some(def.did()),
                 _ => None,
             });
         let is_option_or_result = parent_self_ty.map_or(false, |def_id| {

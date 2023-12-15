@@ -13,7 +13,7 @@ use rustc_hir::TraitCandidate;
 use rustc_middle::ty::{DefIdTree, Visibility};
 use rustc_resolve::{ParentScope, Resolver};
 use rustc_session::config::Externs;
-use rustc_span::{Span, SyntaxContext, DUMMY_SP};
+use rustc_span::SyntaxContext;
 
 use std::collections::hash_map::Entry;
 use std::mem;
@@ -39,7 +39,7 @@ crate fn early_resolve_intra_doc_links(
 
     // Overridden `visit_item` below doesn't apply to the crate root,
     // so we have to visit its attributes and reexports separately.
-    loader.load_links_in_attrs(&krate.attrs, krate.span);
+    loader.load_links_in_attrs(&krate.attrs);
     loader.process_module_children_or_reexports(CRATE_DEF_ID.to_def_id());
     visit::walk_crate(&mut loader, krate);
     loader.add_foreign_traits_in_scope();
@@ -49,12 +49,7 @@ crate fn early_resolve_intra_doc_links(
     // DO NOT REMOVE THIS without first testing on the reproducer in
     // https://github.com/jyn514/objr/commit/edcee7b8124abf0e4c63873e8422ff81beb11ebb
     for (extern_name, _) in externs.iter().filter(|(_, entry)| entry.add_prelude) {
-        let _ = loader.resolver.resolve_str_path_error(
-            DUMMY_SP,
-            extern_name,
-            TypeNS,
-            CRATE_DEF_ID.to_def_id(),
-        );
+        loader.resolver.resolve_rustdoc_path(extern_name, TypeNS, CRATE_DEF_ID.to_def_id());
     }
 
     ResolverCaches {
@@ -118,7 +113,8 @@ impl IntraLinkCrateLoader<'_, '_> {
                 Vec::from_iter(self.resolver.cstore().trait_impls_in_crate_untracked(cnum));
             let all_inherent_impls =
                 Vec::from_iter(self.resolver.cstore().inherent_impls_in_crate_untracked(cnum));
-            let all_lang_items = Vec::from_iter(self.resolver.cstore().lang_items_untracked(cnum));
+            let all_incoherent_impls =
+                Vec::from_iter(self.resolver.cstore().incoherent_impls_in_crate_untracked(cnum));
 
             // Querying traits in scope is expensive so we try to prune the impl and traits lists
             // using privacy, private traits and impls from other crates are never documented in
@@ -142,7 +138,7 @@ impl IntraLinkCrateLoader<'_, '_> {
                     self.add_traits_in_parent_scope(impl_def_id);
                 }
             }
-            for def_id in all_lang_items {
+            for def_id in all_incoherent_impls {
                 self.add_traits_in_parent_scope(def_id);
             }
 
@@ -151,7 +147,7 @@ impl IntraLinkCrateLoader<'_, '_> {
         }
     }
 
-    fn load_links_in_attrs(&mut self, attrs: &[ast::Attribute], span: Span) {
+    fn load_links_in_attrs(&mut self, attrs: &[ast::Attribute]) {
         // FIXME: this needs to consider reexport inlining.
         let attrs = clean::Attributes::from_ast(attrs, None);
         for (parent_module, doc) in attrs.collapsed_doc_value_by_module_level() {
@@ -165,7 +161,7 @@ impl IntraLinkCrateLoader<'_, '_> {
                 } else {
                     continue;
                 };
-                let _ = self.resolver.resolve_str_path_error(span, &path_str, TypeNS, module_id);
+                self.resolver.resolve_rustdoc_path(&path_str, TypeNS, module_id);
             }
         }
     }
@@ -201,7 +197,7 @@ impl Visitor<'_> for IntraLinkCrateLoader<'_, '_> {
             // loaded, even if the module itself has no doc comments.
             self.add_traits_in_parent_scope(self.current_mod.to_def_id());
 
-            self.load_links_in_attrs(&item.attrs, item.span);
+            self.load_links_in_attrs(&item.attrs);
             self.process_module_children_or_reexports(self.current_mod.to_def_id());
             visit::walk_item(self, item);
 
@@ -216,28 +212,28 @@ impl Visitor<'_> for IntraLinkCrateLoader<'_, '_> {
                 }
                 _ => {}
             }
-            self.load_links_in_attrs(&item.attrs, item.span);
+            self.load_links_in_attrs(&item.attrs);
             visit::walk_item(self, item);
         }
     }
 
     fn visit_assoc_item(&mut self, item: &ast::AssocItem, ctxt: AssocCtxt) {
-        self.load_links_in_attrs(&item.attrs, item.span);
+        self.load_links_in_attrs(&item.attrs);
         visit::walk_assoc_item(self, item, ctxt)
     }
 
     fn visit_foreign_item(&mut self, item: &ast::ForeignItem) {
-        self.load_links_in_attrs(&item.attrs, item.span);
+        self.load_links_in_attrs(&item.attrs);
         visit::walk_foreign_item(self, item)
     }
 
     fn visit_variant(&mut self, v: &ast::Variant) {
-        self.load_links_in_attrs(&v.attrs, v.span);
+        self.load_links_in_attrs(&v.attrs);
         visit::walk_variant(self, v)
     }
 
     fn visit_field_def(&mut self, field: &ast::FieldDef) {
-        self.load_links_in_attrs(&field.attrs, field.span);
+        self.load_links_in_attrs(&field.attrs);
         visit::walk_field_def(self, field)
     }
 

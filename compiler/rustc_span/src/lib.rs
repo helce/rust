@@ -17,11 +17,13 @@
 #![feature(array_windows)]
 #![feature(bool_to_option)]
 #![feature(crate_visibility_modifier)]
+#![feature(let_else)]
 #![feature(if_let_guard)]
 #![feature(negative_impls)]
 #![feature(nll)]
 #![feature(min_specialization)]
-#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
+#![feature(rustc_attrs)]
+#![allow(rustc::potential_query_instability)]
 
 #[macro_use]
 extern crate rustc_macros;
@@ -978,12 +980,10 @@ impl<E: Encoder> Encodable<E> for Span {
 }
 impl<D: Decoder> Decodable<D> for Span {
     default fn decode(s: &mut D) -> Span {
-        s.read_struct(|d| {
-            let lo = d.read_struct_field("lo", Decodable::decode);
-            let hi = d.read_struct_field("hi", Decodable::decode);
+        let lo = Decodable::decode(s);
+        let hi = Decodable::decode(s);
 
-            Span::new(lo, hi, SyntaxContext::root(), None)
-        })
+        Span::new(lo, hi, SyntaxContext::root(), None)
     }
 }
 
@@ -1439,65 +1439,59 @@ impl<S: Encoder> Encodable<S> for SourceFile {
 
 impl<D: Decoder> Decodable<D> for SourceFile {
     fn decode(d: &mut D) -> SourceFile {
-        d.read_struct(|d| {
-            let name: FileName = d.read_struct_field("name", |d| Decodable::decode(d));
-            let src_hash: SourceFileHash =
-                d.read_struct_field("src_hash", |d| Decodable::decode(d));
-            let start_pos: BytePos = d.read_struct_field("start_pos", |d| Decodable::decode(d));
-            let end_pos: BytePos = d.read_struct_field("end_pos", |d| Decodable::decode(d));
-            let lines: Vec<BytePos> = d.read_struct_field("lines", |d| {
-                let num_lines: u32 = Decodable::decode(d);
-                let mut lines = Vec::with_capacity(num_lines as usize);
+        let name: FileName = Decodable::decode(d);
+        let src_hash: SourceFileHash = Decodable::decode(d);
+        let start_pos: BytePos = Decodable::decode(d);
+        let end_pos: BytePos = Decodable::decode(d);
+        let lines: Vec<BytePos> = {
+            let num_lines: u32 = Decodable::decode(d);
+            let mut lines = Vec::with_capacity(num_lines as usize);
 
-                if num_lines > 0 {
-                    // Read the number of bytes used per diff.
-                    let bytes_per_diff: u8 = Decodable::decode(d);
+            if num_lines > 0 {
+                // Read the number of bytes used per diff.
+                let bytes_per_diff: u8 = Decodable::decode(d);
 
-                    // Read the first element.
-                    let mut line_start: BytePos = Decodable::decode(d);
+                // Read the first element.
+                let mut line_start: BytePos = Decodable::decode(d);
+                lines.push(line_start);
+
+                for _ in 1..num_lines {
+                    let diff = match bytes_per_diff {
+                        1 => d.read_u8() as u32,
+                        2 => d.read_u16() as u32,
+                        4 => d.read_u32(),
+                        _ => unreachable!(),
+                    };
+
+                    line_start = line_start + BytePos(diff);
+
                     lines.push(line_start);
-
-                    for _ in 1..num_lines {
-                        let diff = match bytes_per_diff {
-                            1 => d.read_u8() as u32,
-                            2 => d.read_u16() as u32,
-                            4 => d.read_u32(),
-                            _ => unreachable!(),
-                        };
-
-                        line_start = line_start + BytePos(diff);
-
-                        lines.push(line_start);
-                    }
                 }
-
-                lines
-            });
-            let multibyte_chars: Vec<MultiByteChar> =
-                d.read_struct_field("multibyte_chars", |d| Decodable::decode(d));
-            let non_narrow_chars: Vec<NonNarrowChar> =
-                d.read_struct_field("non_narrow_chars", |d| Decodable::decode(d));
-            let name_hash: u128 = d.read_struct_field("name_hash", |d| Decodable::decode(d));
-            let normalized_pos: Vec<NormalizedPos> =
-                d.read_struct_field("normalized_pos", |d| Decodable::decode(d));
-            let cnum: CrateNum = d.read_struct_field("cnum", |d| Decodable::decode(d));
-            SourceFile {
-                name,
-                start_pos,
-                end_pos,
-                src: None,
-                src_hash,
-                // Unused - the metadata decoder will construct
-                // a new SourceFile, filling in `external_src` properly
-                external_src: Lock::new(ExternalSource::Unneeded),
-                lines,
-                multibyte_chars,
-                non_narrow_chars,
-                normalized_pos,
-                name_hash,
-                cnum,
             }
-        })
+
+            lines
+        };
+        let multibyte_chars: Vec<MultiByteChar> = Decodable::decode(d);
+        let non_narrow_chars: Vec<NonNarrowChar> = Decodable::decode(d);
+        let name_hash: u128 = Decodable::decode(d);
+        let normalized_pos: Vec<NormalizedPos> = Decodable::decode(d);
+        let cnum: CrateNum = Decodable::decode(d);
+        SourceFile {
+            name,
+            start_pos,
+            end_pos,
+            src: None,
+            src_hash,
+            // Unused - the metadata decoder will construct
+            // a new SourceFile, filling in `external_src` properly
+            external_src: Lock::new(ExternalSource::Unneeded),
+            lines,
+            multibyte_chars,
+            non_narrow_chars,
+            normalized_pos,
+            name_hash,
+            cnum,
+        }
     }
 }
 
@@ -2103,13 +2097,9 @@ where
         // If this is not an empty or invalid span, we want to hash the last
         // position that belongs to it, as opposed to hashing the first
         // position past it.
-        let (file, line_lo, col_lo, line_hi, col_hi) = match ctx.span_data_to_lines_and_cols(&span)
-        {
-            Some(pos) => pos,
-            None => {
-                Hash::hash(&TAG_INVALID_SPAN, hasher);
-                return;
-            }
+        let Some((file, line_lo, col_lo, line_hi, col_hi)) = ctx.span_data_to_lines_and_cols(&span) else {
+            Hash::hash(&TAG_INVALID_SPAN, hasher);
+            return;
         };
 
         Hash::hash(&TAG_VALID_SPAN, hasher);

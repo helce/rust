@@ -1123,7 +1123,7 @@ impl Metadata {
     ///     let metadata = fs::metadata("foo.txt")?;
     ///
     ///     if let Ok(time) = metadata.modified() {
-    ///         println!("{:?}", time);
+    ///         println!("{time:?}");
     ///     } else {
     ///         println!("Not supported on this platform");
     ///     }
@@ -1158,7 +1158,7 @@ impl Metadata {
     ///     let metadata = fs::metadata("foo.txt")?;
     ///
     ///     if let Ok(time) = metadata.accessed() {
-    ///         println!("{:?}", time);
+    ///         println!("{time:?}");
     ///     } else {
     ///         println!("Not supported on this platform");
     ///     }
@@ -1190,7 +1190,7 @@ impl Metadata {
     ///     let metadata = fs::metadata("foo.txt")?;
     ///
     ///     if let Ok(time) = metadata.created() {
-    ///         println!("{:?}", time);
+    ///         println!("{time:?}");
     ///     } else {
     ///         println!("Not supported on this platform or filesystem");
     ///     }
@@ -1729,11 +1729,17 @@ pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> 
 /// This function currently corresponds to the `open` function in Unix
 /// with `O_RDONLY` for `from` and `O_WRONLY`, `O_CREAT`, and `O_TRUNC` for `to`.
 /// `O_CLOEXEC` is set for returned file descriptors.
+///
+/// On Linux (including Android), this function attempts to use `copy_file_range(2)`,
+/// and falls back to reading and writing if that is not possible.
+///
 /// On Windows, this function currently corresponds to `CopyFileEx`. Alternate
 /// NTFS streams are copied but only the size of the main stream is returned by
-/// this function. On MacOS, this function corresponds to `fclonefileat` and
-/// `fcopyfile`.
-/// Note that, this [may change in the future][changes].
+/// this function.
+///
+/// On MacOS, this function corresponds to `fclonefileat` and `fcopyfile`.
+///
+/// Note that platform-specific behavior [may change in the future][changes].
 ///
 /// [changes]: io#platform-specific-behavior
 ///
@@ -2049,9 +2055,10 @@ pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 ///
 /// [changes]: io#platform-specific-behavior
 ///
-/// On macOS before version 10.10 and REDOX this function is not protected against time-of-check to
-/// time-of-use (TOCTOU) race conditions, and should not be used in security-sensitive code on
-/// those platforms. All other platforms are protected.
+/// On macOS before version 10.10 and REDOX, as well as when running in Miri for any target, this
+/// function is not protected against time-of-check to time-of-use (TOCTOU) race conditions, and
+/// should not be used in security-sensitive code on those platforms. All other platforms are
+/// protected.
 ///
 /// # Errors
 ///

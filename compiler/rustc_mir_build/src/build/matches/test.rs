@@ -30,11 +30,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// It is a bug to call this with a not-fully-simplified pattern.
     pub(super) fn test<'pat>(&mut self, match_pair: &MatchPair<'pat, 'tcx>) -> Test<'tcx> {
         match *match_pair.pattern.kind {
-            PatKind::Variant { ref adt_def, substs: _, variant_index: _, subpatterns: _ } => Test {
+            PatKind::Variant { adt_def, substs: _, variant_index: _, subpatterns: _ } => Test {
                 span: match_pair.pattern.span,
                 kind: TestKind::Switch {
                     adt_def,
-                    variants: BitSet::new_empty(adt_def.variants.len()),
+                    variants: BitSet::new_empty(adt_def.variants().len()),
                 },
             },
 
@@ -126,11 +126,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         candidate: &Candidate<'pat, 'tcx>,
         variants: &mut BitSet<VariantIdx>,
     ) -> bool {
-        let match_pair = match candidate.match_pairs.iter().find(|mp| mp.place == *test_place) {
-            Some(match_pair) => match_pair,
-            _ => {
-                return false;
-            }
+        let Some(match_pair) = candidate.match_pairs.iter().find(|mp| mp.place == *test_place) else {
+            return false;
         };
 
         match *match_pair.pattern.kind {
@@ -177,7 +174,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             TestKind::Switch { adt_def, ref variants } => {
                 let target_blocks = make_target_blocks(self);
                 // Variants is a BitVec of indexes into adt_def.variants.
-                let num_enum_variants = adt_def.variants.len();
+                let num_enum_variants = adt_def.variants().len();
                 debug_assert_eq!(target_blocks.len(), num_enum_variants + 1);
                 let otherwise_block = *target_blocks.last().unwrap();
                 let tcx = self.tcx;
@@ -204,7 +201,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     otherwise_block,
                 );
                 debug!("num_enum_variants: {}, variants: {:?}", num_enum_variants, variants);
-                let discr_ty = adt_def.repr.discr_type().to_ty(tcx);
+                let discr_ty = adt_def.repr().discr_type().to_ty(tcx);
                 let discr = self.temp(discr_ty, test.span);
                 self.cfg.push_assign(
                     block,
@@ -421,9 +418,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
         }
 
-        let deref_ty = match *ty.kind() {
-            ty::Ref(_, deref_ty, _) => deref_ty,
-            _ => bug!("non_scalar_compare called on non-reference type: {}", ty),
+        let ty::Ref(_, deref_ty, _) = *ty.kind() else {
+            bug!("non_scalar_compare called on non-reference type: {}", ty);
         };
 
         let eq_def_id = self.tcx.require_lang_item(LangItem::PartialEq, None);
@@ -737,7 +733,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     fn candidate_after_variant_switch<'pat>(
         &mut self,
         match_pair_index: usize,
-        adt_def: &'tcx ty::AdtDef,
+        adt_def: ty::AdtDef<'tcx>,
         variant_index: VariantIdx,
         subpatterns: &'pat [FieldPat<'tcx>],
         candidate: &mut Candidate<'pat, 'tcx>,
@@ -748,7 +744,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         // we want to create a set of derived match-patterns like
         // `(x as Variant).0 @ P1` and `(x as Variant).1 @ P1`.
         let elem =
-            ProjectionElem::Downcast(Some(adt_def.variants[variant_index].name), variant_index);
+            ProjectionElem::Downcast(Some(adt_def.variant(variant_index).name), variant_index);
         let downcast_place = match_pair.place.project(elem); // `(x as Variant)`
         let consequent_match_pairs = subpatterns.iter().map(|subpattern| {
             // e.g., `(x as Variant).0`
@@ -802,7 +798,7 @@ impl Test<'_> {
                 // variants, we have a target for each variant and the
                 // otherwise case, and we make sure that all of the cases not
                 // specified have the same block.
-                adt_def.variants.len() + 1
+                adt_def.variants().len() + 1
             }
             TestKind::SwitchInt { switch_ty, ref options, .. } => {
                 if switch_ty.is_bool() {

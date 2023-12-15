@@ -131,16 +131,18 @@ fn object_safety_violations_for_trait(
             }),
     );
 
-    violations.extend(
-        tcx.associated_items(trait_def_id)
-            .in_definition_order()
-            .filter(|item| item.kind == ty::AssocKind::Type)
-            .filter(|item| !tcx.generics_of(item.def_id).params.is_empty())
-            .map(|item| {
-                let ident = item.ident(tcx);
-                ObjectSafetyViolation::GAT(ident.name, ident.span)
-            }),
-    );
+    if !tcx.features().generic_associated_types_extended {
+        violations.extend(
+            tcx.associated_items(trait_def_id)
+                .in_definition_order()
+                .filter(|item| item.kind == ty::AssocKind::Type)
+                .filter(|item| !tcx.generics_of(item.def_id).params.is_empty())
+                .map(|item| {
+                    let ident = item.ident(tcx);
+                    ObjectSafetyViolation::GAT(ident.name, ident.span)
+                }),
+        );
+    }
 
     debug!(
         "object_safety_violations_for_trait(trait_def_id={:?}) = {:?}",
@@ -322,11 +324,8 @@ fn trait_has_sized_self(tcx: TyCtxt<'_>, trait_def_id: DefId) -> bool {
 }
 
 fn generics_require_sized_self(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    let sized_def_id = match tcx.lang_items().sized_trait() {
-        Some(def_id) => def_id,
-        None => {
-            return false; /* No Sized trait, can't require it! */
-        }
+    let Some(sized_def_id) = tcx.lang_items().sized_trait() else {
+        return false; /* No Sized trait, can't require it! */
     };
 
     // Search for a predicate like `Self : Sized` amongst the trait bounds.

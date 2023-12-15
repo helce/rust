@@ -51,6 +51,7 @@
 //! ```
 use crate::mir;
 use crate::ty::{self, flags::FlagComputation, Binder, Ty, TyCtxt, TypeFlags};
+use rustc_errors::ErrorGuaranteed;
 use rustc_hir::def_id::DefId;
 
 use rustc_data_structures::fx::FxHashSet;
@@ -150,6 +151,13 @@ pub trait TypeFoldable<'tcx>: fmt::Debug + Clone {
     }
     fn references_error(&self) -> bool {
         self.has_type_flags(TypeFlags::HAS_ERROR)
+    }
+    fn error_reported(&self) -> Option<ErrorGuaranteed> {
+        if self.references_error() {
+            Some(ErrorGuaranteed::unchecked_claim_error_was_emitted())
+        } else {
+            None
+        }
     }
     fn has_param_types_or_consts(&self) -> bool {
         self.has_type_flags(TypeFlags::HAS_TY_PARAM | TypeFlags::HAS_CT_PARAM)
@@ -1235,15 +1243,11 @@ impl<'tcx> TypeVisitor<'tcx> for HasTypeFlagsVisitor {
     type BreakTy = FoundFlags;
 
     #[inline]
-    #[instrument(level = "trace")]
-    fn visit_ty(&mut self, t: Ty<'_>) -> ControlFlow<Self::BreakTy> {
-        debug!(
-            "HasTypeFlagsVisitor: t={:?} t.flags={:?} self.flags={:?}",
-            t,
-            t.flags(),
-            self.flags
-        );
-        if t.flags().intersects(self.flags) {
+    #[instrument(skip(self), level = "trace")]
+    fn visit_ty(&mut self, t: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
+        let flags = t.flags();
+        trace!(t.flags=?t.flags());
+        if flags.intersects(self.flags) {
             ControlFlow::Break(FoundFlags)
         } else {
             ControlFlow::CONTINUE
@@ -1372,6 +1376,53 @@ impl<'tcx> TypeVisitor<'tcx> for LateBoundRegionsCollector {
                 self.regions.insert(br.kind);
             }
         }
+        ControlFlow::CONTINUE
+    }
+}
+
+/// Finds the max universe present
+pub struct MaxUniverse {
+    max_universe: ty::UniverseIndex,
+}
+
+impl MaxUniverse {
+    pub fn new() -> Self {
+        MaxUniverse { max_universe: ty::UniverseIndex::ROOT }
+    }
+
+    pub fn max_universe(self) -> ty::UniverseIndex {
+        self.max_universe
+    }
+}
+
+impl<'tcx> TypeVisitor<'tcx> for MaxUniverse {
+    fn visit_ty(&mut self, t: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
+        if let ty::Placeholder(placeholder) = t.kind() {
+            self.max_universe = ty::UniverseIndex::from_u32(
+                self.max_universe.as_u32().max(placeholder.universe.as_u32()),
+            );
+        }
+
+        t.super_visit_with(self)
+    }
+
+    fn visit_const(&mut self, c: ty::consts::Const<'tcx>) -> ControlFlow<Self::BreakTy> {
+        if let ty::ConstKind::Placeholder(placeholder) = c.val() {
+            self.max_universe = ty::UniverseIndex::from_u32(
+                self.max_universe.as_u32().max(placeholder.universe.as_u32()),
+            );
+        }
+
+        c.super_visit_with(self)
+    }
+
+    fn visit_region(&mut self, r: ty::Region<'tcx>) -> ControlFlow<Self::BreakTy> {
+        if let ty::RePlaceholder(placeholder) = *r {
+            self.max_universe = ty::UniverseIndex::from_u32(
+                self.max_universe.as_u32().max(placeholder.universe.as_u32()),
+            );
+        }
+
         ControlFlow::CONTINUE
     }
 }

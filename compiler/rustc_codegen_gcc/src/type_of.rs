@@ -52,12 +52,12 @@ pub fn uncached_gcc_type<'gcc, 'tcx>(cx: &CodegenCx<'gcc, 'tcx>, layout: TyAndLa
         ty::Adt(..) | ty::Closure(..) | ty::Foreign(..) | ty::Generator(..) | ty::Str
             if !cx.sess().fewer_names() =>
         {
-            let mut name = with_no_trimmed_paths(|| layout.ty.to_string());
+            let mut name = with_no_trimmed_paths!(layout.ty.to_string());
             if let (&ty::Adt(def, _), &Variants::Single { index }) =
                 (layout.ty.kind(), &layout.variants)
             {
-                if def.is_enum() && !def.variants.is_empty() {
-                    write!(&mut name, "::{}", def.variants[index].name).unwrap();
+                if def.is_enum() && !def.variants().is_empty() {
+                    write!(&mut name, "::{}", def.variant(index).name).unwrap();
                 }
             }
             if let (&ty::Generator(_, _, _), &Variants::Single { index }) =
@@ -251,7 +251,9 @@ impl<'tcx> LayoutGccExt<'tcx> for TyAndLayout<'tcx> {
             ty::Ref(..) | ty::RawPtr(_) => {
                 return self.field(cx, index).gcc_type(cx, true);
             }
-            ty::Adt(def, _) if def.is_box() => {
+            // only wide pointer boxes are handled as pointers
+            // thin pointer boxes with scalar allocators are handled by the general logic below
+            ty::Adt(def, substs) if def.is_box() && cx.layout_of(substs.type_at(1)).is_zst() => {
                 let ptr_ty = cx.tcx.mk_mut_ptr(self.ty.boxed_ty());
                 return cx.layout_of(ptr_ty).scalar_pair_element_gcc_type(cx, index, immediate);
             }

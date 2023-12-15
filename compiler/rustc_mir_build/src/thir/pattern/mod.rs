@@ -198,7 +198,7 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
         let kind = match pat.kind {
             hir::PatKind::Wild => PatKind::Wild,
 
-            hir::PatKind::Lit(ref value) => self.lower_lit(value),
+            hir::PatKind::Lit(value) => self.lower_lit(value),
 
             hir::PatKind::Range(ref lo_expr, ref hi_expr, end) => {
                 let (lo_expr, hi_expr) = (lo_expr.as_deref(), hi_expr.as_deref());
@@ -245,9 +245,8 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
             }
 
             hir::PatKind::Tuple(ref pats, ddpos) => {
-                let tys = match ty.kind() {
-                    ty::Tuple(ref tys) => tys,
-                    _ => span_bug!(pat.span, "unexpected type for tuple pattern: {:?}", ty),
+                let ty::Tuple(ref tys) = ty.kind() else {
+                    span_bug!(pat.span, "unexpected type for tuple pattern: {:?}", ty);
                 };
                 let subpatterns = self.lower_tuple_subpats(pats, tys.len(), ddpos);
                 PatKind::Leaf { subpatterns }
@@ -294,9 +293,8 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
 
             hir::PatKind::TupleStruct(ref qpath, ref pats, ddpos) => {
                 let res = self.typeck_results.qpath_res(qpath, pat.hir_id);
-                let adt_def = match ty.kind() {
-                    ty::Adt(adt_def, _) => adt_def,
-                    _ => span_bug!(pat.span, "tuple struct pattern not applied to an ADT {:?}", ty),
+                let ty::Adt(adt_def, _) = ty.kind() else {
+                    span_bug!(pat.span, "tuple struct pattern not applied to an ADT {:?}", ty);
                 };
                 let variant_def = adt_def.variant_of_res(res);
                 let subpatterns = self.lower_tuple_subpats(pats, variant_def.fields.len(), ddpos);
@@ -422,7 +420,7 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
             _ => {
                 let pattern_error = match res {
                     Res::Def(DefKind::ConstParam, _) => PatternError::ConstParamInPattern(span),
-                    Res::Def(DefKind::Static, _) => PatternError::StaticInPattern(span),
+                    Res::Def(DefKind::Static(_), _) => PatternError::StaticInPattern(span),
                     _ => PatternError::NonConstPath(span),
                 };
                 self.errors.push(pattern_error);
@@ -576,9 +574,8 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
             }
             hir::ExprKind::Lit(ref lit) => (lit, false),
             hir::ExprKind::Unary(hir::UnOp::Neg, ref expr) => {
-                let lit = match expr.kind {
-                    hir::ExprKind::Lit(ref lit) => lit,
-                    _ => span_bug!(expr.span, "not a literal: {:?}", expr),
+                let hir::ExprKind::Lit(ref lit) = expr.kind else {
+                    span_bug!(expr.span, "not a literal: {:?}", expr);
                 };
                 (lit, true)
             }
@@ -656,7 +653,7 @@ macro_rules! CloneImpls {
 
 CloneImpls! { <'tcx>
     Span, Field, Mutability, Symbol, hir::HirId, usize, ty::Const<'tcx>,
-    Region<'tcx>, Ty<'tcx>, BindingMode, &'tcx AdtDef,
+    Region<'tcx>, Ty<'tcx>, BindingMode, AdtDef<'tcx>,
     SubstsRef<'tcx>, &'tcx GenericArg<'tcx>, UserType<'tcx>,
     UserTypeProjection, PatTyProj<'tcx>
 }
@@ -793,16 +790,14 @@ crate fn compare_const_vals<'tcx>(
         };
     }
 
-    if let ty::Str = ty.kind() {
-        if let (
-            ty::ConstKind::Value(a_val @ ConstValue::Slice { .. }),
-            ty::ConstKind::Value(b_val @ ConstValue::Slice { .. }),
-        ) = (a.val(), b.val())
-        {
-            let a_bytes = get_slice_bytes(&tcx, a_val);
-            let b_bytes = get_slice_bytes(&tcx, b_val);
-            return from_bool(a_bytes == b_bytes);
-        }
+    if let ty::Str = ty.kind() && let (
+        ty::ConstKind::Value(a_val @ ConstValue::Slice { .. }),
+        ty::ConstKind::Value(b_val @ ConstValue::Slice { .. }),
+    ) = (a.val(), b.val())
+    {
+        let a_bytes = get_slice_bytes(&tcx, a_val);
+        let b_bytes = get_slice_bytes(&tcx, b_val);
+        return from_bool(a_bytes == b_bytes);
     }
     fallback()
 }

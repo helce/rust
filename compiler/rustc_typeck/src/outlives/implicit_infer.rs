@@ -157,7 +157,7 @@ fn insert_required_predicates_to_be_wf<'tcx>(
                 // `['b => 'a, U => T]` and thus get the requirement that `T:
                 // 'a` holds for `Foo`.
                 debug!("Adt");
-                if let Some(unsubstituted_predicates) = global_inferred_outlives.get(&def.did) {
+                if let Some(unsubstituted_predicates) = global_inferred_outlives.get(&def.did()) {
                     for (unsubstituted_predicate, &span) in unsubstituted_predicates {
                         // `unsubstituted_predicate` is `U: 'b` in the
                         // example above.  So apply the substitution to
@@ -178,7 +178,7 @@ fn insert_required_predicates_to_be_wf<'tcx>(
                 // let _: () = substs.region_at(0);
                 check_explicit_predicates(
                     tcx,
-                    def.did,
+                    def.did(),
                     substs,
                     required_predicates,
                     explicit_map,
@@ -304,13 +304,12 @@ pub fn check_explicit_predicates<'tcx>(
         // = X` binding from the object type (there must be such a
         // binding) and thus infer an outlives requirement that `X:
         // 'b`.
-        if let Some(self_ty) = ignored_self_ty {
-            if let GenericArgKind::Type(ty) = outlives_predicate.0.unpack() {
-                if ty.walk().any(|arg| arg == self_ty.into()) {
-                    debug!("skipping self ty = {:?}", &ty);
-                    continue;
-                }
-            }
+        if let Some(self_ty) = ignored_self_ty
+            && let GenericArgKind::Type(ty) = outlives_predicate.0.unpack()
+            && ty.walk().any(|arg| arg == self_ty.into())
+        {
+            debug!("skipping self ty = {:?}", &ty);
+            continue;
         }
 
         let predicate = outlives_predicate.subst(tcx, substs);

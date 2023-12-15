@@ -9,7 +9,7 @@ use rustc_hir as hir;
 use rustc_index::vec::Idx;
 use rustc_middle::mir::*;
 use rustc_middle::thir::*;
-use rustc_middle::ty::{self, CanonicalUserTypeAnnotation};
+use rustc_middle::ty::CanonicalUserTypeAnnotation;
 use std::iter;
 
 impl<'a, 'tcx> Builder<'a, 'tcx> {
@@ -107,7 +107,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     Constant {
                         span: expr_span,
                         user_ty: None,
-                        literal: ty::Const::from_bool(this.tcx, true).into(),
+                        literal: ConstantKind::from_bool(this.tcx, true),
                     },
                 );
 
@@ -118,7 +118,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     Constant {
                         span: expr_span,
                         user_ty: None,
-                        literal: ty::Const::from_bool(this.tcx, false).into(),
+                        literal: ConstantKind::from_bool(this.tcx, false),
                     },
                 );
 
@@ -183,8 +183,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         span: expr_span,
                         user_ty: None,
                         literal: match op {
-                            LogicalOp::And => ty::Const::from_bool(this.tcx, false).into(),
-                            LogicalOp::Or => ty::Const::from_bool(this.tcx, true).into(),
+                            LogicalOp::And => ConstantKind::from_bool(this.tcx, false),
+                            LogicalOp::Or => ConstantKind::from_bool(this.tcx, true),
                         },
                     },
                 );
@@ -332,7 +332,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     .collect();
 
                 let field_names: Vec<_> =
-                    (0..adt_def.variants[variant_index].fields.len()).map(Field::new).collect();
+                    (0..adt_def.variant(variant_index).fields.len()).map(Field::new).collect();
 
                 let fields: Vec<_> = if let Some(FruInfo { base, field_types }) = base {
                     let place_builder =
@@ -367,7 +367,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     })
                 });
                 let adt = Box::new(AggregateKind::Adt(
-                    adt_def.did,
+                    adt_def.did(),
                     variant_index,
                     substs,
                     user_ty,
@@ -533,6 +533,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | ExprKind::Closure { .. }
             | ExprKind::ConstBlock { .. }
             | ExprKind::Literal { .. }
+            | ExprKind::NamedConst { .. }
+            | ExprKind::NonHirLiteral { .. }
+            | ExprKind::ConstParam { .. }
             | ExprKind::ThreadLocalRef(_)
             | ExprKind::StaticRef { .. } => {
                 debug_assert!(match Category::of(&expr.kind).unwrap() {

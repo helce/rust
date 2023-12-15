@@ -461,10 +461,10 @@ impl<'tcx> CloneShimBuilder<'tcx> {
 
     fn tuple_like_shim<I>(&mut self, dest: Place<'tcx>, src: Place<'tcx>, tys: I)
     where
-        I: Iterator<Item = Ty<'tcx>>,
+        I: IntoIterator<Item = Ty<'tcx>>,
     {
         let mut previous_field = None;
-        for (i, ity) in tys.enumerate() {
+        for (i, ity) in tys.into_iter().enumerate() {
             let field = Field::new(i);
             let src_field = self.tcx.mk_place_field(src, field, ity);
 
@@ -734,9 +734,8 @@ pub fn build_adt_ctor(tcx: TyCtxt<'_>, ctor_id: DefId) -> Body<'_> {
     let sig = tcx.fn_sig(ctor_id).no_bound_vars().expect("LBR in ADT constructor signature");
     let sig = tcx.normalize_erasing_regions(param_env, sig);
 
-    let (adt_def, substs) = match sig.output().kind() {
-        ty::Adt(adt_def, substs) => (adt_def, substs),
-        _ => bug!("unexpected type for ADT ctor {:?}", sig.output()),
+    let ty::Adt(adt_def, substs) = sig.output().kind() else {
+        bug!("unexpected type for ADT ctor {:?}", sig.output());
     };
 
     debug!("build_ctor: ctor_id={:?} sig={:?}", ctor_id, sig);
@@ -761,10 +760,10 @@ pub fn build_adt_ctor(tcx: TyCtxt<'_>, ctor_id: DefId) -> Body<'_> {
 
     let statements = expand_aggregate(
         Place::return_place(),
-        adt_def.variants[variant_index].fields.iter().enumerate().map(|(idx, field_def)| {
+        adt_def.variant(variant_index).fields.iter().enumerate().map(|(idx, field_def)| {
             (Operand::Move(Place::from(Local::new(idx + 1))), field_def.ty(tcx, substs))
         }),
-        AggregateKind::Adt(adt_def.did, variant_index, substs, None, None),
+        AggregateKind::Adt(adt_def.did(), variant_index, substs, None, None),
         source_info,
         tcx,
     )

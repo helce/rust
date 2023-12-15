@@ -29,18 +29,32 @@ pub enum NativeLibKind {
     /// Dynamic library (e.g. `libfoo.so` on Linux)
     /// or an import library corresponding to a dynamic library (e.g. `foo.lib` on Windows/MSVC).
     Dylib {
-        /// Whether the dynamic library will be linked only if it satifies some undefined symbols
+        /// Whether the dynamic library will be linked only if it satisfies some undefined symbols
         as_needed: Option<bool>,
     },
     /// Dynamic library (e.g. `foo.dll` on Windows) without a corresponding import library.
     RawDylib,
     /// A macOS-specific kind of dynamic libraries.
     Framework {
-        /// Whether the framework will be linked only if it satifies some undefined symbols
+        /// Whether the framework will be linked only if it satisfies some undefined symbols
         as_needed: Option<bool>,
     },
     /// The library kind wasn't specified, `Dylib` is currently used as a default.
     Unspecified,
+}
+
+impl NativeLibKind {
+    pub fn has_modifiers(&self) -> bool {
+        match self {
+            NativeLibKind::Static { bundle, whole_archive } => {
+                bundle.is_some() || whole_archive.is_some()
+            }
+            NativeLibKind::Dylib { as_needed } | NativeLibKind::Framework { as_needed } => {
+                as_needed.is_some()
+            }
+            NativeLibKind::RawDylib | NativeLibKind::Unspecified => false,
+        }
+    }
 }
 
 rustc_data_structures::impl_stable_hash_via_hash!(NativeLibKind);
@@ -51,6 +65,12 @@ pub struct NativeLib {
     pub new_name: Option<String>,
     pub kind: NativeLibKind,
     pub verbatim: Option<bool>,
+}
+
+impl NativeLib {
+    pub fn has_modifiers(&self) -> bool {
+        self.verbatim.is_some() || self.kind.has_modifiers()
+    }
 }
 
 rustc_data_structures::impl_stable_hash_via_hash!(NativeLib);
@@ -112,6 +132,9 @@ impl<'a> FlattenNonterminals<'a> {
 
     pub fn process_token(&mut self, token: Token) -> TokenStream {
         match token.kind {
+            token::Interpolated(nt) if let token::NtIdent(ident, is_raw) = *nt => {
+                TokenTree::Token(Token::new(token::Ident(ident.name, is_raw), ident.span)).into()
+            }
             token::Interpolated(nt) => {
                 let tts = (self.nt_to_tokenstream)(&nt, self.parse_sess, self.synthesize_tokens);
                 TokenTree::Delimited(

@@ -4,14 +4,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
-use build_helper::t;
-
 use crate::builder::{Builder, Cargo as CargoCommand, RunConfig, ShouldRun, Step};
 use crate::channel::GitInfo;
 use crate::compile;
 use crate::config::TargetSelection;
 use crate::toolstate::ToolState;
-use crate::util::{add_dylib_path, exe};
+use crate::util::{add_dylib_path, exe, t};
 use crate::Compiler;
 use crate::Mode;
 
@@ -393,7 +391,7 @@ impl ErrorIndex {
         add_dylib_path(
             vec![
                 PathBuf::from(&builder.sysroot_libdir(compiler, compiler.host)),
-                PathBuf::from(builder.rustc_libdir(compiler)),
+                builder.rustc_libdir(compiler),
             ],
             &mut cmd,
         );

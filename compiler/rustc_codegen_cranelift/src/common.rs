@@ -67,7 +67,7 @@ fn clif_type_from_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<types::Typ
                 pointer_ty(tcx)
             }
         }
-        ty::Adt(adt_def, _) if adt_def.repr.simd() => {
+        ty::Adt(adt_def, _) if adt_def.repr().simd() => {
             let (element, count) = match &tcx.layout_of(ParamEnv::reveal_all().and(ty)).unwrap().abi
             {
                 Abi::Vector { element, count } => (element.clone(), *count),
@@ -90,10 +90,9 @@ fn clif_pair_type_from_ty<'tcx>(
     ty: Ty<'tcx>,
 ) -> Option<(types::Type, types::Type)> {
     Some(match ty.kind() {
-        ty::Tuple(substs) if substs.len() == 2 => {
-            let mut types = substs.types();
-            let a = clif_type_from_ty(tcx, types.next().unwrap())?;
-            let b = clif_type_from_ty(tcx, types.next().unwrap())?;
+        ty::Tuple(types) if types.len() == 2 => {
+            let a = clif_type_from_ty(tcx, types[0])?;
+            let b = clif_type_from_ty(tcx, types[1])?;
             if a.is_vector() || b.is_vector() {
                 return None;
             }

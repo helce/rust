@@ -263,9 +263,8 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
 
         while let Some(vid) = changes.pop() {
             constraints[vid].retain(|&(a_vid, b_vid)| {
-                let a_region = match *var_values.value(a_vid) {
-                    VarValue::ErrorValue => return false,
-                    VarValue::Value(a_region) => a_region,
+                let VarValue::Value(a_region) = *var_values.value(a_vid) else {
+                    return false;
                 };
                 let b_data = var_values.value_mut(b_vid);
                 if self.expand_node(a_region, b_vid, b_data) {
@@ -305,10 +304,8 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                 // check below for a common case, here purely as an
                 // optimization.
                 let b_universe = self.var_infos[b_vid].universe;
-                if let ReEmpty(a_universe) = *a_region {
-                    if a_universe == b_universe {
-                        return false;
-                    }
+                if let ReEmpty(a_universe) = *a_region && a_universe == b_universe {
+                    return false;
                 }
 
                 let mut lub = self.lub_concrete_regions(a_region, cur_region);
@@ -325,10 +322,8 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                 // tighter bound than `'static`.
                 //
                 // (This might e.g. arise from being asked to prove `for<'a> { 'b: 'a }`.)
-                if let ty::RePlaceholder(p) = *lub {
-                    if b_universe.cannot_name(p.universe) {
-                        lub = self.tcx().lifetimes.re_static;
-                    }
+                if let ty::RePlaceholder(p) = *lub && b_universe.cannot_name(p.universe) {
+                    lub = self.tcx().lifetimes.re_static;
                 }
 
                 debug!("Expanding value of {:?} from {:?} to {:?}", b_vid, cur_region, lub);
@@ -485,9 +480,8 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                     let a_data = var_data.value_mut(a_vid);
                     debug!("contraction: {:?} == {:?}, {:?}", a_vid, a_data, b_region);
 
-                    let a_region = match *a_data {
-                        VarValue::ErrorValue => continue,
-                        VarValue::Value(a_region) => a_region,
+                    let VarValue::Value(a_region) = *a_data else {
+                        continue;
                     };
 
                     // Do not report these errors immediately:

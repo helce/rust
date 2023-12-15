@@ -358,10 +358,15 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for transmutes either to or from a type which does not have a defined representation.
+    /// Checks for transmutes between types which do not have a representation defined relative to
+    /// each other.
     ///
     /// ### Why is this bad?
     /// The results of such a transmute are not defined.
+    ///
+    /// ### Known problems
+    /// This lint has had multiple problems in the past and was moved to `nursery`. See issue
+    /// [#8496](https://github.com/rust-lang/rust-clippy/issues/8496) for more details.
     ///
     /// ### Example
     /// ```rust
@@ -410,7 +415,8 @@ impl<'tcx> LateLintPass<'tcx> for Transmute {
                 // And see https://github.com/rust-lang/rust/issues/51911 for dereferencing raw pointers.
                 let const_context = in_constant(cx, e.hir_id);
 
-                let from_ty = cx.typeck_results().expr_ty(arg);
+                let from_ty = cx.typeck_results().expr_ty_adjusted(arg);
+                // Adjustments for `to_ty` happen after the call to `transmute`, so don't use them.
                 let to_ty = cx.typeck_results().expr_ty(e);
 
                 // If useless_transmute is triggered, the other lints can be skipped.

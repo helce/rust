@@ -3,7 +3,9 @@ use std::ptr;
 use rustc_ast::{self as ast, Path};
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_errors::{struct_span_err, Applicability, DiagnosticBuilder};
+use rustc_errors::{
+    struct_span_err, Applicability, Diagnostic, DiagnosticBuilder, ErrorGuaranteed,
+};
 use rustc_feature::BUILTIN_ATTRIBUTES;
 use rustc_hir::def::Namespace::{self, *};
 use rustc_hir::def::{self, CtorKind, CtorOf, DefKind, NonMacroAttrKind};
@@ -22,10 +24,8 @@ use tracing::debug;
 use crate::imports::{Import, ImportKind, ImportResolver};
 use crate::path_names_to_string;
 use crate::{AmbiguityError, AmbiguityErrorMisc, AmbiguityKind};
-use crate::{
-    BindingError, CrateLint, HasGenericParams, MacroRulesScope, Module, ModuleOrUniformRoot,
-};
-use crate::{NameBinding, NameBindingKind, PrivacyError, VisResolutionError};
+use crate::{BindingError, HasGenericParams, MacroRulesScope, Module, ModuleOrUniformRoot};
+use crate::{Finalize, NameBinding, NameBindingKind, PrivacyError, VisResolutionError};
 use crate::{ParentScope, PathResult, ResolutionError, Resolver, Scope, ScopeSet, Segment};
 
 type Res = def::Res<ast::NodeId>;
@@ -110,7 +110,7 @@ impl<'a> Resolver<'a> {
         &self,
         span: Span,
         resolution_error: ResolutionError<'_>,
-    ) -> DiagnosticBuilder<'_> {
+    ) -> DiagnosticBuilder<'_, ErrorGuaranteed> {
         match resolution_error {
             ResolutionError::GenericParamsFromOuterFunction(outer_res, has_generic_params) => {
                 let mut err = struct_span_err!(
@@ -624,7 +624,10 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    crate fn report_vis_error(&self, vis_resolution_error: VisResolutionError<'_>) {
+    crate fn report_vis_error(
+        &self,
+        vis_resolution_error: VisResolutionError<'_>,
+    ) -> ErrorGuaranteed {
         match vis_resolution_error {
             VisResolutionError::Relative2018(span, path) => {
                 let mut err = self.session.struct_span_err(
@@ -1031,7 +1034,7 @@ impl<'a> Resolver<'a> {
 
     crate fn unresolved_macro_suggestions(
         &mut self,
-        err: &mut DiagnosticBuilder<'a>,
+        err: &mut Diagnostic,
         macro_kind: MacroKind,
         parent_scope: &ParentScope<'a>,
         ident: Ident,
@@ -1071,9 +1074,8 @@ impl<'a> Resolver<'a> {
                 ident,
                 ScopeSet::All(ns, false),
                 &parent_scope,
+                None,
                 false,
-                false,
-                ident.span,
             ) {
                 let desc = match binding.res() {
                     Res::Def(DefKind::Macro(MacroKind::Bang), _) => {
@@ -1120,7 +1122,7 @@ impl<'a> Resolver<'a> {
 
     crate fn add_typo_suggestion(
         &self,
-        err: &mut DiagnosticBuilder<'_>,
+        err: &mut Diagnostic,
         suggestion: Option<TypoSuggestion>,
         span: Span,
     ) -> bool {
@@ -1400,10 +1402,10 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
             _ => return None,
         }
 
-        self.make_missing_self_suggestion(span, path.clone(), parent_scope)
-            .or_else(|| self.make_missing_crate_suggestion(span, path.clone(), parent_scope))
-            .or_else(|| self.make_missing_super_suggestion(span, path.clone(), parent_scope))
-            .or_else(|| self.make_external_crate_suggestion(span, path, parent_scope))
+        self.make_missing_self_suggestion(path.clone(), parent_scope)
+            .or_else(|| self.make_missing_crate_suggestion(path.clone(), parent_scope))
+            .or_else(|| self.make_missing_super_suggestion(path.clone(), parent_scope))
+            .or_else(|| self.make_external_crate_suggestion(path, parent_scope))
     }
 
     /// Suggest a missing `self::` if that resolves to an correct module.
@@ -1415,13 +1417,12 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
     /// ```
     fn make_missing_self_suggestion(
         &mut self,
-        span: Span,
         mut path: Vec<Segment>,
         parent_scope: &ParentScope<'b>,
     ) -> Option<(Vec<Segment>, Vec<String>)> {
         // Replace first ident with `self` and check if that is valid.
         path[0].ident.name = kw::SelfLower;
-        let result = self.r.resolve_path(&path, None, parent_scope, false, span, CrateLint::No);
+        let result = self.r.resolve_path(&path, None, parent_scope, Finalize::No);
         debug!("make_missing_self_suggestion: path={:?} result={:?}", path, result);
         if let PathResult::Module(..) = result { Some((path, Vec::new())) } else { None }
     }
@@ -1435,13 +1436,12 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
     /// ```
     fn make_missing_crate_suggestion(
         &mut self,
-        span: Span,
         mut path: Vec<Segment>,
         parent_scope: &ParentScope<'b>,
     ) -> Option<(Vec<Segment>, Vec<String>)> {
         // Replace first ident with `crate` and check if that is valid.
         path[0].ident.name = kw::Crate;
-        let result = self.r.resolve_path(&path, None, parent_scope, false, span, CrateLint::No);
+        let result = self.r.resolve_path(&path, None, parent_scope, Finalize::No);
         debug!("make_missing_crate_suggestion:  path={:?} result={:?}", path, result);
         if let PathResult::Module(..) = result {
             Some((
@@ -1467,13 +1467,12 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
     /// ```
     fn make_missing_super_suggestion(
         &mut self,
-        span: Span,
         mut path: Vec<Segment>,
         parent_scope: &ParentScope<'b>,
     ) -> Option<(Vec<Segment>, Vec<String>)> {
         // Replace first ident with `crate` and check if that is valid.
         path[0].ident.name = kw::Super;
-        let result = self.r.resolve_path(&path, None, parent_scope, false, span, CrateLint::No);
+        let result = self.r.resolve_path(&path, None, parent_scope, Finalize::No);
         debug!("make_missing_super_suggestion:  path={:?} result={:?}", path, result);
         if let PathResult::Module(..) = result { Some((path, Vec::new())) } else { None }
     }
@@ -1490,7 +1489,6 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
     /// name as the first part of path.
     fn make_external_crate_suggestion(
         &mut self,
-        span: Span,
         mut path: Vec<Segment>,
         parent_scope: &ParentScope<'b>,
     ) -> Option<(Vec<Segment>, Vec<String>)> {
@@ -1508,7 +1506,7 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
         for name in extern_crate_names.into_iter() {
             // Replace first ident with a crate name and check if that is valid.
             path[0].ident.name = name;
-            let result = self.r.resolve_path(&path, None, parent_scope, false, span, CrateLint::No);
+            let result = self.r.resolve_path(&path, None, parent_scope, Finalize::No);
             debug!(
                 "make_external_crate_suggestion: name={:?} path={:?} result={:?}",
                 name, path, result
@@ -1605,7 +1603,7 @@ impl<'a, 'b> ImportResolver<'a, 'b> {
                 // Remove the `removal_span`.
                 corrections.push((removal_span, "".to_string()));
 
-                // Find the span after the crate name and if it has nested imports immediatately
+                // Find the span after the crate name and if it has nested imports immediately
                 // after the crate name already.
                 //   ie. `use a::b::{c, d};`
                 //               ^^^^^^^^^
@@ -1817,7 +1815,7 @@ fn find_span_immediately_after_crate_name(
 crate fn show_candidates(
     definitions: &rustc_hir::definitions::Definitions,
     session: &Session,
-    err: &mut DiagnosticBuilder<'_>,
+    err: &mut Diagnostic,
     // This is `None` if all placement locations are inside expansions
     use_placement_span: Option<Span>,
     candidates: &[ImportSuggestion],

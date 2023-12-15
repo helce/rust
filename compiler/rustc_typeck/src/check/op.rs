@@ -3,7 +3,7 @@
 use super::method::MethodCallee;
 use super::{has_expected_num_generic_args, FnCtxt};
 use rustc_ast as ast;
-use rustc_errors::{self, struct_span_err, Applicability, DiagnosticBuilder};
+use rustc_errors::{self, struct_span_err, Applicability, Diagnostic};
 use rustc_hir as hir;
 use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_middle::ty::adjustment::{
@@ -36,7 +36,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let ty =
             if !lhs_ty.is_ty_var() && !rhs_ty.is_ty_var() && is_builtin_binop(lhs_ty, rhs_ty, op) {
-                self.enforce_builtin_binop_types(&lhs.span, lhs_ty, &rhs.span, rhs_ty, op);
+                self.enforce_builtin_binop_types(lhs.span, lhs_ty, rhs.span, rhs_ty, op);
                 self.tcx.mk_unit()
             } else {
                 return_ty
@@ -98,9 +98,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     && is_builtin_binop(lhs_ty, rhs_ty, op)
                 {
                     let builtin_return_ty = self.enforce_builtin_binop_types(
-                        &lhs_expr.span,
+                        lhs_expr.span,
                         lhs_ty,
-                        &rhs_expr.span,
+                        rhs_expr.span,
                         rhs_ty,
                         op,
                     );
@@ -114,9 +114,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     fn enforce_builtin_binop_types(
         &self,
-        lhs_span: &Span,
+        lhs_span: Span,
         lhs_ty: Ty<'tcx>,
-        rhs_span: &Span,
+        rhs_span: Span,
         rhs_ty: Ty<'tcx>,
         op: hir::BinOp,
     ) -> Ty<'tcx> {
@@ -129,8 +129,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let tcx = self.tcx;
         match BinOpCategory::from(op) {
             BinOpCategory::Shortcircuit => {
-                self.demand_suptype(*lhs_span, tcx.types.bool, lhs_ty);
-                self.demand_suptype(*rhs_span, tcx.types.bool, rhs_ty);
+                self.demand_suptype(lhs_span, tcx.types.bool, lhs_ty);
+                self.demand_suptype(rhs_span, tcx.types.bool, rhs_ty);
                 tcx.types.bool
             }
 
@@ -141,13 +141,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
             BinOpCategory::Math | BinOpCategory::Bitwise => {
                 // both LHS and RHS and result will have the same type
-                self.demand_suptype(*rhs_span, lhs_ty, rhs_ty);
+                self.demand_suptype(rhs_span, lhs_ty, rhs_ty);
                 lhs_ty
             }
 
             BinOpCategory::Comparison => {
                 // both LHS and RHS and result will have the same type
-                self.demand_suptype(*rhs_span, lhs_ty, rhs_ty);
+                self.demand_suptype(rhs_span, lhs_ty, rhs_ty);
                 tcx.types.bool
             }
         }
@@ -201,7 +201,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             span: rhs_expr.span,
         });
 
-        let result = self.lookup_op_method(lhs_ty, &[rhs_ty_var], Op::Binary(op, is_assign));
+        let result = self.lookup_op_method(
+            lhs_ty,
+            Some(rhs_ty_var),
+            Some(rhs_expr),
+            Op::Binary(op, is_assign),
+        );
 
         // see `NB` above
         let rhs_ty = self.check_expr_coercable_to_type(rhs_expr, rhs_ty_var, Some(lhs_expr));
@@ -294,52 +299,52 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     IsAssign::No => {
                         let (message, missing_trait, use_output) = match op.node {
                             hir::BinOpKind::Add => (
-                                format!("cannot add `{}` to `{}`", rhs_ty, lhs_ty),
+                                format!("cannot add `{rhs_ty}` to `{lhs_ty}`"),
                                 Some("std::ops::Add"),
                                 true,
                             ),
                             hir::BinOpKind::Sub => (
-                                format!("cannot subtract `{}` from `{}`", rhs_ty, lhs_ty),
+                                format!("cannot subtract `{rhs_ty}` from `{lhs_ty}`"),
                                 Some("std::ops::Sub"),
                                 true,
                             ),
                             hir::BinOpKind::Mul => (
-                                format!("cannot multiply `{}` by `{}`", lhs_ty, rhs_ty),
+                                format!("cannot multiply `{lhs_ty}` by `{rhs_ty}`"),
                                 Some("std::ops::Mul"),
                                 true,
                             ),
                             hir::BinOpKind::Div => (
-                                format!("cannot divide `{}` by `{}`", lhs_ty, rhs_ty),
+                                format!("cannot divide `{lhs_ty}` by `{rhs_ty}`"),
                                 Some("std::ops::Div"),
                                 true,
                             ),
                             hir::BinOpKind::Rem => (
-                                format!("cannot mod `{}` by `{}`", lhs_ty, rhs_ty),
+                                format!("cannot mod `{lhs_ty}` by `{rhs_ty}`"),
                                 Some("std::ops::Rem"),
                                 true,
                             ),
                             hir::BinOpKind::BitAnd => (
-                                format!("no implementation for `{} & {}`", lhs_ty, rhs_ty),
+                                format!("no implementation for `{lhs_ty} & {rhs_ty}`"),
                                 Some("std::ops::BitAnd"),
                                 true,
                             ),
                             hir::BinOpKind::BitXor => (
-                                format!("no implementation for `{} ^ {}`", lhs_ty, rhs_ty),
+                                format!("no implementation for `{lhs_ty} ^ {rhs_ty}`"),
                                 Some("std::ops::BitXor"),
                                 true,
                             ),
                             hir::BinOpKind::BitOr => (
-                                format!("no implementation for `{} | {}`", lhs_ty, rhs_ty),
+                                format!("no implementation for `{lhs_ty} | {rhs_ty}`"),
                                 Some("std::ops::BitOr"),
                                 true,
                             ),
                             hir::BinOpKind::Shl => (
-                                format!("no implementation for `{} << {}`", lhs_ty, rhs_ty),
+                                format!("no implementation for `{lhs_ty} << {rhs_ty}`"),
                                 Some("std::ops::Shl"),
                                 true,
                             ),
                             hir::BinOpKind::Shr => (
-                                format!("no implementation for `{} >> {}`", lhs_ty, rhs_ty),
+                                format!("no implementation for `{lhs_ty} >> {rhs_ty}`"),
                                 Some("std::ops::Shr"),
                                 true,
                             ),
@@ -382,6 +387,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 lhs_expr.span,
                                 lhs_ty,
                                 rhs_ty,
+                                rhs_expr,
                                 op,
                                 is_assign,
                             );
@@ -390,6 +396,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 rhs_expr.span,
                                 rhs_ty,
                                 lhs_ty,
+                                lhs_expr,
                                 op,
                                 is_assign,
                             );
@@ -400,7 +407,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 };
                 if let Ref(_, rty, _) = lhs_ty.kind() {
                     if self.infcx.type_is_copy_modulo_regions(self.param_env, *rty, lhs_expr.span)
-                        && self.lookup_op_method(*rty, &[rhs_ty], Op::Binary(op, is_assign)).is_ok()
+                        && self
+                            .lookup_op_method(
+                                *rty,
+                                Some(rhs_ty),
+                                Some(rhs_expr),
+                                Op::Binary(op, is_assign),
+                            )
+                            .is_ok()
                     {
                         if let Ok(lstring) = source_map.span_to_snippet(lhs_expr.span) {
                             let msg = &format!(
@@ -443,7 +457,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             let needs_bound = self
                                 .lookup_op_method(
                                     eraser.fold_ty(lhs_ty),
-                                    &[eraser.fold_ty(rhs_ty)],
+                                    Some(eraser.fold_ty(rhs_ty)),
+                                    Some(rhs_expr),
                                     Op::Binary(op, is_assign),
                                 )
                                 .is_ok();
@@ -462,8 +477,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 // When we know that a missing bound is responsible, we don't show
                                 // this note as it is redundant.
                                 err.note(&format!(
-                                    "the trait `{}` is not implemented for `{}`",
-                                    missing_trait, lhs_ty
+                                    "the trait `{missing_trait}` is not implemented for `{lhs_ty}`"
                                 ));
                             }
                         } else {
@@ -483,10 +497,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// suggest calling the function. Returns `true` if suggestion would apply (even if not given).
     fn add_type_neq_err_label(
         &self,
-        err: &mut rustc_errors::DiagnosticBuilder<'_>,
+        err: &mut Diagnostic,
         span: Span,
         ty: Ty<'tcx>,
         other_ty: Ty<'tcx>,
+        other_expr: &'tcx hir::Expr<'tcx>,
         op: hir::BinOp,
         is_assign: IsAssign,
     ) -> bool /* did we suggest to call a function because of missing parentheses? */ {
@@ -513,7 +528,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             };
 
             if self
-                .lookup_op_method(fn_sig.output(), &[other_ty], Op::Binary(op, is_assign))
+                .lookup_op_method(
+                    fn_sig.output(),
+                    Some(other_ty),
+                    Some(other_expr),
+                    Op::Binary(op, is_assign),
+                )
                 .is_ok()
             {
                 let (variable_snippet, applicability) = if !fn_sig.inputs().is_empty() {
@@ -545,7 +565,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         rhs_expr: &'tcx hir::Expr<'tcx>,
         lhs_ty: Ty<'tcx>,
         rhs_ty: Ty<'tcx>,
-        err: &mut rustc_errors::DiagnosticBuilder<'_>,
+        err: &mut Diagnostic,
         is_assign: IsAssign,
         op: hir::BinOp,
     ) -> bool {
@@ -555,7 +575,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let string_type = self.tcx.get_diagnostic_item(sym::String);
         let is_std_string = |ty: Ty<'tcx>| match ty.ty_adt_def() {
-            Some(ty_def) => Some(ty_def.did) == string_type,
+            Some(ty_def) => Some(ty_def.did()) == string_type,
             None => false,
         };
 
@@ -631,7 +651,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         op: hir::UnOp,
     ) -> Ty<'tcx> {
         assert!(op.is_by_value());
-        match self.lookup_op_method(operand_ty, &[], Op::Unary(op, ex.span)) {
+        match self.lookup_op_method(operand_ty, None, None, Op::Unary(op, ex.span)) {
             Ok(method) => {
                 self.write_method_call(ex.hir_id, method);
                 method.sig.output()
@@ -651,6 +671,25 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         ex.span,
                         format!("cannot apply unary operator `{}`", op.as_str()),
                     );
+                    let missing_trait = match op {
+                        hir::UnOp::Deref => unreachable!("check unary op `-` or `!` only"),
+                        hir::UnOp::Not => "std::ops::Not",
+                        hir::UnOp::Neg => "std::ops::Neg",
+                    };
+                    let mut visitor = TypeParamVisitor(vec![]);
+                    visitor.visit_ty(operand_ty);
+                    if let [ty] = &visitor.0[..] && let ty::Param(p) = *operand_ty.kind() {
+                        suggest_constraining_param(
+                            self.tcx,
+                            self.body_id,
+                            &mut err,
+                            *ty,
+                            operand_ty,
+                            missing_trait,
+                            p,
+                            true,
+                        );
+                    }
 
                     let sp = self.tcx.sess.source_map().start_point(ex.span);
                     if let Some(sp) =
@@ -680,10 +719,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                     err.span_suggestion(
                                         ex.span,
                                         &format!(
-                                            "you may have meant the maximum value of `{}`",
-                                            actual
+                                            "you may have meant the maximum value of `{actual}`",
                                         ),
-                                        format!("{}::MAX", actual),
+                                        format!("{actual}::MAX"),
                                         Applicability::MaybeIncorrect,
                                     );
                                 }
@@ -705,7 +743,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     fn lookup_op_method(
         &self,
         lhs_ty: Ty<'tcx>,
-        other_tys: &[Ty<'tcx>],
+        other_ty: Option<Ty<'tcx>>,
+        other_ty_expr: Option<&'tcx hir::Expr<'tcx>>,
         op: Op,
     ) -> Result<MethodCallee<'tcx>, Vec<FulfillmentError<'tcx>>> {
         let lang = self.tcx.lang_items();
@@ -791,7 +830,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let opname = Ident::with_dummy_span(opname);
         let method = trait_did.and_then(|trait_did| {
-            self.lookup_method_in_trait(span, opname, trait_did, lhs_ty, Some(other_tys))
+            self.lookup_op_method_in_trait(span, opname, trait_did, lhs_ty, other_ty, other_ty_expr)
         });
 
         match (method, trait_did) {
@@ -803,7 +842,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             (None, None) => Err(vec![]),
             (None, Some(trait_did)) => {
                 let (obligation, _) =
-                    self.obligation_for_method(span, trait_did, lhs_ty, Some(other_tys));
+                    self.obligation_for_op_method(span, trait_did, lhs_ty, other_ty, other_ty_expr);
                 let mut fulfill = <dyn TraitEngine<'_>>::new(self.tcx);
                 fulfill.register_predicate_obligation(self, obligation);
                 Err(fulfill.select_where_possible(&self.infcx))
@@ -813,7 +852,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 }
 
 // Binary operator categories. These categories summarize the behavior
-// with respect to the builtin operationrs supported.
+// with respect to the builtin operations supported.
 enum BinOpCategory {
     /// &&, || -- cannot be overridden
     Shortcircuit,
@@ -937,7 +976,7 @@ fn is_builtin_binop<'tcx>(lhs: Ty<'tcx>, rhs: Ty<'tcx>, op: hir::BinOp) -> bool 
 fn suggest_constraining_param(
     tcx: TyCtxt<'_>,
     body_id: hir::HirId,
-    mut err: &mut DiagnosticBuilder<'_>,
+    mut err: &mut Diagnostic,
     lhs_ty: Ty<'_>,
     rhs_ty: Ty<'_>,
     missing_trait: &str,
@@ -945,7 +984,7 @@ fn suggest_constraining_param(
     set_output: bool,
 ) {
     let hir = tcx.hir();
-    let msg = &format!("`{}` might need a bound for `{}`", lhs_ty, missing_trait);
+    let msg = &format!("`{lhs_ty}` might need a bound for `{missing_trait}`");
     // Try to find the def-id and details for the parameter p. We have only the index,
     // so we have to find the enclosing function's def-id, then look through its declared
     // generic parameters to get the declaration.
@@ -959,13 +998,13 @@ fn suggest_constraining_param(
         .as_ref()
         .and_then(|node| node.generics())
     {
-        let output = if set_output { format!("<Output = {}>", rhs_ty) } else { String::new() };
+        let output = if set_output { format!("<Output = {rhs_ty}>") } else { String::new() };
         suggest_constraining_type_param(
             tcx,
             generics,
             &mut err,
-            &format!("{}", lhs_ty),
-            &format!("{}{}", missing_trait, output),
+            &lhs_ty.to_string(),
+            &format!("{missing_trait}{output}"),
             None,
         );
     } else {

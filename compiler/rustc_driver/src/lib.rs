@@ -6,9 +6,10 @@
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![feature(nll)]
+#![feature(let_else)]
 #![feature(once_cell)]
 #![recursion_limit = "256"]
-#![cfg_attr(not(bootstrap), allow(rustc::potential_query_instability))]
+#![allow(rustc::potential_query_instability)]
 
 #[macro_use]
 extern crate tracing;
@@ -20,7 +21,7 @@ use rustc_codegen_ssa::{traits::CodegenBackend, CodegenResults};
 use rustc_data_structures::profiling::{get_resident_set_size, print_time_passes_entry};
 use rustc_data_structures::sync::SeqCst;
 use rustc_errors::registry::{InvalidErrorCode, Registry};
-use rustc_errors::{ErrorReported, PResult};
+use rustc_errors::{ErrorGuaranteed, PResult};
 use rustc_feature::find_gated_cfg;
 use rustc_interface::util::{self, collect_crate_types, get_codegen_backend};
 use rustc_interface::{interface, Queries};
@@ -72,7 +73,7 @@ const ICE_REPORT_COMPILER_FLAGS_EXCLUDE: &[&str] = &["metadata", "extra-filename
 
 const ICE_REPORT_COMPILER_FLAGS_STRIP_VALUE: &[&str] = &["incremental"];
 
-pub fn abort_on_err<T>(result: Result<T, ErrorReported>, sess: &Session) -> T {
+pub fn abort_on_err<T>(result: Result<T, ErrorGuaranteed>, sess: &Session) -> T {
     match result {
         Err(..) => {
             sess.abort_if_errors();
@@ -203,10 +204,7 @@ fn run_compiler(
     let args = args::arg_expand_all(at_args);
 
     let diagnostic_output = emitter.map_or(DiagnosticOutput::Default, DiagnosticOutput::Raw);
-    let matches = match handle_options(&args) {
-        Some(matches) => matches,
-        None => return Ok(()),
-    };
+    let Some(matches) = handle_options(&args) else { return Ok(()) };
 
     let sopts = config::build_session_options(&matches);
 
@@ -237,7 +235,7 @@ fn run_compiler(
     };
 
     match make_input(config.opts.error_format, &matches.free) {
-        Err(ErrorReported) => return Err(ErrorReported),
+        Err(reported) => return Err(reported),
         Ok(Some((input, input_file_path))) => {
             config.input = input;
             config.input_path = input_file_path;
@@ -459,7 +457,7 @@ fn make_output(matches: &getopts::Matches) -> (Option<PathBuf>, Option<PathBuf>)
 fn make_input(
     error_format: ErrorOutputType,
     free_matches: &[String],
-) -> Result<Option<(Input, Option<PathBuf>)>, ErrorReported> {
+) -> Result<Option<(Input, Option<PathBuf>)>, ErrorGuaranteed> {
     if free_matches.len() == 1 {
         let ifile = &free_matches[0];
         if ifile == "-" {
@@ -467,11 +465,11 @@ fn make_input(
             if io::stdin().read_to_string(&mut src).is_err() {
                 // Immediately stop compilation if there was an issue reading
                 // the input (for example if the input stream is not UTF-8).
-                early_error_no_abort(
+                let reported = early_error_no_abort(
                     error_format,
                     "couldn't read from stdin, as it did not contain valid UTF-8",
                 );
-                return Err(ErrorReported);
+                return Err(reported);
             }
             if let Ok(path) = env::var("UNSTABLE_RUSTDOC_TEST_PATH") {
                 let line = env::var("UNSTABLE_RUSTDOC_TEST_LINE").expect(
@@ -590,8 +588,12 @@ pub fn try_process_rlink(sess: &Session, compiler: &interface::Compiler) -> Comp
             let rlink_data = fs::read(file).unwrap_or_else(|err| {
                 sess.fatal(&format!("failed to read rlink file: {}", err));
             });
-            let mut decoder = rustc_serialize::opaque::Decoder::new(&rlink_data, 0);
-            let codegen_results: CodegenResults = rustc_serialize::Decodable::decode(&mut decoder);
+            let codegen_results = match CodegenResults::deserialize_rlink(rlink_data) {
+                Ok(codegen) => codegen,
+                Err(error) => {
+                    sess.fatal(&format!("Could not deserialize .rlink file: {error}"));
+                }
+            };
             let result = compiler.codegen_backend().link(sess, codegen_results, &outputs);
             abort_on_err(result, sess);
         } else {
@@ -1127,10 +1129,10 @@ fn extra_compiler_flags() -> Option<(Vec<String>, bool)> {
 /// The compiler currently unwinds with a special sentinel value to abort
 /// compilation on fatal errors. This function catches that sentinel and turns
 /// the panic into a `Result` instead.
-pub fn catch_fatal_errors<F: FnOnce() -> R, R>(f: F) -> Result<R, ErrorReported> {
+pub fn catch_fatal_errors<F: FnOnce() -> R, R>(f: F) -> Result<R, ErrorGuaranteed> {
     catch_unwind(panic::AssertUnwindSafe(f)).map_err(|value| {
         if value.is::<rustc_errors::FatalErrorMarker>() {
-            ErrorReported
+            ErrorGuaranteed::unchecked_claim_error_was_emitted()
         } else {
             panic::resume_unwind(value);
         }
@@ -1183,8 +1185,8 @@ pub fn report_ice(info: &panic::PanicInfo<'_>, bug_report_url: &str) {
     // a .span_bug or .bug call has already printed what
     // it wants to print.
     if !info.payload().is::<rustc_errors::ExplicitBug>() {
-        let d = rustc_errors::Diagnostic::new(rustc_errors::Level::Bug, "unexpected panic");
-        handler.emit_diagnostic(&d);
+        let mut d = rustc_errors::Diagnostic::new(rustc_errors::Level::Bug, "unexpected panic");
+        handler.emit_diagnostic(&mut d);
     }
 
     let mut xs: Vec<Cow<'static, str>> = vec![
@@ -1230,7 +1232,7 @@ pub fn report_ice(info: &panic::PanicInfo<'_>, bug_report_url: &str) {
 ///
 /// A custom rustc driver can skip calling this to set up a custom ICE hook.
 pub fn install_ice_hook() {
-    // If the user has not explicitly overriden "RUST_BACKTRACE", then produce
+    // If the user has not explicitly overridden "RUST_BACKTRACE", then produce
     // full backtraces. When a compiler ICE happens, we want to gather
     // as much information as possible to present in the issue opened
     // by the user. Compiler developers and other rustc users can

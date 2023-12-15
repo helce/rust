@@ -55,7 +55,7 @@ pub struct CodegenCx<'ll, 'tcx> {
     pub vtables:
         RefCell<FxHashMap<(Ty<'tcx>, Option<ty::PolyExistentialTraitRef<'tcx>>), &'ll Value>>,
     /// Cache of constant strings,
-    pub const_cstr_cache: RefCell<FxHashMap<Symbol, &'ll Value>>,
+    pub const_str_cache: RefCell<FxHashMap<Symbol, &'ll Value>>,
 
     /// Reverse-direction for const ptrs cast from globals.
     ///
@@ -95,7 +95,7 @@ pub struct CodegenCx<'ll, 'tcx> {
     pub isize_ty: &'ll Type,
 
     pub coverage_cx: Option<coverageinfo::CrateCoverageContext<'ll, 'tcx>>,
-    pub dbg_cx: Option<debuginfo::CrateDebugContext<'ll, 'tcx>>,
+    pub dbg_cx: Option<debuginfo::CodegenUnitDebugContext<'ll, 'tcx>>,
 
     eh_personality: Cell<Option<&'ll Value>>,
     eh_catch_typeinfo: Cell<Option<&'ll Value>>,
@@ -134,7 +134,7 @@ pub unsafe fn create_module<'ll>(
     let mod_name = SmallCStr::new(mod_name);
     let llmod = llvm::LLVMModuleCreateWithNameInContext(mod_name.as_ptr(), llcx);
 
-    let mut target_data_layout = sess.target.data_layout.clone();
+    let mut target_data_layout = sess.target.data_layout.to_string();
     let llvm_version = llvm_util::get_version();
     if llvm_version < (13, 0, 0) {
         if sess.target.arch == "powerpc64" {
@@ -360,7 +360,7 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
         //   feasible. The compiler may be able to get around this, but it may
         //   involve some invasive changes to deal with this.
         //
-        // The flipside of this situation is that whenever you link to a dll and
+        // The flip side of this situation is that whenever you link to a dll and
         // you import a function from it, the import should be tagged with
         // `dllimport`. At this time, however, the compiler does not emit
         // `dllimport` for any declarations other than constants (where it is
@@ -396,8 +396,12 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
         };
 
         let dbg_cx = if tcx.sess.opts.debuginfo != DebugInfo::None {
-            let dctx = debuginfo::CrateDebugContext::new(llmod);
-            debuginfo::metadata::compile_unit_metadata(tcx, codegen_unit.name().as_str(), &dctx);
+            let dctx = debuginfo::CodegenUnitDebugContext::new(llmod);
+            debuginfo::metadata::build_compile_unit_di_node(
+                tcx,
+                codegen_unit.name().as_str(),
+                &dctx,
+            );
             Some(dctx)
         } else {
             None
@@ -415,7 +419,7 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
             codegen_unit,
             instances: Default::default(),
             vtables: Default::default(),
-            const_cstr_cache: Default::default(),
+            const_str_cache: Default::default(),
             const_unsized: Default::default(),
             const_globals: Default::default(),
             statics_to_rauw: RefCell::new(Vec::new()),
@@ -520,7 +524,8 @@ impl<'ll, 'tcx> MiscMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                 } else {
                     let fty = self.type_variadic_func(&[], self.type_i32());
                     let llfn = self.declare_cfn(name, llvm::UnnamedAddr::Global, fty);
-                    attributes::apply_target_cpu_attr(self, llfn);
+                    let target_cpu = attributes::target_cpu_attr(self);
+                    attributes::apply_to_llfn(llfn, llvm::AttributePlace::Function, &[target_cpu]);
                     llfn
                 }
             }
@@ -550,12 +555,16 @@ impl<'ll, 'tcx> MiscMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     }
 
     fn set_frame_pointer_type(&self, llfn: &'ll Value) {
-        attributes::set_frame_pointer_type(self, llfn)
+        if let Some(attr) = attributes::frame_pointer_type_attr(self) {
+            attributes::apply_to_llfn(llfn, llvm::AttributePlace::Function, &[attr]);
+        }
     }
 
     fn apply_target_cpu_attr(&self, llfn: &'ll Value) {
-        attributes::apply_target_cpu_attr(self, llfn);
-        attributes::apply_tune_cpu_attr(self, llfn);
+        let mut attrs = SmallVec::<[_; 2]>::new();
+        attrs.push(attributes::target_cpu_attr(self));
+        attrs.extend(attributes::tune_cpu_attr(self));
+        attributes::apply_to_llfn(llfn, llvm::AttributePlace::Function, &attrs);
     }
 
     fn create_used_variable(&self) {
@@ -850,7 +859,10 @@ impl<'ll> CodegenCx<'ll, '_> {
 
         // This isn't an "LLVM intrinsic", but LLVM's optimization passes
         // recognize it like one and we assume it exists in `core::slice::cmp`
-        ifn!("memcmp", fn(i8p, i8p, t_isize) -> t_i32);
+        match self.sess().target.arch.as_ref() {
+            "avr" | "msp430" => ifn!("memcmp", fn(i8p, i8p, t_isize) -> t_i16),
+            _ => ifn!("memcmp", fn(i8p, i8p, t_isize) -> t_i32),
+        }
 
         // variadic intrinsics
         ifn!("llvm.va_start", fn(i8p) -> void);

@@ -42,7 +42,7 @@ pub struct PromoteTemps<'tcx> {
 
 impl<'tcx> MirPass<'tcx> for PromoteTemps<'tcx> {
     fn phase_change(&self) -> Option<MirPhase> {
-        Some(MirPhase::ConstPromotion)
+        Some(MirPhase::ConstsPromoted)
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
@@ -747,15 +747,12 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
         if loc.statement_index < num_stmts {
             let (mut rvalue, source_info) = {
                 let statement = &mut self.source[loc.block].statements[loc.statement_index];
-                let rhs = match statement.kind {
-                    StatementKind::Assign(box (_, ref mut rhs)) => rhs,
-                    _ => {
-                        span_bug!(
-                            statement.source_info.span,
-                            "{:?} is not an assignment",
-                            statement
-                        );
-                    }
+                let StatementKind::Assign(box (_, ref mut rhs)) = statement.kind else {
+                    span_bug!(
+                        statement.source_info.span,
+                        "{:?} is not an assignment",
+                        statement
+                    );
                 };
 
                 (

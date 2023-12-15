@@ -84,6 +84,7 @@
     target_has_atomic_load_store = "ptr",
 ))]
 #![no_core]
+#![cfg_attr(not(bootstrap), rustc_coherence_is_core)]
 //
 // Lints:
 #![deny(rust_2021_incompatible_or_patterns)]
@@ -93,10 +94,9 @@
 #![warn(missing_docs)]
 #![allow(explicit_outlives_requirements)]
 //
-// Library features for const fns:
+// Library features:
 #![feature(const_align_offset)]
 #![feature(const_align_of_val)]
-#![feature(const_alloc_layout)]
 #![feature(const_arguments_as_str)]
 #![feature(const_array_into_iter_constructors)]
 #![feature(const_bigint_helper_methods)]
@@ -104,6 +104,7 @@
 #![feature(const_caller_location)]
 #![feature(const_cell_into_inner)]
 #![feature(const_char_convert)]
+#![feature(const_clone)]
 #![feature(const_discriminant)]
 #![feature(const_eval_select)]
 #![feature(const_float_bits_conv)]
@@ -125,7 +126,6 @@
 #![feature(const_pin)]
 #![feature(const_replace)]
 #![feature(const_ptr_is_null)]
-#![feature(const_ptr_offset)]
 #![feature(const_ptr_offset_from)]
 #![feature(const_ptr_read)]
 #![feature(const_ptr_write)]
@@ -145,9 +145,13 @@
 #![feature(ptr_metadata)]
 #![feature(slice_ptr_get)]
 #![feature(str_internals)]
+#![feature(utf16_extra)]
+#![feature(utf16_extra_const)]
 #![feature(variant_count)]
 #![feature(const_array_from_ref)]
 #![feature(const_slice_from_ref)]
+#![feature(const_slice_index)]
+#![feature(const_is_char_boundary)]
 //
 // Language features:
 #![feature(abi_unadjusted)]
@@ -156,16 +160,17 @@
 #![feature(associated_type_bounds)]
 #![feature(auto_traits)]
 #![feature(cfg_target_has_atomic)]
-#![cfg_attr(not(bootstrap), feature(cfg_target_has_atomic_equal_alignment))]
+#![feature(cfg_target_has_atomic_equal_alignment)]
 #![feature(const_fn_floating_point_arithmetic)]
-#![feature(const_fn_fn_ptr_basics)]
-#![feature(const_fn_trait_bound)]
-#![feature(const_impl_trait)]
+#![cfg_attr(bootstrap, feature(const_fn_fn_ptr_basics))]
+#![cfg_attr(bootstrap, feature(const_fn_trait_bound))]
+#![cfg_attr(bootstrap, feature(const_impl_trait))]
 #![feature(const_mut_refs)]
 #![feature(const_precise_live_drops)]
 #![feature(const_refs_to_cell)]
 #![feature(decl_macro)]
 #![feature(derive_default_enum)]
+#![cfg_attr(not(bootstrap), feature(deprecated_suggestion))]
 #![feature(doc_cfg)]
 #![feature(doc_notable_trait)]
 #![feature(rustdoc_internals)]
@@ -202,8 +207,7 @@
 #![feature(asm_const)]
 //
 // Target features:
-#![feature(aarch64_target_feature)]
-#![feature(adx_target_feature)]
+#![cfg_attr(bootstrap, feature(aarch64_target_feature))]
 #![feature(arm_target_feature)]
 #![feature(avx512_target_feature)]
 #![feature(cmpxchg16b_target_feature)]
@@ -215,6 +219,7 @@
 #![feature(sse4a_target_feature)]
 #![feature(tbm_target_feature)]
 #![feature(wasm_target_feature)]
+#![cfg_attr(bootstrap, feature(adx_target_feature))]
 
 // allow using `core::` in intra-doc links
 #[allow(unused_extern_crates)]
@@ -408,12 +413,10 @@ pub mod arch {
 #[allow(missing_debug_implementations, dead_code, unsafe_op_in_unsafe_fn, unused_unsafe)]
 #[allow(rustdoc::bare_urls)]
 #[unstable(feature = "portable_simd", issue = "86656")]
-#[cfg(not(all(miri, doctest)))] // Miri does not support all SIMD intrinsics
 mod core_simd;
 
 #[doc = include_str!("../../portable-simd/crates/core_simd/src/core_simd_docs.md")]
 #[unstable(feature = "portable_simd", issue = "86656")]
-#[cfg(not(all(miri, doctest)))] // Miri does not support all SIMD intrinsics
 pub mod simd {
     #[unstable(feature = "portable_simd", issue = "86656")]
     pub use crate::core_simd::simd::*;

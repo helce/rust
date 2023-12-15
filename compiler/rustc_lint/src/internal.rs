@@ -23,10 +23,7 @@ declare_lint_pass!(DefaultHashTypes => [DEFAULT_HASH_TYPES]);
 
 impl LateLintPass<'_> for DefaultHashTypes {
     fn check_path(&mut self, cx: &LateContext<'_>, path: &Path<'_>, hir_id: HirId) {
-        let def_id = match path.res {
-            Res::Def(rustc_hir::def::DefKind::Struct, id) => id,
-            _ => return,
-        };
+        let Res::Def(rustc_hir::def::DefKind::Struct, def_id) = path.res else { return };
         if matches!(cx.tcx.hir().get(hir_id), Node::Item(Item { kind: ItemKind::Use(..), .. })) {
             // don't lint imports, only actual usages
             return;
@@ -205,7 +202,7 @@ fn is_ty_or_ty_ctxt(cx: &LateContext<'_>, ty: &Ty<'_>) -> Option<String> {
             Res::SelfTy { trait_: None, alias_to: Some((did, _)) } => {
                 if let ty::Adt(adt, substs) = cx.tcx.type_of(did).kind() {
                     if let Some(name @ (sym::Ty | sym::TyCtxt)) =
-                        cx.tcx.get_diagnostic_name(adt.did)
+                        cx.tcx.get_diagnostic_name(adt.did())
                     {
                         // NOTE: This path is currently unreachable as `Ty<'tcx>` is
                         // defined as a type alias meaning that `impl<'tcx> Ty<'tcx>`

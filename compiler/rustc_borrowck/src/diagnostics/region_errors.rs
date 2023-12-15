@@ -1,6 +1,6 @@
 //! Error reporting machinery for lifetime errors.
 
-use rustc_errors::{Applicability, DiagnosticBuilder};
+use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder, ErrorGuaranteed};
 use rustc_infer::infer::{
     error_reporting::nice_region_error::NiceRegionError,
     error_reporting::unexpected_hidden_region_diagnostic, NllRegionVariableOrigin,
@@ -140,14 +140,11 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
 
     /// Returns `true` if a closure is inferred to be an `FnMut` closure.
     fn is_closure_fn_mut(&self, fr: RegionVid) -> bool {
-        if let Some(ty::ReFree(free_region)) = self.to_error_region(fr).as_deref() {
-            if let ty::BoundRegionKind::BrEnv = free_region.bound_region {
-                if let DefiningTy::Closure(_, substs) =
-                    self.regioncx.universal_regions().defining_ty
-                {
-                    return substs.as_closure().kind() == ty::ClosureKind::FnMut;
-                }
-            }
+        if let Some(ty::ReFree(free_region)) = self.to_error_region(fr).as_deref()
+            && let ty::BoundRegionKind::BrEnv = free_region.bound_region
+            && let DefiningTy::Closure(_, substs) = self.regioncx.universal_regions().defining_ty
+        {
+            return substs.as_closure().kind() == ty::ClosureKind::FnMut;
         }
 
         false
@@ -179,7 +176,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                         // FIXME. We should handle this case better. It
                         // indicates that we have e.g., some region variable
                         // whose value is like `'a+'b` where `'a` and `'b` are
-                        // distinct unrelated univesal regions that are not
+                        // distinct unrelated universal regions that are not
                         // known to outlive one another. It'd be nice to have
                         // some examples where this arises to decide how best
                         // to report it; we could probably handle it by
@@ -348,8 +345,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     ty::Adt(adt, substs) => {
                         let generic_arg = substs[param_index as usize];
                         let identity_substs =
-                            InternalSubsts::identity_for_item(self.infcx.tcx, adt.did);
-                        let base_ty = self.infcx.tcx.mk_adt(adt, identity_substs);
+                            InternalSubsts::identity_for_item(self.infcx.tcx, adt.did());
+                        let base_ty = self.infcx.tcx.mk_adt(*adt, identity_substs);
                         let base_generic_arg = identity_substs[param_index as usize];
                         let adt_desc = adt.descr();
 
@@ -392,7 +389,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         &self,
         errci: &ErrorConstraintInfo,
         kind: ReturnConstraint,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
         let ErrorConstraintInfo { outlived_fr, span, .. } = errci;
 
         let mut diag = self
@@ -413,7 +410,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 "returns a closure that contains a reference to a captured variable, which then \
                  escapes the closure body"
             }
-            ty::Adt(def, _) if self.infcx.tcx.is_diagnostic_item(sym::gen_future, def.did) => {
+            ty::Adt(def, _) if self.infcx.tcx.is_diagnostic_item(sym::gen_future, def.did()) => {
                 "returns an `async` block that contains a reference to a captured variable, which then \
                  escapes the closure body"
             }
@@ -469,7 +466,10 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     /// LL |     ref_obj(x)
     ///    |     ^^^^^^^^^^ `x` escapes the function body here
     /// ```
-    fn report_escaping_data_error(&self, errci: &ErrorConstraintInfo) -> DiagnosticBuilder<'tcx> {
+    fn report_escaping_data_error(
+        &self,
+        errci: &ErrorConstraintInfo,
+    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
         let ErrorConstraintInfo { span, category, .. } = errci;
 
         let fr_name_and_span = self.regioncx.get_var_name_and_span_for_region(
@@ -570,7 +570,10 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     ///    |     ^^^^^^^^^^^^^^ function was supposed to return data with lifetime `'a` but it
     ///    |                    is returning data with lifetime `'b`
     /// ```
-    fn report_general_error(&self, errci: &ErrorConstraintInfo) -> DiagnosticBuilder<'tcx> {
+    fn report_general_error(
+        &self,
+        errci: &ErrorConstraintInfo,
+    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
         let ErrorConstraintInfo {
             fr,
             fr_is_local,
@@ -632,7 +635,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
     /// ```
     fn add_static_impl_trait_suggestion(
         &self,
-        diag: &mut DiagnosticBuilder<'tcx>,
+        diag: &mut Diagnostic,
         fr: RegionVid,
         // We need to pass `fr_name` - computing it again will label it twice.
         fr_name: RegionName,

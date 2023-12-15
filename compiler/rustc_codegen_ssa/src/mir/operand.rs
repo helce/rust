@@ -78,17 +78,15 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
 
         let val = match val {
             ConstValue::Scalar(x) => {
-                let scalar = match layout.abi {
-                    Abi::Scalar(x) => x,
-                    _ => bug!("from_const: invalid ByVal layout: {:#?}", layout),
+                let Abi::Scalar(scalar) = layout.abi else {
+                    bug!("from_const: invalid ByVal layout: {:#?}", layout);
                 };
                 let llval = bx.scalar_to_backend(x, scalar, bx.immediate_backend_type(layout));
                 OperandValue::Immediate(llval)
             }
             ConstValue::Slice { data, start, end } => {
-                let a_scalar = match layout.abi {
-                    Abi::ScalarPair(a, _) => a,
-                    _ => bug!("from_const: invalid ScalarPair layout: {:#?}", layout),
+                let Abi::ScalarPair(a_scalar, _) = layout.abi else {
+                    bug!("from_const: invalid ScalarPair layout: {:#?}", layout);
                 };
                 let a = Scalar::from_pointer(
                     Pointer::new(bx.tcx().create_memory_alloc(data), Size::from_bytes(start)),
@@ -128,7 +126,14 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
             .ty;
         let (llptr, llextra) = match self.val {
             OperandValue::Immediate(llptr) => (llptr, None),
-            OperandValue::Pair(llptr, llextra) => (llptr, Some(llextra)),
+            OperandValue::Pair(llptr, llextra) => {
+                // if the box's allocator isn't a ZST, then "llextra" is actually the allocator
+                if self.layout.ty.is_box() && !self.layout.field(cx, 1).is_zst() {
+                    (llptr, None)
+                } else {
+                    (llptr, Some(llextra))
+                }
+            }
             OperandValue::Ref(..) => bug!("Deref of by-Ref operand {:?}", self),
         };
         let layout = cx.layout_of(projected_ty);
@@ -307,9 +312,8 @@ impl<'a, 'tcx, V: CodegenObject> OperandValue<V> {
                 bx.store_with_flags(val, dest.llval, dest.align, flags);
             }
             OperandValue::Pair(a, b) => {
-                let (a_scalar, b_scalar) = match dest.layout.abi {
-                    Abi::ScalarPair(a, b) => (a, b),
-                    _ => bug!("store_with_flags: invalid ScalarPair layout: {:#?}", dest.layout),
+                let Abi::ScalarPair(a_scalar, b_scalar) = dest.layout.abi else {
+                    bug!("store_with_flags: invalid ScalarPair layout: {:#?}", dest.layout);
                 };
                 let ty = bx.backend_type(dest.layout);
                 let b_offset = a_scalar.value.size(bx).align_to(b_scalar.value.align(bx).abi);

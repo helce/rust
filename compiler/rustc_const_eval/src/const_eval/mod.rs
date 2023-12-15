@@ -105,13 +105,13 @@ fn const_to_valtree_inner<'tcx>(
         ty::Array(_, len) => branches(usize::try_from(len.eval_usize(ecx.tcx.tcx, ecx.param_env)).unwrap(), None),
 
         ty::Adt(def, _) => {
-            if def.variants.is_empty() {
+            if def.variants().is_empty() {
                 bug!("uninhabited types should have errored and never gotten converted to valtree")
             }
 
             let variant = ecx.read_discriminant(&place.into()).unwrap().1;
 
-            branches(def.variants[variant].fields.len(), def.is_enum().then_some(variant))
+            branches(def.variant(variant).fields.len(), def.is_enum().then_some(variant))
         }
 
         ty::Never
@@ -147,10 +147,14 @@ pub(crate) fn try_destructure_const<'tcx>(
     // We go to `usize` as we cannot allocate anything bigger anyway.
     let (field_count, variant, down) = match val.ty().kind() {
         ty::Array(_, len) => (usize::try_from(len.eval_usize(tcx, param_env)).unwrap(), None, op),
+        // Checks if we have any variants, to avoid downcasting to a non-existing variant (when
+        // there are no variants `read_discriminant` successfully returns a non-existing variant
+        // index).
+        ty::Adt(def, _) if def.variants().is_empty() => throw_ub!(Unreachable),
         ty::Adt(def, _) => {
             let variant = ecx.read_discriminant(&op)?.1;
             let down = ecx.operand_downcast(&op, variant)?;
-            (def.variants[variant].fields.len(), Some(variant), down)
+            (def.variant(variant).fields.len(), Some(variant), down)
         }
         ty::Tuple(substs) => (substs.len(), None, op),
         _ => bug!("cannot destructure constant {:?}", val),
@@ -179,7 +183,7 @@ pub(crate) fn deref_const<'tcx>(
     let mplace = ecx.deref_operand(&op).unwrap();
     if let Some(alloc_id) = mplace.ptr.provenance {
         assert_eq!(
-            tcx.get_global_alloc(alloc_id).unwrap().unwrap_memory().mutability,
+            tcx.get_global_alloc(alloc_id).unwrap().unwrap_memory().inner().mutability,
             Mutability::Not,
             "deref_const cannot be used with mutable allocations as \
             that could allow pattern matching to observe mutable statics",

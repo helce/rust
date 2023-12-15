@@ -16,7 +16,7 @@ use rustc_hir::{
 };
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::hir::nested_filter;
-use rustc_middle::ty::{self, AssocItems, AssocKind, Ty};
+use rustc_middle::ty::{self, Ty};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::source_map::Span;
 use rustc_span::symbol::Symbol;
@@ -308,7 +308,6 @@ struct PtrArg<'tcx> {
     method_renames: &'static [(&'static str, &'static str)],
     ref_prefix: RefPrefix,
     deref_ty: DerefTy<'tcx>,
-    deref_assoc_items: Option<(DefId, &'tcx AssocItems<'tcx>)>,
 }
 impl PtrArg<'_> {
     fn build_msg(&self) -> String {
@@ -405,13 +404,13 @@ fn check_fn_args<'cx, 'tcx: 'cx>(
                 // Check that the name as typed matches the actual name of the type.
                 // e.g. `fn foo(_: &Foo)` shouldn't trigger the lint when `Foo` is an alias for `Vec`
                 if let [.., name] = path.segments;
-                if cx.tcx.item_name(adt.did) == name.ident.name;
+                if cx.tcx.item_name(adt.did()) == name.ident.name;
 
                 if !is_lint_allowed(cx, PTR_ARG, hir_ty.hir_id);
                 if params.get(i).map_or(true, |p| !is_lint_allowed(cx, PTR_ARG, p.hir_id));
 
                 then {
-                    let (method_renames, deref_ty, deref_impl_id) = match cx.tcx.get_diagnostic_name(adt.did) {
+                    let (method_renames, deref_ty) = match cx.tcx.get_diagnostic_name(adt.did()) {
                         Some(sym::Vec) => (
                             [("clone", ".to_owned()")].as_slice(),
                             DerefTy::Slice(
@@ -424,19 +423,16 @@ fn check_fn_args<'cx, 'tcx: 'cx>(
                                     }),
                                 substs.type_at(0),
                             ),
-                            cx.tcx.lang_items().slice_impl()
                         ),
                         Some(sym::String) => (
                             [("clone", ".to_owned()"), ("as_str", "")].as_slice(),
                             DerefTy::Str,
-                            cx.tcx.lang_items().str_impl()
                         ),
                         Some(sym::PathBuf) => (
                             [("clone", ".to_path_buf()"), ("as_path", "")].as_slice(),
                             DerefTy::Path,
-                            None,
                         ),
-                        Some(sym::Cow) => {
+                        Some(sym::Cow) if mutability == Mutability::Not => {
                             let ty_name = name.args
                                 .and_then(|args| {
                                     args.args.iter().find_map(|a| match a {
@@ -462,7 +458,7 @@ fn check_fn_args<'cx, 'tcx: 'cx>(
                     return Some(PtrArg {
                         idx: i,
                         span: hir_ty.span,
-                        ty_did: adt.did,
+                        ty_did: adt.did(),
                         ty_name: name.ident.name,
                         method_renames,
                         ref_prefix: RefPrefix {
@@ -470,7 +466,6 @@ fn check_fn_args<'cx, 'tcx: 'cx>(
                             mutability,
                         },
                         deref_ty,
-                        deref_assoc_items: deref_impl_id.map(|id| (id, cx.tcx.associated_items(id))),
                     });
                 }
             }
@@ -547,7 +542,7 @@ fn check_ptr_arg_usage<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'_>, args:
 
             // Helper function to handle early returns.
             let mut set_skip_flag = || {
-                if result.skip {
+                if !result.skip {
                     self.skip_count += 1;
                 }
                 result.skip = true;
@@ -570,7 +565,7 @@ fn check_ptr_arg_usage<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'_>, args:
                             .map(|sig| sig.input(i).skip_binder().peel_refs())
                             .map_or(true, |ty| match *ty.kind() {
                                 ty::Param(_) => true,
-                                ty::Adt(def, _) => def.did == args.ty_did,
+                                ty::Adt(def, _) => def.did() == args.ty_did,
                                 _ => false,
                             })
                         {
@@ -607,14 +602,7 @@ fn check_ptr_arg_usage<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'_>, args:
                             // If the types match check for methods which exist on both types. e.g. `Vec::len` and
                             // `slice::len`
                             ty::Adt(def, _)
-                                if def.did == args.ty_did
-                                    && (i != 0
-                                        || self.cx.tcx.trait_of_item(id).is_some()
-                                        || !args.deref_assoc_items.map_or(false, |(id, items)| {
-                                            items
-                                                .find_by_name_and_kind(self.cx.tcx, name.ident, AssocKind::Fn, id)
-                                                .is_some()
-                                        })) =>
+                                if def.did() == args.ty_did =>
                             {
                                 set_skip_flag();
                             },

@@ -1,5 +1,6 @@
 use rustc_data_structures::base_n;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::intern::Interned;
 use rustc_hir as hir;
 use rustc_hir::def::CtorKind;
 use rustc_hir::def_id::{CrateNum, DefId};
@@ -446,14 +447,14 @@ impl<'tcx> Printer<'tcx> for &mut SymbolMangler<'tcx> {
 
             ty::Tuple(tys) => {
                 self.push("T");
-                for ty in tys.iter().map(|k| k.expect_ty()) {
+                for ty in tys.iter() {
                     self = ty.print(self)?;
                 }
                 self.push("E");
             }
 
             // Mangle all nominal types as paths.
-            ty::Adt(&ty::AdtDef { did: def_id, .. }, substs)
+            ty::Adt(ty::AdtDef(Interned(&ty::AdtDefData { did: def_id, .. }, _)), substs)
             | ty::FnDef(def_id, substs)
             | ty::Opaque(def_id, substs)
             | ty::Projection(ty::ProjectionTy { item_def_id: def_id, substs })
@@ -633,8 +634,9 @@ impl<'tcx> Printer<'tcx> for &mut SymbolMangler<'tcx> {
                         // The `inspect` here is okay since we checked the bounds, and there are no
                         // relocations (we have an active `str` reference here). We don't use this
                         // result to affect interpreter execution.
-                        let slice =
-                            data.inspect_with_uninit_and_ptr_outside_interpreter(start..end);
+                        let slice = data
+                            .inner()
+                            .inspect_with_uninit_and_ptr_outside_interpreter(start..end);
                         let s = std::str::from_utf8(slice).expect("non utf8 str from miri");
 
                         self.push("e");
@@ -683,7 +685,7 @@ impl<'tcx> Printer<'tcx> for &mut SymbolMangler<'tcx> {
                     ty::Adt(def, substs) => {
                         let variant_idx =
                             contents.variant.expect("destructed const of adt without variant idx");
-                        let variant_def = &def.variants[variant_idx];
+                        let variant_def = &def.variant(variant_idx);
 
                         self.push("V");
                         self = self.print_def_path(variant_def.def_id, substs)?;

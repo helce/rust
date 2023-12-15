@@ -1,16 +1,12 @@
 use crate::infer::error_reporting::{note_and_explain_region, ObligationCauseExt};
 use crate::infer::{self, InferCtxt, SubregionOrigin};
-use rustc_errors::{struct_span_err, DiagnosticBuilder};
+use rustc_errors::{struct_span_err, Diagnostic, DiagnosticBuilder, ErrorGuaranteed};
 use rustc_middle::traits::ObligationCauseCode;
 use rustc_middle::ty::error::TypeError;
 use rustc_middle::ty::{self, Region};
 
 impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
-    pub(super) fn note_region_origin(
-        &self,
-        err: &mut DiagnosticBuilder<'_>,
-        origin: &SubregionOrigin<'tcx>,
-    ) {
+    pub(super) fn note_region_origin(&self, err: &mut Diagnostic, origin: &SubregionOrigin<'tcx>) {
         let mut label_or_note = |span, msg| {
             let sub_count = err.children.iter().filter(|d| d.span.is_dummy()).count();
             let expanded_sub_count = err.children.iter().filter(|d| !d.span.is_dummy()).count();
@@ -113,7 +109,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         origin: SubregionOrigin<'tcx>,
         sub: Region<'tcx>,
         sup: Region<'tcx>,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
         match origin {
             infer::Subtype(box trace) => {
                 let terr = TypeError::RegionsDoesNotOutlive(sup, sub);
@@ -352,7 +348,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                 let mut err = self.report_concrete_failure(*parent, sub, sup);
 
                 let trait_item_span = self.tcx.def_span(trait_item_def_id);
-                let item_name = self.tcx.item_name(impl_item_def_id);
+                let item_name = self.tcx.item_name(impl_item_def_id.to_def_id());
                 err.span_label(
                     trait_item_span,
                     format!("definition of `{}` from trait", item_name),
@@ -374,7 +370,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     let where_clause_span = self
                         .tcx
                         .hir()
-                        .get_generics(impl_item_def_id.expect_local())
+                        .get_generics(impl_item_def_id)
                         .unwrap()
                         .where_clause
                         .tail_span_for_suggestion();
@@ -405,7 +401,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         placeholder_origin: SubregionOrigin<'tcx>,
         sub: Region<'tcx>,
         sup: Region<'tcx>,
-    ) -> DiagnosticBuilder<'tcx> {
+    ) -> DiagnosticBuilder<'tcx, ErrorGuaranteed> {
         // I can't think how to do better than this right now. -nikomatsakis
         debug!(?placeholder_origin, ?sub, ?sup, "report_placeholder_failure");
         match placeholder_origin {

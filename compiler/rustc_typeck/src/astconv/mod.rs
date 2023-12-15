@@ -15,7 +15,9 @@ use crate::middle::resolve_lifetime as rl;
 use crate::require_c_abi_if_c_variadic;
 use rustc_ast::TraitObjectSyntax;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_errors::{struct_span_err, Applicability, ErrorReported, FatalError};
+use rustc_errors::{
+    struct_span_err, Applicability, DiagnosticBuilder, ErrorGuaranteed, FatalError,
+};
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Namespace, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
@@ -162,7 +164,7 @@ pub(crate) enum GenericArgPosition {
 #[derive(Clone, Default)]
 pub struct GenericArgCountMismatch {
     /// Indicates whether a fatal error was reported (`Some`), or just a lint (`None`).
-    pub reported: Option<ErrorReported>,
+    pub reported: Option<ErrorGuaranteed>,
     /// A list of spans of arguments provided that were not valid.
     pub invalid_args: Vec<Span>,
 }
@@ -205,7 +207,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         let r = match tcx.named_region(lifetime.hir_id) {
             Some(rl::Region::Static) => tcx.lifetimes.re_static,
 
-            Some(rl::Region::LateBound(debruijn, index, def_id, _)) => {
+            Some(rl::Region::LateBound(debruijn, index, def_id)) => {
                 let name = lifetime_name(def_id.expect_local());
                 let br = ty::BoundRegion {
                     var: ty::BoundVar::from_u32(index),
@@ -222,7 +224,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 tcx.mk_region(ty::ReLateBound(debruijn, br))
             }
 
-            Some(rl::Region::EarlyBound(index, id, _)) => {
+            Some(rl::Region::EarlyBound(index, id)) => {
                 let name = lifetime_name(id.expect_local());
                 tcx.mk_region(ty::ReEarlyBound(ty::EarlyBoundRegion { def_id: id, index, name }))
             }
@@ -288,7 +290,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
     /// Given the type/lifetime/const arguments provided to some path (along with
     /// an implicit `Self`, if this is a trait reference), returns the complete
     /// set of substitutions. This may involve applying defaulted type parameters.
-    /// Constraints on associated typess are created from `create_assoc_bindings_for_generic_args`.
+    /// Constraints on associated types are created from `create_assoc_bindings_for_generic_args`.
     ///
     /// Example:
     ///
@@ -733,7 +735,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         let mut dup_bindings = FxHashMap::default();
         for binding in &assoc_bindings {
             // Specify type to assert that error was already reported in `Err` case.
-            let _: Result<_, ErrorReported> = self.add_predicates_for_ast_type_binding(
+            let _: Result<_, ErrorGuaranteed> = self.add_predicates_for_ast_type_binding(
                 hir_id,
                 poly_trait_ref,
                 binding,
@@ -742,7 +744,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 &mut dup_bindings,
                 binding_span.unwrap_or(binding.span),
             );
-            // Okay to ignore `Err` because of `ErrorReported` (see above).
+            // Okay to ignore `Err` because of `ErrorGuaranteed` (see above).
         }
 
         arg_count
@@ -1054,12 +1056,11 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         let mut result = Vec::new();
 
         for ast_bound in ast_bounds {
-            if let Some(trait_ref) = ast_bound.trait_ref() {
-                if let Some(trait_did) = trait_ref.trait_def_id() {
-                    if self.tcx().trait_may_define_assoc_type(trait_did, assoc_name) {
-                        result.push(ast_bound.clone());
-                    }
-                }
+            if let Some(trait_ref) = ast_bound.trait_ref()
+                && let Some(trait_did) = trait_ref.trait_def_id()
+                && self.tcx().trait_may_define_assoc_type(trait_did, assoc_name)
+            {
+                result.push(ast_bound.clone());
             }
         }
 
@@ -1097,7 +1098,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         speculative: bool,
         dup_bindings: &mut FxHashMap<DefId, Span>,
         path_span: Span,
-    ) -> Result<(), ErrorReported> {
+    ) -> Result<(), ErrorGuaranteed> {
         // Given something like `U: SomeTrait<T = X>`, we want to produce a
         // predicate like `<U as SomeTrait>::T = X`. This is somewhat
         // subtle in the event that `T` is defined in a supertrait of
@@ -1434,7 +1435,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                         // If the projection output contains `Self`, force the user to
                         // elaborate it explicitly to avoid a lot of complexity.
                         //
-                        // The "classicaly useful" case is the following:
+                        // The "classically useful" case is the following:
                         // ```
                         //     trait MyTrait: FnMut() -> <Self as MyTrait>::MyOutput {
                         //         type MyOutput;
@@ -1569,7 +1570,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         type_str: &str,
         trait_str: &str,
         name: Symbol,
-    ) {
+    ) -> ErrorGuaranteed {
         let mut err = struct_span_err!(self.tcx().sess, span, E0223, "ambiguous associated type");
         if let (true, Ok(snippet)) = (
             self.tcx()
@@ -1593,7 +1594,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 Applicability::HasPlaceholders,
             );
         }
-        err.emit();
+        err.emit()
     }
 
     // Search for a bound on a type parameter which includes the associated item
@@ -1605,7 +1606,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         ty_param_def_id: LocalDefId,
         assoc_name: Ident,
         span: Span,
-    ) -> Result<ty::PolyTraitRef<'tcx>, ErrorReported> {
+    ) -> Result<ty::PolyTraitRef<'tcx>, ErrorGuaranteed> {
         let tcx = self.tcx();
 
         debug!(
@@ -1647,7 +1648,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         assoc_name: Ident,
         span: Span,
         is_equality: impl Fn() -> Option<String>,
-    ) -> Result<ty::PolyTraitRef<'tcx>, ErrorReported>
+    ) -> Result<ty::PolyTraitRef<'tcx>, ErrorGuaranteed>
     where
         I: Iterator<Item = ty::PolyTraitRef<'tcx>>,
     {
@@ -1660,13 +1661,13 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
             (Some(bound), _) => (bound, matching_candidates.next()),
             (None, Some(bound)) => (bound, const_candidates.next()),
             (None, None) => {
-                self.complain_about_assoc_type_not_found(
+                let reported = self.complain_about_assoc_type_not_found(
                     all_candidates,
                     &ty_param_name(),
                     assoc_name,
                     span,
                 );
-                return Err(ErrorReported);
+                return Err(reported);
             }
         };
         debug!("one_bound_for_assoc_type: bound = {:?}", bound);
@@ -1751,9 +1752,9 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                     where_bounds.join(",\n"),
                 ));
             }
-            err.emit();
+            let reported = err.emit();
             if !where_bounds.is_empty() {
-                return Err(ErrorReported);
+                return Err(reported);
             }
         }
 
@@ -1767,7 +1768,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
     // Will fail except for `T::A` and `Self::A`; i.e., if `qself_ty`/`qself_def` are not a type
     // parameter or `Self`.
     // NOTE: When this function starts resolving `Trait::AssocTy` successfully
-    // it should also start reportint the `BARE_TRAIT_OBJECTS` lint.
+    // it should also start reporting the `BARE_TRAIT_OBJECTS` lint.
     pub fn associated_path_to_ty(
         &self,
         hir_ref_id: hir::HirId,
@@ -1776,7 +1777,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         qself_res: Res,
         assoc_segment: &hir::PathSegment<'_>,
         permit_variants: bool,
-    ) -> Result<(Ty<'tcx>, DefKind, DefId), ErrorReported> {
+    ) -> Result<(Ty<'tcx>, DefKind, DefId), ErrorGuaranteed> {
         let tcx = self.tcx();
         let assoc_ident = assoc_segment.ident;
 
@@ -1787,9 +1788,9 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         if let ty::Adt(adt_def, _) = qself_ty.kind() {
             if adt_def.is_enum() {
                 let variant_def = adt_def
-                    .variants
+                    .variants()
                     .iter()
-                    .find(|vd| tcx.hygienic_eq(assoc_ident, vd.ident(tcx), adt_def.did));
+                    .find(|vd| tcx.hygienic_eq(assoc_ident, vd.ident(tcx), adt_def.did()));
                 if let Some(variant_def) = variant_def {
                     if permit_variants {
                         tcx.check_stability(variant_def.def_id, Some(hir_ref_id), span, None);
@@ -1808,12 +1809,10 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
             (_, Res::SelfTy { trait_: Some(_), alias_to: Some((impl_def_id, _)) }) => {
                 // `Self` in an impl of a trait -- we have a concrete self type and a
                 // trait reference.
-                let trait_ref = match tcx.impl_trait_ref(impl_def_id) {
-                    Some(trait_ref) => trait_ref,
-                    None => {
-                        // A cycle error occurred, most likely.
-                        return Err(ErrorReported);
-                    }
+                let Some(trait_ref) = tcx.impl_trait_ref(impl_def_id) else {
+                    // A cycle error occurred, most likely.
+                    let guar = tcx.sess.delay_span_bug(span, "expected cycle error");
+                    return Err(guar);
                 };
 
                 self.one_bound_for_assoc_type(
@@ -1830,10 +1829,10 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 | Res::Def(DefKind::TyParam, param_did),
             ) => self.find_bound_for_assoc_item(param_did.expect_local(), assoc_ident, span)?,
             _ => {
-                if variant_resolution.is_some() {
+                let reported = if variant_resolution.is_some() {
                     // Variant in type position
                     let msg = format!("expected type, found variant `{}`", assoc_ident);
-                    tcx.sess.span_err(span, &msg);
+                    tcx.sess.span_err(span, &msg)
                 } else if qself_ty.is_enum() {
                     let mut err = struct_span_err!(
                         tcx.sess,
@@ -1847,7 +1846,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                     let adt_def = qself_ty.ty_adt_def().expect("enum is not an ADT");
                     if let Some(suggested_name) = find_best_match_for_name(
                         &adt_def
-                            .variants
+                            .variants()
                             .iter()
                             .map(|variant| variant.name)
                             .collect::<Vec<Symbol>>(),
@@ -1867,22 +1866,24 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                         );
                     }
 
-                    if let Some(sp) = tcx.hir().span_if_local(adt_def.did) {
+                    if let Some(sp) = tcx.hir().span_if_local(adt_def.did()) {
                         let sp = tcx.sess.source_map().guess_head_span(sp);
                         err.span_label(sp, format!("variant `{}` not found here", assoc_ident));
                     }
 
-                    err.emit();
-                } else if !qself_ty.references_error() {
+                    err.emit()
+                } else if let Some(reported) = qself_ty.error_reported() {
+                    reported
+                } else {
                     // Don't print `TyErr` to the user.
                     self.report_ambiguous_associated_type(
                         span,
                         &qself_ty.to_string(),
                         "Trait",
                         assoc_ident.name,
-                    );
-                }
-                return Err(ErrorReported);
+                    )
+                };
+                return Err(reported);
             }
         };
 
@@ -1900,8 +1901,8 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         // but it was used in a type position.
         let Some(item) = item else {
             let msg = format!("found associated const `{assoc_ident}` when type was expected");
-            tcx.sess.struct_span_err(span, &msg).emit();
-            return Err(ErrorReported);
+            let guar = tcx.sess.struct_span_err(span, &msg).emit();
+            return Err(guar);
         };
 
         let ty = self.projected_ty_from_poly_trait_ref(span, item.def_id, assoc_segment, bound);
@@ -2156,7 +2157,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                 let adt_def = self_ty.map(|t| t.ty_adt_def().unwrap());
                 let (generics_def_id, index) = if let Some(adt_def) = adt_def {
                     debug_assert!(adt_def.is_enum());
-                    (adt_def.did, last)
+                    (adt_def.did(), last)
                 } else if last >= 1 && segments[last - 1].args.is_some() {
                     // Everything but the penultimate segment should have no
                     // parameters at all.
@@ -2185,7 +2186,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
             }
 
             // Case 3. Reference to a top-level value.
-            DefKind::Fn | DefKind::Const | DefKind::ConstParam | DefKind::Static => {
+            DefKind::Fn | DefKind::Const | DefKind::ConstParam | DefKind::Static(_) => {
                 path_segs.push(PathSeg(def_id, last));
             }
 
@@ -2621,7 +2622,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
         &self,
         constrained_regions: FxHashSet<ty::BoundRegionKind>,
         referenced_regions: FxHashSet<ty::BoundRegionKind>,
-        generate_err: impl Fn(&str) -> rustc_errors::DiagnosticBuilder<'tcx>,
+        generate_err: impl Fn(&str) -> DiagnosticBuilder<'tcx, ErrorGuaranteed>,
     ) {
         for br in referenced_regions.difference(&constrained_regions) {
             let br_name = match *br {
@@ -2739,7 +2740,7 @@ impl<'o, 'tcx> dyn AstConv<'tcx> + 'o {
                                 sugg,
                                 Applicability::MachineApplicable,
                             )
-                            .emit()
+                            .emit();
                     },
                 );
             }

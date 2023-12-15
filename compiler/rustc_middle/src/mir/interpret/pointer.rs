@@ -18,6 +18,11 @@ pub trait PointerArithmetic: HasDataLayout {
         self.data_layout().pointer_size
     }
 
+    #[inline(always)]
+    fn max_size_of_val(&self) -> Size {
+        Size::from_bytes(self.machine_isize_max())
+    }
+
     #[inline]
     fn machine_usize_max(&self) -> u64 {
         self.pointer_size().unsigned_int_max().try_into().unwrap()
@@ -99,7 +104,7 @@ impl<T: HasDataLayout> PointerArithmetic for T {}
 /// mostly opaque; the `Machine` trait extends it with some more operations that also have access to
 /// some global state.
 /// We don't actually care about this `Debug` bound (we use `Provenance::fmt` to format the entire
-/// pointer), but `derive` adds some unecessary bounds.
+/// pointer), but `derive` adds some unnecessary bounds.
 pub trait Provenance: Copy + fmt::Debug {
     /// Says whether the `offset` field of `Pointer`s with this provenance is the actual physical address.
     /// If `true, ptr-to-int casts work by simply discarding the provenance.

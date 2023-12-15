@@ -11,7 +11,7 @@ use crate::check::{
 
 use rustc_ast as ast;
 use rustc_data_structures::sync::Lrc;
-use rustc_errors::{Applicability, DiagnosticBuilder, DiagnosticId};
+use rustc_errors::{Applicability, Diagnostic, DiagnosticId};
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::DefId;
@@ -149,16 +149,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                     let expected_input_tys = match expected_input_tys.get(0) {
                         Some(&ty) => match ty.kind() {
-                            ty::Tuple(ref tys) => tys.iter().map(|k| k.expect_ty()).collect(),
+                            ty::Tuple(tys) => tys.iter().collect(),
                             _ => vec![],
                         },
                         None => vec![],
                     };
-                    (arg_types.iter().map(|k| k.expect_ty()).collect(), expected_input_tys)
+                    (arg_types.iter().collect(), expected_input_tys)
                 }
                 _ => {
                     // Otherwise, there's a mismatch, so clear out what we're expecting, and set
-                    // our input typs to err_args so we don't blow up the error messages
+                    // our input types to err_args so we don't blow up the error messages
                     struct_span_err!(
                         tcx.sess,
                         call_span,
@@ -281,6 +281,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             self.demand_suptype(provided_arg.span, formal_input_ty, coerced_ty);
         };
 
+        let minimum_input_count = formal_input_tys.len();
+
         // Check the arguments.
         // We do this in a pretty awful way: first we type-check any arguments
         // that are not closures, then we type-check the closures. This is so
@@ -303,7 +305,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 })
             }
 
-            let minimum_input_count = formal_input_tys.len();
             for (idx, arg) in provided_args.iter().enumerate() {
                 // Warn only for the first loop (the "no closures" one).
                 // Closure arguments themselves can't be diverging, but
@@ -406,25 +407,23 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     if arg_count == 0 || i + 1 == arg_count { &label } else { "" },
                 );
             }
-            if let Some(def_id) = fn_def_id {
-                if let Some(def_span) = tcx.def_ident_span(def_id) {
-                    let mut spans: MultiSpan = def_span.into();
+            if let Some(def_id) = fn_def_id && let Some(def_span) = tcx.def_ident_span(def_id) {
+                let mut spans: MultiSpan = def_span.into();
 
-                    let params = tcx
-                        .hir()
-                        .get_if_local(def_id)
-                        .and_then(|node| node.body_id())
-                        .into_iter()
-                        .map(|id| tcx.hir().body(id).params)
-                        .flatten();
+                let params = tcx
+                    .hir()
+                    .get_if_local(def_id)
+                    .and_then(|node| node.body_id())
+                    .into_iter()
+                    .map(|id| tcx.hir().body(id).params)
+                    .flatten();
 
-                    for param in params {
-                        spans.push_span_label(param.span, String::new());
-                    }
-
-                    let def_kind = tcx.def_kind(def_id);
-                    err.span_note(spans, &format!("{} defined here", def_kind.descr(def_id)));
+                for param in params {
+                    spans.push_span_label(param.span, String::new());
                 }
+
+                let def_kind = tcx.def_kind(def_id);
+                err.span_note(spans, &format!("{} defined here", def_kind.descr(def_id)));
             }
             if sugg_unit {
                 let sugg_span = tcx.sess.source_map().end_point(call_expr.span);
@@ -458,17 +457,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             err.emit();
         }
 
-        // We also need to make sure we at least write the ty of the other
-        // arguments which we skipped above.
-        if c_variadic {
-            fn variadic_error<'tcx>(sess: &Session, span: Span, ty: Ty<'tcx>, cast_ty: &str) {
-                use crate::structured_errors::MissingCastForVariadicArg;
+        for arg in provided_args.iter().skip(minimum_input_count) {
+            let arg_ty = self.check_expr(&arg);
 
-                MissingCastForVariadicArg { sess, span, ty, cast_ty }.diagnostic().emit()
-            }
+            if c_variadic {
+                // We also need to make sure we at least write the ty of the other
+                // arguments which we skipped above, either because they were additional
+                // c_variadic args, or because we had an argument count mismatch.
+                fn variadic_error<'tcx>(sess: &Session, span: Span, ty: Ty<'tcx>, cast_ty: &str) {
+                    use crate::structured_errors::MissingCastForVariadicArg;
 
-            for arg in provided_args.iter().skip(expected_arg_count) {
-                let arg_ty = self.check_expr(&arg);
+                    MissingCastForVariadicArg { sess, span, ty, cast_ty }.diagnostic().emit();
+                }
 
                 // There are a few types which get autopromoted when passed via varargs
                 // in C but we just error out instead and require explicit casts.
@@ -499,12 +499,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expected_input_tys: &[Ty<'tcx>],
         provided_args: &'tcx [hir::Expr<'tcx>],
     ) -> Option<FnArgsAsTuple<'_>> {
-        let [expected_arg_type] = &expected_input_tys[..] else { return None };
+        let [expected_arg_type] = expected_input_tys[..] else { return None };
 
-        let ty::Tuple(expected_elems) = self.resolve_vars_if_possible(*expected_arg_type).kind()
+        let &ty::Tuple(expected_types) = self.resolve_vars_if_possible(expected_arg_type).kind()
             else { return None };
 
-        let expected_types: Vec<_> = expected_elems.iter().map(|k| k.expect_ty()).collect();
         let supplied_types: Vec<_> = provided_args.iter().map(|arg| self.check_expr(arg)).collect();
 
         let all_match = iter::zip(expected_types, supplied_types)
@@ -578,13 +577,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 return None;
             }
             Res::Def(DefKind::Variant, _) => match ty.kind() {
-                ty::Adt(adt, substs) => Some((adt.variant_of_res(def), adt.did, substs)),
+                ty::Adt(adt, substs) => Some((adt.variant_of_res(def), adt.did(), substs)),
                 _ => bug!("unexpected type: {:?}", ty),
             },
             Res::Def(DefKind::Struct | DefKind::Union | DefKind::TyAlias | DefKind::AssocTy, _)
             | Res::SelfTy { .. } => match ty.kind() {
                 ty::Adt(adt, substs) if !adt.is_enum() => {
-                    Some((adt.non_enum_variant(), adt.did, substs))
+                    Some((adt.non_enum_variant(), adt.did(), substs))
                 }
                 _ => None,
             },
@@ -791,7 +790,20 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let tail_expr = tail_expr.unwrap();
                 let span = self.get_expr_coercion_span(tail_expr);
                 let cause = self.cause(span, ObligationCauseCode::BlockTailExpression(blk.hir_id));
-                coerce.coerce(self, &cause, tail_expr, tail_expr_ty);
+                let ty_for_diagnostic = coerce.merged_ty();
+                // We use coerce_inner here because we want to augment the error
+                // suggesting to wrap the block in square brackets if it might've
+                // been mistaken array syntax
+                coerce.coerce_inner(
+                    self,
+                    &cause,
+                    Some(tail_expr),
+                    tail_expr_ty,
+                    Some(&mut |diag: &mut Diagnostic| {
+                        self.suggest_block_to_brackets(diag, blk, tail_expr_ty, ty_for_diagnostic);
+                    }),
+                    false,
+                );
             } else {
                 // Subtle: if there is no explicit tail expression,
                 // that is typically equivalent to a tail expression
@@ -832,19 +844,35 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 if expected_ty == self.tcx.types.bool {
                                     // If this is caused by a missing `let` in a `while let`,
                                     // silence this redundant error, as we already emit E0070.
-                                    let parent = self.tcx.hir().get_parent_node(blk.hir_id);
-                                    let parent = self.tcx.hir().get_parent_node(parent);
-                                    let parent = self.tcx.hir().get_parent_node(parent);
-                                    let parent = self.tcx.hir().get_parent_node(parent);
-                                    let parent = self.tcx.hir().get_parent_node(parent);
-                                    match self.tcx.hir().find(parent) {
-                                        Some(hir::Node::Expr(hir::Expr {
-                                            kind: hir::ExprKind::Loop(_, _, hir::LoopSource::While, _),
-                                            ..
-                                        })) => {
-                                            err.delay_as_bug();
-                                        }
-                                        _ => {}
+
+                                    // Our block must be a `assign desugar local; assignment`
+                                    if let Some(hir::Node::Block(hir::Block {
+                                        stmts:
+                                            [
+                                                hir::Stmt {
+                                                    kind:
+                                                        hir::StmtKind::Local(hir::Local {
+                                                            source:
+                                                                hir::LocalSource::AssignDesugar(_),
+                                                            ..
+                                                        }),
+                                                    ..
+                                                },
+                                                hir::Stmt {
+                                                    kind:
+                                                        hir::StmtKind::Expr(hir::Expr {
+                                                            kind: hir::ExprKind::Assign(..),
+                                                            ..
+                                                        }),
+                                                    ..
+                                                },
+                                            ],
+                                        ..
+                                    })) = self.tcx.hir().find(blk.hir_id)
+                                    {
+                                        self.comes_from_while_condition(blk.hir_id, |_| {
+                                            err.downgrade_to_delayed_bug();
+                                        })
                                     }
                                 }
                             }
@@ -895,7 +923,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         blk: &'tcx hir::Block<'tcx>,
         expected_ty: Ty<'tcx>,
-        err: &mut DiagnosticBuilder<'_>,
+        err: &mut Diagnostic,
     ) {
         if let Some((span_semi, boxed)) = self.could_remove_semicolon(blk, expected_ty) {
             if let StatementAsExpression::NeedsBoxing = boxed {
@@ -1074,8 +1102,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let mut result_code = code.clone();
                 loop {
                     let parent = match &*code {
+                        ObligationCauseCode::ImplDerivedObligation(c) => {
+                            c.derived.parent_code.clone()
+                        }
                         ObligationCauseCode::BuiltinDerivedObligation(c)
-                        | ObligationCauseCode::ImplDerivedObligation(c)
                         | ObligationCauseCode::DerivedObligation(c) => c.parent_code.clone(),
                         _ => break,
                     };
@@ -1085,9 +1115,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
             let self_: ty::subst::GenericArg<'_> = match &*unpeel_to_top(error.obligation.cause.clone_code()) {
                 ObligationCauseCode::BuiltinDerivedObligation(code) |
-                ObligationCauseCode::ImplDerivedObligation(code) |
                 ObligationCauseCode::DerivedObligation(code) => {
                     code.parent_trait_pred.self_ty().skip_binder().into()
+                }
+                ObligationCauseCode::ImplDerivedObligation(code) => {
+                    code.derived.parent_trait_pred.self_ty().skip_binder().into()
                 }
                 _ if let ty::PredicateKind::Trait(predicate) =
                     error.obligation.predicate.kind().skip_binder() => {

@@ -6,7 +6,6 @@ pub use TokenKind::*;
 
 use crate::ast;
 use crate::ptr::P;
-use crate::tokenstream::TokenTree;
 
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync::Lrc;
@@ -60,9 +59,9 @@ pub enum LitKind {
     Integer,
     Float,
     Str,
-    StrRaw(u16), // raw string delimited by `n` hash symbols
+    StrRaw(u8), // raw string delimited by `n` hash symbols
     ByteStr,
-    ByteStrRaw(u16), // raw byte string delimited by `n` hash symbols
+    ByteStrRaw(u8), // raw byte string delimited by `n` hash symbols
     Err,
 }
 
@@ -504,10 +503,8 @@ impl Token {
 
     /// Returns `true` if the token is an interpolated path.
     fn is_path(&self) -> bool {
-        if let Interpolated(ref nt) = self.kind {
-            if let NtPath(..) = **nt {
-                return true;
-            }
+        if let Interpolated(ref nt) = self.kind && let NtPath(..) = **nt {
+            return true;
         }
         false
     }
@@ -516,10 +513,10 @@ impl Token {
     /// That is, is this a pre-parsed expression dropped into the token stream
     /// (which happens while parsing the result of macro expansion)?
     pub fn is_whole_expr(&self) -> bool {
-        if let Interpolated(ref nt) = self.kind {
-            if let NtExpr(_) | NtLiteral(_) | NtPath(_) | NtIdent(..) | NtBlock(_) = **nt {
-                return true;
-            }
+        if let Interpolated(ref nt) = self.kind
+            && let NtExpr(_) | NtLiteral(_) | NtPath(_) | NtIdent(..) | NtBlock(_) = **nt
+        {
+            return true;
         }
 
         false
@@ -527,10 +524,8 @@ impl Token {
 
     // Is the token an interpolated block (`$b:block`)?
     pub fn is_whole_block(&self) -> bool {
-        if let Interpolated(ref nt) = self.kind {
-            if let NtBlock(..) = **nt {
-                return true;
-            }
+        if let Interpolated(ref nt) = self.kind && let NtBlock(..) = **nt {
+            return true;
         }
         false
     }
@@ -684,7 +679,6 @@ pub enum Nonterminal {
     NtMeta(P<ast::AttrItem>),
     NtPath(ast::Path),
     NtVis(ast::Visibility),
-    NtTT(TokenTree),
 }
 
 // `Nonterminal` is used a lot. Make sure it doesn't unintentionally get bigger.
@@ -782,7 +776,6 @@ impl Nonterminal {
             NtMeta(attr_item) => attr_item.span(),
             NtPath(path) => path.span,
             NtVis(vis) => vis.span,
-            NtTT(tt) => tt.span(),
         }
     }
 }
@@ -794,7 +787,6 @@ impl PartialEq for Nonterminal {
                 ident_lhs == ident_rhs && is_raw_lhs == is_raw_rhs
             }
             (NtLifetime(ident_lhs), NtLifetime(ident_rhs)) => ident_lhs == ident_rhs,
-            (NtTT(tt_lhs), NtTT(tt_rhs)) => tt_lhs == tt_rhs,
             // FIXME: Assume that all "complex" nonterminal are not equal, we can't compare them
             // correctly based on data from AST. This will prevent them from matching each other
             // in macros. The comparison will become possible only when each nonterminal has an
@@ -817,7 +809,6 @@ impl fmt::Debug for Nonterminal {
             NtLiteral(..) => f.pad("NtLiteral(..)"),
             NtMeta(..) => f.pad("NtMeta(..)"),
             NtPath(..) => f.pad("NtPath(..)"),
-            NtTT(..) => f.pad("NtTT(..)"),
             NtVis(..) => f.pad("NtVis(..)"),
             NtLifetime(..) => f.pad("NtLifetime(..)"),
         }

@@ -100,11 +100,12 @@ rustc_data_structures::static_assert_size!(LazyTokenStreamImpl, 144);
 
 impl CreateTokenStream for LazyTokenStreamImpl {
     fn create_token_stream(&self) -> AttrAnnotatedTokenStream {
-        // The token produced by the final call to `next` or `next_desugared`
-        // was not actually consumed by the callback. The combination
-        // of chaining the initial token and using `take` produces the desired
-        // result - we produce an empty `TokenStream` if no calls were made,
-        // and omit the final token otherwise.
+        // The token produced by the final call to `{,inlined_}next` or
+        // `{,inlined_}next_desugared` was not actually consumed by the
+        // callback. The combination of chaining the initial token and using
+        // `take` produces the desired result - we produce an empty
+        // `TokenStream` if no calls were made, and omit the final token
+        // otherwise.
         let mut cursor_snapshot = self.cursor_snapshot.clone();
         let tokens =
             std::iter::once((FlatToken::Token(self.start_token.0.clone()), self.start_token.1))
@@ -187,7 +188,7 @@ impl<'a> Parser<'a> {
     ///
     /// Note: If your callback consumes an opening delimiter
     /// (including the case where you call `collect_tokens`
-    /// when the current token is an opening delimeter),
+    /// when the current token is an opening delimiter),
     /// you must also consume the corresponding closing delimiter.
     ///
     /// That is, you can consume
@@ -259,7 +260,7 @@ impl<'a> Parser<'a> {
             // We also call `has_cfg_or_cfg_attr` at the beginning of this function,
             // but we only bail out if there's no possibility of inner attributes
             // (!R::SUPPORTS_CUSTOM_INNER_ATTRS)
-            // We only catpure about `#[cfg]` or `#[cfg_attr]` in `capture_cfg`
+            // We only capture about `#[cfg]` or `#[cfg_attr]` in `capture_cfg`
             // mode - during normal parsing, we don't need any special capturing
             // for those attributes, since they're builtin.
             && !(self.capture_cfg && has_cfg_or_cfg_attr(ret.attrs()))
@@ -381,7 +382,7 @@ impl<'a> Parser<'a> {
         if matches!(self.capture_state.capturing, Capturing::No) {
             self.capture_state.replace_ranges.clear();
             // We don't clear `inner_attr_ranges`, as doing so repeatedly
-            // had a measureable performance impact. Most inner attributes that
+            // had a measurable performance impact. Most inner attributes that
             // we insert will get removed - when we drop the parser, we'll free
             // up the memory used by any attributes that we didn't remove from the map.
         }
@@ -417,7 +418,7 @@ fn make_token_stream(
                 stack.push(FrameData { open: span, open_delim: delim, inner: vec![] });
             }
             FlatToken::Token(Token { kind: TokenKind::CloseDelim(delim), span }) => {
-                // HACK: If we enconter a mismatched `None` delimiter at the top
+                // HACK: If we encounter a mismatched `None` delimiter at the top
                 // level, just ignore it.
                 if matches!(delim, DelimToken::NoDelim)
                     && (stack.len() == 1

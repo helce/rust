@@ -28,12 +28,18 @@
 use super::*;
 
 use rustc_middle::ty::relate::{Relate, TypeRelation};
-use rustc_middle::ty::Const;
+use rustc_middle::ty::{Const, ImplSubject};
 
 pub struct At<'a, 'tcx> {
     pub infcx: &'a InferCtxt<'a, 'tcx>,
     pub cause: &'a ObligationCause<'tcx>,
     pub param_env: ty::ParamEnv<'tcx>,
+    /// Whether we should define opaque types
+    /// or just treat them opaquely.
+    /// Currently only used to prevent predicate
+    /// matching from matching anything against opaque
+    /// types.
+    pub define_opaque_types: bool,
 }
 
 pub struct Trace<'a, 'tcx> {
@@ -49,7 +55,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         cause: &'a ObligationCause<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
     ) -> At<'a, 'tcx> {
-        At { infcx: self, cause, param_env }
+        At { infcx: self, cause, param_env, define_opaque_types: true }
     }
 
     /// Forks the inference context, creating a new inference context with the same inference
@@ -86,6 +92,10 @@ pub trait ToTrace<'tcx>: Relate<'tcx> + Copy {
 }
 
 impl<'a, 'tcx> At<'a, 'tcx> {
+    pub fn define_opaque_types(self, define_opaque_types: bool) -> Self {
+        Self { define_opaque_types, ..self }
+    }
+
     /// Hacky routine for equating two impl headers in coherence.
     pub fn eq_impl_headers(
         self,
@@ -216,7 +226,7 @@ impl<'a, 'tcx> Trace<'a, 'tcx> {
     {
         let Trace { at, trace, a_is_expected } = self;
         at.infcx.commit_if_ok(|_| {
-            let mut fields = at.infcx.combine_fields(trace, at.param_env);
+            let mut fields = at.infcx.combine_fields(trace, at.param_env, at.define_opaque_types);
             fields
                 .sub(a_is_expected)
                 .relate(a, b)
@@ -233,7 +243,7 @@ impl<'a, 'tcx> Trace<'a, 'tcx> {
     {
         let Trace { at, trace, a_is_expected } = self;
         at.infcx.commit_if_ok(|_| {
-            let mut fields = at.infcx.combine_fields(trace, at.param_env);
+            let mut fields = at.infcx.combine_fields(trace, at.param_env, at.define_opaque_types);
             fields
                 .equate(a_is_expected)
                 .relate(a, b)
@@ -248,7 +258,7 @@ impl<'a, 'tcx> Trace<'a, 'tcx> {
     {
         let Trace { at, trace, a_is_expected } = self;
         at.infcx.commit_if_ok(|_| {
-            let mut fields = at.infcx.combine_fields(trace, at.param_env);
+            let mut fields = at.infcx.combine_fields(trace, at.param_env, at.define_opaque_types);
             fields
                 .lub(a_is_expected)
                 .relate(a, b)
@@ -263,12 +273,35 @@ impl<'a, 'tcx> Trace<'a, 'tcx> {
     {
         let Trace { at, trace, a_is_expected } = self;
         at.infcx.commit_if_ok(|_| {
-            let mut fields = at.infcx.combine_fields(trace, at.param_env);
+            let mut fields = at.infcx.combine_fields(trace, at.param_env, at.define_opaque_types);
             fields
                 .glb(a_is_expected)
                 .relate(a, b)
                 .map(move |t| InferOk { value: t, obligations: fields.obligations })
         })
+    }
+}
+
+impl<'tcx> ToTrace<'tcx> for ImplSubject<'tcx> {
+    fn to_trace(
+        tcx: TyCtxt<'tcx>,
+        cause: &ObligationCause<'tcx>,
+        a_is_expected: bool,
+        a: Self,
+        b: Self,
+    ) -> TypeTrace<'tcx> {
+        match (a, b) {
+            (ImplSubject::Trait(trait_ref_a), ImplSubject::Trait(trait_ref_b)) => {
+                ToTrace::to_trace(tcx, cause, a_is_expected, trait_ref_a, trait_ref_b)
+            }
+            (ImplSubject::Inherent(ty_a), ImplSubject::Inherent(ty_b)) => {
+                ToTrace::to_trace(tcx, cause, a_is_expected, ty_a, ty_b)
+            }
+            (ImplSubject::Trait(_), ImplSubject::Inherent(_))
+            | (ImplSubject::Inherent(_), ImplSubject::Trait(_)) => {
+                bug!("can not trace TraitRef and Ty");
+            }
+        }
     }
 }
 

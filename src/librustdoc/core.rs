@@ -192,6 +192,7 @@ crate fn create_config(
         libs,
         externs,
         mut cfgs,
+        check_cfgs,
         codegen_options,
         debugging_opts,
         target,
@@ -219,6 +220,7 @@ crate fn create_config(
         // these are definitely not part of rustdoc, but we want to warn on them anyway.
         rustc_lint::builtin::RENAMED_AND_REMOVED_LINTS.name.to_string(),
         rustc_lint::builtin::UNKNOWN_LINTS.name.to_string(),
+        rustc_lint::builtin::UNEXPECTED_CFGS.name.to_string(),
     ];
     lints_to_show.extend(crate::lint::RUSTDOC_LINTS.iter().map(|lint| lint.name.to_string()));
 
@@ -253,7 +255,7 @@ crate fn create_config(
     interface::Config {
         opts: sessopts,
         crate_cfg: interface::parse_cfgspecs(cfgs),
-        crate_check_cfg: interface::parse_check_cfg(vec![]),
+        crate_check_cfg: interface::parse_check_cfg(check_cfgs),
         input,
         input_path: cpath,
         output_file: None,
@@ -450,7 +452,7 @@ crate fn run_global_ctxt(
         }
     }
 
-    if tcx.sess.diagnostic().has_errors_or_lint_errors() {
+    if tcx.sess.diagnostic().has_errors_or_lint_errors().is_some() {
         rustc_errors::FatalError.raise();
     }
 

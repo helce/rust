@@ -2,14 +2,15 @@
 //!
 //! [RFC 1946]: https://github.com/rust-lang/rfcs/blob/master/text/1946-intra-rustdoc-links.md
 
-use rustc_data_structures::{fx::FxHashMap, stable_set::FxHashSet};
-use rustc_errors::{Applicability, DiagnosticBuilder};
+use rustc_data_structures::{fx::FxHashMap, intern::Interned, stable_set::FxHashSet};
+use rustc_errors::{Applicability, Diagnostic};
 use rustc_hir::def::{
     DefKind,
     Namespace::{self, *},
     PerNS,
 };
 use rustc_hir::def_id::{CrateNum, DefId, CRATE_DEF_ID};
+use rustc_hir::Mutability;
 use rustc_middle::ty::{DefIdTree, Ty, TyCtxt};
 use rustc_middle::{bug, span_bug, ty};
 use rustc_session::lint::Lint;
@@ -26,7 +27,8 @@ use std::fmt::Write;
 use std::mem;
 use std::ops::Range;
 
-use crate::clean::{self, utils::find_nearest_parent_module, Crate, Item, ItemLink, PrimitiveType};
+use crate::clean::{self, utils::find_nearest_parent_module};
+use crate::clean::{Crate, Item, ItemId, ItemLink, PrimitiveType};
 use crate::core::DocContext;
 use crate::html::markdown::{markdown_links, MarkdownLink};
 use crate::lint::{BROKEN_INTRA_DOC_LINKS, PRIVATE_INTRA_DOC_LINKS};
@@ -129,7 +131,7 @@ impl Res {
             DefKind::Const | DefKind::ConstParam | DefKind::AssocConst | DefKind::AnonConst => {
                 "const"
             }
-            DefKind::Static => "static",
+            DefKind::Static(_) => "static",
             DefKind::Macro(MacroKind::Derive) => "derive",
             // Now handle things that don't have a specific disambiguator
             _ => match kind
@@ -177,6 +179,8 @@ enum ResolutionFailure<'a> {
     /// The link failed to resolve. [`resolution_failure`] should look to see if there's
     /// a more helpful error that can be given.
     NotResolved {
+        /// Item on which the link is resolved, used for resolving `Self`.
+        item_id: ItemId,
         /// The scope the link was resolved in.
         module_id: DefId,
         /// If part of the link resolved, this has the `Res`.
@@ -343,6 +347,7 @@ impl ItemFragment {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct ResolutionInfo {
+    item_id: ItemId,
     module_id: DefId,
     dis: Option<Disambiguator>,
     path_str: String,
@@ -384,10 +389,12 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
     fn variant_field<'path>(
         &self,
         path_str: &'path str,
+        item_id: ItemId,
         module_id: DefId,
     ) -> Result<(Res, Option<ItemFragment>), ErrorKind<'path>> {
         let tcx = self.cx.tcx;
         let no_res = || ResolutionFailure::NotResolved {
+            item_id,
             module_id,
             partial_res: None,
             unresolved: path_str.into(),
@@ -410,13 +417,7 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
             // If there's no third component, we saw `[a::b]` before and it failed to resolve.
             // So there's no partial res.
             .ok_or_else(no_res)?;
-        let ty_res = self
-            .cx
-            .enter_resolver(|resolver| {
-                resolver.resolve_str_path_error(DUMMY_SP, &path, TypeNS, module_id)
-            })
-            .and_then(|(_, res)| res.try_into())
-            .map_err(|()| no_res())?;
+        let ty_res = self.resolve_path(&path, TypeNS, item_id, module_id).ok_or_else(no_res)?;
 
         match ty_res {
             Res::Def(DefKind::Enum, did) => {
@@ -437,8 +438,9 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
                             Ok((ty_res, Some(ItemFragment(FragmentKind::VariantField, field.did))))
                         } else {
                             Err(ResolutionFailure::NotResolved {
+                                item_id,
                                 module_id,
-                                partial_res: Some(Res::Def(DefKind::Enum, def.did)),
+                                partial_res: Some(Res::Def(DefKind::Enum, def.did())),
                                 unresolved: variant_field_name.to_string().into(),
                             }
                             .into())
@@ -448,6 +450,7 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
                 }
             }
             _ => Err(ResolutionFailure::NotResolved {
+                item_id,
                 module_id,
                 partial_res: Some(ty_res),
                 unresolved: variant_name.to_string().into(),
@@ -465,7 +468,7 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
     ) -> Option<(Res, ItemFragment)> {
         let tcx = self.cx.tcx;
 
-        prim_ty.impls(tcx).into_iter().find_map(|&impl_| {
+        prim_ty.impls(tcx).find_map(|impl_| {
             tcx.associated_items(impl_)
                 .find_by_name_and_namespace(tcx, Ident::with_dummy_span(item_name), ns, impl_)
                 .map(|item| {
@@ -481,15 +484,14 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
     fn resolve_macro(
         &self,
         path_str: &'a str,
+        item_id: ItemId,
         module_id: DefId,
     ) -> Result<Res, ResolutionFailure<'a>> {
         self.cx.enter_resolver(|resolver| {
-            // NOTE: this needs 2 separate lookups because `resolve_str_path_error` doesn't take
+            // NOTE: this needs 2 separate lookups because `resolve_rustdoc_path` doesn't take
             // lexical scope into account (it ignores all macros not defined at the mod-level)
             debug!("resolving {} as a macro in the module {:?}", path_str, module_id);
-            if let Ok((_, res)) =
-                resolver.resolve_str_path_error(DUMMY_SP, path_str, MacroNS, module_id)
-            {
+            if let Some(res) = resolver.resolve_rustdoc_path(path_str, MacroNS, module_id) {
                 // don't resolve builtins like `#[derive]`
                 if let Ok(res) = res.try_into() {
                     return Ok(res);
@@ -499,6 +501,7 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
                 return Ok(res.try_into().unwrap());
             }
             Err(ResolutionFailure::NotResolved {
+                item_id,
                 module_id,
                 partial_res: None,
                 unresolved: path_str.into(),
@@ -506,24 +509,60 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
         })
     }
 
-    /// Convenience wrapper around `resolve_str_path_error`.
+    fn resolve_self_ty(&self, path_str: &str, ns: Namespace, item_id: ItemId) -> Option<Res> {
+        if ns != TypeNS || path_str != "Self" {
+            return None;
+        }
+
+        let tcx = self.cx.tcx;
+        item_id
+            .as_def_id()
+            .map(|def_id| match tcx.def_kind(def_id) {
+                def_kind @ (DefKind::AssocFn
+                | DefKind::AssocConst
+                | DefKind::AssocTy
+                | DefKind::Variant
+                | DefKind::Field) => {
+                    let parent_def_id = tcx.parent(def_id).expect("nested item has no parent");
+                    if def_kind == DefKind::Field && tcx.def_kind(parent_def_id) == DefKind::Variant
+                    {
+                        tcx.parent(parent_def_id).expect("variant has no parent")
+                    } else {
+                        parent_def_id
+                    }
+                }
+                _ => def_id,
+            })
+            .and_then(|self_id| match tcx.def_kind(self_id) {
+                DefKind::Impl => self.def_id_to_res(self_id),
+                def_kind => Some(Res::Def(def_kind, self_id)),
+            })
+    }
+
+    /// Convenience wrapper around `resolve_rustdoc_path`.
     ///
     /// This also handles resolving `true` and `false` as booleans.
-    /// NOTE: `resolve_str_path_error` knows only about paths, not about types.
+    /// NOTE: `resolve_rustdoc_path` knows only about paths, not about types.
     /// Associated items will never be resolved by this function.
-    fn resolve_path(&self, path_str: &str, ns: Namespace, module_id: DefId) -> Option<Res> {
-        let result = self.cx.enter_resolver(|resolver| {
-            resolver
-                .resolve_str_path_error(DUMMY_SP, path_str, ns, module_id)
-                .and_then(|(_, res)| res.try_into())
-        });
-        debug!("{} resolved to {:?} in namespace {:?}", path_str, result, ns);
-        match result {
-            // resolver doesn't know about true, false, and types that aren't paths (e.g. `()`)
-            // manually as bool
-            Err(()) => resolve_primitive(path_str, ns),
-            Ok(res) => Some(res),
+    fn resolve_path(
+        &self,
+        path_str: &str,
+        ns: Namespace,
+        item_id: ItemId,
+        module_id: DefId,
+    ) -> Option<Res> {
+        if let res @ Some(..) = self.resolve_self_ty(path_str, ns, item_id) {
+            return res;
         }
+
+        // Resolver doesn't know about true, false, and types that aren't paths (e.g. `()`).
+        let result = self
+            .cx
+            .enter_resolver(|resolver| resolver.resolve_rustdoc_path(path_str, ns, module_id))
+            .and_then(|res| res.try_into().ok())
+            .or_else(|| resolve_primitive(path_str, ns));
+        debug!("{} resolved to {:?} in namespace {:?}", path_str, result, ns);
+        result
     }
 
     /// Resolves a string as a path within a particular namespace. Returns an
@@ -532,10 +571,11 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
         &mut self,
         path_str: &'path str,
         ns: Namespace,
+        item_id: ItemId,
         module_id: DefId,
         user_fragment: &Option<String>,
     ) -> Result<(Res, Option<UrlFragment>), ErrorKind<'path>> {
-        let (res, rustdoc_fragment) = self.resolve_inner(path_str, ns, module_id)?;
+        let (res, rustdoc_fragment) = self.resolve_inner(path_str, ns, item_id, module_id)?;
         let chosen_fragment = match (user_fragment, rustdoc_fragment) {
             (Some(_), Some(r_frag)) => {
                 let diag_res = match r_frag {
@@ -555,9 +595,10 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
         &mut self,
         path_str: &'path str,
         ns: Namespace,
+        item_id: ItemId,
         module_id: DefId,
     ) -> Result<(Res, Option<ItemFragment>), ErrorKind<'path>> {
-        if let Some(res) = self.resolve_path(path_str, ns, module_id) {
+        if let Some(res) = self.resolve_path(path_str, ns, item_id, module_id) {
             match res {
                 // FIXME(#76467): make this fallthrough to lookup the associated
                 // item a separate function.
@@ -585,6 +626,7 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
             .ok_or_else(|| {
                 debug!("found no `::`, assumming {} was correctly not in scope", item_name);
                 ResolutionFailure::NotResolved {
+                    item_id,
                     module_id,
                     partial_res: None,
                     unresolved: item_str.into(),
@@ -596,7 +638,7 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
         // error instead and special case *only* modules with `#[doc(primitive)]`, not all
         // primitives.
         resolve_primitive(&path_root, TypeNS)
-            .or_else(|| self.resolve_path(&path_root, TypeNS, module_id))
+            .or_else(|| self.resolve_path(&path_root, TypeNS, item_id, module_id))
             .and_then(|ty_res| {
                 let (res, fragment) =
                     self.resolve_associated_item(ty_res, item_name, ns, module_id)?;
@@ -605,9 +647,10 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
             })
             .unwrap_or_else(|| {
                 if ns == Namespace::ValueNS {
-                    self.variant_field(path_str, module_id)
+                    self.variant_field(path_str, item_id, module_id)
                 } else {
                     Err(ResolutionFailure::NotResolved {
+                        item_id,
                         module_id,
                         partial_res: None,
                         unresolved: path_root.into(),
@@ -638,7 +681,7 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
             ty::FnDef(..) => panic!("type alias to a function definition"),
             ty::FnPtr(_) => Res::Primitive(Fn),
             ty::Never => Res::Primitive(Never),
-            ty::Adt(&ty::AdtDef { did, .. }, _) | ty::Foreign(did) => {
+            ty::Adt(ty::AdtDef(Interned(&ty::AdtDefData { did, .. }, _)), _) | ty::Foreign(did) => {
                 Res::Def(self.cx.tcx.def_kind(did), did)
             }
             ty::Projection(_)
@@ -723,10 +766,27 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
                 self.resolve_associated_item(res, item_name, ns, module_id)
             }
             Res::Def(
-                DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::ForeignTy,
+                def_kind @ (DefKind::Struct | DefKind::Union | DefKind::Enum | DefKind::ForeignTy),
                 did,
             ) => {
                 debug!("looking for associated item named {} for item {:?}", item_name, did);
+                // Checks if item_name is a variant of the `SomeItem` enum
+                if ns == TypeNS && def_kind == DefKind::Enum {
+                    match tcx.type_of(did).kind() {
+                        ty::Adt(adt_def, _) => {
+                            for variant in adt_def.variants() {
+                                if variant.name == item_name {
+                                    return Some((
+                                        root_res,
+                                        ItemFragment(FragmentKind::Variant, variant.def_id),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+
                 // Checks if item_name belongs to `impl SomeItem`
                 let assoc_item = tcx
                     .inherent_impls(did)
@@ -813,17 +873,18 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
         &mut self,
         ns: Namespace,
         path_str: &str,
+        item_id: ItemId,
         module_id: DefId,
         extra_fragment: &Option<String>,
     ) -> Option<Res> {
         // resolve() can't be used for macro namespace
         let result = match ns {
             Namespace::MacroNS => self
-                .resolve_macro(path_str, module_id)
+                .resolve_macro(path_str, item_id, module_id)
                 .map(|res| (res, None))
                 .map_err(ErrorKind::from),
             Namespace::TypeNS | Namespace::ValueNS => {
-                self.resolve(path_str, ns, module_id, extra_fragment)
+                self.resolve(path_str, ns, item_id, module_id, extra_fragment)
             }
         };
 
@@ -882,7 +943,7 @@ fn resolve_associated_trait_item<'a>(
 ///
 /// This function returns `None` if no associated item was found in the impl.
 /// This can occur when the trait associated item has a default value that is
-/// not overriden in the impl.
+/// not overridden in the impl.
 ///
 /// This is just a wrapper around [`TyCtxt::impl_item_implementor_ids()`] and
 /// [`TyCtxt::associated_item()`] (with some helpful logging added).
@@ -936,8 +997,8 @@ fn trait_impls_for<'a>(
             let saw_impl = impl_type == ty
                 || match (impl_type.kind(), ty.kind()) {
                     (ty::Adt(impl_def, _), ty::Adt(ty_def, _)) => {
-                        debug!("impl def_id: {:?}, ty def_id: {:?}", impl_def.did, ty_def.did);
-                        impl_def.did == ty_def.did
+                        debug!("impl def_id: {:?}, ty def_id: {:?}", impl_def.did(), ty_def.did());
+                        impl_def.did() == ty_def.did()
                     }
                     _ => false,
                 };
@@ -970,53 +1031,6 @@ impl<'a, 'tcx> DocVisitor for LinkCollector<'a, 'tcx> {
             trace!("got parent node for {:?} {:?}, id {:?}", item.type_(), item.name, item.def_id);
         }
 
-        // find item's parent to resolve `Self` in item's docs below
-        debug!("looking for the `Self` type");
-        let self_id = match item.def_id.as_def_id() {
-            None => None,
-            Some(did)
-                if (matches!(self.cx.tcx.def_kind(did), DefKind::Field)
-                    && matches!(
-                        self.cx.tcx.def_kind(self.cx.tcx.parent(did).unwrap()),
-                        DefKind::Variant
-                    )) =>
-            {
-                self.cx.tcx.parent(did).and_then(|item_id| self.cx.tcx.parent(item_id))
-            }
-            Some(did)
-                if matches!(
-                    self.cx.tcx.def_kind(did),
-                    DefKind::AssocConst
-                        | DefKind::AssocFn
-                        | DefKind::AssocTy
-                        | DefKind::Variant
-                        | DefKind::Field
-                ) =>
-            {
-                self.cx.tcx.parent(did)
-            }
-            Some(did) => Some(did),
-        };
-
-        // FIXME(jynelson): this shouldn't go through stringification, rustdoc should just use the DefId directly
-        let self_name = self_id.and_then(|self_id| {
-            if matches!(self.cx.tcx.def_kind(self_id), DefKind::Impl) {
-                // using `ty.to_string()` (or any variant) has issues with raw idents
-                let ty = self.cx.tcx.type_of(self_id);
-                let name = match ty.kind() {
-                    ty::Adt(def, _) => Some(self.cx.tcx.item_name(def.did).to_string()),
-                    other if other.is_primitive() => Some(ty.to_string()),
-                    _ => None,
-                };
-                debug!("using type_of(): {:?}", name);
-                name
-            } else {
-                let name = self.cx.tcx.opt_item_name(self_id).map(|sym| sym.to_string());
-                debug!("using item_name(): {:?}", name);
-                name
-            }
-        });
-
         let inner_docs = item.inner_docs(self.cx.tcx);
 
         if item.is_mod() && inner_docs {
@@ -1038,7 +1052,7 @@ impl<'a, 'tcx> DocVisitor for LinkCollector<'a, 'tcx> {
             // NOTE: if there are links that start in one crate and end in another, this will not resolve them.
             // This is a degenerate case and it's not supported by rustdoc.
             for md_link in markdown_links(&doc) {
-                let link = self.resolve_link(&item, &doc, &self_name, parent_node, krate, md_link);
+                let link = self.resolve_link(&item, &doc, parent_node, krate, md_link);
                 if let Some(link) = link {
                     self.cx.cache.intra_doc_links.entry(item.def_id).or_default().push(link);
                 }
@@ -1172,7 +1186,6 @@ impl LinkCollector<'_, '_> {
         &mut self,
         item: &Item,
         dox: &str,
-        self_name: &Option<String>,
         parent_node: Option<DefId>,
         krate: CrateNum,
         ori_link: MarkdownLink,
@@ -1240,19 +1253,8 @@ impl LinkCollector<'_, '_> {
         };
 
         let resolved_self;
-        // replace `Self` with suitable item's parent name
-        let is_lone_self = path_str == "Self";
         let is_lone_crate = path_str == "crate";
-        if path_str.starts_with("Self::") || is_lone_self {
-            if let Some(ref name) = self_name {
-                if is_lone_self {
-                    path_str = name;
-                } else {
-                    resolved_self = format!("{}::{}", name, &path_str[6..]);
-                    path_str = &resolved_self;
-                }
-            }
-        } else if path_str.starts_with("crate::") || is_lone_crate {
+        if path_str.starts_with("crate::") || is_lone_crate {
             use rustc_span::def_id::CRATE_DEF_INDEX;
 
             // HACK(jynelson): rustc_resolve thinks that `crate` is the crate currently being documented.
@@ -1272,6 +1274,7 @@ impl LinkCollector<'_, '_> {
 
         let (mut res, fragment) = self.resolve_with_disambiguator_cached(
             ResolutionInfo {
+                item_id: item.def_id,
                 module_id,
                 dis: disambiguator,
                 path_str: path_str.to_owned(),
@@ -1434,7 +1437,7 @@ impl LinkCollector<'_, '_> {
     ) {
         // The resolved item did not match the disambiguator; give a better error than 'not found'
         let msg = format!("incompatible link kind for `{}`", path_str);
-        let callback = |diag: &mut DiagnosticBuilder<'_>, sp: Option<rustc_span::Span>| {
+        let callback = |diag: &mut Diagnostic, sp: Option<rustc_span::Span>| {
             let note = format!(
                 "this link resolved to {} {}, which is not {} {}",
                 resolved.article(),
@@ -1514,12 +1517,13 @@ impl LinkCollector<'_, '_> {
     ) -> Option<(Res, Option<UrlFragment>)> {
         let disambiguator = key.dis;
         let path_str = &key.path_str;
+        let item_id = key.item_id;
         let base_node = key.module_id;
         let extra_fragment = &key.extra_fragment;
 
         match disambiguator.map(Disambiguator::ns) {
             Some(expected_ns @ (ValueNS | TypeNS)) => {
-                match self.resolve(path_str, expected_ns, base_node, extra_fragment) {
+                match self.resolve(path_str, expected_ns, item_id, base_node, extra_fragment) {
                     Ok(res) => Some(res),
                     Err(ErrorKind::Resolve(box mut kind)) => {
                         // We only looked in one namespace. Try to give a better error if possible.
@@ -1528,9 +1532,13 @@ impl LinkCollector<'_, '_> {
                             // FIXME: really it should be `resolution_failure` that does this, not `resolve_with_disambiguator`
                             // See https://github.com/rust-lang/rust/pull/76955#discussion_r493953382 for a good approach
                             for new_ns in [other_ns, MacroNS] {
-                                if let Some(res) =
-                                    self.check_full_res(new_ns, path_str, base_node, extra_fragment)
-                                {
+                                if let Some(res) = self.check_full_res(
+                                    new_ns,
+                                    path_str,
+                                    item_id,
+                                    base_node,
+                                    extra_fragment,
+                                ) {
                                     kind = ResolutionFailure::WrongNamespace { res, expected_ns };
                                     break;
                                 }
@@ -1552,9 +1560,15 @@ impl LinkCollector<'_, '_> {
                 // Try everything!
                 let mut candidates = PerNS {
                     macro_ns: self
-                        .resolve_macro(path_str, base_node)
+                        .resolve_macro(path_str, item_id, base_node)
                         .map(|res| (res, extra_fragment.clone().map(UrlFragment::UserWritten))),
-                    type_ns: match self.resolve(path_str, TypeNS, base_node, extra_fragment) {
+                    type_ns: match self.resolve(
+                        path_str,
+                        TypeNS,
+                        item_id,
+                        base_node,
+                        extra_fragment,
+                    ) {
                         Ok(res) => {
                             debug!("got res in TypeNS: {:?}", res);
                             Ok(res)
@@ -1565,7 +1579,13 @@ impl LinkCollector<'_, '_> {
                         }
                         Err(ErrorKind::Resolve(box kind)) => Err(kind),
                     },
-                    value_ns: match self.resolve(path_str, ValueNS, base_node, extra_fragment) {
+                    value_ns: match self.resolve(
+                        path_str,
+                        ValueNS,
+                        item_id,
+                        base_node,
+                        extra_fragment,
+                    ) {
                         Ok(res) => Ok(res),
                         Err(ErrorKind::AnchorFailure(msg)) => {
                             anchor_failure(self.cx, diag, msg);
@@ -1624,14 +1644,18 @@ impl LinkCollector<'_, '_> {
                 }
             }
             Some(MacroNS) => {
-                match self.resolve_macro(path_str, base_node) {
+                match self.resolve_macro(path_str, item_id, base_node) {
                     Ok(res) => Some((res, extra_fragment.clone().map(UrlFragment::UserWritten))),
                     Err(mut kind) => {
                         // `resolve_macro` only looks in the macro namespace. Try to give a better error if possible.
                         for ns in [TypeNS, ValueNS] {
-                            if let Some(res) =
-                                self.check_full_res(ns, path_str, base_node, extra_fragment)
-                            {
+                            if let Some(res) = self.check_full_res(
+                                ns,
+                                path_str,
+                                item_id,
+                                base_node,
+                                extra_fragment,
+                            ) {
                                 kind =
                                     ResolutionFailure::WrongNamespace { res, expected_ns: MacroNS };
                                 break;
@@ -1714,7 +1738,7 @@ impl Disambiguator {
                 "union" => Kind(DefKind::Union),
                 "module" | "mod" => Kind(DefKind::Mod),
                 "const" | "constant" => Kind(DefKind::Const),
-                "static" => Kind(DefKind::Static),
+                "static" => Kind(DefKind::Static(Mutability::Not)),
                 "function" | "fn" | "method" => Kind(DefKind::Fn),
                 "derive" => Kind(DefKind::Macro(MacroKind::Derive)),
                 "type" => NS(Namespace::TypeNS),
@@ -1866,15 +1890,13 @@ fn report_diagnostic(
     lint: &'static Lint,
     msg: &str,
     DiagnosticInfo { item, ori_link: _, dox, link_range }: &DiagnosticInfo<'_>,
-    decorate: impl FnOnce(&mut DiagnosticBuilder<'_>, Option<rustc_span::Span>),
+    decorate: impl FnOnce(&mut Diagnostic, Option<rustc_span::Span>),
 ) {
-    let hir_id = match DocContext::as_local_hir_id(tcx, item.def_id) {
-        Some(hir_id) => hir_id,
-        None => {
-            // If non-local, no need to check anything.
-            info!("ignoring warning from parent crate: {}", msg);
-            return;
-        }
+    let Some(hir_id) = DocContext::as_local_hir_id(tcx, item.def_id)
+    else {
+        // If non-local, no need to check anything.
+        info!("ignoring warning from parent crate: {}", msg);
+        return;
     };
 
     let sp = item.attr_span(tcx);
@@ -1958,11 +1980,16 @@ fn resolution_failure(
                 }
                 variants_seen.push(variant);
 
-                if let ResolutionFailure::NotResolved { module_id, partial_res, unresolved } =
-                    &mut failure
+                if let ResolutionFailure::NotResolved {
+                    item_id,
+                    module_id,
+                    partial_res,
+                    unresolved,
+                } = &mut failure
                 {
                     use DefKind::*;
 
+                    let item_id = *item_id;
                     let module_id = *module_id;
                     // FIXME(jynelson): this might conflict with my `Self` fix in #76467
                     // FIXME: maybe use itertools `collect_tuple` instead?
@@ -1984,7 +2011,8 @@ fn resolution_failure(
                         };
                         name = start;
                         for ns in [TypeNS, ValueNS, MacroNS] {
-                            if let Some(res) = collector.check_full_res(ns, start, module_id, &None)
+                            if let Some(res) =
+                                collector.check_full_res(ns, start, item_id, module_id, &None)
                             {
                                 debug!("found partial_res={:?}", res);
                                 *partial_res = Some(res);
@@ -2064,7 +2092,7 @@ fn resolution_failure(
                                 return;
                             }
                             Trait | TyAlias | ForeignTy | OpaqueTy | TraitAlias | TyParam
-                            | Static => "associated item",
+                            | Static(_) => "associated item",
                             Impl | GlobalAsm => unreachable!("not a path"),
                         }
                     } else {
@@ -2098,8 +2126,15 @@ fn resolution_failure(
                         )
                     }
                     ResolutionFailure::NoParentItem => {
-                        diag.level = rustc_errors::Level::Bug;
-                        "all intra-doc links should have a parent item".to_owned()
+                        // FIXME(eddyb) this doesn't belong here, whatever made
+                        // the `ResolutionFailure::NoParentItem` should emit an
+                        // immediate or delayed `span_bug` about the issue.
+                        tcx.sess.delay_span_bug(
+                            sp.unwrap_or(DUMMY_SP),
+                            "intra-doc link missing parent item",
+                        );
+
+                        "BUG: all intra-doc links should have a parent item".to_owned()
                     }
                     ResolutionFailure::MalformedGenerics(variant) => match variant {
                         MalformedGenerics::UnbalancedAngleBrackets => {
@@ -2233,7 +2268,7 @@ fn ambiguity_error(
 /// disambiguator.
 fn suggest_disambiguator(
     res: Res,
-    diag: &mut DiagnosticBuilder<'_>,
+    diag: &mut Diagnostic,
     path_str: &str,
     ori_link: &str,
     sp: Option<rustc_span::Span>,

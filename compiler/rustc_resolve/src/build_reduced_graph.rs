@@ -9,7 +9,7 @@ use crate::def_collector::collect_definitions;
 use crate::imports::{Import, ImportKind};
 use crate::macros::{MacroRulesBinding, MacroRulesScope, MacroRulesScopeRef};
 use crate::Namespace::{self, MacroNS, TypeNS, ValueNS};
-use crate::{CrateLint, Determinacy, ExternPreludeEntry, Module, ModuleKind, ModuleOrUniformRoot};
+use crate::{Determinacy, ExternPreludeEntry, Finalize, Module, ModuleKind, ModuleOrUniformRoot};
 use crate::{NameBinding, NameBindingKind, ParentScope, PathResult, PerNS, ResolutionError};
 use crate::{Resolver, ResolverArenas, Segment, ToNameBinding, VisResolutionError};
 
@@ -235,16 +235,16 @@ impl<'a> AsMut<Resolver<'a>> for BuildReducedGraphVisitor<'a, '_> {
 
 impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
     fn resolve_visibility(&mut self, vis: &ast::Visibility) -> ty::Visibility {
-        self.resolve_visibility_speculative(vis, false).unwrap_or_else(|err| {
+        self.try_resolve_visibility(vis, true).unwrap_or_else(|err| {
             self.r.report_vis_error(err);
             ty::Visibility::Public
         })
     }
 
-    fn resolve_visibility_speculative<'ast>(
+    fn try_resolve_visibility<'ast>(
         &mut self,
         vis: &'ast ast::Visibility,
-        speculative: bool,
+        finalize: bool,
     ) -> Result<ty::Visibility, VisResolutionError<'ast>> {
         let parent_scope = &self.parent_scope;
         match vis.kind {
@@ -296,13 +296,11 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                     &segments,
                     Some(TypeNS),
                     parent_scope,
-                    !speculative,
-                    path.span,
-                    CrateLint::SimplePath(id),
+                    if finalize { Finalize::SimplePath(id, path.span) } else { Finalize::No },
                 ) {
                     PathResult::Module(ModuleOrUniformRoot::Module(module)) => {
                         let res = module.res().expect("visibility resolved to unnamed block");
-                        if !speculative {
+                        if finalize {
                             self.r.record_partial_res(id, PartialRes::new(res));
                         }
                         if module.is_normal() {
@@ -703,8 +701,8 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
             }
 
             // These items live in the value namespace.
-            ItemKind::Static(..) => {
-                let res = Res::Def(DefKind::Static, def_id);
+            ItemKind::Static(_, mt, _) => {
+                let res = Res::Def(DefKind::Static(mt), def_id);
                 self.r.define(parent, ident, ValueNS, (res, vis, sp, expansion));
             }
             ItemKind::Const(..) => {
@@ -772,7 +770,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                         // correct visibilities for unnamed field placeholders specifically, so the
                         // constructor visibility should still be determined correctly.
                         let field_vis = self
-                            .resolve_visibility_speculative(&field.vis, true)
+                            .try_resolve_visibility(&field.vis, false)
                             .unwrap_or(ty::Visibility::Public);
                         if ctor_vis.is_at_least(field_vis, &*self.r) {
                             ctor_vis = field_vis;
@@ -909,7 +907,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
         let def_id = local_def_id.to_def_id();
         let (def_kind, ns) = match item.kind {
             ForeignItemKind::Fn(..) => (DefKind::Fn, ValueNS),
-            ForeignItemKind::Static(..) => (DefKind::Static, ValueNS),
+            ForeignItemKind::Static(_, mt, _) => (DefKind::Static(mt), ValueNS),
             ForeignItemKind::TyAlias(..) => (DefKind::ForeignTy, TypeNS),
             ForeignItemKind::MacCall(_) => unreachable!(),
         };
@@ -940,7 +938,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
     /// Builds the reduced graph for a single item in an external crate.
     fn build_reduced_graph_for_external_crate_res(&mut self, child: ModChild) {
         let parent = self.parent_scope.module;
-        let ModChild { ident, res, vis, span } = child;
+        let ModChild { ident, res, vis, span, macro_rules } = child;
         let res = res.expect_non_local();
         let expansion = self.parent_scope.expansion;
         // Record primary definitions.
@@ -965,14 +963,16 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
             Res::Def(
                 DefKind::Fn
                 | DefKind::AssocFn
-                | DefKind::Static
+                | DefKind::Static(_)
                 | DefKind::Const
                 | DefKind::AssocConst
                 | DefKind::Ctor(..),
                 _,
             ) => self.r.define(parent, ident, ValueNS, (res, vis, span, expansion)),
             Res::Def(DefKind::Macro(..), _) | Res::NonMacroAttr(..) => {
-                self.r.define(parent, ident, MacroNS, (res, vis, span, expansion))
+                if !macro_rules {
+                    self.r.define(parent, ident, MacroNS, (res, vis, span, expansion))
+                }
             }
             Res::Def(
                 DefKind::TyParam
@@ -1068,8 +1068,9 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                             .emit();
                     }
                 }
-                let ill_formed =
-                    |span| struct_span_err!(self.r.session, span, E0466, "bad macro import").emit();
+                let ill_formed = |span| {
+                    struct_span_err!(self.r.session, span, E0466, "bad macro import").emit();
+                };
                 match attr.meta() {
                     Some(meta) => match meta.kind {
                         MetaItemKind::Word => {
@@ -1128,8 +1129,7 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
                     ident,
                     MacroNS,
                     &self.parent_scope,
-                    false,
-                    ident.span,
+                    None,
                 );
                 if let Ok(binding) = result {
                     let import = macro_use_import(self, ident.span);
@@ -1269,9 +1269,9 @@ impl<'a, 'b> BuildReducedGraphVisitor<'a, 'b> {
             let vis = match item.kind {
                 // Visibilities must not be resolved non-speculatively twice
                 // and we already resolved this one as a `fn` item visibility.
-                ItemKind::Fn(..) => self
-                    .resolve_visibility_speculative(&item.vis, true)
-                    .unwrap_or(ty::Visibility::Public),
+                ItemKind::Fn(..) => {
+                    self.try_resolve_visibility(&item.vis, false).unwrap_or(ty::Visibility::Public)
+                }
                 _ => self.resolve_visibility(&item.vis),
             };
             if vis != ty::Visibility::Public {

@@ -111,7 +111,10 @@ pub fn expand_test_or_bench(
             // These were a warning before #92959 and need to continue being that to avoid breaking
             // stable user code (#94508).
             ast::ItemKind::MacCall(_) => diag.struct_span_warn(attr_sp, msg),
-            _ => diag.struct_span_err(attr_sp, msg),
+            // `.forget_guarantee()` needed to get these two arms to match types. Because of how
+            // locally close the `.emit()` call is I'm comfortable with it, but if it can be
+            // reworked in the future to not need it, it'd be nice.
+            _ => diag.struct_span_err(attr_sp, msg).forget_guarantee(),
         };
         err.span_label(attr_sp, "the `#[test]` macro causes a a function to be run on a test and has no effect on non-functions")
             .span_label(item.span, format!("expected a non-associated function, found {} {}", item.kind.article(), item.kind.descr()))
@@ -263,6 +266,15 @@ pub fn expand_test_or_bench(
                                         "ignore",
                                         cx.expr_bool(sp, should_ignore(&cx.sess, &item)),
                                     ),
+                                    // ignore_message: Some("...") | None
+                                    field(
+                                        "ignore_message",
+                                        if let Some(msg) = should_ignore_message(cx, &item) {
+                                            cx.expr_some(sp, cx.expr_str(sp, msg))
+                                        } else {
+                                            cx.expr_none(sp)
+                                        },
+                                    ),
                                     // compile_fail: true | false
                                     field("compile_fail", cx.expr_bool(sp, false)),
                                     // no_run: true | false
@@ -363,6 +375,20 @@ enum ShouldPanic {
 
 fn should_ignore(sess: &Session, i: &ast::Item) -> bool {
     sess.contains_name(&i.attrs, sym::ignore)
+}
+
+fn should_ignore_message(cx: &ExtCtxt<'_>, i: &ast::Item) -> Option<Symbol> {
+    match cx.sess.find_by_name(&i.attrs, sym::ignore) {
+        Some(attr) => {
+            match attr.meta_item_list() {
+                // Handle #[ignore(bar = "foo")]
+                Some(_) => None,
+                // Handle #[ignore] and #[ignore = "message"]
+                None => attr.value_str(),
+            }
+        }
+        None => None,
+    }
 }
 
 fn should_panic(cx: &ExtCtxt<'_>, i: &ast::Item) -> ShouldPanic {

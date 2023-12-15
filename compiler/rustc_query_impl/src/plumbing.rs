@@ -272,11 +272,12 @@ macro_rules! define_queries {
                 let name = stringify!($name);
                 // Disable visible paths printing for performance reasons.
                 // Showing visible path instead of any path is not that important in production.
-                let description = ty::print::with_no_visible_paths(
-                    || ty::print::with_forced_impl_filename_line(
+                let description = ty::print::with_no_visible_paths!(
                     // Force filename-line mode to avoid invoking `type_of` query.
-                    || queries::$name::describe(tcx, key)
-                ));
+                    ty::print::with_forced_impl_filename_line!(
+                        queries::$name::describe(tcx, key)
+                    )
+                );
                 let description = if tcx.sess.verbose() {
                     format!("{} [{}]", description, name)
                 } else {
@@ -289,13 +290,11 @@ macro_rules! define_queries {
                 } else {
                     Some(key.default_span(*tcx))
                 };
-                let def_id = key.key_as_def_id();
-                let def_kind = def_id
+                // Use `tcx.hir().opt_def_kind()` to reduce the chance of
+                // accidentally triggering an infinite query loop.
+                let def_kind = key.key_as_def_id()
                     .and_then(|def_id| def_id.as_local())
-                    // Use `tcx.hir().opt_def_kind()` to reduce the chance of
-                    // accidentally triggering an infinite query loop.
-                    .and_then(|def_id| tcx.hir().opt_def_kind(def_id))
-                    .map(|def_kind| $crate::util::def_kind_to_simple_def_kind(def_kind));
+                    .and_then(|def_id| tcx.hir().opt_def_kind(def_id));
                 let hash = || {
                     let mut hcx = tcx.create_stable_hashing_context();
                     let mut hasher = StableHasher::new();
@@ -337,7 +336,7 @@ macro_rules! define_queries {
             }
 
             #[inline(always)]
-            fn query_cache<'a>(tcx: QueryCtxt<$tcx>) -> &'a QueryCacheStore<Self::Cache>
+            fn query_cache<'a>(tcx: QueryCtxt<$tcx>) -> &'a Self::Cache
                 where 'tcx:'a
             {
                 &tcx.query_caches.$name
@@ -538,12 +537,11 @@ macro_rules! define_queries_struct {
                 tcx: TyCtxt<$tcx>,
                 span: Span,
                 key: query_keys::$name<$tcx>,
-                lookup: QueryLookup,
                 mode: QueryMode,
             ) -> Option<query_stored::$name<$tcx>> {
                 opt_remap_env_constness!([$($modifiers)*][key]);
                 let qcx = QueryCtxt { tcx, queries: self };
-                get_query::<queries::$name<$tcx>, _>(qcx, span, key, lookup, mode)
+                get_query::<queries::$name<$tcx>, _>(qcx, span, key, mode)
             })*
         }
     };

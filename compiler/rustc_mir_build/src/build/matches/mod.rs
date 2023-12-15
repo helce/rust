@@ -444,7 +444,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             // we lower the guard.
             let target_block = self.cfg.start_new_block();
             let mut schedule_drops = true;
-            // We keep a stack of all of the bindings and type asciptions
+            // We keep a stack of all of the bindings and type ascriptions
             // from the parent candidates that we visit, that also need to
             // be bound for each candidate.
             traverse_candidate(
@@ -946,7 +946,7 @@ enum TestKind<'tcx> {
     /// Test what enum variant a value is.
     Switch {
         /// The enum type being tested.
-        adt_def: &'tcx ty::AdtDef,
+        adt_def: ty::AdtDef<'tcx>,
         /// The set of variants that we should create a branch for. We also
         /// create an additional "otherwise" case.
         variants: BitSet<VariantIdx>,
@@ -1597,13 +1597,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         }
 
         // Insert a Shallow borrow of any places that is switched on.
-        if let Some(fb) = fake_borrows {
-            if let Ok(match_place_resolved) =
-                match_place.clone().try_upvars_resolved(self.tcx, self.typeck_results)
-            {
-                let resolved_place = match_place_resolved.into_place(self.tcx, self.typeck_results);
-                fb.insert(resolved_place);
-            }
+        if let Some(fb) = fake_borrows && let Ok(match_place_resolved) =
+            match_place.clone().try_upvars_resolved(self.tcx, self.typeck_results)
+        {
+            let resolved_place = match_place_resolved.into_place(self.tcx, self.typeck_results);
+            fb.insert(resolved_place);
         }
 
         // perform the test, branching to one of N blocks. For each of
