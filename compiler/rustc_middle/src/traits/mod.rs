@@ -47,7 +47,8 @@ pub enum Reveal {
     /// impl. Concretely, that means that the following example will
     /// fail to compile:
     ///
-    /// ```
+    /// ```compile_fail,E0308
+    /// #![feature(specialization)]
     /// trait Assoc {
     ///     type Output;
     /// }
@@ -57,7 +58,7 @@ pub enum Reveal {
     /// }
     ///
     /// fn main() {
-    ///     let <() as Assoc>::Output = true;
+    ///     let x: <() as Assoc>::Output = true;
     /// }
     /// ```
     UserFacing,
@@ -515,7 +516,7 @@ pub type SelectionResult<'tcx, T> = Result<Option<T>, SelectionError<'tcx>>;
 /// For example, the obligation may be satisfied by a specific impl (case A),
 /// or it may be relative to some bound that is in scope (case B).
 ///
-/// ```
+/// ```ignore (illustrative)
 /// impl<T:Clone> Clone<T> for Option<T> { ... } // Impl_1
 /// impl<T:Clone> Clone<T> for Box<T> { ... }    // Impl_2
 /// impl Clone for i32 { ... }                   // Impl_3
@@ -961,4 +962,22 @@ pub enum MethodViolationCode {
 
     /// the method's receiver (`self` argument) can't be dispatched on
     UndispatchableReceiver,
+}
+
+/// These are the error cases for `codegen_fulfill_obligation`.
+#[derive(Copy, Clone, Debug, Hash, HashStable, Encodable, Decodable)]
+pub enum CodegenObligationError {
+    /// Ambiguity can happen when monomorphizing during trans
+    /// expands to some humongous type that never occurred
+    /// statically -- this humongous type can then overflow,
+    /// leading to an ambiguous result. So report this as an
+    /// overflow bug, since I believe this is the only case
+    /// where ambiguity can result.
+    Ambiguity,
+    /// This can trigger when we probe for the source of a `'static` lifetime requirement
+    /// on a trait object: `impl Foo for dyn Trait {}` has an implicit `'static` bound.
+    /// This can also trigger when we have a global bound that is not actually satisfied,
+    /// but was included during typeck due to the trivial_bounds feature.
+    Unimplemented,
+    FulfillmentError,
 }

@@ -1,5 +1,5 @@
 error[E0061]: this enum variant takes 1 argument but 2 arguments were supplied
-  --> $DIR/args-instead-of-tuple.rs:7:36
+  --> $DIR/args-instead-of-tuple.rs:5:36
    |
 LL |     let _: Result<(i32, i8), ()> = Ok(1, 2);
    |                                    ^^ -  - supplied 2 arguments
@@ -10,7 +10,7 @@ LL |     let _: Result<(i32, i8), ()> = Ok((1, 2));
    |                                       +    +
 
 error[E0061]: this enum variant takes 1 argument but 3 arguments were supplied
-  --> $DIR/args-instead-of-tuple.rs:9:46
+  --> $DIR/args-instead-of-tuple.rs:7:46
    |
 LL |     let _: Option<(i32, i8, &'static str)> = Some(1, 2, "hi");
    |                                              ^^^^ -  -  ---- supplied 3 arguments
@@ -21,18 +21,15 @@ LL |     let _: Option<(i32, i8, &'static str)> = Some((1, 2, "hi"));
    |                                                   +          +
 
 error[E0061]: this enum variant takes 1 argument but 0 arguments were supplied
-  --> $DIR/args-instead-of-tuple.rs:11:25
+  --> $DIR/args-instead-of-tuple.rs:9:25
    |
 LL |     let _: Option<()> = Some();
    |                         ^^^^-- supplied 0 arguments
-   |
-help: expected the unit value `()`; create it with empty parentheses
-   |
-LL |     let _: Option<()> = Some(());
-   |                              ++
+   |                         |
+   |                         expected 1 argument
 
 error[E0308]: mismatched types
-  --> $DIR/args-instead-of-tuple.rs:14:34
+  --> $DIR/args-instead-of-tuple.rs:12:34
    |
 LL |     let _: Option<(i32,)> = Some(3);
    |                                  ^ expected tuple, found integer
@@ -45,7 +42,7 @@ LL |     let _: Option<(i32,)> = Some((3,));
    |                                  + ++
 
 error[E0308]: mismatched types
-  --> $DIR/args-instead-of-tuple.rs:17:34
+  --> $DIR/args-instead-of-tuple.rs:15:34
    |
 LL |     let _: Option<(i32,)> = Some((3));
    |                                  ^^^ expected tuple, found integer
@@ -58,13 +55,13 @@ LL |     let _: Option<(i32,)> = Some((3,));
    |                                    +
 
 error[E0061]: this function takes 1 argument but 2 arguments were supplied
-  --> $DIR/args-instead-of-tuple.rs:20:5
+  --> $DIR/args-instead-of-tuple.rs:18:5
    |
 LL |     two_ints(1, 2);
    |     ^^^^^^^^ -  - supplied 2 arguments
    |
 note: function defined here
-  --> $DIR/args-instead-of-tuple.rs:25:4
+  --> $DIR/args-instead-of-tuple.rs:23:4
    |
 LL | fn two_ints(_: (i32, i32)) {
    |    ^^^^^^^^ -------------
@@ -74,13 +71,13 @@ LL |     two_ints((1, 2));
    |              +    +
 
 error[E0061]: this function takes 1 argument but 2 arguments were supplied
-  --> $DIR/args-instead-of-tuple.rs:22:5
+  --> $DIR/args-instead-of-tuple.rs:20:5
    |
 LL |     with_generic(3, 4);
    |     ^^^^^^^^^^^^ -  - supplied 2 arguments
    |
 note: function defined here
-  --> $DIR/args-instead-of-tuple.rs:28:4
+  --> $DIR/args-instead-of-tuple.rs:26:4
    |
 LL | fn with_generic<T: Copy + Send>((a, b): (i32, T)) {
    |    ^^^^^^^^^^^^                 ----------------
@@ -90,13 +87,13 @@ LL |     with_generic((3, 4));
    |                  +    +
 
 error[E0061]: this function takes 1 argument but 2 arguments were supplied
-  --> $DIR/args-instead-of-tuple.rs:31:9
+  --> $DIR/args-instead-of-tuple.rs:29:9
    |
 LL |         with_generic(a, b);
    |         ^^^^^^^^^^^^ -  - supplied 2 arguments
    |
 note: function defined here
-  --> $DIR/args-instead-of-tuple.rs:28:4
+  --> $DIR/args-instead-of-tuple.rs:26:4
    |
 LL | fn with_generic<T: Copy + Send>((a, b): (i32, T)) {
    |    ^^^^^^^^^^^^                 ----------------

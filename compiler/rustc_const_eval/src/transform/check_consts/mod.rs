@@ -61,19 +61,17 @@ impl<'mir, 'tcx> ConstCx<'mir, 'tcx> {
             && is_const_stable_const_fn(self.tcx, self.def_id().to_def_id())
     }
 
-    /// Returns the function signature of the item being const-checked if it is a `fn` or `const fn`.
-    pub fn fn_sig(&self) -> Option<&'tcx hir::FnSig<'tcx>> {
-        // Get this from the HIR map instead of a query to avoid cycle errors.
-        //
-        // FIXME: Is this still an issue?
-        let hir_map = self.tcx.hir();
-        let hir_id = hir_map.local_def_id_to_hir_id(self.def_id());
-        hir_map.fn_sig_by_hir_id(hir_id)
+    fn is_async(&self) -> bool {
+        self.tcx.asyncness(self.def_id()) == hir::IsAsync::Async
     }
 }
 
-pub fn rustc_allow_const_fn_unstable(tcx: TyCtxt<'_>, def_id: DefId, feature_gate: Symbol) -> bool {
-    let attrs = tcx.get_attrs(def_id);
+pub fn rustc_allow_const_fn_unstable(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    feature_gate: Symbol,
+) -> bool {
+    let attrs = tcx.hir().attrs(tcx.hir().local_def_id_to_hir_id(def_id));
     attr::rustc_allow_const_fn_unstable(&tcx.sess, attrs).any(|name| name == feature_gate)
 }
 

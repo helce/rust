@@ -222,7 +222,7 @@ impl<'mir, 'tcx> Checker<'mir, 'tcx> {
 
         // `async` functions cannot be `const fn`. This is checked during AST lowering, so there's
         // no need to emit duplicate errors here.
-        if is_async_fn(self.ccx) || body.generator.is_some() {
+        if self.ccx.is_async() || body.generator.is_some() {
             tcx.sess.delay_span_bug(body.span, "`async` functions cannot be `const fn`");
             return;
         }
@@ -312,11 +312,7 @@ impl<'mir, 'tcx> Checker<'mir, 'tcx> {
 
             Status::Unstable(gate) if self.tcx.features().enabled(gate) => {
                 let unstable_in_stable = self.ccx.is_const_stable_const_fn()
-                    && !super::rustc_allow_const_fn_unstable(
-                        self.tcx,
-                        self.def_id().to_def_id(),
-                        gate,
-                    );
+                    && !super::rustc_allow_const_fn_unstable(self.tcx, self.def_id(), gate);
                 if unstable_in_stable {
                     emit_unstable_in_stable_error(self.ccx, span, gate);
                 }
@@ -692,6 +688,7 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
         match statement.kind {
             StatementKind::Assign(..)
             | StatementKind::SetDiscriminant { .. }
+            | StatementKind::Deinit(..)
             | StatementKind::FakeRead(..)
             | StatementKind::StorageLive(_)
             | StatementKind::StorageDead(_)
@@ -712,7 +709,7 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
         match &terminator.kind {
             TerminatorKind::Call { func, args, fn_span, from_hir_call, .. } => {
                 let ConstCx { tcx, body, param_env, .. } = *self.ccx;
-                let caller = self.def_id().to_def_id();
+                let caller = self.def_id();
 
                 let fn_ty = func.ty(body, tcx);
 
@@ -796,7 +793,7 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
                             // trait.
                             let callee_trait = tcx.trait_of_item(callee);
                             if callee_trait.is_some()
-                                && tcx.has_attr(caller, sym::default_method_body_is_const)
+                                && tcx.has_attr(caller.to_def_id(), sym::default_method_body_is_const)
                                 && callee_trait == tcx.trait_of_item(caller)
                                 // Can only call methods when it's `<Self as TheTrait>::f`.
                                 && tcx.types.self_param == substs.type_at(0)
@@ -1056,12 +1053,8 @@ fn is_int_bool_or_char(ty: Ty<'_>) -> bool {
     ty.is_bool() || ty.is_integral() || ty.is_char()
 }
 
-fn is_async_fn(ccx: &ConstCx<'_, '_>) -> bool {
-    ccx.fn_sig().map_or(false, |sig| sig.header.asyncness == hir::IsAsync::Async)
-}
-
 fn emit_unstable_in_stable_error(ccx: &ConstCx<'_, '_>, span: Span, gate: Symbol) {
-    let attr_span = ccx.fn_sig().map_or(ccx.body.span, |sig| sig.span.shrink_to_lo());
+    let attr_span = ccx.tcx.def_span(ccx.def_id()).shrink_to_lo();
 
     ccx.tcx
         .sess

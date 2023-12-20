@@ -374,26 +374,33 @@ impl<T> Rc<T> {
         }
     }
 
-    /// Constructs a new `Rc<T>` using a closure `data_fn` that has access to a
-    /// weak reference to the constructing `Rc<T>`.
+    /// Constructs a new `Rc<T>` while giving you a `Weak<T>` to the allocation,
+    /// to allow you to construct a `T` which holds a weak pointer to itself.
     ///
     /// Generally, a structure circularly referencing itself, either directly or
-    /// indirectly, should not hold a strong reference to prevent a memory leak.
-    /// In `data_fn`, initialization of `T` can make use of the weak reference
-    /// by cloning and storing it inside `T` for use at a later time.
+    /// indirectly, should not hold a strong reference to itself to prevent a memory leak.
+    /// Using this function, you get access to the weak pointer during the
+    /// initialization of `T`, before the `Rc<T>` is created, such that you can
+    /// clone and store it inside the `T`.
+    ///
+    /// `new_cyclic` first allocates the managed allocation for the `Rc<T>`,
+    /// then calls your closure, giving it a `Weak<T>` to this allocation,
+    /// and only afterwards completes the construction of the `Rc<T>` by placing
+    /// the `T` returned from your closure into the allocation.
     ///
     /// Since the new `Rc<T>` is not fully-constructed until `Rc<T>::new_cyclic`
-    /// returns, calling [`upgrade`] on the weak reference inside `data_fn` will
+    /// returns, calling [`upgrade`] on the weak reference inside your closure will
     /// fail and result in a `None` value.
     ///
     /// # Panics
+    ///
     /// If `data_fn` panics, the panic is propagated to the caller, and the
     /// temporary [`Weak<T>`] is dropped normally.
     ///
     /// # Examples
     ///
     /// ```
-    /// #![allow(dead_code)]
+    /// # #![allow(dead_code)]
     /// use std::rc::{Rc, Weak};
     ///
     /// struct Gadget {
@@ -403,7 +410,12 @@ impl<T> Rc<T> {
     /// impl Gadget {
     ///     /// Construct a reference counted Gadget.
     ///     fn new() -> Rc<Self> {
-    ///         Rc::new_cyclic(|me| Gadget { me: me.clone() })
+    ///         // `me` is a `Weak<Gadget>` pointing at the new allocation of the
+    ///         // `Rc` we're constructing.
+    ///         Rc::new_cyclic(|me| {
+    ///             // Create the actual struct here.
+    ///             Gadget { me: me.clone() }
+    ///         })
     ///     }
     ///
     ///     /// Return a reference counted pointer to Self.
@@ -1956,6 +1968,25 @@ where
     }
 }
 
+#[stable(feature = "shared_from_str", since = "1.62.0")]
+impl From<Rc<str>> for Rc<[u8]> {
+    /// Converts a reference-counted string slice into a byte slice.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use std::rc::Rc;
+    /// let string: Rc<str> = Rc::from("eggplant");
+    /// let bytes: Rc<[u8]> = Rc::from(string);
+    /// assert_eq!("eggplant".as_bytes(), bytes.as_ref());
+    /// ```
+    #[inline]
+    fn from(rc: Rc<str>) -> Self {
+        // SAFETY: `str` has the same layout as `[u8]`.
+        unsafe { Rc::from_raw(Rc::into_raw(rc) as *const [u8]) }
+    }
+}
+
 #[stable(feature = "boxed_slice_try_from", since = "1.43.0")]
 impl<T, const N: usize> TryFrom<Rc<[T]>> for Rc<[T; N]> {
     type Error = Rc<[T]>;
@@ -2511,14 +2542,23 @@ trait RcInnerPtr {
     fn inc_strong(&self) {
         let strong = self.strong();
 
+        // We insert an `assume` here to hint LLVM at an otherwise
+        // missed optimization.
+        // SAFETY: The reference count will never be zero when this is
+        // called.
+        unsafe {
+            core::intrinsics::assume(strong != 0);
+        }
+
+        let strong = strong.wrapping_add(1);
+        self.strong_ref().set(strong);
+
         // We want to abort on overflow instead of dropping the value.
-        // The reference count will never be zero when this is called;
-        // nevertheless, we insert an abort here to hint LLVM at
-        // an otherwise missed optimization.
-        if strong == 0 || strong == usize::MAX {
+        // Checking for overflow after the store instead of before
+        // allows for slightly better code generation.
+        if core::intrinsics::unlikely(strong == 0) {
             abort();
         }
-        self.strong_ref().set(strong + 1);
     }
 
     #[inline]
@@ -2535,14 +2575,23 @@ trait RcInnerPtr {
     fn inc_weak(&self) {
         let weak = self.weak();
 
+        // We insert an `assume` here to hint LLVM at an otherwise
+        // missed optimization.
+        // SAFETY: The reference count will never be zero when this is
+        // called.
+        unsafe {
+            core::intrinsics::assume(weak != 0);
+        }
+
+        let weak = weak.wrapping_add(1);
+        self.weak_ref().set(weak);
+
         // We want to abort on overflow instead of dropping the value.
-        // The reference count will never be zero when this is called;
-        // nevertheless, we insert an abort here to hint LLVM at
-        // an otherwise missed optimization.
-        if weak == 0 || weak == usize::MAX {
+        // Checking for overflow after the store instead of before
+        // allows for slightly better code generation.
+        if core::intrinsics::unlikely(weak == 0) {
             abort();
         }
-        self.weak_ref().set(weak + 1);
     }
 
     #[inline]

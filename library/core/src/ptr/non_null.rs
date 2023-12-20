@@ -9,7 +9,7 @@ use crate::ops::{CoerceUnsized, DispatchFromDyn};
 use crate::ptr::Unique;
 use crate::slice::{self, SliceIndex};
 
-/// `*mut T` but non-zero and covariant.
+/// `*mut T` but non-zero and [covariant].
 ///
 /// This is often the correct thing to use when building data structures using
 /// raw pointers, but is ultimately more dangerous to use because of its additional
@@ -42,6 +42,7 @@ use crate::slice::{self, SliceIndex};
 /// it is your responsibility to ensure that `as_mut` is never called, and `as_ptr`
 /// is never used for mutation.
 ///
+/// [covariant]: https://doc.rust-lang.org/reference/subtyping.html
 /// [`PhantomData`]: crate::marker::PhantomData
 /// [`UnsafeCell<T>`]: crate::cell::UnsafeCell
 #[stable(feature = "nonnull", since = "1.25.0")]
@@ -114,7 +115,7 @@ impl<T: Sized> NonNull<T> {
     ///
     /// * You must enforce Rust's aliasing rules, since the returned lifetime `'a` is
     ///   arbitrarily chosen and does not necessarily reflect the actual lifetime of the data.
-    ///   In particular, for the duration of this lifetime, the memory the pointer points to must
+    ///   In particular, while this reference exists, the memory the pointer points to must
     ///   not get mutated (except inside `UnsafeCell`).
     ///
     /// This applies even if the result of this method is unused!
@@ -148,7 +149,7 @@ impl<T: Sized> NonNull<T> {
     ///
     /// * You must enforce Rust's aliasing rules, since the returned lifetime `'a` is
     ///   arbitrarily chosen and does not necessarily reflect the actual lifetime of the data.
-    ///   In particular, for the duration of this lifetime, the memory the pointer points to must
+    ///   In particular, while this reference exists, the memory the pointer points to must
     ///   not get accessed (read or written) through any other pointer.
     ///
     /// This applies even if the result of this method is unused!
@@ -256,8 +257,10 @@ impl<T: ?Sized> NonNull<T> {
 
     /// Gets the "address" portion of the pointer.
     ///
+    /// For more details see the equivalent method on a raw pointer, [`pointer::addr`].
+    ///
     /// This API and its claimed semantics are part of the Strict Provenance experiment,
-    /// see the [module documentation][crate::ptr] for details.
+    /// see the [`ptr` module documentation][crate::ptr].
     #[must_use]
     #[inline]
     #[unstable(feature = "strict_provenance", issue = "95228")]
@@ -272,8 +275,10 @@ impl<T: ?Sized> NonNull<T> {
 
     /// Creates a new pointer with the given address.
     ///
+    /// For more details see the equivalent method on a raw pointer, [`pointer::with_addr`].
+    ///
     /// This API and its claimed semantics are part of the Strict Provenance experiment,
-    /// see the [module documentation][crate::ptr] for details.
+    /// see the [`ptr` module documentation][crate::ptr].
     #[must_use]
     #[inline]
     #[unstable(feature = "strict_provenance", issue = "95228")]
@@ -287,10 +292,10 @@ impl<T: ?Sized> NonNull<T> {
 
     /// Creates a new pointer by mapping `self`'s address to a new one.
     ///
-    /// This is a convenience for [`with_addr`][Self::with_addr], see that method for details.
+    /// For more details see the equivalent method on a raw pointer, [`pointer::map_addr`].
     ///
     /// This API and its claimed semantics are part of the Strict Provenance experiment,
-    /// see the [module documentation][crate::ptr] for details.
+    /// see the [`ptr` module documentation][crate::ptr].
     #[must_use]
     #[inline]
     #[unstable(feature = "strict_provenance", issue = "95228")]
@@ -346,7 +351,7 @@ impl<T: ?Sized> NonNull<T> {
     ///
     /// * You must enforce Rust's aliasing rules, since the returned lifetime `'a` is
     ///   arbitrarily chosen and does not necessarily reflect the actual lifetime of the data.
-    ///   In particular, for the duration of this lifetime, the memory the pointer points to must
+    ///   In particular, while this reference exists, the memory the pointer points to must
     ///   not get mutated (except inside `UnsafeCell`).
     ///
     /// This applies even if the result of this method is unused!
@@ -396,7 +401,7 @@ impl<T: ?Sized> NonNull<T> {
     ///
     /// * You must enforce Rust's aliasing rules, since the returned lifetime `'a` is
     ///   arbitrarily chosen and does not necessarily reflect the actual lifetime of the data.
-    ///   In particular, for the duration of this lifetime, the memory the pointer points to must
+    ///   In particular, while this reference exists, the memory the pointer points to must
     ///   not get accessed (read or written) through any other pointer.
     ///
     /// This applies even if the result of this method is unused!
@@ -576,7 +581,7 @@ impl<T> NonNull<[T]> {
     ///
     /// * You must enforce Rust's aliasing rules, since the returned lifetime `'a` is
     ///   arbitrarily chosen and does not necessarily reflect the actual lifetime of the data.
-    ///   In particular, for the duration of this lifetime, the memory the pointer points to must
+    ///   In particular, while this reference exists, the memory the pointer points to must
     ///   not get mutated (except inside `UnsafeCell`).
     ///
     /// This applies even if the result of this method is unused!
@@ -622,7 +627,7 @@ impl<T> NonNull<[T]> {
     ///
     /// * You must enforce Rust's aliasing rules, since the returned lifetime `'a` is
     ///   arbitrarily chosen and does not necessarily reflect the actual lifetime of the data.
-    ///   In particular, for the duration of this lifetime, the memory the pointer points to must
+    ///   In particular, while this reference exists, the memory the pointer points to must
     ///   not get accessed (read or written) through any other pointer.
     ///
     /// This applies even if the result of this method is unused!

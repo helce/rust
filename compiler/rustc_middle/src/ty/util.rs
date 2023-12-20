@@ -6,14 +6,13 @@ use crate::ty::layout::IntegerExt;
 use crate::ty::query::TyCtxtAt;
 use crate::ty::subst::{GenericArgKind, Subst, SubstsRef};
 use crate::ty::{
-    self, Const, DebruijnIndex, DefIdTree, List, ReEarlyBound, Region, Ty, TyCtxt, TyKind::*,
+    self, Const, DebruijnIndex, DefIdTree, EarlyBinder, List, ReEarlyBound, Ty, TyCtxt, TyKind::*,
     TypeFoldable,
 };
 use rustc_apfloat::Float as _;
 use rustc_ast as ast;
 use rustc_attr::{self as attr, SignedInt, UnsignedInt};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_data_structures::intern::Interned;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
@@ -144,10 +143,10 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn res_generics_def_id(self, res: Res) -> Option<DefId> {
         match res {
             Res::Def(DefKind::Ctor(CtorOf::Variant, _), def_id) => {
-                Some(self.parent(def_id).and_then(|def_id| self.parent(def_id)).unwrap())
+                Some(self.parent(self.parent(def_id)))
             }
             Res::Def(DefKind::Variant | DefKind::Ctor(CtorOf::Struct, _), def_id) => {
-                Some(self.parent(def_id).unwrap())
+                Some(self.parent(def_id))
             }
             // Other `DefKind`s don't have generics and would ICE when calling
             // `generics_of`.
@@ -189,7 +188,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// if input `ty` is not a structure at all.
     pub fn struct_tail_without_normalization(self, ty: Ty<'tcx>) -> Ty<'tcx> {
         let tcx = self;
-        tcx.struct_tail_with_normalize(ty, |ty| ty)
+        tcx.struct_tail_with_normalize(ty, |ty| ty, || {})
     }
 
     /// Returns the deeply last field of nested structures, or the same type if
@@ -205,7 +204,7 @@ impl<'tcx> TyCtxt<'tcx> {
         param_env: ty::ParamEnv<'tcx>,
     ) -> Ty<'tcx> {
         let tcx = self;
-        tcx.struct_tail_with_normalize(ty, |ty| tcx.normalize_erasing_regions(param_env, ty))
+        tcx.struct_tail_with_normalize(ty, |ty| tcx.normalize_erasing_regions(param_env, ty), || {})
     }
 
     /// Returns the deeply last field of nested structures, or the same type if
@@ -222,6 +221,10 @@ impl<'tcx> TyCtxt<'tcx> {
         self,
         mut ty: Ty<'tcx>,
         mut normalize: impl FnMut(Ty<'tcx>) -> Ty<'tcx>,
+        // This is currently used to allow us to walk a ValTree
+        // in lockstep with the type in order to get the ValTree branch that
+        // corresponds to an unsized field.
+        mut f: impl FnMut() -> (),
     ) -> Ty<'tcx> {
         let recursion_limit = self.recursion_limit();
         for iteration in 0.. {
@@ -237,12 +240,16 @@ impl<'tcx> TyCtxt<'tcx> {
                         break;
                     }
                     match def.non_enum_variant().fields.last() {
-                        Some(f) => ty = f.ty(self, substs),
+                        Some(field) => {
+                            f();
+                            ty = field.ty(self, substs);
+                        }
                         None => break,
                     }
                 }
 
                 ty::Tuple(tys) if let Some((&last_ty, _)) = tys.split_last() => {
+                    f();
                     ty = last_ty;
                 }
 
@@ -418,24 +425,25 @@ impl<'tcx> TyCtxt<'tcx> {
         let result = iter::zip(item_substs, impl_substs)
             .filter(|&(_, k)| {
                 match k.unpack() {
-                    GenericArgKind::Lifetime(Region(Interned(ReEarlyBound(ref ebr), _))) => {
-                        !impl_generics.region_param(ebr, self).pure_wrt_drop
-                    }
-                    GenericArgKind::Type(Ty(Interned(
-                        ty::TyS { kind: ty::Param(ref pt), .. },
-                        _,
-                    ))) => !impl_generics.type_param(pt, self).pure_wrt_drop,
-                    GenericArgKind::Const(Const(Interned(
-                        ty::ConstS { val: ty::ConstKind::Param(ref pc), .. },
-                        _,
-                    ))) => !impl_generics.const_param(pc, self).pure_wrt_drop,
-                    GenericArgKind::Lifetime(_)
-                    | GenericArgKind::Type(_)
-                    | GenericArgKind::Const(_) => {
-                        // Not a type, const or region param: this should be reported
-                        // as an error.
-                        false
-                    }
+                    GenericArgKind::Lifetime(region) => match region.kind() {
+                        ReEarlyBound(ref ebr) => {
+                            !impl_generics.region_param(ebr, self).pure_wrt_drop
+                        }
+                        // Error: not a region param
+                        _ => false,
+                    },
+                    GenericArgKind::Type(ty) => match ty.kind() {
+                        ty::Param(ref pt) => !impl_generics.type_param(pt, self).pure_wrt_drop,
+                        // Error: not a type param
+                        _ => false,
+                    },
+                    GenericArgKind::Const(ct) => match ct.val() {
+                        ty::ConstKind::Param(ref pc) => {
+                            !impl_generics.const_param(pc, self).pure_wrt_drop
+                        }
+                        // Error: not a const param
+                        _ => false,
+                    },
                 }
             })
             .map(|(item_param, _)| item_param)
@@ -493,9 +501,7 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn typeck_root_def_id(self, def_id: DefId) -> DefId {
         let mut def_id = def_id;
         while self.is_typeck_child(def_id) {
-            def_id = self.parent(def_id).unwrap_or_else(|| {
-                bug!("closure {:?} has no parent", def_id);
-            });
+            def_id = self.parent(def_id);
         }
         def_id
     }
@@ -586,6 +592,32 @@ impl<'tcx> TyCtxt<'tcx> {
         trace!(?expanded_type);
         if visitor.found_recursion { Err(expanded_type) } else { Ok(expanded_type) }
     }
+
+    pub fn bound_type_of(self, def_id: DefId) -> EarlyBinder<Ty<'tcx>> {
+        EarlyBinder(self.type_of(def_id))
+    }
+
+    pub fn bound_fn_sig(self, def_id: DefId) -> EarlyBinder<ty::PolyFnSig<'tcx>> {
+        EarlyBinder(self.fn_sig(def_id))
+    }
+
+    pub fn bound_impl_trait_ref(self, def_id: DefId) -> Option<EarlyBinder<ty::TraitRef<'tcx>>> {
+        self.impl_trait_ref(def_id).map(|i| EarlyBinder(i))
+    }
+
+    pub fn bound_explicit_item_bounds(
+        self,
+        def_id: DefId,
+    ) -> EarlyBinder<&'tcx [(ty::Predicate<'tcx>, rustc_span::Span)]> {
+        EarlyBinder(self.explicit_item_bounds(def_id))
+    }
+
+    pub fn bound_item_bounds(
+        self,
+        def_id: DefId,
+    ) -> EarlyBinder<&'tcx ty::List<ty::Predicate<'tcx>>> {
+        EarlyBinder(self.item_bounds(def_id))
+    }
 }
 
 struct OpaqueTypeExpander<'tcx> {
@@ -617,7 +649,7 @@ impl<'tcx> OpaqueTypeExpander<'tcx> {
             let expanded_ty = match self.expanded_cache.get(&(def_id, substs)) {
                 Some(expanded_ty) => *expanded_ty,
                 None => {
-                    let generic_ty = self.tcx.type_of(def_id);
+                    let generic_ty = self.tcx.bound_type_of(def_id);
                     let concrete_ty = generic_ty.subst(self.tcx, substs);
                     let expanded_ty = self.fold_ty(concrete_ty);
                     self.expanded_cache.insert((def_id, substs), expanded_ty);
@@ -968,7 +1000,7 @@ impl<'tcx> ExplicitSelf<'tcx> {
     ///
     /// Examples:
     ///
-    /// ```
+    /// ```ignore (illustrative)
     /// impl<'a> Foo for &'a T {
     ///     // Legal declarations:
     ///     fn method1(self: &&'a T); // ExplicitSelf::ByReference
@@ -1158,9 +1190,8 @@ pub fn normalize_opaque_types<'tcx>(
 
 /// Determines whether an item is annotated with `doc(hidden)`.
 pub fn is_doc_hidden(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    tcx.get_attrs(def_id)
-        .iter()
-        .filter_map(|attr| if attr.has_name(sym::doc) { attr.meta_item_list() } else { None })
+    tcx.get_attrs(def_id, sym::doc)
+        .filter_map(|attr| attr.meta_item_list())
         .any(|items| items.iter().any(|item| item.has_name(sym::hidden)))
 }
 

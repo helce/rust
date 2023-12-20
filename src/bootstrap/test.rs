@@ -21,7 +21,6 @@ use crate::native;
 use crate::tool::{self, SourceType, Tool};
 use crate::toolstate::ToolState;
 use crate::util::{self, add_link_lib_path, dylib_path, dylib_path_var, output, t};
-use crate::Crate as CargoCrate;
 use crate::{envify, CLang, DocTests, GitRepo, Mode};
 
 const ADB_TEST_DIR: &str = "/data/tmp/work";
@@ -665,8 +664,6 @@ impl Step for Clippy {
             &[],
         );
 
-        // clippy tests need to know about the stage sysroot
-        cargo.env("SYSROOT", builder.sysroot(compiler));
         cargo.env("RUSTC_TEST_SUITE", builder.rustc(compiler));
         cargo.env("RUSTC_LIB_PATH", builder.rustc_libdir(compiler));
         let host_libs = builder.stage_out(compiler, Mode::ToolRustc).join(builder.cargo_dir());
@@ -1405,16 +1402,7 @@ note: if you're sure you want to do this, please open an issue as to why. In the
         targetflags.extend(builder.lld_flags(target));
         cmd.arg("--target-rustcflags").arg(targetflags.join(" "));
 
-        cmd.arg("--docck-python").arg(builder.python());
-
-        if builder.config.build.ends_with("apple-darwin") {
-            // Force /usr/bin/python3 on macOS for LLDB tests because we're loading the
-            // LLDB plugin's compiled module which only works with the system python
-            // (namely not Homebrew-installed python)
-            cmd.arg("--lldb-python").arg("/usr/bin/python3");
-        } else {
-            cmd.arg("--lldb-python").arg(builder.python());
-        }
+        cmd.arg("--python").arg(builder.python());
 
         if let Some(ref gdb) = builder.config.gdb {
             cmd.arg("--gdb").arg(gdb);
@@ -1589,9 +1577,7 @@ note: if you're sure you want to do this, please open an issue as to why. In the
             cmd.env("RUSTC_PROFILER_SUPPORT", "1");
         }
 
-        let tmp = builder.out.join("tmp");
-        std::fs::create_dir_all(&tmp).unwrap();
-        cmd.env("RUST_TEST_TMPDIR", tmp);
+        cmd.env("RUST_TEST_TMPDIR", builder.tempdir());
 
         cmd.arg("--adb-path").arg("adb");
         cmd.arg("--adb-test-dir").arg(ADB_TEST_DIR);
@@ -1904,20 +1890,12 @@ impl Step for CrateLibrustc {
 
     fn make_run(run: RunConfig<'_>) {
         let builder = run.builder;
-        let compiler = builder.compiler(builder.top_stage, run.build_triple());
+        let host = run.build_triple();
+        let compiler = builder.compiler_for(builder.top_stage, host, host);
+        let krate = builder.crate_paths[&run.path];
+        let test_kind = builder.kind.into();
 
-        for krate in builder.in_tree_crates("rustc-main", Some(run.target)) {
-            if krate.path.ends_with(&run.path) {
-                let test_kind = builder.kind.into();
-
-                builder.ensure(CrateLibrustc {
-                    compiler,
-                    target: run.target,
-                    test_kind,
-                    krate: krate.name,
-                });
-            }
-        }
+        builder.ensure(CrateLibrustc { compiler, target: run.target, test_kind, krate });
     }
 
     fn run(self, builder: &Builder<'_>) {
@@ -1950,25 +1928,12 @@ impl Step for Crate {
 
     fn make_run(run: RunConfig<'_>) {
         let builder = run.builder;
-        let compiler = builder.compiler(builder.top_stage, run.build_triple());
+        let host = run.build_triple();
+        let compiler = builder.compiler_for(builder.top_stage, host, host);
+        let test_kind = builder.kind.into();
+        let krate = builder.crate_paths[&run.path];
 
-        let make = |mode: Mode, krate: &CargoCrate| {
-            let test_kind = builder.kind.into();
-
-            builder.ensure(Crate {
-                compiler,
-                target: run.target,
-                mode,
-                test_kind,
-                krate: krate.name,
-            });
-        };
-
-        for krate in builder.in_tree_crates("test", Some(run.target)) {
-            if krate.path.ends_with(&run.path) {
-                make(Mode::Std, krate);
-            }
-        }
+        builder.ensure(Crate { compiler, target: run.target, mode: Mode::Std, test_kind, krate });
     }
 
     /// Runs all unit tests plus documentation tests for a given crate defined
@@ -2069,6 +2034,7 @@ impl Step for Crate {
     }
 }
 
+/// Rustdoc is special in various ways, which is why this step is different from `Crate`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct CrateRustdoc {
     host: TargetSelection,
@@ -2096,11 +2062,15 @@ impl Step for CrateRustdoc {
         let test_kind = self.test_kind;
         let target = self.host;
 
-        // Use the previous stage compiler to reuse the artifacts that are
-        // created when running compiletest for src/test/rustdoc. If this used
-        // `compiler`, then it would cause rustdoc to be built *again*, which
-        // isn't really necessary.
-        let compiler = builder.compiler_for(builder.top_stage, target, target);
+        let compiler = if builder.config.download_rustc {
+            builder.compiler(builder.top_stage, target)
+        } else {
+            // Use the previous stage compiler to reuse the artifacts that are
+            // created when running compiletest for src/test/rustdoc. If this used
+            // `compiler`, then it would cause rustdoc to be built *again*, which
+            // isn't really necessary.
+            builder.compiler_for(builder.top_stage, target, target)
+        };
         builder.ensure(compile::Rustc { compiler, target });
 
         let mut cargo = tool::prepare_tool_cargo(
@@ -2115,6 +2085,15 @@ impl Step for CrateRustdoc {
         );
         if test_kind.subcommand() == "test" && !builder.fail_fast {
             cargo.arg("--no-fail-fast");
+        }
+        match builder.doc_tests {
+            DocTests::Only => {
+                cargo.arg("--doc");
+            }
+            DocTests::No => {
+                cargo.args(&["--lib", "--bins", "--examples", "--tests", "--benches"]);
+            }
+            DocTests::Yes => {}
         }
 
         cargo.arg("-p").arg("rustdoc:0.0.0");
@@ -2140,6 +2119,8 @@ impl Step for CrateRustdoc {
         // sets up the dylib path for the *host* (stage1/lib), which is the
         // wrong directory.
         //
+        // Recall that we special-cased `compiler_for(top_stage)` above, so we always use stage1.
+        //
         // It should be considered to just stop running doctests on
         // librustdoc. There is only one test, and it doesn't look too
         // important. There might be other ways to avoid this, but it seems
@@ -2148,8 +2129,15 @@ impl Step for CrateRustdoc {
         // See also https://github.com/rust-lang/rust/issues/13983 where the
         // host vs target dylibs for rustdoc are consistently tricky to deal
         // with.
+        //
+        // Note that this set the host libdir for `download_rustc`, which uses a normal rust distribution.
+        let libdir = if builder.config.download_rustc {
+            builder.rustc_libdir(compiler)
+        } else {
+            builder.sysroot_libdir(compiler, target).to_path_buf()
+        };
         let mut dylib_path = dylib_path();
-        dylib_path.insert(0, PathBuf::from(&*builder.sysroot_libdir(compiler, target)));
+        dylib_path.insert(0, PathBuf::from(&*libdir));
         cargo.env(dylib_path_var(), env::join_paths(&dylib_path).unwrap());
 
         if !builder.config.verbose_tests {
@@ -2269,14 +2257,13 @@ impl Step for RemoteCopyLibs {
         builder.ensure(compile::Std { compiler, target });
 
         builder.info(&format!("REMOTE copy libs to emulator ({})", target));
-        t!(fs::create_dir_all(builder.out.join("tmp")));
 
         let server = builder.ensure(tool::RemoteTestServer { compiler, target });
 
         // Spawn the emulator and wait for it to come online
         let tool = builder.tool_exe(Tool::RemoteTestClient);
         let mut cmd = Command::new(&tool);
-        cmd.arg("spawn-emulator").arg(target.triple).arg(&server).arg(builder.out.join("tmp"));
+        cmd.arg("spawn-emulator").arg(target.triple).arg(&server).arg(builder.tempdir());
         if let Some(rootfs) = builder.qemu_rootfs(target) {
             cmd.arg(rootfs);
         }
@@ -2300,7 +2287,7 @@ impl Step for Distcheck {
     type Output = ();
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("distcheck")
+        run.alias("distcheck")
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -2310,7 +2297,7 @@ impl Step for Distcheck {
     /// Runs "distcheck", a 'make check' from a tarball
     fn run(self, builder: &Builder<'_>) {
         builder.info("Distcheck");
-        let dir = builder.out.join("tmp").join("distcheck");
+        let dir = builder.tempdir().join("distcheck");
         let _ = fs::remove_dir_all(&dir);
         t!(fs::create_dir_all(&dir));
 
@@ -2336,7 +2323,7 @@ impl Step for Distcheck {
 
         // Now make sure that rust-src has all of libstd's dependencies
         builder.info("Distcheck rust-src");
-        let dir = builder.out.join("tmp").join("distcheck-src");
+        let dir = builder.tempdir().join("distcheck-src");
         let _ = fs::remove_dir_all(&dir);
         t!(fs::create_dir_all(&dir));
 
@@ -2368,16 +2355,17 @@ impl Step for Bootstrap {
 
     /// Tests the build system itself.
     fn run(self, builder: &Builder<'_>) {
+        let mut check_bootstrap = Command::new(&builder.python());
+        check_bootstrap.arg("bootstrap_test.py").current_dir(builder.src.join("src/bootstrap/"));
+        try_run(builder, &mut check_bootstrap);
+
         let mut cmd = Command::new(&builder.initial_cargo);
         cmd.arg("test")
             .current_dir(builder.src.join("src/bootstrap"))
             .env("RUSTFLAGS", "-Cdebuginfo=2")
             .env("CARGO_TARGET_DIR", builder.out.join("bootstrap"))
-            // HACK: bootstrap's tests want to know the output directory, but there's no way to set
-            // it except through config.toml. Set it through an env variable instead.
-            .env("BOOTSTRAP_OUTPUT_DIRECTORY", &builder.config.out)
-            .env("BOOTSTRAP_INITIAL_CARGO", &builder.config.initial_cargo)
             .env("RUSTC_BOOTSTRAP", "1")
+            .env("RUSTDOC", builder.rustdoc(builder.compiler(0, builder.build.build)))
             .env("RUSTC", &builder.initial_rustc);
         if let Some(flags) = option_env!("RUSTFLAGS") {
             // Use the same rustc flags for testing as for "normal" compilation,
@@ -2388,6 +2376,16 @@ impl Step for Bootstrap {
         if !builder.fail_fast {
             cmd.arg("--no-fail-fast");
         }
+        match builder.doc_tests {
+            DocTests::Only => {
+                cmd.arg("--doc");
+            }
+            DocTests::No => {
+                cmd.args(&["--lib", "--bins", "--examples", "--tests", "--benches"]);
+            }
+            DocTests::Yes => {}
+        }
+
         cmd.arg("--").args(&builder.config.cmd.test_args());
         // rustbuild tests are racy on directory creation so just run them one at a time.
         // Since there's not many this shouldn't be a problem.

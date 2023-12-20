@@ -4,6 +4,7 @@ use rustc_ast as ast;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{
     pluralize, struct_span_err, Applicability, Diagnostic, DiagnosticBuilder, ErrorGuaranteed,
+    MultiSpan,
 };
 use rustc_hir as hir;
 use rustc_hir::def::{CtorKind, DefKind, Res};
@@ -18,7 +19,7 @@ use rustc_span::hygiene::DesugaringKind;
 use rustc_span::lev_distance::find_best_match_for_name;
 use rustc_span::source_map::{Span, Spanned};
 use rustc_span::symbol::{kw, sym, Ident};
-use rustc_span::{BytePos, MultiSpan, DUMMY_SP};
+use rustc_span::{BytePos, DUMMY_SP};
 use rustc_trait_selection::autoderef::Autoderef;
 use rustc_trait_selection::traits::{ObligationCause, Pattern};
 use ty::VariantDef;
@@ -404,16 +405,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let mut pat_ty = ty;
         if let hir::ExprKind::Lit(Spanned { node: ast::LitKind::ByteStr(_), .. }) = lt.kind {
             let expected = self.structurally_resolved_type(span, expected);
-            if let ty::Ref(_, inner_ty, _) = expected.kind() {
-                if matches!(inner_ty.kind(), ty::Slice(_)) {
-                    let tcx = self.tcx;
-                    trace!(?lt.hir_id.local_id, "polymorphic byte string lit");
-                    self.typeck_results
-                        .borrow_mut()
-                        .treat_byte_string_as_slice
-                        .insert(lt.hir_id.local_id);
-                    pat_ty = tcx.mk_imm_ref(tcx.lifetimes.re_static, tcx.mk_slice(tcx.types.u8));
-                }
+            if let ty::Ref(_, inner_ty, _) = expected.kind()
+                && matches!(inner_ty.kind(), ty::Slice(_))
+            {
+                let tcx = self.tcx;
+                trace!(?lt.hir_id.local_id, "polymorphic byte string lit");
+                self.typeck_results
+                    .borrow_mut()
+                    .treat_byte_string_as_slice
+                    .insert(lt.hir_id.local_id);
+                pat_ty = tcx.mk_imm_ref(tcx.lifetimes.re_static, tcx.mk_slice(tcx.types.u8));
             }
         }
 
@@ -480,14 +481,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // Unify each side with `expected`.
         // Subtyping doesn't matter here, as the value is some kind of scalar.
         let demand_eqtype = |x: &mut _, y| {
-            if let Some((ref mut fail, x_ty, x_span)) = *x {
-                if let Some(mut err) = self.demand_eqtype_pat_diag(x_span, expected, x_ty, ti) {
-                    if let Some((_, y_ty, y_span)) = y {
-                        self.endpoint_has_type(&mut err, y_span, y_ty);
-                    }
-                    err.emit();
-                    *fail = true;
-                };
+            if let Some((ref mut fail, x_ty, x_span)) = *x
+                && let Some(mut err) = self.demand_eqtype_pat_diag(x_span, expected, x_ty, ti)
+            {
+                if let Some((_, y_ty, y_span)) = y {
+                    self.endpoint_has_type(&mut err, y_span, y_ty);
+                }
+                err.emit();
+                *fail = true;
             }
         };
         demand_eqtype(&mut lhs, rhs);
@@ -629,7 +630,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if let Some(mut err) = self.demand_eqtype_pat_diag(span, var_ty, ty, ti) {
             let hir = self.tcx.hir();
             let var_ty = self.resolve_vars_with_obligations(var_ty);
-            let msg = format!("first introduced with type `{}` here", var_ty);
+            let msg = format!("first introduced with type `{var_ty}` here");
             err.span_label(hir.span(var_id), msg);
             let in_match = hir.parent_iter(var_id).any(|(_, n)| {
                 matches!(
@@ -642,6 +643,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             });
             let pre = if in_match { "in the same arm, " } else { "" };
             err.note(&format!("{}a binding must have the same type in all alternatives", pre));
+            // FIXME: check if `var_ty` and `ty` can be made the same type by adding or removing
+            // `ref` or `&` to the pattern.
             err.emit();
         }
     }
@@ -664,8 +667,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 {
                     err.span_suggestion(
                         *span,
-                        &format!("did you mean `{}`", snippet),
-                        format!(" &{}", expected),
+                        &format!("did you mean `{snippet}`"),
+                        format!(" &{expected}"),
                         Applicability::MachineApplicable,
                     );
                 }
@@ -700,7 +703,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         "type `{}` cannot be dereferenced",
                         type_str
                     );
-                    err.span_label(span, format!("type `{}` cannot be dereferenced", type_str));
+                    err.span_label(span, format!("type `{type_str}` cannot be dereferenced"));
                     if self.tcx.sess.teach(&err.get_code().unwrap()) {
                         err.note(CANNOT_IMPLICITLY_DEREF_POINTER_TRAIT_OBJ);
                     }
@@ -917,7 +920,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 path_str
             );
 
-            let mut err = struct_span_err!(tcx.sess, pat.span, E0164, "{}", msg);
+            let mut err = struct_span_err!(tcx.sess, pat.span, E0164, "{msg}");
             match res {
                 Res::Def(DefKind::Fn | DefKind::AssocFn, _) => {
                     err.span_label(pat.span, "`fn` calls are not allowed in patterns");
@@ -1395,8 +1398,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     self.tcx.sess,
                     pat.span,
                     E0769,
-                    "tuple variant `{}` written as struct variant",
-                    path
+                    "tuple variant `{path}` written as struct variant",
                 );
                 err.span_suggestion_verbose(
                     qpath.span().shrink_to_hi().to(pat.span.shrink_to_hi()),
@@ -1421,8 +1423,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             sess,
             pat.span,
             E0638,
-            "`..` required with {} marked as non-exhaustive",
-            descr
+            "`..` required with {descr} marked as non-exhaustive",
         );
         err.span_suggestion_verbose(
             sp_comma,
@@ -1441,8 +1442,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             "field `{}` bound multiple times in the pattern",
             ident
         )
-        .span_label(span, format!("multiple uses of `{}` in pattern", ident))
-        .span_label(other_field, format!("first use of `{}`", ident))
+        .span_label(span, format!("multiple uses of `{ident}` in pattern"))
+        .span_label(other_field, format!("first use of `{ident}`"))
         .emit();
     }
 
@@ -1893,7 +1894,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     ///
     /// Syntactically, these look like `[pat_0, ..., pat_n]`.
     /// Semantically, we are type checking a pattern with structure:
-    /// ```
+    /// ```ignore (not-rust)
     /// [before_0, ..., before_n, (slice, after_0, ... after_n)?]
     /// ```
     /// The type of `slice`, if it is present, depends on the `expected` type.
@@ -2043,63 +2044,60 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             self.tcx.sess,
             span,
             E0529,
-            "expected an array or slice, found `{}`",
-            expected_ty
+            "expected an array or slice, found `{expected_ty}`"
         );
-        if let ty::Ref(_, ty, _) = expected_ty.kind() {
-            if let ty::Array(..) | ty::Slice(..) = ty.kind() {
-                err.help("the semantics of slice patterns changed recently; see issue #62254");
-            }
+        if let ty::Ref(_, ty, _) = expected_ty.kind()
+            && let ty::Array(..) | ty::Slice(..) = ty.kind()
+        {
+            err.help("the semantics of slice patterns changed recently; see issue #62254");
         } else if Autoderef::new(&self.infcx, self.param_env, self.body_id, span, expected_ty, span)
             .any(|(ty, _)| matches!(ty.kind(), ty::Slice(..) | ty::Array(..)))
+            && let (Some(span), true) = (ti.span, ti.origin_expr)
+            && let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(span)
         {
-            if let (Some(span), true) = (ti.span, ti.origin_expr) {
-                if let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(span) {
-                    let applicability = Autoderef::new(
-                        &self.infcx,
-                        self.param_env,
-                        self.body_id,
+            let ty = self.resolve_vars_if_possible(ti.expected);
+            let is_slice_or_array_or_vector = self.is_slice_or_array_or_vector(&mut err, snippet.clone(), ty);
+            match is_slice_or_array_or_vector.1.kind() {
+                ty::Adt(adt_def, _)
+                    if self.tcx.is_diagnostic_item(sym::Option, adt_def.did())
+                        || self.tcx.is_diagnostic_item(sym::Result, adt_def.did()) =>
+                {
+                    // Slicing won't work here, but `.as_deref()` might (issue #91328).
+                    err.span_suggestion(
                         span,
-                        self.resolve_vars_if_possible(ti.expected),
-                        span,
-                    )
-                    .find_map(|(ty, _)| {
-                        match ty.kind() {
-                            ty::Adt(adt_def, _)
-                                if self.tcx.is_diagnostic_item(sym::Option, adt_def.did())
-                                    || self.tcx.is_diagnostic_item(sym::Result, adt_def.did()) =>
-                            {
-                                // Slicing won't work here, but `.as_deref()` might (issue #91328).
-                                err.span_suggestion(
-                                    span,
-                                    "consider using `as_deref` here",
-                                    format!("{}.as_deref()", snippet),
-                                    Applicability::MaybeIncorrect,
-                                );
-                                Some(None)
-                            }
-
-                            ty::Slice(..) | ty::Array(..) => {
-                                Some(Some(Applicability::MachineApplicable))
-                            }
-
-                            _ => None,
-                        }
-                    })
-                    .unwrap_or(Some(Applicability::MaybeIncorrect));
-
-                    if let Some(applicability) = applicability {
-                        err.span_suggestion(
-                            span,
-                            "consider slicing here",
-                            format!("{}[..]", snippet),
-                            applicability,
-                        );
-                    }
+                        "consider using `as_deref` here",
+                        format!("{snippet}.as_deref()"),
+                        Applicability::MaybeIncorrect,
+                    );
                 }
+                _ => ()
+            }
+            if is_slice_or_array_or_vector.0 {
+                err.span_suggestion(
+                    span,
+                    "consider slicing here",
+                    format!("{snippet}[..]"),
+                    Applicability::MachineApplicable,
+                );
             }
         }
-        err.span_label(span, format!("pattern cannot match with input type `{}`", expected_ty));
+        err.span_label(span, format!("pattern cannot match with input type `{expected_ty}`"));
         err.emit();
+    }
+
+    fn is_slice_or_array_or_vector(
+        &self,
+        err: &mut Diagnostic,
+        snippet: String,
+        ty: Ty<'tcx>,
+    ) -> (bool, Ty<'tcx>) {
+        match ty.kind() {
+            ty::Adt(adt_def, _) if self.tcx.is_diagnostic_item(sym::Vec, adt_def.did()) => {
+                (true, ty)
+            }
+            ty::Ref(_, ty, _) => self.is_slice_or_array_or_vector(err, snippet, *ty),
+            ty::Slice(..) | ty::Array(..) => (true, ty),
+            _ => (false, ty),
+        }
     }
 }

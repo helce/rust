@@ -23,7 +23,7 @@ use rustc_incremental::{
 };
 use rustc_metadata::EncodedMetadata;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
-use rustc_middle::middle::exported_symbols::SymbolExportLevel;
+use rustc_middle::middle::exported_symbols::SymbolExportInfo;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::cgu_reuse_tracker::CguReuseTracker;
 use rustc_session::config::{self, CrateType, Lto, OutputFilenames, OutputType};
@@ -304,7 +304,7 @@ pub type TargetMachineFactoryFn<B> = Arc<
         + Sync,
 >;
 
-pub type ExportedSymbols = FxHashMap<CrateNum, Arc<Vec<(String, SymbolExportLevel)>>>;
+pub type ExportedSymbols = FxHashMap<CrateNum, Arc<Vec<(String, SymbolExportInfo)>>>;
 
 /// Additional resources used by optimize_and_codegen (not module specific)
 #[derive(Clone)]
@@ -889,7 +889,7 @@ fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
 
 fn execute_lto_work_item<B: ExtraBackendMethods>(
     cgcx: &CodegenContext<B>,
-    mut module: lto::LtoModuleCodegen<B>,
+    module: lto::LtoModuleCodegen<B>,
     module_config: &ModuleConfig,
 ) -> Result<WorkItemResult<B>, FatalError> {
     let module = unsafe { module.optimize(cgcx)? };
@@ -1707,22 +1707,32 @@ impl SharedEmitter {
 
 impl Emitter for SharedEmitter {
     fn emit_diagnostic(&mut self, diag: &rustc_errors::Diagnostic) {
+        let fluent_args = self.to_fluent_args(diag.args());
         drop(self.sender.send(SharedEmitterMessage::Diagnostic(Diagnostic {
-            msg: diag.message(),
+            msg: self.translate_messages(&diag.message, &fluent_args).to_string(),
             code: diag.code.clone(),
             lvl: diag.level(),
         })));
         for child in &diag.children {
             drop(self.sender.send(SharedEmitterMessage::Diagnostic(Diagnostic {
-                msg: child.message(),
+                msg: self.translate_messages(&child.message, &fluent_args).to_string(),
                 code: None,
                 lvl: child.level,
             })));
         }
         drop(self.sender.send(SharedEmitterMessage::AbortIfErrors));
     }
+
     fn source_map(&self) -> Option<&Lrc<SourceMap>> {
         None
+    }
+
+    fn fluent_bundle(&self) -> Option<&Lrc<rustc_errors::FluentBundle>> {
+        None
+    }
+
+    fn fallback_fluent_bundle(&self) -> &rustc_errors::FluentBundle {
+        panic!("shared emitter attempted to translate a diagnostic");
     }
 }
 
@@ -1754,9 +1764,9 @@ impl SharedEmitterMain {
                     let msg = msg.strip_prefix("error: ").unwrap_or(&msg);
 
                     let mut err = match level {
-                        Level::Error { lint: false } => sess.struct_err(&msg).forget_guarantee(),
-                        Level::Warning => sess.struct_warn(&msg),
-                        Level::Note => sess.struct_note_without_error(&msg),
+                        Level::Error { lint: false } => sess.struct_err(msg).forget_guarantee(),
+                        Level::Warning => sess.struct_warn(msg),
+                        Level::Note => sess.struct_note_without_error(msg),
                         _ => bug!("Invalid inline asm diagnostic level"),
                     };
 

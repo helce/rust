@@ -18,13 +18,13 @@
 //!     First upvars are stored
 //!     It is followed by the generator state field.
 //!     Then finally the MIR locals which are live across a suspension point are stored.
-//!
+//!     ```ignore (illustrative)
 //!     struct Generator {
 //!         upvars...,
 //!         state: u32,
 //!         mir_locals...,
 //!     }
-//!
+//!     ```
 //! This pass computes the meaning of the state field and the MIR locals which are live
 //! across a suspension point. There are however three hardcoded generator states:
 //!     0 - Generator have not been resumed yet
@@ -247,7 +247,7 @@ impl<'tcx> TransformVisitor<'tcx> {
         assert_eq!(self.state_adt_ref.variant(idx).fields.len(), 1);
         let ty = self
             .tcx
-            .type_of(self.state_adt_ref.variant(idx).fields[0].did)
+            .bound_type_of(self.state_adt_ref.variant(idx).fields[0].did)
             .subst(self.tcx, self.state_substs);
         expand_aggregate(
             Place::return_place(),
@@ -1441,6 +1441,7 @@ impl<'tcx> Visitor<'tcx> for EnsureGeneratorFieldAssignmentsNeverAlias<'_> {
 
             StatementKind::FakeRead(..)
             | StatementKind::SetDiscriminant { .. }
+            | StatementKind::Deinit(..)
             | StatementKind::StorageLive(_)
             | StatementKind::StorageDead(_)
             | StatementKind::Retag(..)

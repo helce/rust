@@ -1,3 +1,4 @@
+use crate::creader::CrateMetadataRef;
 use decoder::Metadata;
 use def_path_hash_map::DefPathHashMapRef;
 use table::{Table, TableBuilder};
@@ -8,16 +9,18 @@ use rustc_data_structures::svh::Svh;
 use rustc_data_structures::sync::MetadataRef;
 use rustc_hir as hir;
 use rustc_hir::def::{CtorKind, DefKind};
-use rustc_hir::def_id::{DefId, DefIndex, DefPathHash, StableCrateId};
+use rustc_hir::def_id::{CrateNum, DefId, DefIndex, DefPathHash, StableCrateId};
 use rustc_hir::definitions::DefKey;
 use rustc_hir::lang_items;
 use rustc_index::{bit_set::FiniteBitSet, vec::IndexVec};
 use rustc_middle::metadata::ModChild;
-use rustc_middle::middle::exported_symbols::{ExportedSymbol, SymbolExportLevel};
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
+use rustc_middle::middle::exported_symbols::{ExportedSymbol, SymbolExportInfo};
 use rustc_middle::mir;
 use rustc_middle::thir;
 use rustc_middle::ty::fast_reject::SimplifiedType;
 use rustc_middle::ty::query::Providers;
+use rustc_middle::ty::GeneratorDiagnosticData;
 use rustc_middle::ty::{self, ReprOptions, Ty};
 use rustc_serialize::opaque::Encoder;
 use rustc_session::config::SymbolManglingVersion;
@@ -217,8 +220,9 @@ crate struct CrateRoot<'tcx> {
     proc_macro_data: Option<ProcMacroData>,
 
     tables: LazyTables<'tcx>,
+    debugger_visualizers: Lazy<[rustc_span::DebuggerVisualizerFile]>,
 
-    exported_symbols: Lazy!([(ExportedSymbol<'tcx>, SymbolExportLevel)]),
+    exported_symbols: Lazy!([(ExportedSymbol<'tcx>, SymbolExportInfo)]),
 
     syntax_contexts: SyntaxContextTable,
     expn_data: ExpnDataTable,
@@ -235,6 +239,29 @@ crate struct CrateRoot<'tcx> {
     panic_runtime: bool,
     profiler_runtime: bool,
     symbol_mangling_version: SymbolManglingVersion,
+}
+
+/// On-disk representation of `DefId`.
+/// This creates a type-safe way to enforce that we remap the CrateNum between the on-disk
+/// representation and the compilation session.
+#[derive(Copy, Clone)]
+crate struct RawDefId {
+    krate: u32,
+    index: u32,
+}
+
+impl Into<RawDefId> for DefId {
+    fn into(self) -> RawDefId {
+        RawDefId { krate: self.krate.as_u32(), index: self.index.as_u32() }
+    }
+}
+
+impl RawDefId {
+    fn decode(self, cdata: CrateMetadataRef<'_>) -> DefId {
+        let krate = CrateNum::from_u32(self.krate);
+        let krate = cdata.map_encoded_cnum_to_current(krate);
+        DefId { krate, index: DefIndex::from_u32(self.index) }
+    }
 }
 
 #[derive(Encodable, Decodable)]
@@ -286,7 +313,7 @@ define_tables! {
     attributes: Table<DefIndex, Lazy<[ast::Attribute]>>,
     children: Table<DefIndex, Lazy<[DefIndex]>>,
 
-    opt_def_kind: Table<DefIndex, Lazy<DefKind>>,
+    opt_def_kind: Table<DefIndex, DefKind>,
     visibility: Table<DefIndex, Lazy<ty::Visibility>>,
     def_span: Table<DefIndex, Lazy<Span>>,
     def_ident_span: Table<DefIndex, Lazy<Span>>,
@@ -303,26 +330,27 @@ define_tables! {
     type_of: Table<DefIndex, Lazy!(Ty<'tcx>)>,
     variances_of: Table<DefIndex, Lazy<[ty::Variance]>>,
     fn_sig: Table<DefIndex, Lazy!(ty::PolyFnSig<'tcx>)>,
+    codegen_fn_attrs: Table<DefIndex, Lazy!(CodegenFnAttrs)>,
     impl_trait_ref: Table<DefIndex, Lazy!(ty::TraitRef<'tcx>)>,
     const_param_default: Table<DefIndex, Lazy<rustc_middle::ty::Const<'tcx>>>,
     optimized_mir: Table<DefIndex, Lazy!(mir::Body<'tcx>)>,
     mir_for_ctfe: Table<DefIndex, Lazy!(mir::Body<'tcx>)>,
     promoted_mir: Table<DefIndex, Lazy!(IndexVec<mir::Promoted, mir::Body<'tcx>>)>,
     thir_abstract_const: Table<DefIndex, Lazy!(&'tcx [thir::abstract_const::Node<'tcx>])>,
-    impl_parent: Table<DefIndex, Lazy!(DefId)>,
-    impl_polarity: Table<DefIndex, Lazy!(ty::ImplPolarity)>,
-    impl_constness: Table<DefIndex, Lazy!(hir::Constness)>,
-    impl_defaultness: Table<DefIndex, Lazy!(hir::Defaultness)>,
+    impl_parent: Table<DefIndex, RawDefId>,
+    impl_polarity: Table<DefIndex, ty::ImplPolarity>,
+    impl_constness: Table<DefIndex, hir::Constness>,
+    impl_defaultness: Table<DefIndex, hir::Defaultness>,
     // FIXME(eddyb) perhaps compute this on the fly if cheap enough?
     coerce_unsized_info: Table<DefIndex, Lazy!(ty::adjustment::CoerceUnsizedInfo)>,
     mir_const_qualif: Table<DefIndex, Lazy!(mir::ConstQualifs)>,
     rendered_const: Table<DefIndex, Lazy!(String)>,
-    asyncness: Table<DefIndex, Lazy!(hir::IsAsync)>,
+    asyncness: Table<DefIndex, hir::IsAsync>,
     fn_arg_names: Table<DefIndex, Lazy!([Ident])>,
     generator_kind: Table<DefIndex, Lazy!(hir::GeneratorKind)>,
     trait_def: Table<DefIndex, Lazy!(ty::TraitDef)>,
 
-    trait_item_def_id: Table<DefIndex, Lazy<DefId>>,
+    trait_item_def_id: Table<DefIndex, RawDefId>,
     inherent_impls: Table<DefIndex, Lazy<[DefIndex]>>,
     expn_that_defined: Table<DefIndex, Lazy<ExpnId>>,
     unused_generic_params: Table<DefIndex, Lazy<FiniteBitSet<u32>>>,
@@ -332,8 +360,10 @@ define_tables! {
     // `DefPathTable` up front, since we may only ever use a few
     // definitions from any given crate.
     def_keys: Table<DefIndex, Lazy<DefKey>>,
-    def_path_hashes: Table<DefIndex, Lazy<DefPathHash>>,
+    def_path_hashes: Table<DefIndex, DefPathHash>,
     proc_macro_quoted_spans: Table<usize, Lazy<Span>>,
+    generator_diagnostic_data: Table<DefIndex, Lazy<GeneratorDiagnosticData<'tcx>>>,
+    may_have_doc_links: Table<DefIndex, ()>,
 }
 
 #[derive(Copy, Clone, MetadataEncodable, MetadataDecodable)]

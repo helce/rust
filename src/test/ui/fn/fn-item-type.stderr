@@ -35,7 +35,7 @@ LL |     eq(bar::<String>, bar::<Vec<u8>>);
    = help: if the expected type is due to type inference, cast the expected `fn` to a function pointer: `bar::<String> as fn(isize) -> isize`
 
 error[E0308]: mismatched types
-  --> $DIR/fn-item-type.rs:39:26
+  --> $DIR/fn-item-type.rs:38:26
    |
 LL |     eq(<u8 as Foo>::foo, <u16 as Foo>::foo);
    |                          ^^^^^^^^^^^^^^^^^ expected `u8`, found `u16`
@@ -47,7 +47,7 @@ LL |     eq(<u8 as Foo>::foo, <u16 as Foo>::foo);
    = help: if the expected type is due to type inference, cast the expected `fn` to a function pointer: `<u8 as Foo>::foo as fn()`
 
 error[E0308]: mismatched types
-  --> $DIR/fn-item-type.rs:46:19
+  --> $DIR/fn-item-type.rs:45:19
    |
 LL |     eq(foo::<u8>, bar::<u8> as fn(isize) -> isize);
    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected fn item, found fn pointer

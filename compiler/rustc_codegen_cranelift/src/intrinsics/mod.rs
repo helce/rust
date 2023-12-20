@@ -713,14 +713,21 @@ fn codegen_regular_intrinsic_call<'tcx>(
             ret.write_cvalue(fx, val);
         };
 
-        ptr_offset_from, (v ptr, v base) {
+        ptr_offset_from | ptr_offset_from_unsigned, (v ptr, v base) {
             let ty = substs.type_at(0);
             let isize_layout = fx.layout_of(fx.tcx.types.isize);
 
             let pointee_size: u64 = fx.layout_of(ty).size.bytes();
-            let diff = fx.bcx.ins().isub(ptr, base);
+            let diff_bytes = fx.bcx.ins().isub(ptr, base);
             // FIXME this can be an exact division.
-            let val = CValue::by_val(fx.bcx.ins().sdiv_imm(diff, pointee_size as i64), isize_layout);
+            let diff = if intrinsic == sym::ptr_offset_from_unsigned {
+                // Because diff_bytes ULE isize::MAX, this would be fine as signed,
+                // but unsigned is slightly easier to codegen, so might as well.
+                fx.bcx.ins().udiv_imm(diff_bytes, pointee_size as i64)
+            } else {
+                fx.bcx.ins().sdiv_imm(diff_bytes, pointee_size as i64)
+            };
+            let val = CValue::by_val(diff, isize_layout);
             ret.write_cvalue(fx, val);
         };
 
@@ -1019,39 +1026,23 @@ fn codegen_regular_intrinsic_call<'tcx>(
             ret.write_cvalue(fx, old);
         };
 
-        // In Rust floating point min and max don't propagate NaN. In Cranelift they do however.
-        // For this reason it is necessary to use `a.is_nan() ? b : (a >= b ? b : a)` for `minnumf*`
-        // and `a.is_nan() ? b : (a <= b ? b : a)` for `maxnumf*`. NaN checks are done by comparing
-        // a float against itself. Only in case of NaN is it not equal to itself.
         minnumf32, (v a, v b) {
-            let a_is_nan = fx.bcx.ins().fcmp(FloatCC::NotEqual, a, a);
-            let a_ge_b = fx.bcx.ins().fcmp(FloatCC::GreaterThanOrEqual, a, b);
-            let temp = fx.bcx.ins().select(a_ge_b, b, a);
-            let val = fx.bcx.ins().select(a_is_nan, b, temp);
+            let val = crate::num::codegen_float_min(fx, a, b);
             let val = CValue::by_val(val, fx.layout_of(fx.tcx.types.f32));
             ret.write_cvalue(fx, val);
         };
         minnumf64, (v a, v b) {
-            let a_is_nan = fx.bcx.ins().fcmp(FloatCC::NotEqual, a, a);
-            let a_ge_b = fx.bcx.ins().fcmp(FloatCC::GreaterThanOrEqual, a, b);
-            let temp = fx.bcx.ins().select(a_ge_b, b, a);
-            let val = fx.bcx.ins().select(a_is_nan, b, temp);
+            let val = crate::num::codegen_float_min(fx, a, b);
             let val = CValue::by_val(val, fx.layout_of(fx.tcx.types.f64));
             ret.write_cvalue(fx, val);
         };
         maxnumf32, (v a, v b) {
-            let a_is_nan = fx.bcx.ins().fcmp(FloatCC::NotEqual, a, a);
-            let a_le_b = fx.bcx.ins().fcmp(FloatCC::LessThanOrEqual, a, b);
-            let temp = fx.bcx.ins().select(a_le_b, b, a);
-            let val = fx.bcx.ins().select(a_is_nan, b, temp);
+            let val = crate::num::codegen_float_max(fx, a, b);
             let val = CValue::by_val(val, fx.layout_of(fx.tcx.types.f32));
             ret.write_cvalue(fx, val);
         };
         maxnumf64, (v a, v b) {
-            let a_is_nan = fx.bcx.ins().fcmp(FloatCC::NotEqual, a, a);
-            let a_le_b = fx.bcx.ins().fcmp(FloatCC::LessThanOrEqual, a, b);
-            let temp = fx.bcx.ins().select(a_le_b, b, a);
-            let val = fx.bcx.ins().select(a_is_nan, b, temp);
+            let val = crate::num::codegen_float_max(fx, a, b);
             let val = CValue::by_val(val, fx.layout_of(fx.tcx.types.f64));
             ret.write_cvalue(fx, val);
         };

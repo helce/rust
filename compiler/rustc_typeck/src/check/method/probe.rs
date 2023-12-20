@@ -1,7 +1,7 @@
 use super::suggest;
+use super::CandidateSource;
 use super::MethodError;
 use super::NoMatchData;
-use super::{CandidateSource, ImplSource, TraitSource};
 
 use crate::check::FnCtxt;
 use crate::errors::MethodCallOnUnknownType;
@@ -21,10 +21,13 @@ use rustc_middle::middle::stability;
 use rustc_middle::ty::fast_reject::{simplify_type, TreatParams};
 use rustc_middle::ty::subst::{InternalSubsts, Subst, SubstsRef};
 use rustc_middle::ty::GenericParamDefKind;
-use rustc_middle::ty::{self, ParamEnvAnd, ToPredicate, Ty, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{self, EarlyBinder, ParamEnvAnd, ToPredicate, Ty, TyCtxt, TypeFoldable};
 use rustc_session::lint;
 use rustc_span::def_id::LocalDefId;
-use rustc_span::lev_distance::{find_best_match_for_name, lev_distance};
+use rustc_span::lev_distance::{
+    find_best_match_for_name_with_substrings, lev_distance_with_substrings,
+};
+use rustc_span::symbol::sym;
 use rustc_span::{symbol::Ident, Span, Symbol, DUMMY_SP};
 use rustc_trait_selection::autoderef::{self, Autoderef};
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
@@ -198,8 +201,9 @@ pub struct Pick<'tcx> {
     pub import_ids: SmallVec<[LocalDefId; 1]>,
 
     /// Indicates that the source expression should be autoderef'd N times
-    ///
-    ///     A = expr | *expr | **expr | ...
+    /// ```ignore (not-rust)
+    /// A = expr | *expr | **expr | ...
+    /// ```
     pub autoderefs: usize,
 
     /// Indicates that we want to add an autoref (and maybe also unsize it), or if the receiver is
@@ -640,12 +644,22 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
 
                 self.assemble_inherent_candidates_from_object(generalized_self_ty);
                 self.assemble_inherent_impl_candidates_for_type(p.def_id());
+                if self.tcx.has_attr(p.def_id(), sym::rustc_has_incoherent_inherent_impls) {
+                    self.assemble_inherent_candidates_for_incoherent_ty(raw_self_ty);
+                }
             }
             ty::Adt(def, _) => {
-                self.assemble_inherent_impl_candidates_for_type(def.did());
+                let def_id = def.did();
+                self.assemble_inherent_impl_candidates_for_type(def_id);
+                if self.tcx.has_attr(def_id, sym::rustc_has_incoherent_inherent_impls) {
+                    self.assemble_inherent_candidates_for_incoherent_ty(raw_self_ty);
+                }
             }
             ty::Foreign(did) => {
                 self.assemble_inherent_impl_candidates_for_type(did);
+                if self.tcx.has_attr(did, sym::rustc_has_incoherent_inherent_impls) {
+                    self.assemble_inherent_candidates_for_incoherent_ty(raw_self_ty);
+                }
             }
             ty::Param(p) => {
                 self.assemble_inherent_candidates_from_param(p);
@@ -692,12 +706,12 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         for item in self.impl_or_trait_item(impl_def_id) {
             if !self.has_applicable_self(&item) {
                 // No receiver declared. Not a candidate.
-                self.record_static_candidate(ImplSource(impl_def_id));
+                self.record_static_candidate(CandidateSource::Impl(impl_def_id));
                 continue;
             }
 
             let (impl_ty, impl_substs) = self.impl_ty_and_substs(impl_def_id);
-            let impl_ty = impl_ty.subst(self.tcx, impl_substs);
+            let impl_ty = EarlyBinder(impl_ty).subst(self.tcx, impl_substs);
 
             debug!("impl_ty: {:?}", impl_ty);
 
@@ -846,7 +860,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             debug!("elaborate_bounds(bound_trait_ref={:?})", bound_trait_ref);
             for item in self.impl_or_trait_item(bound_trait_ref.def_id()) {
                 if !self.has_applicable_self(&item) {
-                    self.record_static_candidate(TraitSource(bound_trait_ref.def_id()));
+                    self.record_static_candidate(CandidateSource::Trait(bound_trait_ref.def_id()));
                 } else {
                     mk_cand(self, bound_trait_ref, item);
                 }
@@ -887,7 +901,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
     ) -> bool {
         match method.kind {
             ty::AssocKind::Fn => {
-                let fty = self.tcx.fn_sig(method.def_id);
+                let fty = self.tcx.bound_fn_sig(method.def_id);
                 self.probe(|_| {
                     let substs = self.fresh_substs_for_item(self.span, method.def_id);
                     let fty = fty.subst(self.tcx, substs);
@@ -944,7 +958,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                 // Check whether `trait_def_id` defines a method with suitable name.
                 if !self.has_applicable_self(&item) {
                     debug!("method has inapplicable self");
-                    self.record_static_candidate(TraitSource(trait_def_id));
+                    self.record_static_candidate(CandidateSource::Trait(trait_def_id));
                     continue;
                 }
 
@@ -1016,8 +1030,8 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             Some(Err(MethodError::Ambiguity(v))) => v
                 .into_iter()
                 .map(|source| match source {
-                    TraitSource(id) => id,
-                    ImplSource(impl_id) => match tcx.trait_id_of_impl(impl_id) {
+                    CandidateSource::Trait(id) => id,
+                    CandidateSource::Impl(impl_id) => match tcx.trait_id_of_impl(impl_id) {
                         Some(id) => id,
                         None => span_bug!(span, "found inherent method when looking at traits"),
                     },
@@ -1415,8 +1429,10 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
 
     fn candidate_source(&self, candidate: &Candidate<'tcx>, self_ty: Ty<'tcx>) -> CandidateSource {
         match candidate.kind {
-            InherentImplCandidate(..) => ImplSource(candidate.item.container.id()),
-            ObjectCandidate | WhereClauseCandidate(_) => TraitSource(candidate.item.container.id()),
+            InherentImplCandidate(..) => CandidateSource::Impl(candidate.item.container.id()),
+            ObjectCandidate | WhereClauseCandidate(_) => {
+                CandidateSource::Trait(candidate.item.container.id())
+            }
             TraitCandidate(trait_ref) => self.probe(|_| {
                 let _ = self
                     .at(&ObligationCause::dummy(), self.param_env)
@@ -1426,9 +1442,9 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                     Ok(Some(traits::ImplSource::UserDefined(ref impl_data))) => {
                         // If only a single impl matches, make the error message point
                         // to that impl.
-                        ImplSource(impl_data.impl_def_id)
+                        CandidateSource::Impl(impl_data.impl_def_id)
                     }
-                    _ => TraitSource(candidate.item.container.id()),
+                    _ => CandidateSource::Trait(candidate.item.container.id()),
                 }
             }),
         }
@@ -1623,7 +1639,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
     ///
     /// Example (`src/test/ui/method-two-trait-defer-resolution-1.rs`):
     ///
-    /// ```
+    /// ```ignore (illustrative)
     /// trait Foo { ... }
     /// impl Foo for Vec<i32> { ... }
     /// impl Foo for Vec<usize> { ... }
@@ -1699,7 +1715,11 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                         .iter()
                         .map(|cand| cand.name)
                         .collect::<Vec<Symbol>>();
-                    find_best_match_for_name(&names, self.method_name.unwrap().name, None)
+                    find_best_match_for_name_with_substrings(
+                        &names,
+                        self.method_name.unwrap().name,
+                        None,
+                    )
                 }
                 .unwrap();
                 Ok(applicable_close_candidates.into_iter().find(|method| method.name == best_name))
@@ -1751,7 +1771,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
 
     #[instrument(level = "debug", skip(self))]
     fn xform_method_sig(&self, method: DefId, substs: SubstsRef<'tcx>) -> ty::FnSig<'tcx> {
-        let fn_sig = self.tcx.fn_sig(method);
+        let fn_sig = self.tcx.bound_fn_sig(method);
         debug!(?fn_sig);
 
         assert!(!substs.has_escaping_bound_vars());
@@ -1764,12 +1784,8 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         let generics = self.tcx.generics_of(method);
         assert_eq!(substs.len(), generics.parent_count as usize);
 
-        // Erase any late-bound regions from the method and substitute
-        // in the values from the substitution.
-        let xform_fn_sig = self.erase_late_bound_regions(fn_sig);
-
-        if generics.params.is_empty() {
-            xform_fn_sig.subst(self.tcx, substs)
+        let xform_fn_sig = if generics.params.is_empty() {
+            fn_sig.subst(self.tcx, substs)
         } else {
             let substs = InternalSubsts::for_item(self.tcx, method, |param, _| {
                 let i = param.index as usize;
@@ -1787,8 +1803,10 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                     }
                 }
             });
-            xform_fn_sig.subst(self.tcx, substs)
-        }
+            fn_sig.subst(self.tcx, substs)
+        };
+
+        self.erase_late_bound_regions(xform_fn_sig)
     }
 
     /// Gets the type of an impl and generate substitutions with placeholders.
@@ -1856,7 +1874,8 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                         if x.kind.namespace() != Namespace::ValueNS {
                             return false;
                         }
-                        match lev_distance(name.as_str(), x.name.as_str(), max_dist) {
+                        match lev_distance_with_substrings(name.as_str(), x.name.as_str(), max_dist)
+                        {
                             Some(d) => d > 0,
                             None => false,
                         }

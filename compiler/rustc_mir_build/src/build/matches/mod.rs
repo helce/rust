@@ -11,7 +11,7 @@ use crate::build::ForGuard::{self, OutsideGuard, RefWithinGuard};
 use crate::build::{BlockAnd, BlockAndExtension, Builder};
 use crate::build::{GuardFrame, GuardFrameLocal, LocalsForNode};
 use rustc_data_structures::{
-    fx::{FxHashSet, FxIndexMap},
+    fx::{FxHashSet, FxIndexMap, FxIndexSet},
     stack::ensure_sufficient_stack,
 };
 use rustc_hir::HirId;
@@ -264,7 +264,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         // The set of places that we are creating fake borrows of. If there are
         // no match guards then we don't need any fake borrows, so don't track
         // them.
-        let mut fake_borrows = match_has_guard.then(FxHashSet::default);
+        let mut fake_borrows = match_has_guard.then(FxIndexSet::default);
 
         let mut otherwise = None;
 
@@ -701,8 +701,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let local_id = self.var_local_id(var, for_guard);
         let source_info = self.source_info(span);
         self.cfg.push(block, Statement { source_info, kind: StatementKind::StorageLive(local_id) });
-        let region_scope = self.region_scope_tree.var_scope(var.local_id);
-        if schedule_drop {
+        // Altough there is almost always scope for given variable in corner cases
+        // like #92893 we might get variable with no scope.
+        if let Some(region_scope) = self.region_scope_tree.var_scope(var.local_id) && schedule_drop{
             self.schedule_drop(span, region_scope, local_id, DropKind::Storage);
         }
         Place::from(local_id)
@@ -710,8 +711,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
     crate fn schedule_drop_for_binding(&mut self, var: HirId, span: Span, for_guard: ForGuard) {
         let local_id = self.var_local_id(var, for_guard);
-        let region_scope = self.region_scope_tree.var_scope(var.local_id);
-        self.schedule_drop(span, region_scope, local_id, DropKind::Value);
+        if let Some(region_scope) = self.region_scope_tree.var_scope(var.local_id) {
+            self.schedule_drop(span, region_scope, local_id, DropKind::Value);
+        }
     }
 
     /// Visit all of the primary bindings in a patterns, that is, visit the
@@ -1030,11 +1032,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// exhaustive match, consider:
     ///
     /// ```
+    /// # fn foo(x: (bool, bool)) {
     /// match x {
     ///     (true, true) => (),
     ///     (_, false) => (),
     ///     (false, true) => (),
     /// }
+    /// # }
     /// ```
     ///
     /// For this match, we check if `x.0` matches `true` (for the first
@@ -1049,7 +1053,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         start_block: BasicBlock,
         otherwise_block: &mut Option<BasicBlock>,
         candidates: &mut [&mut Candidate<'pat, 'tcx>],
-        fake_borrows: &mut Option<FxHashSet<Place<'tcx>>>,
+        fake_borrows: &mut Option<FxIndexSet<Place<'tcx>>>,
     ) {
         debug!(
             "matched_candidate(span={:?}, candidates={:?}, start_block={:?}, otherwise_block={:?})",
@@ -1101,7 +1105,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         start_block: BasicBlock,
         otherwise_block: &mut Option<BasicBlock>,
         candidates: &mut [&mut Candidate<'_, 'tcx>],
-        fake_borrows: &mut Option<FxHashSet<Place<'tcx>>>,
+        fake_borrows: &mut Option<FxIndexSet<Place<'tcx>>>,
     ) {
         // The candidates are sorted by priority. Check to see whether the
         // higher priority candidates (and hence at the front of the slice)
@@ -1155,7 +1159,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     ///
     /// For example, if we have something like this:
     ///
-    /// ```rust
+    /// ```ignore (illustrative)
     /// ...
     /// Some(x) if cond1 => ...
     /// Some(x) => ...
@@ -1180,7 +1184,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         &mut self,
         matched_candidates: &mut [&mut Candidate<'_, 'tcx>],
         start_block: BasicBlock,
-        fake_borrows: &mut Option<FxHashSet<Place<'tcx>>>,
+        fake_borrows: &mut Option<FxIndexSet<Place<'tcx>>>,
     ) -> Option<BasicBlock> {
         debug_assert!(
             !matched_candidates.is_empty(),
@@ -1318,7 +1322,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         candidates: &mut [&mut Candidate<'_, 'tcx>],
         block: BasicBlock,
         otherwise_block: &mut Option<BasicBlock>,
-        fake_borrows: &mut Option<FxHashSet<Place<'tcx>>>,
+        fake_borrows: &mut Option<FxIndexSet<Place<'tcx>>>,
     ) {
         let (first_candidate, remaining_candidates) = candidates.split_first_mut().unwrap();
 
@@ -1381,7 +1385,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         pats: &'pat [Pat<'tcx>],
         or_span: Span,
         place: PlaceBuilder<'tcx>,
-        fake_borrows: &mut Option<FxHashSet<Place<'tcx>>>,
+        fake_borrows: &mut Option<FxIndexSet<Place<'tcx>>>,
     ) {
         debug!("test_or_pattern:\ncandidate={:#?}\npats={:#?}", candidate, pats);
         let mut or_candidates: Vec<_> = pats
@@ -1479,11 +1483,12 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// ```
     /// # let (x, y, z) = (true, true, true);
     /// match (x, y, z) {
-    ///     (true, _, true) => true,    // (0)
-    ///     (_, true, _) => true,       // (1)
-    ///     (false, false, _) => false, // (2)
-    ///     (true, _, false) => false,  // (3)
+    ///     (true , _    , true ) => true,  // (0)
+    ///     (_    , true , _    ) => true,  // (1)
+    ///     (false, false, _    ) => false, // (2)
+    ///     (true , _    , false) => false, // (3)
     /// }
+    /// # ;
     /// ```
     ///
     /// In that case, after we test on `x`, there are 2 overlapping candidate
@@ -1500,14 +1505,14 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// with precisely the reachable arms being reachable - but that problem
     /// is trivially NP-complete:
     ///
-    /// ```rust
-    ///     match (var0, var1, var2, var3, ...) {
-    ///         (true, _, _, false, true, ...) => false,
-    ///         (_, true, true, false, _, ...) => false,
-    ///         (false, _, false, false, _, ...) => false,
-    ///         ...
-    ///         _ => true
-    ///     }
+    /// ```ignore (illustrative)
+    /// match (var0, var1, var2, var3, ...) {
+    ///     (true , _   , _    , false, true, ...) => false,
+    ///     (_    , true, true , false, _   , ...) => false,
+    ///     (false, _   , false, false, _   , ...) => false,
+    ///     ...
+    ///     _ => true
+    /// }
     /// ```
     ///
     /// Here the last arm is reachable only if there is an assignment to
@@ -1518,7 +1523,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// our simplistic treatment of constants and guards would make it occur
     /// in very common situations - for example [#29740]:
     ///
-    /// ```rust
+    /// ```ignore (illustrative)
     /// match x {
     ///     "foo" if foo_guard => ...,
     ///     "bar" if bar_guard => ...,
@@ -1567,7 +1572,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         mut candidates: &'b mut [&'c mut Candidate<'pat, 'tcx>],
         block: BasicBlock,
         otherwise_block: &mut Option<BasicBlock>,
-        fake_borrows: &mut Option<FxHashSet<Place<'tcx>>>,
+        fake_borrows: &mut Option<FxIndexSet<Place<'tcx>>>,
     ) {
         // extract the match-pair from the highest priority candidate
         let match_pair = &candidates.first().unwrap().match_pairs[0];
@@ -1710,7 +1715,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     ///    by a MIR pass run after borrow checking.
     fn calculate_fake_borrows<'b>(
         &mut self,
-        fake_borrows: &'b FxHashSet<Place<'tcx>>,
+        fake_borrows: &'b FxIndexSet<Place<'tcx>>,
         temp_span: Span,
     ) -> Vec<(Place<'tcx>, Local)> {
         let tcx = self.tcx;
@@ -1736,9 +1741,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             all_fake_borrows.push(place.as_ref());
         }
 
-        // Deduplicate and ensure a deterministic order.
-        all_fake_borrows.sort();
-        all_fake_borrows.dedup();
+        // Deduplicate
+        let mut dedup = FxHashSet::default();
+        all_fake_borrows.retain(|b| dedup.insert(*b));
 
         debug!("add_fake_borrows all_fake_borrows = {:?}", all_fake_borrows);
 

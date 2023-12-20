@@ -436,14 +436,14 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// minimum values.
     ///
     /// For example:
-    ///
-    ///     fn foo<'a, 'b>(..) where 'a: 'b
-    ///
+    /// ```
+    /// fn foo<'a, 'b>( /* ... */ ) where 'a: 'b { /* ... */ }
+    /// ```
     /// would initialize two variables like so:
-    ///
-    ///     R0 = { CFG, R0 } // 'a
-    ///     R1 = { CFG, R0, R1 } // 'b
-    ///
+    /// ```ignore (illustrative)
+    /// R0 = { CFG, R0 } // 'a
+    /// R1 = { CFG, R0, R1 } // 'b
+    /// ```
     /// Here, R0 represents `'a`, and it contains (a) the entire CFG
     /// and (b) any universally quantified regions that it outlives,
     /// which in this case is just itself. R1 (`'b`) in contrast also
@@ -1310,9 +1310,9 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// whether any of the constraints were too strong. In particular,
     /// we want to check for a case where a universally quantified
     /// region exceeded its bounds. Consider:
-    ///
-    ///     fn foo<'a, 'b>(x: &'a u32) -> &'b u32 { x }
-    ///
+    /// ```compile_fail,E0312
+    /// fn foo<'a, 'b>(x: &'a u32) -> &'b u32 { x }
+    /// ```
     /// In this case, returning `x` requires `&'a u32 <: &'b u32`
     /// and hence we establish (transitively) a constraint that
     /// `'a: 'b`. The `propagate_constraints` code above will
@@ -1366,9 +1366,9 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// <https://smallcultfollowing.com/babysteps/blog/2019/01/17/polonius-and-region-errors/>
     ///
     /// In the canonical example
-    ///
-    ///     fn foo<'a, 'b>(x: &'a u32) -> &'b u32 { x }
-    ///
+    /// ```compile_fail,E0312
+    /// fn foo<'a, 'b>(x: &'a u32) -> &'b u32 { x }
+    /// ```
     /// returning `x` requires `&'a u32 <: &'b u32` and hence we establish (transitively) a
     /// constraint that `'a: 'b`. It is an error that we have no evidence that this
     /// constraint holds.
@@ -1733,7 +1733,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
 
     crate fn retrieve_closure_constraint_info(
         &self,
-        body: &Body<'tcx>,
+        _body: &Body<'tcx>,
         constraint: &OutlivesConstraint<'tcx>,
     ) -> BlameConstraint<'tcx> {
         let loc = match constraint.locations {
@@ -1760,7 +1760,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
             .unwrap_or(BlameConstraint {
                 category: constraint.category,
                 from_closure: false,
-                cause: ObligationCause::dummy_with_span(body.source_info(loc).span),
+                cause: ObligationCause::dummy_with_span(constraint.span),
                 variance_info: constraint.variance_info,
             })
     }
@@ -1869,6 +1869,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
                     sup: r,
                     sub: constraint.min_choice,
                     locations: Locations::All(p_c.definition_span),
+                    span: p_c.definition_span,
                     category: ConstraintCategory::OpaqueType,
                     variance_info: ty::VarianceDiagInfo::default(),
                 };
@@ -2017,7 +2018,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
                         category: constraint.category,
                         from_closure: false,
                         cause: ObligationCause::new(
-                            constraint.locations.span(body),
+                            constraint.span,
                             CRATE_HIR_ID,
                             cause_code.clone(),
                         ),

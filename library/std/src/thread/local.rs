@@ -21,6 +21,8 @@ use crate::fmt;
 /// The [`with`] method yields a reference to the contained value which cannot be
 /// sent across threads or escape the given closure.
 ///
+/// [`thread_local!`]: crate::thread_local
+///
 /// # Initialization and Destruction
 ///
 /// Initialization is dynamically performed on the first call to [`with`]
@@ -179,6 +181,7 @@ macro_rules! __thread_local_inner {
     // used to generate the `LocalKey` value for const-initialized thread locals
     (@key $t:ty, const $init:expr) => {{
         #[cfg_attr(not(windows), inline)] // see comments below
+        #[deny(unsafe_op_in_unsafe_fn)]
         unsafe fn __getit(
             _init: $crate::option::Option<&mut $crate::option::Option<$t>>,
         ) -> $crate::option::Option<&'static $t> {
@@ -193,7 +196,7 @@ macro_rules! __thread_local_inner {
             #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
             {
                 static mut VAL: $t = INIT_EXPR;
-                $crate::option::Option::Some(&VAL)
+                unsafe { $crate::option::Option::Some(&VAL) }
             }
 
             // If the platform has support for `#[thread_local]`, use it.
@@ -980,7 +983,7 @@ pub mod fast {
         unsafe fn try_initialize<F: FnOnce() -> T>(&self, init: F) -> Option<&'static T> {
             // SAFETY: See comment above (this function doc).
             if !mem::needs_drop::<T>() || unsafe { self.try_register_dtor() } {
-                // SAFETY: See comment above (his function doc).
+                // SAFETY: See comment above (this function doc).
                 Some(unsafe { self.inner.initialize(init) })
             } else {
                 None

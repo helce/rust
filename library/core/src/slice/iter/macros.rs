@@ -325,7 +325,7 @@ macro_rules! iterator {
                 None
             }
 
-            #[doc(hidden)]
+            #[inline]
             unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item {
                 // SAFETY: the caller must guarantee that `i` is in bounds of
                 // the underlying slice, so `i` cannot overflow an `isize`, and

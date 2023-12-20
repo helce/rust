@@ -66,7 +66,7 @@ use std::lazy::SyncOnceCell;
 use std::sync::{Mutex, MutexGuard};
 
 use if_chain::if_chain;
-use rustc_ast::ast::{self, Attribute, LitKind};
+use rustc_ast::ast::{self, LitKind};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::unhash::UnhashMap;
 use rustc_hir as hir;
@@ -77,19 +77,22 @@ use rustc_hir::intravisit::{walk_expr, FnKind, Visitor};
 use rustc_hir::itemlikevisit::ItemLikeVisitor;
 use rustc_hir::LangItem::{OptionNone, ResultErr, ResultOk};
 use rustc_hir::{
-    def, Arm, ArrayLen, BindingAnnotation, Block, BlockCheckMode, Body, Constness, Destination, Expr,
-    ExprKind, FnDecl, ForeignItem, HirId, Impl, ImplItem, ImplItemKind, IsAsync, Item, ItemKind, LangItem, Local,
-    MatchSource, Mutability, Node, Param, Pat, PatKind, Path, PathSegment, PrimTy, QPath, Stmt, StmtKind,
-    TraitItem, TraitItemKind, TraitRef, TyKind, UnOp,
+    def, Arm, ArrayLen, BindingAnnotation, Block, BlockCheckMode, Body, Constness, Destination, Expr, ExprKind, FnDecl,
+    ForeignItem, HirId, Impl, ImplItem, ImplItemKind, IsAsync, Item, ItemKind, LangItem, Local, MatchSource,
+    Mutability, Node, Param, Pat, PatKind, Path, PathSegment, PrimTy, QPath, Stmt, StmtKind, TraitItem, TraitItemKind,
+    TraitRef, TyKind, UnOp,
 };
 use rustc_lint::{LateContext, Level, Lint, LintContext};
 use rustc_middle::hir::place::PlaceBase;
 use rustc_middle::ty as rustc_ty;
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow};
 use rustc_middle::ty::binding::BindingMode;
-use rustc_middle::ty::{IntTy, UintTy, FloatTy};
-use rustc_middle::ty::fast_reject::SimplifiedTypeGen::*;
+use rustc_middle::ty::fast_reject::SimplifiedTypeGen::{
+    ArraySimplifiedType, BoolSimplifiedType, CharSimplifiedType, FloatSimplifiedType, IntSimplifiedType,
+    PtrSimplifiedType, SliceSimplifiedType, StrSimplifiedType, UintSimplifiedType,
+};
 use rustc_middle::ty::{layout::IntegerExt, BorrowKind, DefIdTree, Ty, TyCtxt, TypeAndMut, TypeFoldable, UpvarCapture};
+use rustc_middle::ty::{FloatTy, IntTy, UintTy};
 use rustc_semver::RustcVersion;
 use rustc_session::Session;
 use rustc_span::hygiene::{ExpnKind, MacroKind};
@@ -232,7 +235,7 @@ pub fn is_lang_ctor(cx: &LateContext<'_>, qpath: &QPath<'_>, lang_item: LangItem
     if let QPath::Resolved(_, path) = qpath {
         if let Res::Def(DefKind::Ctor(..), ctor_id) = path.res {
             if let Ok(item_id) = cx.tcx.lang_items().require(lang_item) {
-                return cx.tcx.parent(ctor_id) == Some(item_id);
+                return cx.tcx.parent(ctor_id) == item_id;
             }
         }
     }
@@ -522,7 +525,7 @@ pub fn def_path_res(cx: &LateContext<'_>, path: &[&str]) -> Res {
     let tcx = cx.tcx;
     let starts = find_primitive(tcx, base)
         .chain(find_crate(tcx, base))
-        .flat_map(|id| item_child_by_name(tcx, id, first));
+        .filter_map(|id| item_child_by_name(tcx, id, first));
 
     for first in starts {
         let last = path
@@ -1469,12 +1472,6 @@ pub fn recurse_or_patterns<'tcx, F: FnMut(&'tcx Pat<'tcx>)>(pat: &'tcx Pat<'tcx>
     }
 }
 
-/// Checks for the `#[automatically_derived]` attribute all `#[derive]`d
-/// implementations have.
-pub fn is_automatically_derived(attrs: &[ast::Attribute]) -> bool {
-    has_attr(attrs, sym::automatically_derived)
-}
-
 pub fn is_self(slf: &Param<'_>) -> bool {
     if let PatKind::Binding(.., name, _) = slf.pat.kind {
         name.name == kw::SelfLower
@@ -1687,7 +1684,7 @@ pub fn if_sequence<'tcx>(mut expr: &'tcx Expr<'tcx>) -> (Vec<&'tcx Expr<'tcx>>, 
 
 /// Checks if the given function kind is an async function.
 pub fn is_async_fn(kind: FnKind<'_>) -> bool {
-    matches!(kind, FnKind::ItemFn(_, _, header, _) if header.asyncness == IsAsync::Async)
+    matches!(kind, FnKind::ItemFn(_, _, header) if header.asyncness == IsAsync::Async)
 }
 
 /// Peels away all the compiler generated code surrounding the body of an async function,
@@ -1721,11 +1718,6 @@ pub fn get_async_fn_body<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'_>) -> Option<&'t
     None
 }
 
-// Finds the `#[must_use]` attribute, if any
-pub fn must_use_attr(attrs: &[Attribute]) -> Option<&Attribute> {
-    attrs.iter().find(|a| a.has_name(sym::must_use))
-}
-
 // check if expr is calling method or function with #[must_use] attribute
 pub fn is_must_use_func_call(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     let did = match expr.kind {
@@ -1742,7 +1734,7 @@ pub fn is_must_use_func_call(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
         _ => None,
     };
 
-    did.map_or(false, |did| must_use_attr(cx.tcx.get_attrs(did)).is_some())
+    did.map_or(false, |did| cx.tcx.has_attr(did, sym::must_use))
 }
 
 /// Checks if an expression represents the identity function

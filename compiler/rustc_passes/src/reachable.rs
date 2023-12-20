@@ -208,7 +208,11 @@ impl<'tcx> ReachableContext<'tcx> {
                 } else {
                     false
                 };
-            let codegen_attrs = self.tcx.codegen_fn_attrs(search_item);
+            let codegen_attrs = if self.tcx.def_kind(search_item).has_codegen_attrs() {
+                self.tcx.codegen_fn_attrs(search_item)
+            } else {
+                CodegenFnAttrs::EMPTY
+            };
             let is_extern = codegen_attrs.contains_extern_indicator();
             let std_internal =
                 codegen_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL);
@@ -280,8 +284,7 @@ impl<'tcx> ReachableContext<'tcx> {
                     self.visit_nested_body(body);
                 }
                 hir::ImplItemKind::Fn(_, body) => {
-                    let impl_def_id =
-                        self.tcx.parent(search_item.to_def_id()).unwrap().expect_local();
+                    let impl_def_id = self.tcx.local_parent(search_item);
                     if method_might_be_inlined(self.tcx, impl_item, impl_def_id) {
                         self.visit_nested_body(body)
                     }
@@ -330,11 +333,18 @@ impl CollectPrivateImplItemsVisitor<'_, '_> {
         // Anything which has custom linkage gets thrown on the worklist no
         // matter where it is in the crate, along with "special std symbols"
         // which are currently akin to allocator symbols.
-        let codegen_attrs = self.tcx.codegen_fn_attrs(def_id);
-        if codegen_attrs.contains_extern_indicator()
-            || codegen_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL)
-        {
-            self.worklist.push(def_id);
+        if self.tcx.def_kind(def_id).has_codegen_attrs() {
+            let codegen_attrs = self.tcx.codegen_fn_attrs(def_id);
+            if codegen_attrs.contains_extern_indicator()
+                || codegen_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL)
+                // FIXME(nbdd0121): `#[used]` are marked as reachable here so it's picked up by
+                // `linked_symbols` in cg_ssa. They won't be exported in binary or cdylib due to their
+                // `SymbolExportLevel::Rust` export level but may end up being exported in dylibs.
+                || codegen_attrs.flags.contains(CodegenFnAttrFlags::USED)
+                || codegen_attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER)
+            {
+                self.worklist.push(def_id);
+            }
         }
     }
 }

@@ -37,18 +37,13 @@ use rustc_middle::ty::{
 use rustc_span::def_id::CRATE_DEF_ID;
 use rustc_span::{Span, DUMMY_SP};
 use rustc_target::abi::VariantIdx;
-use rustc_trait_selection::infer::InferCtxtExt as _;
-use rustc_trait_selection::traits::error_reporting::InferCtxtExt as _;
 use rustc_trait_selection::traits::query::type_op;
 use rustc_trait_selection::traits::query::type_op::custom::scrape_region_constraints;
 use rustc_trait_selection::traits::query::type_op::custom::CustomTypeOp;
 use rustc_trait_selection::traits::query::type_op::{TypeOp, TypeOpOutput};
 use rustc_trait_selection::traits::query::Fallible;
-use rustc_trait_selection::traits::{self, ObligationCause, PredicateObligation};
+use rustc_trait_selection::traits::PredicateObligation;
 
-use rustc_const_eval::transform::{
-    check_consts::ConstCx, promote_consts::is_const_fn_in_array_repeat_expression,
-};
 use rustc_mir_dataflow::impls::MaybeInitializedPlaces;
 use rustc_mir_dataflow::move_paths::MoveData;
 use rustc_mir_dataflow::ResultsCursor;
@@ -976,7 +971,7 @@ pub enum Locations {
     /// things like the type of the return slot. Consider this
     /// example:
     ///
-    /// ```
+    /// ```compile_fail,E0515
     /// fn foo<'a>(x: &'a u32) -> &'a u32 {
     ///     let y = 22;
     ///     return &y; // error
@@ -1141,6 +1136,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             Some(self.implicit_region_bound),
             self.param_env,
             locations,
+            locations.span(self.body),
             category,
             &mut self.borrowck_context.constraints,
         )
@@ -1303,28 +1299,6 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     );
                 }
             }
-            StatementKind::SetDiscriminant { ref place, variant_index } => {
-                let place_type = place.ty(body, tcx).ty;
-                let adt = match place_type.kind() {
-                    ty::Adt(adt, _) if adt.is_enum() => adt,
-                    _ => {
-                        span_bug!(
-                            stmt.source_info.span,
-                            "bad set discriminant ({:?} = {:?}): lhs is not an enum",
-                            place,
-                            variant_index
-                        );
-                    }
-                };
-                if variant_index.as_usize() >= adt.variants().len() {
-                    span_bug!(
-                        stmt.source_info.span,
-                        "bad set discriminant ({:?} = {:?}): value of of range",
-                        place,
-                        variant_index
-                    );
-                };
-            }
             StatementKind::AscribeUserType(box (ref place, ref projection), variance) => {
                 let place_ty = place.ty(body, tcx).ty;
                 if let Err(terr) = self.relate_type_and_user_type(
@@ -1358,6 +1332,9 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             | StatementKind::Retag { .. }
             | StatementKind::Coverage(..)
             | StatementKind::Nop => {}
+            StatementKind::Deinit(..) | StatementKind::SetDiscriminant { .. } => {
+                bug!("Statement not allowed in this MIR phase")
+            }
         }
     }
 
@@ -1886,41 +1863,17 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         Operand::Move(place) => {
                             // Make sure that repeated elements implement `Copy`.
                             let span = body.source_info(location).span;
-                            let ty = operand.ty(body, tcx);
-                            if !self.infcx.type_is_copy_modulo_regions(self.param_env, ty, span) {
-                                let ccx = ConstCx::new_with_param_env(tcx, body, self.param_env);
-                                let is_const_fn =
-                                    is_const_fn_in_array_repeat_expression(&ccx, &place, &body);
+                            let ty = place.ty(body, tcx).ty;
+                            let trait_ref = ty::TraitRef::new(
+                                tcx.require_lang_item(LangItem::Copy, Some(span)),
+                                tcx.mk_substs_trait(ty, &[]),
+                            );
 
-                                debug!("check_rvalue: is_const_fn={:?}", is_const_fn);
-
-                                let def_id = body.source.def_id().expect_local();
-                                let obligation = traits::Obligation::new(
-                                    ObligationCause::new(
-                                        span,
-                                        self.tcx().hir().local_def_id_to_hir_id(def_id),
-                                        traits::ObligationCauseCode::RepeatElementCopy {
-                                            is_const_fn,
-                                        },
-                                    ),
-                                    self.param_env,
-                                    ty::Binder::dummy(ty::TraitRef::new(
-                                        self.tcx().require_lang_item(
-                                            LangItem::Copy,
-                                            Some(self.last_span),
-                                        ),
-                                        tcx.mk_substs_trait(ty, &[]),
-                                    ))
-                                    .without_const()
-                                    .to_predicate(self.tcx()),
-                                );
-                                self.infcx.report_selection_error(
-                                    obligation.clone(),
-                                    &obligation,
-                                    &traits::SelectionError::Unimplemented,
-                                    false,
-                                );
-                            }
+                            self.prove_trait_ref(
+                                trait_ref,
+                                Locations::Single(location),
+                                ConstraintCategory::CopyBound,
+                            );
                         }
                     }
                 }
@@ -2420,6 +2373,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                                 sup: ref_region.to_region_vid(),
                                 sub: borrow_region.to_region_vid(),
                                 locations: location.to_locations(),
+                                span: location.to_locations().span(body),
                                 category,
                                 variance_info: ty::VarianceDiagInfo::default(),
                             });

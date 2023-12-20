@@ -8,7 +8,6 @@ pub mod probe;
 mod suggest;
 
 pub use self::suggest::SelfSource;
-pub use self::CandidateSource::*;
 pub use self::MethodError::*;
 
 use crate::check::FnCtxt;
@@ -82,8 +81,8 @@ pub struct NoMatchData<'tcx> {
 // candidate can arise. Used for error reporting only.
 #[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CandidateSource {
-    ImplSource(DefId),
-    TraitSource(DefId /* trait id */),
+    Impl(DefId),
+    Trait(DefId /* trait id */),
 }
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
@@ -237,8 +236,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         match *source {
                             // Note: this cannot come from an inherent impl,
                             // because the first probing succeeded.
-                            ImplSource(def) => self.tcx.trait_id_of_impl(def),
-                            TraitSource(_) => None,
+                            CandidateSource::Impl(def) => self.tcx.trait_id_of_impl(def),
+                            CandidateSource::Trait(_) => None,
                         }
                     })
                     .collect(),
@@ -461,9 +460,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // N.B., instantiate late-bound regions first so that
         // `instantiate_type_scheme` can normalize associated types that
         // may reference those regions.
-        let fn_sig = tcx.fn_sig(def_id);
-        let fn_sig = self.replace_bound_vars_with_fresh_vars(span, infer::FnCall, fn_sig).0;
+        let fn_sig = tcx.bound_fn_sig(def_id);
         let fn_sig = fn_sig.subst(self.tcx, substs);
+        let fn_sig = self.replace_bound_vars_with_fresh_vars(span, infer::FnCall, fn_sig).0;
 
         let InferOk { value, obligations: o } = if is_op {
             self.normalize_op_associated_types_in_as_infer_ok(span, fn_sig, opt_input_expr)

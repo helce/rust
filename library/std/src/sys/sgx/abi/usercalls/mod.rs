@@ -1,5 +1,4 @@
 use crate::cmp;
-use crate::convert::TryFrom;
 use crate::io::{Error as IoError, ErrorKind, IoSlice, IoSliceMut, Result as IoResult};
 use crate::sys::rand::rdrand64;
 use crate::time::{Duration, Instant};
@@ -7,6 +6,8 @@ use crate::time::{Duration, Instant};
 pub(crate) mod alloc;
 #[macro_use]
 pub(crate) mod raw;
+#[cfg(test)]
+mod tests;
 
 use self::raw::*;
 

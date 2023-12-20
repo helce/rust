@@ -12,7 +12,7 @@ use rustc_target::abi::VariantIdx;
 #[derive(Copy, Clone, Debug, TypeFoldable)]
 pub struct PlaceTy<'tcx> {
     pub ty: Ty<'tcx>,
-    /// Downcast to a particular variant of an enum, if included.
+    /// Downcast to a particular variant of an enum or a generator, if included.
     pub variant_index: Option<VariantIdx>,
 }
 
@@ -76,6 +76,9 @@ impl<'tcx> PlaceTy<'tcx> {
         V: ::std::fmt::Debug,
         T: ::std::fmt::Debug + Copy,
     {
+        if self.variant_index.is_some() && !matches!(elem, ProjectionElem::Field(..)) {
+            bug!("cannot use non field projection on downcasted place")
+        }
         let answer = match *elem {
             ProjectionElem::Deref => {
                 let ty = self
@@ -199,7 +202,9 @@ impl<'tcx> Rvalue<'tcx> {
             Rvalue::Aggregate(ref ak, ref ops) => match **ak {
                 AggregateKind::Array(ty) => tcx.mk_array(ty, ops.len() as u64),
                 AggregateKind::Tuple => tcx.mk_tup(ops.iter().map(|op| op.ty(local_decls, tcx))),
-                AggregateKind::Adt(did, _, substs, _, _) => tcx.type_of(did).subst(tcx, substs),
+                AggregateKind::Adt(did, _, substs, _, _) => {
+                    tcx.bound_type_of(did).subst(tcx, substs)
+                }
                 AggregateKind::Closure(did, substs) => tcx.mk_closure(did, substs),
                 AggregateKind::Generator(did, substs, movability) => {
                     tcx.mk_generator(did, substs, movability)

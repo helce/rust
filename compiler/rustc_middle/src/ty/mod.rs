@@ -14,12 +14,6 @@ pub use self::AssocItemContainer::*;
 pub use self::BorrowKind::*;
 pub use self::IntVarValue::*;
 pub use self::Variance::*;
-pub use adt::*;
-pub use assoc::*;
-pub use generics::*;
-use rustc_data_structures::fingerprint::Fingerprint;
-pub use vtable::*;
-
 use crate::metadata::ModChild;
 use crate::middle::privacy::AccessLevels;
 use crate::mir::{Body, GeneratorLayout};
@@ -28,22 +22,27 @@ use crate::ty;
 use crate::ty::fast_reject::SimplifiedType;
 use crate::ty::subst::{GenericArg, InternalSubsts, Subst, SubstsRef};
 use crate::ty::util::Discr;
+pub use adt::*;
+pub use assoc::*;
+pub use generics::*;
 use rustc_ast as ast;
 use rustc_attr as attr;
+use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
-use rustc_data_structures::intern::Interned;
+use rustc_data_structures::intern::{Interned, WithStableHash};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::tagged_ptr::CopyTaggedPtr;
 use rustc_hir as hir;
 use rustc_hir::def::{CtorKind, CtorOf, DefKind, Res};
-use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LocalDefIdMap, CRATE_DEF_INDEX};
+use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LocalDefIdMap};
 use rustc_hir::Node;
 use rustc_macros::HashStable;
 use rustc_query_system::ich::StableHashingContext;
 use rustc_session::cstore::CrateStoreDyn;
-use rustc_span::symbol::{kw, Ident, Symbol};
+use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::Span;
 use rustc_target::abi::Align;
+pub use vtable::*;
 
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -67,8 +66,9 @@ pub use self::consts::{
 };
 pub use self::context::{
     tls, CanonicalUserType, CanonicalUserTypeAnnotation, CanonicalUserTypeAnnotations,
-    CtxtInterners, DelaySpanBugEmitted, FreeRegionInfo, GeneratorInteriorTypeCause, GlobalCtxt,
-    Lift, OnDiskCache, TyCtxt, TypeckResults, UserType, UserTypeAnnotationIndex,
+    CtxtInterners, DelaySpanBugEmitted, FreeRegionInfo, GeneratorDiagnosticData,
+    GeneratorInteriorTypeCause, GlobalCtxt, Lift, OnDiskCache, TyCtxt, TypeckResults, UserType,
+    UserTypeAnnotationIndex,
 };
 pub use self::instance::{Instance, InstanceDef};
 pub use self::list::List;
@@ -77,7 +77,7 @@ pub use self::sty::RegionKind::*;
 pub use self::sty::TyKind::*;
 pub use self::sty::{
     Binder, BoundRegion, BoundRegionKind, BoundTy, BoundTyKind, BoundVar, BoundVariableKind,
-    CanonicalPolyFnSig, ClosureSubsts, ClosureSubstsParts, ConstVid, EarlyBoundRegion,
+    CanonicalPolyFnSig, ClosureSubsts, ClosureSubstsParts, ConstVid, EarlyBinder, EarlyBoundRegion,
     ExistentialPredicate, ExistentialProjection, ExistentialTraitRef, FnSig, FreeRegion, GenSig,
     GeneratorSubsts, GeneratorSubstsParts, InlineConstSubsts, InlineConstSubstsParts, ParamConst,
     ParamTy, PolyExistentialProjection, PolyExistentialTraitRef, PolyFnSig, PolyGenSig,
@@ -130,6 +130,8 @@ pub struct ResolverOutputs {
     pub definitions: rustc_hir::definitions::Definitions,
     pub cstore: Box<CrateStoreDyn>,
     pub visibilities: FxHashMap<LocalDefId, Visibility>,
+    /// This field is used to decide whether we should make `PRIVATE_IN_PUBLIC` a hard error.
+    pub has_pub_restricted: bool,
     pub access_levels: AccessLevels,
     pub extern_crate_map: FxHashMap<LocalDefId, CrateNum>,
     pub maybe_unused_trait_imports: FxHashSet<LocalDefId>,
@@ -287,11 +289,28 @@ pub struct ClosureSizeProfileData<'tcx> {
 }
 
 pub trait DefIdTree: Copy {
-    fn parent(self, id: DefId) -> Option<DefId>;
+    fn opt_parent(self, id: DefId) -> Option<DefId>;
 
     #[inline]
-    fn local_parent(self, id: LocalDefId) -> Option<LocalDefId> {
-        Some(self.parent(id.to_def_id())?.expect_local())
+    #[track_caller]
+    fn parent(self, id: DefId) -> DefId {
+        match self.opt_parent(id) {
+            Some(id) => id,
+            // not `unwrap_or_else` to avoid breaking caller tracking
+            None => bug!("{id:?} doesn't have a parent"),
+        }
+    }
+
+    #[inline]
+    #[track_caller]
+    fn opt_local_parent(self, id: LocalDefId) -> Option<LocalDefId> {
+        self.opt_parent(id.to_def_id()).map(DefId::expect_local)
+    }
+
+    #[inline]
+    #[track_caller]
+    fn local_parent(self, id: LocalDefId) -> LocalDefId {
+        self.parent(id.to_def_id()).expect_local()
     }
 
     fn is_descendant_of(self, mut descendant: DefId, ancestor: DefId) -> bool {
@@ -300,7 +319,7 @@ pub trait DefIdTree: Copy {
         }
 
         while descendant != ancestor {
-            match self.parent(descendant) {
+            match self.opt_parent(descendant) {
                 Some(parent) => descendant = parent,
                 None => return false,
             }
@@ -310,28 +329,13 @@ pub trait DefIdTree: Copy {
 }
 
 impl<'tcx> DefIdTree for TyCtxt<'tcx> {
-    fn parent(self, id: DefId) -> Option<DefId> {
+    #[inline]
+    fn opt_parent(self, id: DefId) -> Option<DefId> {
         self.def_key(id).parent.map(|index| DefId { index, ..id })
     }
 }
 
 impl Visibility {
-    pub fn from_hir(visibility: &hir::Visibility<'_>, id: hir::HirId, tcx: TyCtxt<'_>) -> Self {
-        match visibility.node {
-            hir::VisibilityKind::Public => Visibility::Public,
-            hir::VisibilityKind::Crate(_) => Visibility::Restricted(DefId::local(CRATE_DEF_INDEX)),
-            hir::VisibilityKind::Restricted { ref path, .. } => match path.res {
-                // If there is no resolution, `resolve` will have already reported an error, so
-                // assume that the visibility is public to avoid reporting more privacy errors.
-                Res::Err => Visibility::Public,
-                def => Visibility::Restricted(def.def_id()),
-            },
-            hir::VisibilityKind::Inherited => {
-                Visibility::Restricted(tcx.parent_module(id).to_def_id())
-            }
-        }
-    }
-
     /// Returns `true` if an item with this visibility is accessible from the given block.
     pub fn is_accessible_from<T: DefIdTree>(self, module: DefId, tree: T) -> bool {
         let restriction = match self {
@@ -438,32 +442,36 @@ crate struct TyS<'tcx> {
     /// De Bruijn indices within the type are contained within `0..D`
     /// (exclusive).
     outer_exclusive_binder: ty::DebruijnIndex,
-
-    /// The stable hash of the type. This way hashing of types will not have to work
-    /// on the address of the type anymore, but can instead just read this field
-    stable_hash: Fingerprint,
 }
 
 // `TyS` is used a lot. Make sure it doesn't unintentionally get bigger.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-static_assert_size!(TyS<'_>, 56);
+static_assert_size!(TyS<'_>, 40);
+
+// We are actually storing a stable hash cache next to the type, so let's
+// also check the full size
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+static_assert_size!(WithStableHash<TyS<'_>>, 56);
 
 /// Use this rather than `TyS`, whenever possible.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, HashStable)]
 #[rustc_diagnostic_item = "Ty"]
 #[rustc_pass_by_value]
-pub struct Ty<'tcx>(Interned<'tcx, TyS<'tcx>>);
+pub struct Ty<'tcx>(Interned<'tcx, WithStableHash<TyS<'tcx>>>);
 
 // Statics only used for internal testing.
-pub static BOOL_TY: Ty<'static> = Ty(Interned::new_unchecked(&BOOL_TYS));
-static BOOL_TYS: TyS<'static> = TyS {
+pub static BOOL_TY: Ty<'static> = Ty(Interned::new_unchecked(&WithStableHash {
+    internee: BOOL_TYS,
+    stable_hash: Fingerprint::ZERO,
+}));
+const BOOL_TYS: TyS<'static> = TyS {
     kind: ty::Bool,
     flags: TypeFlags::empty(),
     outer_exclusive_binder: DebruijnIndex::from_usize(0),
-    stable_hash: Fingerprint::ZERO,
 };
 
-impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for Ty<'tcx> {
+impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for TyS<'tcx> {
+    #[inline]
     fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
         let TyS {
             kind,
@@ -473,24 +481,9 @@ impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for Ty<'tcx> {
             flags: _,
 
             outer_exclusive_binder: _,
+        } = self;
 
-            stable_hash,
-        } = self.0.0;
-
-        if *stable_hash == Fingerprint::ZERO {
-            // No cached hash available. This can only mean that incremental is disabled.
-            // We don't cache stable hashes in non-incremental mode, because they are used
-            // so rarely that the performance actually suffers.
-
-            let stable_hash: Fingerprint = {
-                let mut hasher = StableHasher::new();
-                hcx.while_hashing_spans(false, |hcx| kind.hash_stable(hcx, &mut hasher));
-                hasher.finish()
-            };
-            stable_hash.hash_stable(hcx, hasher);
-        } else {
-            stable_hash.hash_stable(hcx, hasher);
-        }
+        kind.hash_stable(hcx, hasher)
     }
 }
 
@@ -742,7 +735,7 @@ impl<'tcx> Predicate<'tcx> {
         let shifted_pred =
             tcx.shift_bound_var_indices(trait_bound_vars.len(), bound_pred.skip_binder());
         // 2) Self: Bar1<'a, '^0.1> -> T: Bar1<'^0.0, '^0.1>
-        let new = shifted_pred.subst(tcx, trait_ref.skip_binder().substs);
+        let new = EarlyBinder(shifted_pred).subst(tcx, trait_ref.skip_binder().substs);
         // 3) ['x] + ['b] -> ['x, 'b]
         let bound_vars =
             tcx.mk_bound_variable_kinds(trait_bound_vars.iter().chain(pred_bound_vars));
@@ -1036,9 +1029,9 @@ impl<'tcx> Predicate<'tcx> {
 /// their values.
 ///
 /// Example:
-///
-///     struct Foo<T, U: Bar<T>> { ... }
-///
+/// ```ignore (illustrative)
+/// struct Foo<T, U: Bar<T>> { ... }
+/// ```
 /// Here, the `GenericPredicates` for `Foo` would contain a list of bounds like
 /// `[[], [U:Bar<T>]]`. Now if there were some particular reference
 /// like `Foo<isize,usize>`, then the `InstantiatedPredicates` would be `[[],
@@ -1072,6 +1065,7 @@ impl<'tcx> InstantiatedPredicates<'tcx> {
     Lift
 )]
 pub struct OpaqueTypeKey<'tcx> {
+    // FIXME(oli-obk): make this a LocalDefId
     pub def_id: DefId,
     pub substs: SubstsRef<'tcx>,
 }
@@ -1096,9 +1090,9 @@ pub struct OpaqueHiddenType<'tcx> {
     /// The type variable that represents the value of the opaque type
     /// that we require. In other words, after we compile this function,
     /// we will be created a constraint like:
-    ///
-    ///     Foo<'a, T> = ?C
-    ///
+    /// ```ignore (pseudo-rust)
+    /// Foo<'a, T> = ?C
+    /// ```
     /// where `?C` is the value of this type variable. =) It may
     /// naturally refer to the type and lifetime parameters in scope
     /// in this function, though ultimately it should only reference
@@ -1106,6 +1100,26 @@ pub struct OpaqueHiddenType<'tcx> {
     /// other words, `?C` should not include `'b`, even though it's a
     /// lifetime parameter on `foo`.)
     pub ty: Ty<'tcx>,
+}
+
+impl<'tcx> OpaqueHiddenType<'tcx> {
+    pub fn report_mismatch(&self, other: &Self, tcx: TyCtxt<'tcx>) {
+        // Found different concrete types for the opaque type.
+        let mut err = tcx.sess.struct_span_err(
+            other.span,
+            "concrete type differs from previous defining opaque type use",
+        );
+        err.span_label(other.span, format!("expected `{}`, got `{}`", self.ty, other.ty));
+        if self.span == other.span {
+            err.span_label(
+                self.span,
+                "this expression supplies two conflicting concrete types for the same opaque type",
+            );
+        } else {
+            err.span_note(self.span, "previous use here");
+        }
+        err.emit();
+    }
 }
 
 rustc_index::newtype_index! {
@@ -1119,7 +1133,7 @@ rustc_index::newtype_index! {
     ///
     /// To make this more concrete, consider this program:
     ///
-    /// ```
+    /// ```ignore (illustrative)
     /// struct Foo { }
     /// fn bar<T>(x: T) {
     ///   let y: for<'a> fn(&'a u8, Foo) = ...;
@@ -1158,7 +1172,7 @@ impl UniverseIndex {
     /// corresponds to entering a `forall` quantifier. So, for
     /// example, suppose we have this type in universe `U`:
     ///
-    /// ```
+    /// ```ignore (illustrative)
     /// for<'a> fn(&'a u32)
     /// ```
     ///
@@ -1804,8 +1818,8 @@ impl ReprOptions {
             field_shuffle_seed ^= user_seed;
         }
 
-        for attr in tcx.get_attrs(did).iter() {
-            for r in attr::find_repr_attrs(&tcx.sess, attr) {
+        for attr in tcx.get_attrs(did, sym::repr) {
+            for r in attr::parse_repr_attr(&tcx.sess, attr) {
                 flags.insert(match r {
                     attr::ReprC => ReprFlags::IS_C,
                     attr::ReprPacked(pack) => {
@@ -1918,7 +1932,7 @@ impl<'tcx> FieldDef {
     /// Returns the type of this field. The resulting type is not normalized. The `subst` is
     /// typically obtained via the second field of [`TyKind::Adt`].
     pub fn ty(&self, tcx: TyCtxt<'tcx>, subst: SubstsRef<'tcx>) -> Ty<'tcx> {
-        tcx.type_of(self.did).subst(tcx, subst)
+        tcx.bound_type_of(self.did).subst(tcx, subst)
     }
 
     /// Computes the `Ident` of this variant by looking up the `Span`
@@ -1927,8 +1941,7 @@ impl<'tcx> FieldDef {
     }
 }
 
-pub type Attributes<'tcx> = &'tcx [ast::Attribute];
-
+pub type Attributes<'tcx> = impl Iterator<Item = &'tcx ast::Attribute>;
 #[derive(Debug, PartialEq, Eq)]
 pub enum ImplOverlapKind {
     /// These impls are always allowed to overlap.
@@ -1945,7 +1958,7 @@ pub enum ImplOverlapKind {
     /// The widely-used version 0.1.0 of the crate `traitobject` had accidentally relied
     /// that difference, making what reduces to the following set of impls:
     ///
-    /// ```
+    /// ```compile_fail,(E0119)
     /// trait Trait {}
     /// impl Trait for dyn Send + Sync {}
     /// impl Trait for dyn Sync + Send {}
@@ -1982,50 +1995,47 @@ impl<'tcx> TyCtxt<'tcx> {
             .filter(|item| item.kind == AssocKind::Fn && item.defaultness.has_value())
     }
 
-    fn item_name_from_hir(self, def_id: DefId) -> Option<Ident> {
-        self.hir().get_if_local(def_id).and_then(|node| node.ident())
-    }
-
-    fn item_name_from_def_id(self, def_id: DefId) -> Option<Symbol> {
-        if def_id.index == CRATE_DEF_INDEX {
-            Some(self.crate_name(def_id.krate))
+    /// Look up the name of a definition across crates. This does not look at HIR.
+    fn opt_item_name(self, def_id: DefId) -> Option<Symbol> {
+        if let Some(cnum) = def_id.as_crate_root() {
+            Some(self.crate_name(cnum))
         } else {
             let def_key = self.def_key(def_id);
             match def_key.disambiguated_data.data {
                 // The name of a constructor is that of its parent.
-                rustc_hir::definitions::DefPathData::Ctor => self.item_name_from_def_id(DefId {
-                    krate: def_id.krate,
-                    index: def_key.parent.unwrap(),
-                }),
-                _ => def_key.disambiguated_data.data.get_opt_name(),
+                rustc_hir::definitions::DefPathData::Ctor => self
+                    .opt_item_name(DefId { krate: def_id.krate, index: def_key.parent.unwrap() }),
+                // The name of opaque types only exists in HIR.
+                rustc_hir::definitions::DefPathData::ImplTrait
+                    if let Some(def_id) = def_id.as_local() =>
+                    self.hir().opt_name(self.hir().local_def_id_to_hir_id(def_id)),
+                _ => def_key.get_opt_name(),
             }
         }
     }
 
-    /// Look up the name of an item across crates. This does not look at HIR.
+    /// Look up the name of a definition across crates. This does not look at HIR.
     ///
-    /// When possible, this function should be used for cross-crate lookups over
-    /// [`opt_item_name`] to avoid invalidating the incremental cache. If you
-    /// need to handle items without a name, or HIR items that will not be
-    /// serialized cross-crate, or if you need the span of the item, use
+    /// This method will ICE if the corresponding item does not have a name.  In these cases, use
     /// [`opt_item_name`] instead.
     ///
     /// [`opt_item_name`]: Self::opt_item_name
     pub fn item_name(self, id: DefId) -> Symbol {
-        // Look at cross-crate items first to avoid invalidating the incremental cache
-        // unless we have to.
-        self.item_name_from_def_id(id).unwrap_or_else(|| {
+        self.opt_item_name(id).unwrap_or_else(|| {
             bug!("item_name: no name for {:?}", self.def_path(id));
         })
     }
 
-    /// Look up the name and span of an item or [`Node`].
+    /// Look up the name and span of a definition.
     ///
     /// See [`item_name`][Self::item_name] for more information.
-    pub fn opt_item_name(self, def_id: DefId) -> Option<Ident> {
-        // Look at the HIR first so the span will be correct if this is a local item.
-        self.item_name_from_hir(def_id)
-            .or_else(|| self.item_name_from_def_id(def_id).map(Ident::with_dummy_span))
+    pub fn opt_item_ident(self, def_id: DefId) -> Option<Ident> {
+        let def = self.opt_item_name(def_id)?;
+        let span = def_id
+            .as_local()
+            .and_then(|id| self.def_ident_span(id))
+            .unwrap_or(rustc_span::DUMMY_SP);
+        Some(Ident::new(def, span))
     }
 
     pub fn opt_associated_item(self, def_id: DefId) -> Option<&'tcx AssocItem> {
@@ -2126,17 +2136,17 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn expect_variant_res(self, res: Res) -> &'tcx VariantDef {
         match res {
             Res::Def(DefKind::Variant, did) => {
-                let enum_did = self.parent(did).unwrap();
+                let enum_did = self.parent(did);
                 self.adt_def(enum_did).variant_with_id(did)
             }
             Res::Def(DefKind::Struct | DefKind::Union, did) => self.adt_def(did).non_enum_variant(),
             Res::Def(DefKind::Ctor(CtorOf::Variant, ..), variant_ctor_did) => {
-                let variant_did = self.parent(variant_ctor_did).unwrap();
-                let enum_did = self.parent(variant_did).unwrap();
+                let variant_did = self.parent(variant_ctor_did);
+                let enum_did = self.parent(variant_did);
                 self.adt_def(enum_did).variant_with_ctor_id(variant_ctor_did)
             }
             Res::Def(DefKind::Ctor(CtorOf::Struct, ..), ctor_did) => {
-                let struct_did = self.parent(ctor_did).expect("struct ctor has no parent");
+                let struct_did = self.parent(ctor_did);
                 self.adt_def(struct_did).non_enum_variant()
             }
             _ => bug!("expect_variant_res used with unexpected res {:?}", res),
@@ -2171,8 +2181,8 @@ impl<'tcx> TyCtxt<'tcx> {
         }
     }
 
-    /// Gets the attributes of a definition.
-    pub fn get_attrs(self, did: DefId) -> Attributes<'tcx> {
+    // FIXME(@lcnr): Remove this function.
+    pub fn get_attrs_unchecked(self, did: DefId) -> &'tcx [ast::Attribute] {
         if let Some(did) = did.as_local() {
             self.hir().attrs(self.hir().local_def_id_to_hir_id(did))
         } else {
@@ -2180,9 +2190,29 @@ impl<'tcx> TyCtxt<'tcx> {
         }
     }
 
+    /// Gets all attributes with the given name.
+    pub fn get_attrs(self, did: DefId, attr: Symbol) -> ty::Attributes<'tcx> {
+        let filter_fn = move |a: &&ast::Attribute| a.has_name(attr);
+        if let Some(did) = did.as_local() {
+            self.hir().attrs(self.hir().local_def_id_to_hir_id(did)).iter().filter(filter_fn)
+        } else if cfg!(debug_assertions) && rustc_feature::is_builtin_only_local(attr) {
+            bug!("tried to access the `only_local` attribute `{}` from an extern crate", attr);
+        } else {
+            self.item_attrs(did).iter().filter(filter_fn)
+        }
+    }
+
+    pub fn get_attr(self, did: DefId, attr: Symbol) -> Option<&'tcx ast::Attribute> {
+        self.get_attrs(did, attr).next()
+    }
+
     /// Determines whether an item is annotated with an attribute.
     pub fn has_attr(self, did: DefId, attr: Symbol) -> bool {
-        self.sess.contains_name(&self.get_attrs(did), attr)
+        if cfg!(debug_assertions) && !did.is_local() && rustc_feature::is_builtin_only_local(attr) {
+            bug!("tried to access the `only_local` attribute `{}` from an extern crate", attr);
+        } else {
+            self.get_attrs(did, attr).next().is_some()
+        }
     }
 
     /// Returns `true` if this is an `auto trait`.
@@ -2202,13 +2232,18 @@ impl<'tcx> TyCtxt<'tcx> {
         self.impl_trait_ref(def_id).map(|tr| tr.def_id)
     }
 
-    /// If the given defid describes a method belonging to an impl, returns the
+    /// If the given `DefId` describes a method belonging to an impl, returns the
     /// `DefId` of the impl that the method belongs to; otherwise, returns `None`.
     pub fn impl_of_method(self, def_id: DefId) -> Option<DefId> {
         self.opt_associated_item(def_id).and_then(|trait_item| match trait_item.container {
             TraitContainer(_) => None,
             ImplContainer(def_id) => Some(def_id),
         })
+    }
+
+    /// If the given `DefId` belongs to a trait that was automatically derived, returns `true`.
+    pub fn is_builtin_derive(self, def_id: DefId) -> bool {
+        self.has_attr(def_id, sym::automatically_derived)
     }
 
     /// Looks up the span of `impl_did` if the impl is local; otherwise returns `Err`

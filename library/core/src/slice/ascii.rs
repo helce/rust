@@ -6,7 +6,6 @@ use crate::iter;
 use crate::mem;
 use crate::ops;
 
-#[cfg_attr(bootstrap, lang = "slice_u8")]
 #[cfg(not(test))]
 impl [u8] {
     /// Checks if all bytes in this slice are within the ASCII range.
@@ -236,7 +235,7 @@ impl<'a> fmt::Debug for EscapeAscii<'a> {
 /// from `../str/mod.rs`, which does something similar for utf8 validation.
 #[inline]
 fn contains_nonascii(v: usize) -> bool {
-    const NONASCII_MASK: usize = 0x80808080_80808080u64 as usize;
+    const NONASCII_MASK: usize = usize::repeat_u8(0x80);
     (NONASCII_MASK & v) != 0
 }
 

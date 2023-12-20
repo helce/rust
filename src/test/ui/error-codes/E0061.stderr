@@ -13,7 +13,7 @@ LL | fn f(a: u16, b: &str) {}
    |    ^ ------  -------
 
 error[E0061]: this function takes 1 argument but 0 arguments were supplied
-  --> $DIR/E0061.rs:10:5
+  --> $DIR/E0061.rs:9:5
    |
 LL |     f2();
    |     ^^-- supplied 0 arguments

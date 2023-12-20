@@ -100,7 +100,7 @@ impl<'a, 'tcx, V: CodegenObject> PlaceRef<'tcx, V> {
                     self.llval
                 }
                 Abi::ScalarPair(a, b)
-                    if offset == a.value.size(bx.cx()).align_to(b.value.align(bx.cx()).abi) =>
+                    if offset == a.size(bx.cx()).align_to(b.align(bx.cx()).abi) =>
                 {
                     // Offset matches second field.
                     let ty = bx.backend_type(self.layout);
@@ -234,7 +234,7 @@ impl<'a, 'tcx, V: CodegenObject> PlaceRef<'tcx, V> {
         // Decode the discriminant (specifically if it's niche-encoded).
         match *tag_encoding {
             TagEncoding::Direct => {
-                let signed = match tag_scalar.value {
+                let signed = match tag_scalar.primitive() {
                     // We use `i1` for bytes that are always `0` or `1`,
                     // e.g., `#[repr(i8)] enum E { A, B }`, but we can't
                     // let LLVM interpret the `i1` as signed, because
@@ -448,7 +448,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
                     // a box with a non-zst allocator should not be directly dereferenced
                     if cg_base.layout.ty.is_box() && !cg_base.layout.field(cx, 1).is_zst() {
-                        let ptr = cg_base.extract_field(bx, 0).extract_field(bx, 0);
+                        // Extract `Box<T>` -> `Unique<T>` -> `NonNull<T>` -> `*const T`
+                        let ptr =
+                            cg_base.extract_field(bx, 0).extract_field(bx, 0).extract_field(bx, 0);
 
                         ptr.deref(bx.cx())
                     } else {
@@ -464,7 +466,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 mir::ProjectionElem::Deref => {
                     // a box with a non-zst allocator should not be directly dereferenced
                     if cg_base.layout.ty.is_box() && !cg_base.layout.field(cx, 1).is_zst() {
-                        let ptr = cg_base.project_field(bx, 0).project_field(bx, 0);
+                        // Project `Box<T>` -> `Unique<T>` -> `NonNull<T>` -> `*const T`
+                        let ptr =
+                            cg_base.project_field(bx, 0).project_field(bx, 0).project_field(bx, 0);
 
                         bx.load_operand(ptr).deref(bx.cx())
                     } else {

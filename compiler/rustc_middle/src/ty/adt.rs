@@ -82,7 +82,7 @@ bitflags! {
 ///
 /// is essentially represented with [`Ty`] as the following pseudocode:
 ///
-/// ```
+/// ```ignore (illustrative)
 /// struct S { x }
 /// ```
 ///
@@ -161,7 +161,7 @@ impl<'a> HashStable<StableHashingContext<'a>> for AdtDefData {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, HashStable)]
-#[cfg_attr(not(bootstrap), rustc_pass_by_value)]
+#[rustc_pass_by_value]
 pub struct AdtDef<'tcx>(pub Interned<'tcx, AdtDefData>);
 
 impl<'tcx> AdtDef<'tcx> {
@@ -230,8 +230,7 @@ impl AdtDefData {
             flags |= AdtFlags::HAS_CTOR;
         }
 
-        let attrs = tcx.get_attrs(did);
-        if tcx.sess.contains_name(&attrs, sym::fundamental) {
+        if tcx.has_attr(did, sym::fundamental) {
             flags |= AdtFlags::IS_FUNDAMENTAL;
         }
         if Some(did) == tcx.lang_items().phantom_data() {

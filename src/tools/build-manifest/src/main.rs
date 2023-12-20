@@ -152,6 +152,7 @@ static TARGETS: &[&str] = &[
     "x86_64-unknown-linux-gnux32",
     "x86_64-unknown-linux-musl",
     "x86_64-unknown-netbsd",
+    "x86_64-unknown-none",
     "x86_64-unknown-redox",
     "x86_64-unknown-hermit",
 ];
@@ -209,7 +210,7 @@ fn main() {
     let num_threads = if let Some(num) = env::var_os("BUILD_MANIFEST_NUM_THREADS") {
         num.to_str().unwrap().parse().expect("invalid number for BUILD_MANIFEST_NUM_THREADS")
     } else {
-        std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        num_cpus::get()
     };
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)

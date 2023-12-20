@@ -3,7 +3,7 @@ use crate::late::unerased_lint_store;
 use rustc_ast as ast;
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_errors::{struct_span_err, Applicability, Diagnostic};
+use rustc_errors::{struct_span_err, Applicability, Diagnostic, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::{intravisit, HirId};
 use rustc_middle::hir::nested_filter;
@@ -20,7 +20,7 @@ use rustc_session::lint::{
 use rustc_session::parse::{add_feature_diagnostics, feature_err};
 use rustc_session::Session;
 use rustc_span::symbol::{sym, Symbol};
-use rustc_span::{source_map::MultiSpan, Span, DUMMY_SP};
+use rustc_span::{Span, DUMMY_SP};
 use tracing::debug;
 
 fn lint_levels(tcx: TyCtxt<'_>, (): ()) -> LintLevelMap {
@@ -371,7 +371,12 @@ impl<'s> LintLevelsBuilder<'s> {
                             };
                             self.lint_expectations.push((
                                 expect_id,
-                                LintExpectation::new(reason, sp, is_unfulfilled_lint_expectations),
+                                LintExpectation::new(
+                                    reason,
+                                    sp,
+                                    is_unfulfilled_lint_expectations,
+                                    tool_name,
+                                ),
                             ));
                         }
                         let src = LintLevelSource::Node(
@@ -400,8 +405,10 @@ impl<'s> LintLevelsBuilder<'s> {
                                     self.insert_spec(*id, (level, src));
                                 }
                                 if let Level::Expect(expect_id) = level {
-                                    self.lint_expectations
-                                        .push((expect_id, LintExpectation::new(reason, sp, false)));
+                                    self.lint_expectations.push((
+                                        expect_id,
+                                        LintExpectation::new(reason, sp, false, tool_name),
+                                    ));
                                 }
                             }
                             Err((Some(ids), ref new_lint_name)) => {
@@ -444,8 +451,10 @@ impl<'s> LintLevelsBuilder<'s> {
                                     self.insert_spec(*id, (level, src));
                                 }
                                 if let Level::Expect(expect_id) = level {
-                                    self.lint_expectations
-                                        .push((expect_id, LintExpectation::new(reason, sp, false)));
+                                    self.lint_expectations.push((
+                                        expect_id,
+                                        LintExpectation::new(reason, sp, false, tool_name),
+                                    ));
                                 }
                             }
                             Err((None, _)) => {
@@ -550,8 +559,10 @@ impl<'s> LintLevelsBuilder<'s> {
                             }
                         }
                         if let Level::Expect(expect_id) = level {
-                            self.lint_expectations
-                                .push((expect_id, LintExpectation::new(reason, sp, false)));
+                            self.lint_expectations.push((
+                                expect_id,
+                                LintExpectation::new(reason, sp, false, tool_name),
+                            ));
                         }
                     } else {
                         panic!("renamed lint does not exist: {}", new_name);

@@ -44,9 +44,9 @@ crate fn krate(cx: &mut DocContext<'_>) -> Crate {
                 // `#[doc(masked)]` to the injected `extern crate` because it's unstable.
                 if it.is_extern_crate()
                     && (it.attrs.has_doc_flag(sym::masked)
-                        || cx.tcx.is_compiler_builtins(it.def_id.krate()))
+                        || cx.tcx.is_compiler_builtins(it.item_id.krate()))
                 {
-                    cx.cache.masked_crates.insert(it.def_id.krate());
+                    cx.cache.masked_crates.insert(it.item_id.krate());
                 }
             }
         }
@@ -178,7 +178,7 @@ crate fn build_deref_target_impls(cx: &mut DocContext<'_>, items: &[Item], ret: 
 
     for item in items {
         let target = match *item.kind {
-            ItemKind::TypedefItem(ref t, true) => &t.type_,
+            ItemKind::AssocTypeItem(ref t, _) => &t.type_,
             _ => continue,
         };
 
@@ -455,7 +455,7 @@ crate fn find_nearest_parent_module(tcx: TyCtxt<'_>, def_id: DefId) -> Option<De
         let mut current = def_id;
         // The immediate parent might not always be a module.
         // Find the first parent which is.
-        while let Some(parent) = tcx.parent(current) {
+        while let Some(parent) = tcx.opt_parent(current) {
             if tcx.def_kind(parent) == DefKind::Mod {
                 return Some(parent);
             }
@@ -474,10 +474,9 @@ crate fn find_nearest_parent_module(tcx: TyCtxt<'_>, def_id: DefId) -> Option<De
 ///
 /// This function exists because it runs on `hir::Attributes` whereas the other is a
 /// `clean::Attributes` method.
-crate fn has_doc_flag(attrs: ty::Attributes<'_>, flag: Symbol) -> bool {
-    attrs.iter().any(|attr| {
-        attr.has_name(sym::doc)
-            && attr.meta_item_list().map_or(false, |l| rustc_attr::list_contains_name(&l, flag))
+crate fn has_doc_flag(tcx: TyCtxt<'_>, did: DefId, flag: Symbol) -> bool {
+    tcx.get_attrs(did, sym::doc).any(|attr| {
+        attr.meta_item_list().map_or(false, |l| rustc_attr::list_contains_name(&l, flag))
     })
 }
 

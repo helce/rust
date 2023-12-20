@@ -61,8 +61,7 @@ pub fn parse_config(args: Vec<String>) -> Config {
         .reqopt("", "rustc-path", "path to rustc to use for compiling", "PATH")
         .optopt("", "rustdoc-path", "path to rustdoc to use for compiling", "PATH")
         .optopt("", "rust-demangler-path", "path to rust-demangler to use in tests", "PATH")
-        .reqopt("", "lldb-python", "path to python to use for doc tests", "PATH")
-        .reqopt("", "docck-python", "path to python to use for doc tests", "PATH")
+        .reqopt("", "python", "path to python to use for doc tests", "PATH")
         .optopt("", "jsondocck-path", "path to jsondocck to use for doc tests", "PATH")
         .optopt("", "valgrind-path", "path to Valgrind executable for Valgrind tests", "PROGRAM")
         .optflag("", "force-valgrind", "fail if Valgrind tests cannot be run under Valgrind")
@@ -92,6 +91,7 @@ pub fn parse_config(args: Vec<String>) -> Config {
         )
         .optopt("", "run", "whether to execute run-* tests", "auto | always | never")
         .optflag("", "ignored", "run tests marked as ignored")
+        .optmulti("", "skip", "skip tests matching SUBSTRING. Can be passed multiple times", "SUBSTRING")
         .optflag("", "exact", "filters match exactly")
         .optopt(
             "",
@@ -222,8 +222,7 @@ pub fn parse_config(args: Vec<String>) -> Config {
         rustc_path: opt_path(matches, "rustc-path"),
         rustdoc_path: matches.opt_str("rustdoc-path").map(PathBuf::from),
         rust_demangler_path: matches.opt_str("rust-demangler-path").map(PathBuf::from),
-        lldb_python: matches.opt_str("lldb-python").unwrap(),
-        docck_python: matches.opt_str("docck-python").unwrap(),
+        python: matches.opt_str("python").unwrap(),
         jsondocck_path: matches.opt_str("jsondocck-path"),
         valgrind_path: matches.opt_str("valgrind-path"),
         force_valgrind: matches.opt_present("force-valgrind"),
@@ -238,6 +237,7 @@ pub fn parse_config(args: Vec<String>) -> Config {
         debugger: None,
         run_ignored,
         filters: matches.free.clone(),
+        skip: matches.opt_strs("skip"),
         filter_exact: matches.opt_present("exact"),
         force_pass_mode: matches.opt_str("pass").map(|mode| {
             mode.parse::<PassMode>()
@@ -314,6 +314,7 @@ pub fn log_config(config: &Config) {
     logv(c, format!("mode: {}", config.mode));
     logv(c, format!("run_ignored: {}", config.run_ignored));
     logv(c, format!("filters: {:?}", config.filters));
+    logv(c, format!("skip: {:?}", config.skip));
     logv(c, format!("filter_exact: {}", config.filter_exact));
     logv(
         c,
@@ -508,7 +509,7 @@ pub fn test_opts(config: &Config) -> test::TestOpts {
         shuffle: false,
         shuffle_seed: None,
         test_threads: None,
-        skip: vec![],
+        skip: config.skip.clone(),
         list: false,
         options: test::Options::new(),
         time_options: None,
@@ -597,6 +598,7 @@ fn collect_tests_from_dir(
             debug!("found test file: {:?}", file_path.display());
             let paths =
                 TestPaths { file: file_path, relative_dir: relative_dir_path.to_path_buf() };
+
             tests.extend(make_test(config, &paths, inputs))
         } else if file_path.is_dir() {
             let relative_file_path = relative_dir_path.join(file.file_name());
@@ -667,6 +669,40 @@ fn stamp(config: &Config, testpaths: &TestPaths, revision: Option<&str>) -> Path
     output_base_dir(config, testpaths, revision).join("stamp")
 }
 
+fn files_related_to_test(
+    config: &Config,
+    testpaths: &TestPaths,
+    props: &EarlyProps,
+    revision: Option<&str>,
+) -> Vec<PathBuf> {
+    let mut related = vec![];
+
+    if testpaths.file.is_dir() {
+        // run-make tests use their individual directory
+        for entry in WalkDir::new(&testpaths.file) {
+            let path = entry.unwrap().into_path();
+            if path.is_file() {
+                related.push(path);
+            }
+        }
+    } else {
+        related.push(testpaths.file.clone());
+    }
+
+    for aux in &props.aux {
+        let path = testpaths.file.parent().unwrap().join("auxiliary").join(aux);
+        related.push(path);
+    }
+
+    // UI test files.
+    for extension in UI_EXTENSIONS {
+        let path = expected_output_path(testpaths, revision, &config.compare_mode, extension);
+        related.push(path);
+    }
+
+    related
+}
+
 fn is_up_to_date(
     config: &Config,
     testpaths: &TestPaths,
@@ -688,18 +724,8 @@ fn is_up_to_date(
 
     // Check timestamps.
     let mut inputs = inputs.clone();
-    // Use `add_dir` to account for run-make tests, which use their individual directory
-    inputs.add_dir(&testpaths.file);
-
-    for aux in &props.aux {
-        let path = testpaths.file.parent().unwrap().join("auxiliary").join(aux);
+    for path in files_related_to_test(config, testpaths, props, revision) {
         inputs.add_path(&path);
-    }
-
-    // UI test files.
-    for extension in UI_EXTENSIONS {
-        let path = &expected_output_path(testpaths, revision, &config.compare_mode, extension);
-        inputs.add_path(path);
     }
 
     inputs < Stamp::from_path(&stamp_name)
@@ -744,12 +770,10 @@ fn make_test_name(
     testpaths: &TestPaths,
     revision: Option<&String>,
 ) -> test::TestName {
-    // Convert a complete path to something like
-    //
-    //    ui/foo/bar/baz.rs
-    let path = PathBuf::from(config.src_base.file_name().unwrap())
-        .join(&testpaths.relative_dir)
-        .join(&testpaths.file.file_name().unwrap());
+    // Print the name of the file, relative to the repository root.
+    // `src_base` looks like `/path/to/rust/src/test/ui`
+    let root_directory = config.src_base.parent().unwrap().parent().unwrap().parent().unwrap();
+    let path = testpaths.file.strip_prefix(root_directory).unwrap();
     let debugger = match config.debugger {
         Some(d) => format!("-{}", d),
         None => String::new(),

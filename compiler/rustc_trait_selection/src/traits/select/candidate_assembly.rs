@@ -227,8 +227,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // `Err(Unimplemented)` to `Ok(None)`. This helps us avoid
             // emitting additional spurious errors, since we're guaranteed
             // to have emitted at least one.
-            if stack.obligation.references_error() {
-                debug!("no results for error type, treating as ambiguous");
+            if stack.obligation.predicate.references_error() {
+                debug!(?stack.obligation.predicate, "found error type in predicate, treating as ambiguous");
                 return Ok(None);
             }
             return Err(Unimplemented);
@@ -303,17 +303,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 self.assemble_builtin_bound_candidates(sized_conditions, &mut candidates);
             } else if lang_items.unsize_trait() == Some(def_id) {
                 self.assemble_candidates_for_unsizing(obligation, &mut candidates);
-            } else if lang_items.drop_trait() == Some(def_id)
-                && obligation.predicate.is_const_if_const()
-            {
-                // holds to make it easier to transition
-                // FIXME(fee1-dead): add a note for selection error of `~const Drop`
-                // when beta is bumped
-                // FIXME: remove this when beta is bumped
-                #[cfg(bootstrap)]
-                {}
-
-                candidates.vec.push(SelectionCandidate::ConstDestructCandidate(None))
             } else if lang_items.destruct_trait() == Some(def_id) {
                 self.assemble_const_destruct_candidates(obligation, &mut candidates);
             } else {

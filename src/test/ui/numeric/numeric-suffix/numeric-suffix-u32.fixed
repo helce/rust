@@ -1,0 +1,40 @@
+// run-rustfix
+
+fn foo<N>(_x: N) {}
+
+fn main() {
+    foo::<u32>(42_u32);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<u32>(42_u32);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<u32>(42_u32);
+    foo::<u32>(42_u32);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<u32>(42_u32);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<u32>(42_u32);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<u32>(42_u32);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<u32>(42_u32);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<u32>(42_u32);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<u32>(42_u32);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<u32>(42u32);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<u32>(42u32);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+}

@@ -76,7 +76,7 @@ use crate::sys_common::rwlock as sys;
 /// [`Mutex`]: super::Mutex
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct RwLock<T: ?Sized> {
-    inner: sys::MovableRWLock,
+    inner: sys::MovableRwLock,
     poison: poison::Flag,
     data: UnsafeCell<T>,
 }
@@ -99,6 +99,7 @@ unsafe impl<T: ?Sized + Send + Sync> Sync for RwLock<T> {}
                       points can cause deadlocks, delays, \
                       and cause Futures to not implement `Send`"]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[clippy::has_significant_drop]
 pub struct RwLockReadGuard<'a, T: ?Sized + 'a> {
     lock: &'a RwLock<T>,
 }
@@ -122,6 +123,7 @@ unsafe impl<T: ?Sized + Sync> Sync for RwLockReadGuard<'_, T> {}
                       points can cause deadlocks, delays, \
                       and cause Future's to not implement `Send`"]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[clippy::has_significant_drop]
 pub struct RwLockWriteGuard<'a, T: ?Sized + 'a> {
     lock: &'a RwLock<T>,
     poison: poison::Guard,
@@ -146,7 +148,7 @@ impl<T> RwLock<T> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn new(t: T) -> RwLock<T> {
         RwLock {
-            inner: sys::MovableRWLock::new(),
+            inner: sys::MovableRwLock::new(),
             poison: poison::Flag::new(),
             data: UnsafeCell::new(t),
         }

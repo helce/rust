@@ -10,7 +10,7 @@ use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_data_structures::parallel;
 use rustc_data_structures::sync::{Lrc, OnceCell, WorkerLocal};
 use rustc_data_structures::temp_dir::MaybeTempDir;
-use rustc_errors::{Applicability, ErrorGuaranteed, PResult};
+use rustc_errors::{Applicability, ErrorGuaranteed, MultiSpan, PResult};
 use rustc_expand::base::{ExtCtxt, LintStoreExpand, ResolverExpand};
 use rustc_hir::def_id::{StableCrateId, LOCAL_CRATE};
 use rustc_hir::Crate;
@@ -30,12 +30,11 @@ use rustc_resolve::{Resolver, ResolverArenas};
 use rustc_serialize::json;
 use rustc_session::config::{CrateType, Input, OutputFilenames, OutputType};
 use rustc_session::cstore::{MetadataLoader, MetadataLoaderDyn};
-use rustc_session::lint;
 use rustc_session::output::{filename_for_input, filename_for_metadata};
 use rustc_session::search_paths::PathKind;
 use rustc_session::{Limit, Session};
 use rustc_span::symbol::{sym, Symbol};
-use rustc_span::{FileName, MultiSpan};
+use rustc_span::FileName;
 use rustc_trait_selection::traits;
 use rustc_typeck as typeck;
 use tempfile::Builder as TempFileBuilder;
@@ -349,23 +348,8 @@ pub fn configure_and_expand(
             ecx.check_unused_macros();
         });
 
-        let mut missing_fragment_specifiers: Vec<_> = ecx
-            .sess
-            .parse_sess
-            .missing_fragment_specifiers
-            .borrow()
-            .iter()
-            .map(|(span, node_id)| (*span, *node_id))
-            .collect();
-        missing_fragment_specifiers.sort_unstable_by_key(|(span, _)| *span);
-
         let recursion_limit_hit = ecx.reduced_recursion_limit.is_some();
 
-        for (span, node_id) in missing_fragment_specifiers {
-            let lint = lint::builtin::MISSING_FRAGMENT_SPECIFIER;
-            let msg = "missing fragment specifier";
-            resolver.lint_buffer().buffer_lint(lint, node_id, span, msg);
-        }
         if cfg!(windows) {
             env::set_var("PATH", &old_path);
         }
@@ -645,11 +629,15 @@ fn write_out_deps(
         });
         files.extend(extra_tracked_files);
 
-        if let Some(ref backend) = sess.opts.debugging_opts.codegen_backend {
-            files.push(backend.to_string());
-        }
-
         if sess.binary_dep_depinfo() {
+            if let Some(ref backend) = sess.opts.debugging_opts.codegen_backend {
+                if backend.contains('.') {
+                    // If the backend name contain a `.`, it is the path to an external dynamic
+                    // library. If not, it is not a path.
+                    files.push(backend.to_string());
+                }
+            }
+
             boxed_resolver.borrow_mut().access(|resolver| {
                 for cnum in resolver.cstore().crates_untracked() {
                     let source = resolver.cstore().crate_source_untracked(cnum);
@@ -1021,6 +1009,10 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
                 });
             }
         );
+
+        // This check has to be run after all lints are done processing. We don't
+        // define a lint filter, as all lint checks should have finished at this point.
+        sess.time("check_lint_expectations", || tcx.check_expectations(None));
     });
 
     Ok(())

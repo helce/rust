@@ -159,9 +159,9 @@ pub struct InferCtxtInner<'tcx> {
     /// outlive the lifetime 'a". These constraints derive from
     /// instantiated type parameters. So if you had a struct defined
     /// like
-    ///
+    /// ```ignore (illustrative)
     ///     struct Foo<T:'static> { ... }
-    ///
+    /// ```
     /// then in some expression `let x = Foo { ... }` it will
     /// instantiate the type parameter `T` with a fresh type `$0`. At
     /// the same time, it will record a region obligation of
@@ -385,8 +385,8 @@ impl<'tcx> ValuePairs<'tcx> {
 /// See the `error_reporting` module for more details.
 #[derive(Clone, Debug)]
 pub struct TypeTrace<'tcx> {
-    cause: ObligationCause<'tcx>,
-    values: ValuePairs<'tcx>,
+    pub cause: ObligationCause<'tcx>,
+    pub values: ValuePairs<'tcx>,
 }
 
 /// The origin of a `r1 <= r2` constraint.
@@ -927,6 +927,10 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             .borrow_mut()
             .unwrap_region_constraints()
             .region_constraints_added_in_snapshot(&snapshot.undo_snapshot)
+    }
+
+    pub fn opaque_types_added_in_snapshot(&self, snapshot: &CombinedSnapshot<'a, 'tcx>) -> bool {
+        self.inner.borrow().undo_log.opaque_types_in_snapshot(&snapshot.undo_snapshot)
     }
 
     pub fn add_given(&self, sub: ty::Region<'tcx>, sup: ty::RegionVid) {
@@ -1659,49 +1663,6 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         self.tcx.const_eval_resolve(param_env_erased, unevaluated, span)
     }
 
-    /// If `typ` is a type variable of some kind, resolve it one level
-    /// (but do not resolve types found in the result). If `typ` is
-    /// not a type variable, just return it unmodified.
-    // FIXME(eddyb) inline into `ShallowResolver::visit_ty`.
-    fn shallow_resolve_ty(&self, typ: Ty<'tcx>) -> Ty<'tcx> {
-        match *typ.kind() {
-            ty::Infer(ty::TyVar(v)) => {
-                // Not entirely obvious: if `typ` is a type variable,
-                // it can be resolved to an int/float variable, which
-                // can then be recursively resolved, hence the
-                // recursion. Note though that we prevent type
-                // variables from unifying to other type variables
-                // directly (though they may be embedded
-                // structurally), and we prevent cycles in any case,
-                // so this recursion should always be of very limited
-                // depth.
-                //
-                // Note: if these two lines are combined into one we get
-                // dynamic borrow errors on `self.inner`.
-                let known = self.inner.borrow_mut().type_variables().probe(v).known();
-                known.map_or(typ, |t| self.shallow_resolve_ty(t))
-            }
-
-            ty::Infer(ty::IntVar(v)) => self
-                .inner
-                .borrow_mut()
-                .int_unification_table()
-                .probe_value(v)
-                .map(|v| v.to_type(self.tcx))
-                .unwrap_or(typ),
-
-            ty::Infer(ty::FloatVar(v)) => self
-                .inner
-                .borrow_mut()
-                .float_unification_table()
-                .probe_value(v)
-                .map(|v| v.to_type(self.tcx))
-                .unwrap_or(typ),
-
-            _ => typ,
-        }
-    }
-
     /// `ty_or_const_infer_var_changed` is equivalent to one of these two:
     ///   * `shallow_resolve(ty) != ty` (where `ty.kind = ty::Infer(_)`)
     ///   * `shallow_resolve(ct) != ct` (where `ct.kind = ty::ConstKind::Infer(_)`)
@@ -1831,8 +1792,46 @@ impl<'a, 'tcx> TypeFolder<'tcx> for ShallowResolver<'a, 'tcx> {
         self.infcx.tcx
     }
 
+    /// If `ty` is a type variable of some kind, resolve it one level
+    /// (but do not resolve types found in the result). If `typ` is
+    /// not a type variable, just return it unmodified.
     fn fold_ty(&mut self, ty: Ty<'tcx>) -> Ty<'tcx> {
-        self.infcx.shallow_resolve_ty(ty)
+        match *ty.kind() {
+            ty::Infer(ty::TyVar(v)) => {
+                // Not entirely obvious: if `typ` is a type variable,
+                // it can be resolved to an int/float variable, which
+                // can then be recursively resolved, hence the
+                // recursion. Note though that we prevent type
+                // variables from unifying to other type variables
+                // directly (though they may be embedded
+                // structurally), and we prevent cycles in any case,
+                // so this recursion should always be of very limited
+                // depth.
+                //
+                // Note: if these two lines are combined into one we get
+                // dynamic borrow errors on `self.inner`.
+                let known = self.infcx.inner.borrow_mut().type_variables().probe(v).known();
+                known.map_or(ty, |t| self.fold_ty(t))
+            }
+
+            ty::Infer(ty::IntVar(v)) => self
+                .infcx
+                .inner
+                .borrow_mut()
+                .int_unification_table()
+                .probe_value(v)
+                .map_or(ty, |v| v.to_type(self.infcx.tcx)),
+
+            ty::Infer(ty::FloatVar(v)) => self
+                .infcx
+                .inner
+                .borrow_mut()
+                .float_unification_table()
+                .probe_value(v)
+                .map_or(ty, |v| v.to_type(self.infcx.tcx)),
+
+            _ => ty,
+        }
     }
 
     fn fold_const(&mut self, ct: ty::Const<'tcx>) -> ty::Const<'tcx> {

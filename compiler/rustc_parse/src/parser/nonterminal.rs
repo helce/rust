@@ -1,6 +1,6 @@
 use rustc_ast::ptr::P;
-use rustc_ast::token::{self, NonterminalKind, Token};
-use rustc_ast::AstLike;
+use rustc_ast::token::{self, Delimiter, NonterminalKind, Token};
+use rustc_ast::HasTokens;
 use rustc_ast_pretty::pprust;
 use rustc_errors::PResult;
 use rustc_span::symbol::{kw, Ident};
@@ -11,8 +11,10 @@ use crate::parser::{FollowedByType, ForceCollect, NtOrTt, Parser, PathStyle};
 impl<'a> Parser<'a> {
     /// Checks whether a non-terminal may begin with a particular token.
     ///
-    /// Returning `false` is a *stability guarantee* that such a matcher will *never* begin with that
-    /// token. Be conservative (return true) if not sure.
+    /// Returning `false` is a *stability guarantee* that such a matcher will *never* begin with
+    /// that token. Be conservative (return true) if not sure. Inlined because it has a single call
+    /// site.
+    #[inline]
     pub fn nonterminal_may_begin_with(kind: NonterminalKind, token: &Token) -> bool {
         /// Checks whether the non-terminal may contain a single (non-keyword) identifier.
         fn may_be_ident(nt: &token::Nonterminal) -> bool {
@@ -41,7 +43,7 @@ impl<'a> Parser<'a> {
                 _ => token.can_begin_type(),
             },
             NonterminalKind::Block => match token.kind {
-                token::OpenDelim(token::Brace) => true,
+                token::OpenDelim(Delimiter::Brace) => true,
                 token::Interpolated(ref nt) => !matches!(
                     **nt,
                     token::NtItem(_)
@@ -65,8 +67,8 @@ impl<'a> Parser<'a> {
             NonterminalKind::PatParam { .. } | NonterminalKind::PatWithOr { .. } => {
                 match token.kind {
                 token::Ident(..) |                  // box, ref, mut, and other identifiers (can stricten)
-                token::OpenDelim(token::Paren) |    // tuple pattern
-                token::OpenDelim(token::Bracket) |  // slice pattern
+                token::OpenDelim(Delimiter::Parenthesis) |    // tuple pattern
+                token::OpenDelim(Delimiter::Bracket) |  // slice pattern
                 token::BinOp(token::And) |          // reference
                 token::BinOp(token::Minus) |        // negative literal
                 token::AndAnd |                     // double reference
@@ -95,7 +97,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse a non-terminal (e.g. MBE `:pat` or `:ident`).
+    /// Parse a non-terminal (e.g. MBE `:pat` or `:ident`). Inlined because there is only one call
+    /// site.
+    #[inline]
     pub fn parse_nonterminal(&mut self, kind: NonterminalKind) -> PResult<'a, NtOrTt> {
         // Any `Nonterminal` which stores its tokens (currently `NtItem` and `NtExpr`)
         // needs to have them force-captured here.
@@ -118,7 +122,7 @@ impl<'a> Parser<'a> {
                 token::NtBlock(self.collect_tokens_no_attrs(|this| this.parse_block())?)
             }
             NonterminalKind::Stmt => match self.parse_stmt(ForceCollect::Yes)? {
-                Some(s) => token::NtStmt(s),
+                Some(s) => token::NtStmt(P(s)),
                 None => {
                     return Err(self.struct_span_err(self.token.span, "expected a statement"));
                 }
@@ -161,11 +165,11 @@ impl<'a> Parser<'a> {
                 return Err(self.struct_span_err(self.token.span, msg));
             }
             NonterminalKind::Path => token::NtPath(
-                self.collect_tokens_no_attrs(|this| this.parse_path(PathStyle::Type))?,
+                P(self.collect_tokens_no_attrs(|this| this.parse_path(PathStyle::Type))?),
             ),
             NonterminalKind::Meta => token::NtMeta(P(self.parse_attr_item(true)?)),
             NonterminalKind::Vis => token::NtVis(
-                self.collect_tokens_no_attrs(|this| this.parse_visibility(FollowedByType::Yes))?,
+                P(self.collect_tokens_no_attrs(|this| this.parse_visibility(FollowedByType::Yes))?),
             ),
             NonterminalKind::Lifetime => {
                 if self.check_lifetime() {

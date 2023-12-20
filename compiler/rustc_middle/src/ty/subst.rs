@@ -4,13 +4,13 @@ use crate::mir;
 use crate::ty::codec::{TyDecoder, TyEncoder};
 use crate::ty::fold::{FallibleTypeFolder, TypeFoldable, TypeFolder, TypeVisitor};
 use crate::ty::sty::{ClosureSubsts, GeneratorSubsts, InlineConstSubsts};
-use crate::ty::{self, Lift, List, ParamConst, Ty, TyCtxt};
+use crate::ty::{self, EarlyBinder, Lift, List, ParamConst, Ty, TyCtxt};
 
-use rustc_data_structures::intern::Interned;
+use rustc_data_structures::intern::{Interned, WithStableHash};
 use rustc_hir::def_id::DefId;
 use rustc_macros::HashStable;
 use rustc_serialize::{self, Decodable, Encodable};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::DUMMY_SP;
 use smallvec::SmallVec;
 
 use core::intrinsics;
@@ -85,7 +85,7 @@ impl<'tcx> GenericArgKind<'tcx> {
             GenericArgKind::Type(ty) => {
                 // Ensure we can use the tag bits.
                 assert_eq!(mem::align_of_val(ty.0.0) & TAG_MASK, 0);
-                (TYPE_TAG, ty.0.0 as *const ty::TyS<'tcx> as usize)
+                (TYPE_TAG, ty.0.0 as *const WithStableHash<ty::TyS<'tcx>> as usize)
             }
             GenericArgKind::Const(ct) => {
                 // Ensure we can use the tag bits.
@@ -154,7 +154,7 @@ impl<'tcx> GenericArg<'tcx> {
                     &*((ptr & !TAG_MASK) as *const ty::RegionKind),
                 ))),
                 TYPE_TAG => GenericArgKind::Type(Ty(Interned::new_unchecked(
-                    &*((ptr & !TAG_MASK) as *const ty::TyS<'tcx>),
+                    &*((ptr & !TAG_MASK) as *const WithStableHash<ty::TyS<'tcx>>),
                 ))),
                 CONST_TAG => GenericArgKind::Const(ty::Const(Interned::new_unchecked(
                     &*((ptr & !TAG_MASK) as *const ty::ConstS<'tcx>),
@@ -498,35 +498,20 @@ impl<'tcx> TypeFoldable<'tcx> for &'tcx ty::List<Ty<'tcx>> {
     }
 }
 
-///////////////////////////////////////////////////////////////////////////
-// Public trait `Subst`
-//
-// Just call `foo.subst(tcx, substs)` to perform a substitution across
-// `foo`. Or use `foo.subst_spanned(tcx, substs, Some(span))` when
-// there is more information available (for better errors).
-
+// Just call `foo.subst(tcx, substs)` to perform a substitution across `foo`.
+#[rustc_on_unimplemented(message = "Calling `subst` must now be done through an `EarlyBinder`")]
 pub trait Subst<'tcx>: Sized {
-    fn subst(self, tcx: TyCtxt<'tcx>, substs: &[GenericArg<'tcx>]) -> Self {
-        self.subst_spanned(tcx, substs, None)
-    }
+    type Inner;
 
-    fn subst_spanned(
-        self,
-        tcx: TyCtxt<'tcx>,
-        substs: &[GenericArg<'tcx>],
-        span: Option<Span>,
-    ) -> Self;
+    fn subst(self, tcx: TyCtxt<'tcx>, substs: &[GenericArg<'tcx>]) -> Self::Inner;
 }
 
-impl<'tcx, T: TypeFoldable<'tcx>> Subst<'tcx> for T {
-    fn subst_spanned(
-        self,
-        tcx: TyCtxt<'tcx>,
-        substs: &[GenericArg<'tcx>],
-        span: Option<Span>,
-    ) -> T {
-        let mut folder = SubstFolder { tcx, substs, span, binders_passed: 0 };
-        self.fold_with(&mut folder)
+impl<'tcx, T: TypeFoldable<'tcx>> Subst<'tcx> for EarlyBinder<T> {
+    type Inner = T;
+
+    fn subst(self, tcx: TyCtxt<'tcx>, substs: &[GenericArg<'tcx>]) -> Self::Inner {
+        let mut folder = SubstFolder { tcx, substs, binders_passed: 0 };
+        self.0.fold_with(&mut folder)
     }
 }
 
@@ -536,9 +521,6 @@ impl<'tcx, T: TypeFoldable<'tcx>> Subst<'tcx> for T {
 struct SubstFolder<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
     substs: &'a [GenericArg<'tcx>],
-
-    /// The location for which the substitution is performed, if available.
-    span: Option<Span>,
 
     /// Number of region binders we have passed through while doing the substitution
     binders_passed: u32,
@@ -571,13 +553,12 @@ impl<'a, 'tcx> TypeFolder<'tcx> for SubstFolder<'a, 'tcx> {
                 match rk {
                     Some(GenericArgKind::Lifetime(lt)) => self.shift_region_through_binders(lt),
                     _ => {
-                        let span = self.span.unwrap_or(DUMMY_SP);
                         let msg = format!(
                             "Region parameter out of range \
                              when substituting in region {} (index={})",
                             data.name, data.index
                         );
-                        span_bug!(span, "{}", msg);
+                        span_bug!(DUMMY_SP, "{}", msg);
                     }
                 }
             }
@@ -617,9 +598,8 @@ impl<'a, 'tcx> SubstFolder<'a, 'tcx> {
         let ty = match opt_ty {
             Some(GenericArgKind::Type(ty)) => ty,
             Some(kind) => {
-                let span = self.span.unwrap_or(DUMMY_SP);
                 span_bug!(
-                    span,
+                    DUMMY_SP,
                     "expected type for `{:?}` ({:?}/{}) but found {:?} \
                      when substituting, substs={:?}",
                     p,
@@ -630,9 +610,8 @@ impl<'a, 'tcx> SubstFolder<'a, 'tcx> {
                 );
             }
             None => {
-                let span = self.span.unwrap_or(DUMMY_SP);
                 span_bug!(
-                    span,
+                    DUMMY_SP,
                     "type parameter `{:?}` ({:?}/{}) out of range \
                      when substituting, substs={:?}",
                     p,
@@ -652,9 +631,8 @@ impl<'a, 'tcx> SubstFolder<'a, 'tcx> {
         let ct = match opt_ct {
             Some(GenericArgKind::Const(ct)) => ct,
             Some(kind) => {
-                let span = self.span.unwrap_or(DUMMY_SP);
                 span_bug!(
-                    span,
+                    DUMMY_SP,
                     "expected const for `{:?}` ({:?}/{}) but found {:?} \
                      when substituting substs={:?}",
                     p,
@@ -665,9 +643,8 @@ impl<'a, 'tcx> SubstFolder<'a, 'tcx> {
                 );
             }
             None => {
-                let span = self.span.unwrap_or(DUMMY_SP);
                 span_bug!(
-                    span,
+                    DUMMY_SP,
                     "const parameter `{:?}` ({:?}/{}) out of range \
                      when substituting substs={:?}",
                     p,
@@ -687,17 +664,17 @@ impl<'a, 'tcx> SubstFolder<'a, 'tcx> {
     ///
     /// ```
     /// type Func<A> = fn(A);
-    /// type MetaFunc = for<'a> fn(Func<&'a i32>)
+    /// type MetaFunc = for<'a> fn(Func<&'a i32>);
     /// ```
     ///
     /// The type `MetaFunc`, when fully expanded, will be
-    ///
-    ///     for<'a> fn(fn(&'a i32))
-    ///             ^~ ^~ ^~~
-    ///             |  |  |
-    ///             |  |  DebruijnIndex of 2
-    ///             Binders
-    ///
+    /// ```ignore (illustrative)
+    /// for<'a> fn(fn(&'a i32))
+    /// //      ^~ ^~ ^~~
+    /// //      |  |  |
+    /// //      |  |  DebruijnIndex of 2
+    /// //      Binders
+    /// ```
     /// Here the `'a` lifetime is bound in the outer function, but appears as an argument of the
     /// inner one. Therefore, that appearance will have a DebruijnIndex of 2, because we must skip
     /// over the inner binder (remember that we count De Bruijn indices from 1). However, in the
@@ -709,17 +686,17 @@ impl<'a, 'tcx> SubstFolder<'a, 'tcx> {
     ///
     /// ```
     /// type FuncTuple<A> = (A,fn(A));
-    /// type MetaFuncTuple = for<'a> fn(FuncTuple<&'a i32>)
+    /// type MetaFuncTuple = for<'a> fn(FuncTuple<&'a i32>);
     /// ```
     ///
     /// Here the final type will be:
-    ///
-    ///     for<'a> fn((&'a i32, fn(&'a i32)))
-    ///                 ^~~         ^~~
-    ///                 |           |
-    ///          DebruijnIndex of 1 |
-    ///                      DebruijnIndex of 2
-    ///
+    /// ```ignore (illustrative)
+    /// for<'a> fn((&'a i32, fn(&'a i32)))
+    /// //          ^~~         ^~~
+    /// //          |           |
+    /// //   DebruijnIndex of 1 |
+    /// //               DebruijnIndex of 2
+    /// ```
     /// As indicated in the diagram, here the same type `&'a i32` is substituted once, but in the
     /// first case we do not increase the De Bruijn index and in the second case we do. The reason
     /// is that only in the second case have we passed through a fn binder.
@@ -767,7 +744,7 @@ pub struct UserSubsts<'tcx> {
 /// sometimes needed to constrain the type parameters on the impl. For
 /// example, in this code:
 ///
-/// ```
+/// ```ignore (illustrative)
 /// struct Foo<T> { }
 /// impl<A> Foo<A> { fn method() { } }
 /// ```

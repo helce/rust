@@ -3,7 +3,7 @@ use std::cmp;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_errors::{
-    Diagnostic, DiagnosticBuilder, DiagnosticId, EmissionGuarantee, ErrorGuaranteed,
+    Diagnostic, DiagnosticBuilder, DiagnosticId, EmissionGuarantee, ErrorGuaranteed, MultiSpan,
 };
 use rustc_hir::HirId;
 use rustc_index::vec::IndexVec;
@@ -14,7 +14,7 @@ use rustc_session::lint::{
 };
 use rustc_session::Session;
 use rustc_span::hygiene::MacroKind;
-use rustc_span::source_map::{DesugaringKind, ExpnKind, MultiSpan};
+use rustc_span::source_map::{DesugaringKind, ExpnKind};
 use rustc_span::{symbol, Span, Symbol, DUMMY_SP};
 
 /// How a lint level was set.
@@ -210,6 +210,10 @@ pub struct LintExpectation {
     /// adjusted to include an additional note. Therefore, we have to track if
     /// the expectation is for the lint.
     pub is_unfulfilled_lint_expectations: bool,
+    /// This will hold the name of the tool that this lint belongs to. For
+    /// the lint `clippy::some_lint` the tool would be `clippy`, the same
+    /// goes for `rustdoc`. This will be `None` for rustc lints
+    pub lint_tool: Option<Symbol>,
 }
 
 impl LintExpectation {
@@ -217,8 +221,9 @@ impl LintExpectation {
         reason: Option<Symbol>,
         emission_span: Span,
         is_unfulfilled_lint_expectations: bool,
+        lint_tool: Option<Symbol>,
     ) -> Self {
-        Self { reason, emission_span, is_unfulfilled_lint_expectations }
+        Self { reason, emission_span, is_unfulfilled_lint_expectations, lint_tool }
     }
 }
 

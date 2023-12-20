@@ -197,11 +197,11 @@ fn emit_unused_generic_params_error<'tcx>(
     unused_parameters: &FiniteBitSet<u32>,
 ) {
     let base_def_id = tcx.typeck_root_def_id(def_id);
-    if !tcx.get_attrs(base_def_id).iter().any(|a| a.has_name(sym::rustc_polymorphize_error)) {
+    if !tcx.has_attr(base_def_id, sym::rustc_polymorphize_error) {
         return;
     }
 
-    let fn_span = match tcx.opt_item_name(def_id) {
+    let fn_span = match tcx.opt_item_ident(def_id) {
         Some(ident) => ident.span,
         _ => tcx.def_span(def_id),
     };

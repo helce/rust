@@ -1,7 +1,7 @@
 //! Compiler intrinsics.
 //!
-//! The corresponding definitions are in `compiler/rustc_codegen_llvm/src/intrinsic.rs`.
-//! The corresponding const implementations are in `compiler/rustc_mir/src/interpret/intrinsics.rs`
+//! The corresponding definitions are in <https://github.com/rust-lang/rust/blob/master/compiler/rustc_codegen_llvm/src/intrinsic.rs>.
+//! The corresponding const implementations are in <https://github.com/rust-lang/rust/blob/master/compiler/rustc_const_eval/src/interpret/intrinsics.rs>.
 //!
 //! # Const intrinsics
 //!
@@ -10,8 +10,8 @@
 //!
 //! In order to make an intrinsic usable at compile-time, one needs to copy the implementation
 //! from <https://github.com/rust-lang/miri/blob/master/src/shims/intrinsics.rs> to
-//! `compiler/rustc_mir/src/interpret/intrinsics.rs` and add a
-//! `#[rustc_const_unstable(feature = "foo", issue = "01234")]` to the intrinsic.
+//! <https://github.com/rust-lang/rust/blob/master/compiler/rustc_const_eval/src/interpret/intrinsics.rs> and add a
+//! `#[rustc_const_unstable(feature = "const_such_and_such", issue = "01234")]` to the intrinsic declaration.
 //!
 //! If an intrinsic is supposed to be used from a `const fn` with a `rustc_const_stable` attribute,
 //! the intrinsic's attribute must be `rustc_const_stable`, too. Such a change should not be done
@@ -63,10 +63,7 @@ use crate::mem;
 use crate::sync::atomic::{self, AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 
 #[stable(feature = "drop_in_place", since = "1.8.0")]
-#[rustc_deprecated(
-    reason = "no longer an intrinsic - use `ptr::drop_in_place` directly",
-    since = "1.52.0"
-)]
+#[deprecated(note = "no longer an intrinsic - use `ptr::drop_in_place` directly", since = "1.52.0")]
 #[inline]
 pub unsafe fn drop_in_place<T: ?Sized>(to_drop: *mut T) {
     // SAFETY: see `ptr::drop_in_place`
@@ -981,7 +978,7 @@ extern "rust-intrinsic" {
     ///
     /// Turning a pointer into a `usize`:
     ///
-    /// ```
+    /// ```no_run
     /// let ptr = &0;
     /// let ptr_num_transmute = unsafe {
     ///     std::mem::transmute::<&i32, usize>(ptr)
@@ -990,6 +987,16 @@ extern "rust-intrinsic" {
     /// // Use an `as` cast instead
     /// let ptr_num_cast = ptr as *const i32 as usize;
     /// ```
+    ///
+    /// Note that using `transmute` to turn a pointer to a `usize` is (as noted above) [undefined
+    /// behavior][ub] in `const` contexts. Also outside of consts, this operation might not behave
+    /// as expected -- this is touching on many unspecified aspects of the Rust memory model.
+    /// Depending on what the code is doing, the following alternatives are preferrable to
+    /// pointer-to-integer transmutation:
+    /// - If the code just wants to store data of arbitrary type in some buffer and needs to pick a
+    ///   type for that buffer, it can use [`MaybeUninit`][mem::MaybeUninit].
+    /// - If the code actually wants to work on the address the pointer points to, it can use `as`
+    ///   casts or [`ptr.addr()`][pointer::addr].
     ///
     /// Turning a `*mut T` into an `&mut T`:
     ///
@@ -1896,6 +1903,11 @@ extern "rust-intrinsic" {
     #[rustc_const_unstable(feature = "const_ptr_offset_from", issue = "92980")]
     pub fn ptr_offset_from<T>(ptr: *const T, base: *const T) -> isize;
 
+    /// See documentation of `<*const T>::sub_ptr` for details.
+    #[rustc_const_unstable(feature = "const_ptr_offset_from", issue = "92980")]
+    #[cfg(not(bootstrap))]
+    pub fn ptr_offset_from_unsigned<T>(ptr: *const T, base: *const T) -> usize;
+
     /// See documentation of `<*const T>::guaranteed_eq` for details.
     ///
     /// Note that, unlike most intrinsics, this is safe to call;
@@ -2348,7 +2360,6 @@ pub const unsafe fn write_bytes<T>(dst: *mut T, val: u8, count: usize) {
 #[rustc_const_unstable(feature = "const_eval_select", issue = "none")]
 #[lang = "const_eval_select"]
 #[rustc_do_not_const_check]
-#[cfg_attr(not(bootstrap), allow(drop_bounds))] // FIXME remove `~const Drop` and this attr when bumping
 pub const unsafe fn const_eval_select<ARG, F, G, RET>(
     arg: ARG,
     _called_in_const: F,
@@ -2356,7 +2367,7 @@ pub const unsafe fn const_eval_select<ARG, F, G, RET>(
 ) -> RET
 where
     F: ~const FnOnce<ARG, Output = RET>,
-    G: FnOnce<ARG, Output = RET> + ~const Drop + ~const Destruct,
+    G: FnOnce<ARG, Output = RET> + ~const Destruct,
 {
     called_at_rt.call_once(arg)
 }
@@ -2368,7 +2379,6 @@ where
 )]
 #[rustc_const_unstable(feature = "const_eval_select", issue = "none")]
 #[lang = "const_eval_select_ct"]
-#[cfg_attr(not(bootstrap), allow(drop_bounds))] // FIXME remove `~const Drop` and this attr when bumping
 pub const unsafe fn const_eval_select_ct<ARG, F, G, RET>(
     arg: ARG,
     called_in_const: F,
@@ -2376,7 +2386,15 @@ pub const unsafe fn const_eval_select_ct<ARG, F, G, RET>(
 ) -> RET
 where
     F: ~const FnOnce<ARG, Output = RET>,
-    G: FnOnce<ARG, Output = RET> + ~const Drop + ~const Destruct,
+    G: FnOnce<ARG, Output = RET> + ~const Destruct,
 {
     called_in_const.call_once(arg)
+}
+
+/// Bootstrap polyfill
+#[cfg(bootstrap)]
+pub const unsafe fn ptr_offset_from_unsigned<T>(ptr: *const T, base: *const T) -> usize {
+    // SAFETY: we have stricter preconditions than `ptr_offset_from`, so can
+    // call it, and its output has to be positive, so we can just cast.
+    unsafe { ptr_offset_from(ptr, base) as _ }
 }

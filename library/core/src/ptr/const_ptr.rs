@@ -4,7 +4,6 @@ use crate::intrinsics;
 use crate::mem;
 use crate::slice::{self, SliceIndex};
 
-#[cfg_attr(bootstrap, lang = "const_ptr")]
 impl<T: ?Sized> *const T {
     /// Returns `true` if the pointer is null.
     ///
@@ -152,9 +151,17 @@ impl<T: ?Sized> *const T {
 
     /// Gets the "address" portion of the pointer.
     ///
-    /// This is equivalent to `self as usize`, which semantically discards
-    /// *provenance* and *address-space* information. To properly restore that information,
-    /// use [`with_addr`][pointer::with_addr] or [`map_addr`][pointer::map_addr].
+    /// This is similar to `self as usize`, which semantically discards *provenance* and
+    /// *address-space* information. However, unlike `self as usize`, casting the returned address
+    /// back to a pointer yields [`invalid`][], which is undefined behavior to dereference. To
+    /// properly restore the lost information and obtain a dereferencable pointer, use
+    /// [`with_addr`][pointer::with_addr] or [`map_addr`][pointer::map_addr].
+    ///
+    /// If using those APIs is not possible because there is no way to preserve a pointer with the
+    /// required provenance, use [`expose_addr`][pointer::expose_addr] and
+    /// [`from_exposed_addr`][from_exposed_addr] instead. However, note that this makes
+    /// your code less portable and less amenable to tools that check for compliance with the Rust
+    /// memory model.
     ///
     /// On most platforms this will produce a value with the same bytes as the original
     /// pointer, because all the bytes are dedicated to describing the address.
@@ -162,12 +169,48 @@ impl<T: ?Sized> *const T {
     /// perform a change of representation to produce a value containing only the address
     /// portion of the pointer. What that means is up to the platform to define.
     ///
-    /// This API and its claimed semantics are part of the Strict Provenance experiment,
-    /// see the [module documentation][crate::ptr] for details.
+    /// This API and its claimed semantics are part of the Strict Provenance experiment, and as such
+    /// might change in the future (including possibly weakening this so it becomes wholly
+    /// equivalent to `self as usize`). See the [module documentation][crate::ptr] for details.
     #[must_use]
     #[inline]
     #[unstable(feature = "strict_provenance", issue = "95228")]
     pub fn addr(self) -> usize
+    where
+        T: Sized,
+    {
+        // FIXME(strict_provenance_magic): I am magic and should be a compiler intrinsic.
+        self as usize
+    }
+
+    /// Gets the "address" portion of the pointer, and 'exposes' the "provenance" part for future
+    /// use in [`from_exposed_addr`][].
+    ///
+    /// This is equivalent to `self as usize`, which semantically discards *provenance* and
+    /// *address-space* information. Furthermore, this (like the `as` cast) has the implicit
+    /// side-effect of marking the provenance as 'exposed', so on platforms that support it you can
+    /// later call [`from_exposed_addr`][] to reconstitute the original pointer including its
+    /// provenance. (Reconstructing address space information, if required, is your responsibility.)
+    ///
+    /// Using this method means that code is *not* following Strict Provenance rules. Supporting
+    /// [`from_exposed_addr`][] complicates specification and reasoning and may not be supported by
+    /// tools that help you to stay conformant with the Rust memory model, so it is recommended to
+    /// use [`addr`][pointer::addr] wherever possible.
+    ///
+    /// On most platforms this will produce a value with the same bytes as the original pointer,
+    /// because all the bytes are dedicated to describing the address. Platforms which need to store
+    /// additional information in the pointer may not support this operation, since the 'expose'
+    /// side-effect which is required for [`from_exposed_addr`][] to work is typically not
+    /// available.
+    ///
+    /// This API and its claimed semantics are part of the Strict Provenance experiment, see the
+    /// [module documentation][crate::ptr] for details.
+    ///
+    /// [`from_exposed_addr`]: from_exposed_addr
+    #[must_use]
+    #[inline]
+    #[unstable(feature = "strict_provenance", issue = "95228")]
+    pub fn expose_addr(self) -> usize
     where
         T: Sized,
     {
@@ -252,7 +295,7 @@ impl<T: ?Sized> *const T {
     ///
     /// * You must enforce Rust's aliasing rules, since the returned lifetime `'a` is
     ///   arbitrarily chosen and does not necessarily reflect the actual lifetime of the data.
-    ///   In particular, for the duration of this lifetime, the memory the pointer points to must
+    ///   In particular, while this reference exists, the memory the pointer points to must
     ///   not get mutated (except inside `UnsafeCell`).
     ///
     /// This applies even if the result of this method is unused!
@@ -315,7 +358,7 @@ impl<T: ?Sized> *const T {
     ///
     /// * You must enforce Rust's aliasing rules, since the returned lifetime `'a` is
     ///   arbitrarily chosen and does not necessarily reflect the actual lifetime of the data.
-    ///   In particular, for the duration of this lifetime, the memory the pointer points to must
+    ///   In particular, while this reference exists, the memory the pointer points to must
     ///   not get mutated (except inside `UnsafeCell`).
     ///
     /// This applies even if the result of this method is unused!
@@ -475,7 +518,7 @@ impl<T: ?Sized> *const T {
     }
 
     /// Calculates the distance between two pointers. The returned value is in
-    /// units of T: the distance in bytes is divided by `mem::size_of::<T>()`.
+    /// units of T: the distance in bytes divided by `mem::size_of::<T>()`.
     ///
     /// This function is the inverse of [`offset`].
     ///
@@ -566,6 +609,83 @@ impl<T: ?Sized> *const T {
         assert!(0 < pointee_size && pointee_size <= isize::MAX as usize);
         // SAFETY: the caller must uphold the safety contract for `ptr_offset_from`.
         unsafe { intrinsics::ptr_offset_from(self, origin) }
+    }
+
+    /// Calculates the distance between two pointers, *where it's known that
+    /// `self` is equal to or greater than `origin`*. The returned value is in
+    /// units of T: the distance in bytes is divided by `mem::size_of::<T>()`.
+    ///
+    /// This computes the same value that [`offset_from`](#method.offset_from)
+    /// would compute, but with the added precondition that that the offset is
+    /// guaranteed to be non-negative.  This method is equivalent to
+    /// `usize::from(self.offset_from(origin)).unwrap_unchecked()`,
+    /// but it provides slightly more information to the optimizer, which can
+    /// sometimes allow it to optimize slightly better with some backends.
+    ///
+    /// This method can be though of as recovering the `count` that was passed
+    /// to [`add`](#method.add) (or, with the parameters in the other order,
+    /// to [`sub`](#method.sub)).  The following are all equivalent, assuming
+    /// that their safety preconditions are met:
+    /// ```rust
+    /// # #![feature(ptr_sub_ptr)]
+    /// # unsafe fn blah(ptr: *const i32, origin: *const i32, count: usize) -> bool {
+    /// ptr.sub_ptr(origin) == count
+    /// # &&
+    /// origin.add(count) == ptr
+    /// # &&
+    /// ptr.sub(count) == origin
+    /// # }
+    /// ```
+    ///
+    /// # Safety
+    ///
+    /// - The distance between the pointers must be non-negative (`self >= origin`)
+    ///
+    /// - *All* the safety conditions of [`offset_from`](#method.offset_from)
+    ///   apply to this method as well; see it for the full details.
+    ///
+    /// Importantly, despite the return type of this method being able to represent
+    /// a larger offset, it's still *not permitted* to pass pointers which differ
+    /// by more than `isize::MAX` *bytes*.  As such, the result of this method will
+    /// always be less than or equal to `isize::MAX as usize`.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if `T` is a Zero-Sized Type ("ZST").
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(ptr_sub_ptr)]
+    ///
+    /// let a = [0; 5];
+    /// let ptr1: *const i32 = &a[1];
+    /// let ptr2: *const i32 = &a[3];
+    /// unsafe {
+    ///     assert_eq!(ptr2.sub_ptr(ptr1), 2);
+    ///     assert_eq!(ptr1.add(2), ptr2);
+    ///     assert_eq!(ptr2.sub(2), ptr1);
+    ///     assert_eq!(ptr2.sub_ptr(ptr2), 0);
+    /// }
+    ///
+    /// // This would be incorrect, as the pointers are not correctly ordered:
+    /// // ptr1.offset_from(ptr2)
+    /// ```
+    #[unstable(feature = "ptr_sub_ptr", issue = "95892")]
+    #[rustc_const_unstable(feature = "const_ptr_sub_ptr", issue = "95892")]
+    #[inline]
+    pub const unsafe fn sub_ptr(self, origin: *const T) -> usize
+    where
+        T: Sized,
+    {
+        // SAFETY: The comparison has no side-effects, and the intrinsic
+        // does this check internally in the CTFE implementation.
+        unsafe { assert_unsafe_precondition!(self >= origin) };
+
+        let pointee_size = mem::size_of::<T>();
+        assert!(0 < pointee_size && pointee_size <= isize::MAX as usize);
+        // SAFETY: the caller must uphold the safety contract for `ptr_offset_from_unsigned`.
+        unsafe { intrinsics::ptr_offset_from_unsigned(self, origin) }
     }
 
     /// Returns whether two pointers are guaranteed to be equal.
@@ -1042,7 +1162,6 @@ impl<T: ?Sized> *const T {
     }
 }
 
-#[cfg_attr(bootstrap, lang = "const_slice_ptr")]
 impl<T> *const [T] {
     /// Returns the length of a raw slice.
     ///
@@ -1146,7 +1265,7 @@ impl<T> *const [T] {
     ///
     /// * You must enforce Rust's aliasing rules, since the returned lifetime `'a` is
     ///   arbitrarily chosen and does not necessarily reflect the actual lifetime of the data.
-    ///   In particular, for the duration of this lifetime, the memory the pointer points to must
+    ///   In particular, while this reference exists, the memory the pointer points to must
     ///   not get mutated (except inside `UnsafeCell`).
     ///
     /// This applies even if the result of this method is unused!

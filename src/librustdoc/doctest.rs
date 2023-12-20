@@ -168,7 +168,7 @@ crate fn run(options: RustdocOptions) -> Result<(), ErrorGuaranteed> {
 
     // Collect and warn about unused externs, but only if we've gotten
     // reports for each doctest
-    if json_unused_externs {
+    if json_unused_externs.is_enabled() {
         let unused_extern_reports: Vec<_> =
             std::mem::take(&mut unused_extern_reports.lock().unwrap());
         if unused_extern_reports.len() == compiling_test_count {
@@ -337,7 +337,7 @@ fn run_test(
     if lang_string.test_harness {
         compiler.arg("--test");
     }
-    if rustdoc_options.json_unused_externs && !lang_string.compile_fail {
+    if rustdoc_options.json_unused_externs.is_enabled() && !lang_string.compile_fail {
         compiler.arg("--error-format=json");
         compiler.arg("--json").arg("unused-externs");
         compiler.arg("-Z").arg("unstable-options");
@@ -537,12 +537,31 @@ crate fn make_test(
             // Any errors in parsing should also appear when the doctest is compiled for real, so just
             // send all the errors that librustc_ast emits directly into a `Sink` instead of stderr.
             let sm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
-            supports_color =
-                EmitterWriter::stderr(ColorConfig::Auto, None, false, false, Some(80), false)
-                    .supports_color();
+            let fallback_bundle =
+                rustc_errors::fallback_fluent_bundle(rustc_errors::DEFAULT_LOCALE_RESOURCES, false);
+            supports_color = EmitterWriter::stderr(
+                ColorConfig::Auto,
+                None,
+                None,
+                fallback_bundle.clone(),
+                false,
+                false,
+                Some(80),
+                false,
+            )
+            .supports_color();
 
-            let emitter =
-                EmitterWriter::new(box io::sink(), None, false, false, false, None, false);
+            let emitter = EmitterWriter::new(
+                box io::sink(),
+                None,
+                None,
+                fallback_bundle,
+                false,
+                false,
+                false,
+                None,
+                false,
+            );
 
             // FIXME(misdreavus): pass `-Z treat-err-as-bug` to the doctest parser
             let handler = Handler::with_emitter(false, None, box emitter);
@@ -1000,7 +1019,6 @@ impl Tester for Collector {
                     Ignore::None => false,
                     Ignore::Some(ref ignores) => ignores.iter().any(|s| target_str.contains(s)),
                 },
-                #[cfg(not(bootstrap))]
                 ignore_message: None,
                 // compiler failures are test failures
                 should_panic: test::ShouldPanic::No,
@@ -1051,13 +1069,7 @@ impl Tester for Collector {
                             }
                         }
                         TestFailure::ExecutionFailure(out) => {
-                            let reason = if let Some(code) = out.status.code() {
-                                format!("exit code {code}")
-                            } else {
-                                String::from("terminated by signal")
-                            };
-
-                            eprintln!("Test executable failed ({reason}).");
+                            eprintln!("Test executable failed ({reason}).", reason = out.status);
 
                             // FIXME(#12309): An unfortunate side-effect of capturing the test
                             // executable's output is that the relative ordering between the test's
@@ -1162,8 +1174,6 @@ impl<'a, 'hir, 'tcx> HirCollector<'a, 'hir, 'tcx> {
         nested: F,
     ) {
         let ast_attrs = self.tcx.hir().attrs(hir_id);
-        let mut attrs = Attributes::from_ast(ast_attrs, None);
-
         if let Some(ref cfg) = ast_attrs.cfg(self.tcx, &FxHashSet::default()) {
             if !cfg.matches(&self.sess.parse_sess, Some(self.sess.features_untracked())) {
                 return;
@@ -1175,9 +1185,9 @@ impl<'a, 'hir, 'tcx> HirCollector<'a, 'hir, 'tcx> {
             self.collector.names.push(name);
         }
 
-        attrs.unindent_doc_comments();
         // The collapse-docs pass won't combine sugared/raw doc attributes, or included files with
         // anything else, this will combine them for us.
+        let attrs = Attributes::from_ast(ast_attrs, None);
         if let Some(doc) = attrs.collapsed_doc_value() {
             // Use the outermost invocation, so that doctest names come from where the docs were written.
             let span = ast_attrs
@@ -1215,16 +1225,6 @@ impl<'a, 'hir, 'tcx> intravisit::Visitor<'hir> for HirCollector<'a, 'hir, 'tcx> 
 
     fn visit_item(&mut self, item: &'hir hir::Item<'_>) {
         let name = match &item.kind {
-            hir::ItemKind::Macro(ref macro_def, _) => {
-                // FIXME(#88038): Non exported macros have historically not been tested,
-                // but we really ought to start testing them.
-                let def_id = item.def_id.to_def_id();
-                if macro_def.macro_rules && !self.tcx.has_attr(def_id, sym::macro_export) {
-                    intravisit::walk_item(self, item);
-                    return;
-                }
-                item.ident.to_string()
-            }
             hir::ItemKind::Impl(impl_) => {
                 rustc_hir_pretty::id_to_string(&self.map, impl_.self_ty.hir_id)
             }

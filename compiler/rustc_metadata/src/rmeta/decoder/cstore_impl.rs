@@ -5,7 +5,7 @@ use crate::native_libs;
 
 use rustc_ast as ast;
 use rustc_hir::def::{CtorKind, DefKind, Res};
-use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, CRATE_DEF_INDEX, LOCAL_CRATE};
+use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LOCAL_CRATE};
 use rustc_hir::definitions::{DefKey, DefPath, DefPathHash};
 use rustc_middle::metadata::ModChild;
 use rustc_middle::middle::exported_symbols::ExportedSymbol;
@@ -129,6 +129,7 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     type_of => { table }
     variances_of => { table }
     fn_sig => { table }
+    codegen_fn_attrs => { table }
     impl_trait_ref => { table }
     const_param_default => { table }
     thir_abstract_const => { table }
@@ -160,7 +161,9 @@ provide! { <'tcx> tcx, def_id, other, cdata,
         let _ = cdata;
         tcx.calculate_dtor(def_id, |_,_| Ok(()))
     }
-    associated_item_def_ids => { cdata.get_associated_item_def_ids(tcx, def_id.index) }
+    associated_item_def_ids => {
+        tcx.arena.alloc_from_iter(cdata.get_associated_item_def_ids(def_id.index, tcx.sess))
+    }
     associated_item => { cdata.get_associated_item(def_id.index) }
     inherent_impls => { cdata.get_inherent_implementations_for_type(tcx, def_id.index) }
     is_foreign_item => { cdata.is_foreign_item(def_id.index) }
@@ -188,9 +191,9 @@ provide! { <'tcx> tcx, def_id, other, cdata,
         let reachable_non_generics = tcx
             .exported_symbols(cdata.cnum)
             .iter()
-            .filter_map(|&(exported_symbol, export_level)| {
+            .filter_map(|&(exported_symbol, export_info)| {
                 if let ExportedSymbol::NonGeneric(def_id) = exported_symbol {
-                    Some((def_id, export_level))
+                    Some((def_id, export_info))
                 } else {
                     None
                 }
@@ -231,6 +234,7 @@ provide! { <'tcx> tcx, def_id, other, cdata,
     }
 
     used_crate_source => { Lrc::clone(&cdata.source) }
+    debugger_visualizers => { cdata.get_debugger_visualizers() }
 
     exported_symbols => {
         let syms = cdata.exported_symbols(tcx);
@@ -244,6 +248,7 @@ provide! { <'tcx> tcx, def_id, other, cdata,
 
     crate_extern_paths => { cdata.source().paths().cloned().collect() }
     expn_that_defined => { cdata.get_expn_that_defined(def_id.index, tcx.sess) }
+    generator_diagnostic_data => { cdata.get_generator_diagnostic_data(tcx, def_id.index) }
 }
 
 pub(in crate::rmeta) fn provide(providers: &mut Providers) {
@@ -322,7 +327,7 @@ pub(in crate::rmeta) fn provide(providers: &mut Providers) {
                     continue;
                 }
 
-                bfs_queue.push_back(DefId { krate: cnum, index: CRATE_DEF_INDEX });
+                bfs_queue.push_back(cnum.as_def_id());
             }
 
             let mut add_child = |bfs_queue: &mut VecDeque<_>, child: &ModChild, parent: DefId| {
@@ -527,6 +532,18 @@ impl CStore {
         cnum: CrateNum,
     ) -> impl Iterator<Item = DefId> + '_ {
         self.get_crate_data(cnum).get_all_incoherent_impls()
+    }
+
+    pub fn associated_item_def_ids_untracked<'a>(
+        &'a self,
+        def_id: DefId,
+        sess: &'a Session,
+    ) -> impl Iterator<Item = DefId> + 'a {
+        self.get_crate_data(def_id.krate).get_associated_item_def_ids(def_id.index, sess)
+    }
+
+    pub fn may_have_doc_links_untracked(&self, def_id: DefId) -> bool {
+        self.get_crate_data(def_id.krate).get_may_have_doc_links(def_id.index)
     }
 }
 

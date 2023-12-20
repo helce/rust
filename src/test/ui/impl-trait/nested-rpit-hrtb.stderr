@@ -1,3 +1,34 @@
+error[E0261]: use of undeclared lifetime name `'b`
+  --> $DIR/nested-rpit-hrtb.rs:54:77
+   |
+LL | fn two_htrb_outlives() -> impl for<'a> Foo<'a, Assoc = impl for<'b> Sized + 'b> {}
+   |                                                                             ^^ undeclared lifetime
+   |
+   = note: for more information on higher-ranked polymorphism, visit https://doc.rust-lang.org/nomicon/hrtb.html
+help: consider making the bound lifetime-generic with a new `'b` lifetime
+   |
+LL | fn two_htrb_outlives() -> impl for<'b, 'a> Foo<'a, Assoc = impl for<'b> Sized + 'b> {}
+   |                                    +++
+help: consider introducing lifetime `'b` here
+   |
+LL | fn two_htrb_outlives<'b>() -> impl for<'a> Foo<'a, Assoc = impl for<'b> Sized + 'b> {}
+   |                     ++++
+
+error[E0261]: use of undeclared lifetime name `'b`
+  --> $DIR/nested-rpit-hrtb.rs:61:82
+   |
+LL | fn two_htrb_outlives_uses() -> impl for<'a> Bar<'a, Assoc = impl for<'b> Sized + 'b> {}
+   |                                                                                  ^^ undeclared lifetime
+   |
+help: consider making the bound lifetime-generic with a new `'b` lifetime
+   |
+LL | fn two_htrb_outlives_uses() -> impl for<'b, 'a> Bar<'a, Assoc = impl for<'b> Sized + 'b> {}
+   |                                         +++
+help: consider introducing lifetime `'b` here
+   |
+LL | fn two_htrb_outlives_uses<'b>() -> impl for<'a> Bar<'a, Assoc = impl for<'b> Sized + 'b> {}
+   |                          ++++
+
 error: higher kinded lifetime bounds on nested opaque types are not supported yet
   --> $DIR/nested-rpit-hrtb.rs:25:69
    |
@@ -46,35 +77,6 @@ note: lifetime declared here
 LL | fn one_hrtb_trait_param_uses() -> impl for<'a> Bar<'a, Assoc = impl Qux<'a>> {}
    |                                            ^^
 
-error[E0261]: use of undeclared lifetime name `'b`
-  --> $DIR/nested-rpit-hrtb.rs:54:77
-   |
-LL | fn two_htrb_outlives() -> impl for<'a> Foo<'a, Assoc = impl for<'b> Sized + 'b> {}
-   |                     - help: consider introducing lifetime `'b` here: `<'b>` ^^ undeclared lifetime
+error: aborting due to 6 previous errors
 
-error[E0496]: lifetime name `'b` shadows a lifetime name that is already in scope
-  --> $DIR/nested-rpit-hrtb.rs:54:65
-   |
-LL | fn two_htrb_outlives() -> impl for<'a> Foo<'a, Assoc = impl for<'b> Sized + 'b> {}
-   |                                                                 ^^          -- first declared here
-   |                                                                 |
-   |                                                                 lifetime `'b` already in scope
-
-error[E0261]: use of undeclared lifetime name `'b`
-  --> $DIR/nested-rpit-hrtb.rs:62:82
-   |
-LL | fn two_htrb_outlives_uses() -> impl for<'a> Bar<'a, Assoc = impl for<'b> Sized + 'b> {}
-   |                          - help: consider introducing lifetime `'b` here: `<'b>` ^^ undeclared lifetime
-
-error[E0496]: lifetime name `'b` shadows a lifetime name that is already in scope
-  --> $DIR/nested-rpit-hrtb.rs:62:70
-   |
-LL | fn two_htrb_outlives_uses() -> impl for<'a> Bar<'a, Assoc = impl for<'b> Sized + 'b> {}
-   |                                                                      ^^          -- first declared here
-   |                                                                      |
-   |                                                                      lifetime `'b` already in scope
-
-error: aborting due to 8 previous errors
-
-Some errors have detailed explanations: E0261, E0496.
-For more information about an error, try `rustc --explain E0261`.
+For more information about this error, try `rustc --explain E0261`.

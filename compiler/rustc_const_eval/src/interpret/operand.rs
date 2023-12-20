@@ -10,7 +10,7 @@ use rustc_middle::ty::layout::{LayoutOf, PrimitiveExt, TyAndLayout};
 use rustc_middle::ty::print::{FmtPrinter, PrettyPrinter, Printer};
 use rustc_middle::ty::{ConstInt, DelaySpanBugEmitted, Ty};
 use rustc_middle::{mir, ty};
-use rustc_target::abi::{Abi, HasDataLayout, Size, TagEncoding};
+use rustc_target::abi::{self, Abi, HasDataLayout, Size, TagEncoding};
 use rustc_target::abi::{VariantIdx, Variants};
 
 use super::{
@@ -84,13 +84,17 @@ impl<'tcx, Tag: Provenance> Immediate<Tag> {
     }
 
     #[inline]
-    pub fn to_scalar_pair(self) -> InterpResult<'tcx, (Scalar<Tag>, Scalar<Tag>)> {
+    pub fn to_scalar_or_uninit_pair(self) -> (ScalarMaybeUninit<Tag>, ScalarMaybeUninit<Tag>) {
         match self {
-            Immediate::ScalarPair(val1, val2) => Ok((val1.check_init()?, val2.check_init()?)),
-            Immediate::Scalar(..) => {
-                bug!("Got a scalar where a scalar pair was expected")
-            }
+            Immediate::ScalarPair(val1, val2) => (val1, val2),
+            Immediate::Scalar(..) => bug!("Got a scalar where a scalar pair was expected"),
         }
+    }
+
+    #[inline]
+    pub fn to_scalar_pair(self) -> InterpResult<'tcx, (Scalar<Tag>, Scalar<Tag>)> {
+        let (val1, val2) = self.to_scalar_or_uninit_pair();
+        Ok((val1.check_init()?, val2.check_init()?))
     }
 }
 
@@ -248,16 +252,19 @@ impl<'tcx, Tag: Provenance> ImmTy<'tcx, Tag> {
 impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
     /// Try reading an immediate in memory; this is interesting particularly for `ScalarPair`.
     /// Returns `None` if the layout does not permit loading this as a value.
-    fn try_read_immediate_from_mplace(
+    ///
+    /// This is an internal function; call `read_immediate` instead.
+    fn read_immediate_from_mplace_raw(
         &self,
         mplace: &MPlaceTy<'tcx, M::PointerTag>,
+        force: bool,
     ) -> InterpResult<'tcx, Option<ImmTy<'tcx, M::PointerTag>>> {
         if mplace.layout.is_unsized() {
             // Don't touch unsized
             return Ok(None);
         }
 
-        let Some(alloc) = self.get_alloc(mplace)? else {
+        let Some(alloc) = self.get_place_alloc(mplace)? else {
             return Ok(Some(ImmTy {
                 // zero-sized type
                 imm: Scalar::ZST.into(),
@@ -265,40 +272,70 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             }));
         };
 
-        match mplace.layout.abi {
-            Abi::Scalar(..) => {
-                let scalar = alloc.read_scalar(alloc_range(Size::ZERO, mplace.layout.size))?;
-                Ok(Some(ImmTy { imm: scalar.into(), layout: mplace.layout }))
-            }
-            Abi::ScalarPair(a, b) => {
-                // We checked `ptr_align` above, so all fields will have the alignment they need.
-                // We would anyway check against `ptr_align.restrict_for_offset(b_offset)`,
-                // which `ptr.offset(b_offset)` cannot possibly fail to satisfy.
-                let (a, b) = (a.value, b.value);
-                let (a_size, b_size) = (a.size(self), b.size(self));
-                let b_offset = a_size.align_to(b.align(self).abi);
-                assert!(b_offset.bytes() > 0); // we later use the offset to tell apart the fields
-                let a_val = alloc.read_scalar(alloc_range(Size::ZERO, a_size))?;
-                let b_val = alloc.read_scalar(alloc_range(b_offset, b_size))?;
-                Ok(Some(ImmTy { imm: Immediate::ScalarPair(a_val, b_val), layout: mplace.layout }))
-            }
-            _ => Ok(None),
+        // It may seem like all types with `Scalar` or `ScalarPair` ABI are fair game at this point.
+        // However, `MaybeUninit<u64>` is considered a `Scalar` as far as its layout is concerned --
+        // and yet cannot be represented by an interpreter `Scalar`, since we have to handle the
+        // case where some of the bytes are initialized and others are not. So, we need an extra
+        // check that walks over the type of `mplace` to make sure it is truly correct to treat this
+        // like a `Scalar` (or `ScalarPair`).
+        let scalar_layout = match mplace.layout.abi {
+            // `if` does not work nested inside patterns, making this a bit awkward to express.
+            Abi::Scalar(abi::Scalar::Initialized { value: s, .. }) => Some(s),
+            Abi::Scalar(s) if force => Some(s.primitive()),
+            _ => None,
+        };
+        if let Some(_s) = scalar_layout {
+            //FIXME(#96185): let size = s.size(self);
+            //FIXME(#96185): assert_eq!(size, mplace.layout.size, "abi::Scalar size does not match layout size");
+            let size = mplace.layout.size; //FIXME(#96185): remove this line
+            let scalar = alloc.read_scalar(alloc_range(Size::ZERO, size))?;
+            return Ok(Some(ImmTy { imm: scalar.into(), layout: mplace.layout }));
         }
+        let scalar_pair_layout = match mplace.layout.abi {
+            Abi::ScalarPair(
+                abi::Scalar::Initialized { value: a, .. },
+                abi::Scalar::Initialized { value: b, .. },
+            ) => Some((a, b)),
+            Abi::ScalarPair(a, b) if force => Some((a.primitive(), b.primitive())),
+            _ => None,
+        };
+        if let Some((a, b)) = scalar_pair_layout {
+            // We checked `ptr_align` above, so all fields will have the alignment they need.
+            // We would anyway check against `ptr_align.restrict_for_offset(b_offset)`,
+            // which `ptr.offset(b_offset)` cannot possibly fail to satisfy.
+            let (a_size, b_size) = (a.size(self), b.size(self));
+            let b_offset = a_size.align_to(b.align(self).abi);
+            assert!(b_offset.bytes() > 0); // in `operand_field` we use the offset to tell apart the fields
+            let a_val = alloc.read_scalar(alloc_range(Size::ZERO, a_size))?;
+            let b_val = alloc.read_scalar(alloc_range(b_offset, b_size))?;
+            return Ok(Some(ImmTy {
+                imm: Immediate::ScalarPair(a_val, b_val),
+                layout: mplace.layout,
+            }));
+        }
+        // Neither a scalar nor scalar pair.
+        return Ok(None);
     }
 
-    /// Try returning an immediate for the operand.
-    /// If the layout does not permit loading this as an immediate, return where in memory
-    /// we can find the data.
+    /// Try returning an immediate for the operand. If the layout does not permit loading this as an
+    /// immediate, return where in memory we can find the data.
     /// Note that for a given layout, this operation will either always fail or always
     /// succeed!  Whether it succeeds depends on whether the layout can be represented
     /// in an `Immediate`, not on which data is stored there currently.
-    pub fn try_read_immediate(
+    ///
+    /// If `force` is `true`, then even scalars with fields that can be ununit will be
+    /// read. This means the load is lossy and should not be written back!
+    /// This flag exists only for validity checking.
+    ///
+    /// This is an internal function that should not usually be used; call `read_immediate` instead.
+    pub fn read_immediate_raw(
         &self,
         src: &OpTy<'tcx, M::PointerTag>,
+        force: bool,
     ) -> InterpResult<'tcx, Result<ImmTy<'tcx, M::PointerTag>, MPlaceTy<'tcx, M::PointerTag>>> {
         Ok(match src.try_as_mplace() {
             Ok(ref mplace) => {
-                if let Some(val) = self.try_read_immediate_from_mplace(mplace)? {
+                if let Some(val) = self.read_immediate_from_mplace_raw(mplace, force)? {
                     Ok(val)
                 } else {
                     Err(*mplace)
@@ -314,7 +351,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         &self,
         op: &OpTy<'tcx, M::PointerTag>,
     ) -> InterpResult<'tcx, ImmTy<'tcx, M::PointerTag>> {
-        if let Ok(imm) = self.try_read_immediate(op)? {
+        if let Ok(imm) = self.read_immediate_raw(op, /*force*/ false)? {
             Ok(imm)
         } else {
             span_bug!(self.cur_span(), "primitive read failed for type: {:?}", op.layout.ty);
@@ -334,13 +371,13 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         &self,
         op: &OpTy<'tcx, M::PointerTag>,
     ) -> InterpResult<'tcx, Pointer<Option<M::PointerTag>>> {
-        Ok(self.scalar_to_ptr(self.read_scalar(op)?.check_init()?))
+        self.scalar_to_ptr(self.read_scalar(op)?.check_init()?)
     }
 
     // Turn the wide MPlace into a string (must already be dereferenced!)
     pub fn read_str(&self, mplace: &MPlaceTy<'tcx, M::PointerTag>) -> InterpResult<'tcx, &str> {
         let len = mplace.len(self)?;
-        let bytes = self.memory.read_bytes(mplace.ptr, Size::from_bytes(len))?;
+        let bytes = self.read_bytes_ptr(mplace.ptr, Size::from_bytes(len))?;
         let str = std::str::from_utf8(bytes).map_err(|err| err_ub!(InvalidStr(err)))?;
         Ok(str)
     }
@@ -360,28 +397,44 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             Err(value) => value,
         };
 
-        let field_layout = op.layout.field(self, field);
-        if field_layout.is_zst() {
-            let immediate = Scalar::ZST.into();
-            return Ok(OpTy { op: Operand::Immediate(immediate), layout: field_layout });
-        }
-        let offset = op.layout.fields.offset(field);
-        let immediate = match *base {
+        let field_layout = base.layout.field(self, field);
+        let offset = base.layout.fields.offset(field);
+        // This makes several assumptions about what layouts we will encounter; we match what
+        // codegen does as good as we can (see `extract_field` in `rustc_codegen_ssa/src/mir/operand.rs`).
+        let field_val: Immediate<_> = match (*base, base.layout.abi) {
+            // the field contains no information
+            _ if field_layout.is_zst() => Scalar::ZST.into(),
             // the field covers the entire type
-            _ if offset.bytes() == 0 && field_layout.size == op.layout.size => *base,
-            // extract fields from types with `ScalarPair` ABI
-            Immediate::ScalarPair(a, b) => {
-                let val = if offset.bytes() == 0 { a } else { b };
-                Immediate::from(val)
+            _ if field_layout.size == base.layout.size => {
+                assert!(match (base.layout.abi, field_layout.abi) {
+                    (Abi::Scalar(..), Abi::Scalar(..)) => true,
+                    (Abi::ScalarPair(..), Abi::ScalarPair(..)) => true,
+                    _ => false,
+                });
+                assert!(offset.bytes() == 0);
+                *base
             }
-            Immediate::Scalar(val) => span_bug!(
+            // extract fields from types with `ScalarPair` ABI
+            (Immediate::ScalarPair(a_val, b_val), Abi::ScalarPair(a, b)) => {
+                assert!(matches!(field_layout.abi, Abi::Scalar(..)));
+                Immediate::from(if offset.bytes() == 0 {
+                    debug_assert_eq!(field_layout.size, a.size(self));
+                    a_val
+                } else {
+                    debug_assert_eq!(offset, a.size(self).align_to(b.align(self).abi));
+                    debug_assert_eq!(field_layout.size, b.size(self));
+                    b_val
+                })
+            }
+            _ => span_bug!(
                 self.cur_span(),
-                "field access on non aggregate {:#?}, {:#?}",
-                val,
-                op.layout
+                "invalid field access on immediate {}, layout {:#?}",
+                base,
+                base.layout
             ),
         };
-        Ok(OpTy { op: Operand::Immediate(immediate), layout: field_layout })
+
+        Ok(OpTy { op: Operand::Immediate(field_val), layout: field_layout })
     }
 
     pub fn operand_index(
@@ -416,6 +469,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         })
     }
 
+    #[instrument(skip(self), level = "debug")]
     pub fn operand_projection(
         &self,
         base: &OpTy<'tcx, M::PointerTag>,
@@ -485,8 +539,8 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         Ok(OpTy { op, layout: place.layout })
     }
 
-    // Evaluate a place with the goal of reading from it.  This lets us sometimes
-    // avoid allocations.
+    /// Evaluate a place with the goal of reading from it.  This lets us sometimes
+    /// avoid allocations.
     pub fn eval_place_to_op(
         &self,
         place: mir::Place<'tcx>,
@@ -676,7 +730,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         //   may be a pointer. This is `tag_val.layout`; we just use it for sanity checks.
 
         // Get layout for tag.
-        let tag_layout = self.layout_of(tag_scalar_layout.value.to_int_ty(*self.tcx))?;
+        let tag_layout = self.layout_of(tag_scalar_layout.primitive().to_int_ty(*self.tcx))?;
 
         // Read tag and sanity-check `tag_layout`.
         let tag_val = self.read_immediate(&self.operand_field(op, tag_field)?)?;
@@ -687,17 +741,18 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         // Figure out which discriminant and variant this corresponds to.
         Ok(match *tag_encoding {
             TagEncoding::Direct => {
+                let scalar = tag_val.to_scalar()?;
                 // Generate a specific error if `tag_val` is not an integer.
                 // (`tag_bits` itself is only used for error messages below.)
-                let tag_bits = tag_val
-                    .to_scalar()?
+                let tag_bits = scalar
                     .try_to_int()
                     .map_err(|dbg_val| err_ub!(InvalidTag(dbg_val)))?
                     .assert_bits(tag_layout.size);
                 // Cast bits from tag layout to discriminant layout.
-                // After the checks we did above, this cannot fail.
+                // After the checks we did above, this cannot fail, as
+                // discriminants are int-like.
                 let discr_val =
-                    self.misc_cast(&tag_val, discr_layout.ty).unwrap().to_scalar().unwrap();
+                    self.cast_from_int_like(scalar, tag_val.layout, discr_layout.ty).unwrap();
                 let discr_bits = discr_val.assert_bits(discr_layout.size);
                 // Convert discriminant to variant index, and catch invalid discriminants.
                 let index = match *op.layout.ty.kind() {
@@ -730,7 +785,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                         // okay. Everything else, we conservatively reject.
                         let ptr_valid = niche_start == 0
                             && variants_start == variants_end
-                            && !self.scalar_may_be_null(tag_val);
+                            && !self.scalar_may_be_null(tag_val)?;
                         if !ptr_valid {
                             throw_ub!(InvalidTag(dbg_val))
                         }

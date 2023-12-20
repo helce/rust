@@ -1,7 +1,6 @@
 use crate::cmp;
 use crate::fmt;
-use crate::mem;
-use crate::num::NonZeroUsize;
+use crate::mem::{self, ValidAlign};
 use crate::ptr::NonNull;
 
 // While this function is used in one place and its implementation
@@ -31,7 +30,7 @@ const fn size_align<T>() -> (usize, usize) {
 #[lang = "alloc_layout"]
 pub struct Layout {
     // size of the requested block of memory, measured in bytes.
-    size_: usize,
+    size: usize,
 
     // alignment of the requested block of memory, measured in bytes.
     // we ensure that this is always a power-of-two, because API's
@@ -40,7 +39,7 @@ pub struct Layout {
     //
     // (However, we do not analogously require `align >= sizeof(void*)`,
     //  even though that is *also* a requirement of `posix_memalign`.)
-    align_: NonZeroUsize,
+    align: ValidAlign,
 }
 
 impl Layout {
@@ -97,8 +96,8 @@ impl Layout {
     #[must_use]
     #[inline]
     pub const unsafe fn from_size_align_unchecked(size: usize, align: usize) -> Self {
-        // SAFETY: the caller must ensure that `align` is greater than zero.
-        Layout { size_: size, align_: unsafe { NonZeroUsize::new_unchecked(align) } }
+        // SAFETY: the caller must ensure that `align` is a power of two.
+        Layout { size, align: unsafe { ValidAlign::new_unchecked(align) } }
     }
 
     /// The minimum size in bytes for a memory block of this layout.
@@ -107,7 +106,7 @@ impl Layout {
     #[must_use]
     #[inline]
     pub const fn size(&self) -> usize {
-        self.size_
+        self.size
     }
 
     /// The minimum byte alignment for a memory block of this layout.
@@ -117,7 +116,7 @@ impl Layout {
                   without modifying the layout"]
     #[inline]
     pub const fn align(&self) -> usize {
-        self.align_.get()
+        self.align.as_nonzero().get()
     }
 
     /// Constructs a `Layout` suitable for holding a value of type `T`.
@@ -420,9 +419,9 @@ impl Layout {
 }
 
 #[stable(feature = "alloc_layout", since = "1.28.0")]
-#[rustc_deprecated(
+#[deprecated(
     since = "1.52.0",
-    reason = "Name does not follow std convention, use LayoutError",
+    note = "Name does not follow std convention, use LayoutError",
     suggestion = "LayoutError"
 )]
 pub type LayoutErr = LayoutError;

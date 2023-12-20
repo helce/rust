@@ -8,7 +8,7 @@ use crate::fmt;
 use crate::fs;
 use crate::marker::PhantomData;
 use crate::mem::forget;
-#[cfg(not(any(target_os = "wasi", target_env = "sgx")))]
+#[cfg(not(any(target_arch = "wasm32", target_env = "sgx")))]
 use crate::sys::cvt;
 use crate::sys_common::{AsInner, FromInner, IntoInner};
 
@@ -66,8 +66,8 @@ impl BorrowedFd<'_> {
     /// the returned `BorrowedFd`, and it must not have the value `-1`.
     #[inline]
     #[unstable(feature = "io_safety", issue = "87074")]
-    pub unsafe fn borrow_raw(fd: RawFd) -> Self {
-        assert_ne!(fd, u32::MAX as RawFd);
+    pub const unsafe fn borrow_raw(fd: RawFd) -> Self {
+        assert!(fd != u32::MAX as RawFd);
         // SAFETY: we just asserted that the value is in the valid range and isn't `-1` (the only value bigger than `0xFF_FF_FF_FE` unsigned)
         unsafe { Self { fd, _phantom: PhantomData } }
     }
@@ -76,7 +76,7 @@ impl BorrowedFd<'_> {
 impl OwnedFd {
     /// Creates a new `OwnedFd` instance that shares the same underlying file handle
     /// as the existing `OwnedFd` instance.
-    #[cfg(not(target_os = "wasi"))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn try_clone(&self) -> crate::io::Result<Self> {
         // We want to atomically duplicate this file descriptor and set the
         // CLOEXEC flag, and currently that's done via F_DUPFD_CLOEXEC. This
@@ -95,7 +95,7 @@ impl OwnedFd {
         Ok(unsafe { Self::from_raw_fd(fd) })
     }
 
-    #[cfg(target_os = "wasi")]
+    #[cfg(target_arch = "wasm32")]
     pub fn try_clone(&self) -> crate::io::Result<Self> {
         Err(crate::io::const_io_error!(
             crate::io::ErrorKind::Unsupported,

@@ -3,7 +3,7 @@ use crate::{EarlyContext, EarlyLintPass, LateContext, LateLintPass, LintContext}
 use rustc_ast as ast;
 use rustc_ast::util::{classify, parser};
 use rustc_ast::{ExprKind, StmtKind};
-use rustc_errors::{pluralize, Applicability};
+use rustc_errors::{pluralize, Applicability, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
@@ -11,7 +11,7 @@ use rustc_middle::ty::adjustment;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::symbol::Symbol;
 use rustc_span::symbol::{kw, sym};
-use rustc_span::{BytePos, MultiSpan, Span, DUMMY_SP};
+use rustc_span::{BytePos, Span, DUMMY_SP};
 
 declare_lint! {
     /// The `unused_must_use` lint detects unused result of a type flagged as
@@ -303,26 +303,25 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
             descr_pre_path: &str,
             descr_post_path: &str,
         ) -> bool {
-            for attr in cx.tcx.get_attrs(def_id).iter() {
-                if attr.has_name(sym::must_use) {
-                    cx.struct_span_lint(UNUSED_MUST_USE, span, |lint| {
-                        let msg = format!(
-                            "unused {}`{}`{} that must be used",
-                            descr_pre_path,
-                            cx.tcx.def_path_str(def_id),
-                            descr_post_path
-                        );
-                        let mut err = lint.build(&msg);
-                        // check for #[must_use = "..."]
-                        if let Some(note) = attr.value_str() {
-                            err.note(note.as_str());
-                        }
-                        err.emit();
-                    });
-                    return true;
-                }
+            if let Some(attr) = cx.tcx.get_attr(def_id, sym::must_use) {
+                cx.struct_span_lint(UNUSED_MUST_USE, span, |lint| {
+                    let msg = format!(
+                        "unused {}`{}`{} that must be used",
+                        descr_pre_path,
+                        cx.tcx.def_path_str(def_id),
+                        descr_post_path
+                    );
+                    let mut err = lint.build(&msg);
+                    // check for #[must_use = "..."]
+                    if let Some(note) = attr.value_str() {
+                        err.note(note.as_str());
+                    }
+                    err.emit();
+                });
+                true
+            } else {
+                false
             }
-            false
         }
     }
 }

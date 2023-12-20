@@ -120,9 +120,11 @@ pub trait Provenance: Copy + fmt::Debug {
     where
         Self: Sized;
 
-    /// Provenance must always be able to identify the allocation this ptr points to.
+    /// If `OFFSET_IS_ADDR == false`, provenance must always be able to
+    /// identify the allocation this ptr points to (i.e., this must return `Some`).
+    /// Otherwise this function is best-effort (but must agree with `Machine::ptr_get_alloc`).
     /// (Identifying the offset in that allocation, however, is harder -- use `Memory::ptr_get_alloc` for that.)
-    fn get_alloc_id(self) -> AllocId;
+    fn get_alloc_id(self) -> Option<AllocId>;
 }
 
 impl Provenance for AllocId {
@@ -147,8 +149,8 @@ impl Provenance for AllocId {
         Ok(())
     }
 
-    fn get_alloc_id(self) -> AllocId {
-        self
+    fn get_alloc_id(self) -> Option<AllocId> {
+        Some(self)
     }
 }
 
@@ -163,6 +165,9 @@ pub struct Pointer<Tag = AllocId> {
 }
 
 static_assert_size!(Pointer, 16);
+// `Option<Tag>` pointers are also passed around quite a bit
+// (but not stored in permanent machine state).
+static_assert_size!(Pointer<Option<AllocId>>, 16);
 
 // We want the `Debug` output to be readable as it is used by `derive(Debug)` for
 // all the Miri types.
@@ -198,11 +203,25 @@ impl<Tag> From<Pointer<Tag>> for Pointer<Option<Tag>> {
 }
 
 impl<Tag> Pointer<Option<Tag>> {
+    /// Convert this pointer that *might* have a tag into a pointer that *definitely* has a tag, or
+    /// an absolute address.
+    ///
+    /// This is rarely what you want; call `ptr_try_get_alloc_id` instead.
     pub fn into_pointer_or_addr(self) -> Result<Pointer<Tag>, Size> {
         match self.provenance {
             Some(tag) => Ok(Pointer::new(tag, self.offset)),
             None => Err(self.offset),
         }
+    }
+
+    /// Returns the absolute address the pointer points to.
+    /// Only works if Tag::OFFSET_IS_ADDR is true!
+    pub fn addr(self) -> Size
+    where
+        Tag: Provenance,
+    {
+        assert!(Tag::OFFSET_IS_ADDR);
+        self.offset
     }
 }
 

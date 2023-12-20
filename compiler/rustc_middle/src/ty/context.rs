@@ -5,6 +5,7 @@ use crate::dep_graph::{DepGraph, DepKind, DepKindStruct};
 use crate::hir::place::Place as HirPlace;
 use crate::infer::canonical::{Canonical, CanonicalVarInfo, CanonicalVarInfos};
 use crate::lint::{struct_lint_level, LintDiagnosticBuilder, LintLevelSource};
+use crate::middle::codegen_fn_attrs::CodegenFnAttrs;
 use crate::middle::resolve_lifetime::{self, LifetimeScopeForPath};
 use crate::middle::stability;
 use crate::mir::interpret::{self, Allocation, ConstAllocation, ConstValue, Scalar};
@@ -26,7 +27,7 @@ use crate::ty::{
 use rustc_ast as ast;
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_data_structures::intern::Interned;
+use rustc_data_structures::intern::{Interned, WithStableHash};
 use rustc_data_structures::memmap::Mmap;
 use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_data_structures::sharded::{IntoPointer, ShardedHashMap};
@@ -34,7 +35,7 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::{self, Lock, Lrc, WorkerLocal};
 use rustc_data_structures::vec_map::VecMap;
-use rustc_errors::ErrorGuaranteed;
+use rustc_errors::{ErrorGuaranteed, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LocalDefId, LOCAL_CRATE};
@@ -54,7 +55,7 @@ use rustc_session::lint::{Level, Lint};
 use rustc_session::Limit;
 use rustc_session::Session;
 use rustc_span::def_id::{DefPathHash, StableCrateId};
-use rustc_span::source_map::{MultiSpan, SourceMap};
+use rustc_span::source_map::SourceMap;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::{Span, DUMMY_SP};
 use rustc_target::abi::{Layout, LayoutS, TargetDataLayout, VariantIdx};
@@ -105,7 +106,7 @@ pub struct CtxtInterners<'tcx> {
 
     // Specifically use a speedy hash algorithm for these hash sets, since
     // they're accessed quite often.
-    type_: InternedSet<'tcx, TyS<'tcx>>,
+    type_: InternedSet<'tcx, WithStableHash<TyS<'tcx>>>,
     substs: InternedSet<'tcx, InternalSubsts<'tcx>>,
     canonical_var_infos: InternedSet<'tcx, List<CanonicalVarInfo<'tcx>>>,
     region: InternedSet<'tcx, RegionKind>,
@@ -178,10 +179,11 @@ impl<'tcx> CtxtInterners<'tcx> {
                         kind,
                         flags: flags.flags,
                         outer_exclusive_binder: flags.outer_exclusive_binder,
-                        stable_hash,
                     };
 
-                    InternedInSet(self.arena.alloc(ty_struct))
+                    InternedInSet(
+                        self.arena.alloc(WithStableHash { internee: ty_struct, stable_hash }),
+                    )
                 })
                 .0,
         ))
@@ -366,6 +368,16 @@ pub struct GeneratorInteriorTypeCause<'tcx> {
     pub expr: Option<hir::HirId>,
 }
 
+// This type holds diagnostic information on generators and async functions across crate boundaries
+// and is used to provide better error messages
+#[derive(TyEncodable, TyDecodable, Clone, Debug, HashStable)]
+pub struct GeneratorDiagnosticData<'tcx> {
+    pub generator_interior_types: ty::Binder<'tcx, Vec<GeneratorInteriorTypeCause<'tcx>>>,
+    pub hir_owner: DefId,
+    pub nodes_types: ItemLocalMap<Ty<'tcx>>,
+    pub adjustments: ItemLocalMap<Vec<ty::adjustment::Adjustment<'tcx>>>,
+}
+
 #[derive(TyEncodable, TyDecodable, Debug, HashStable)]
 pub struct TypeckResults<'tcx> {
     /// The `HirId::owner` all `ItemLocalId`s in this table are relative to.
@@ -444,12 +456,13 @@ pub struct TypeckResults<'tcx> {
     /// # Example
     ///
     /// ```rust
+    /// # use std::fmt::Debug;
     /// fn foo(x: &u32) -> impl Debug { *x }
     /// ```
     ///
     /// The function signature here would be:
     ///
-    /// ```
+    /// ```ignore (illustrative)
     /// for<'a> fn(&'a u32) -> Foo
     /// ```
     ///
@@ -458,7 +471,7 @@ pub struct TypeckResults<'tcx> {
     ///
     /// The *liberated* form of this would be
     ///
-    /// ```
+    /// ```ignore (illustrative)
     /// fn(&'a u32) -> u32
     /// ```
     ///
@@ -620,6 +633,28 @@ impl<'tcx> TypeckResults<'tcx> {
 
     pub fn node_types_mut(&mut self) -> LocalTableInContextMut<'_, Ty<'tcx>> {
         LocalTableInContextMut { hir_owner: self.hir_owner, data: &mut self.node_types }
+    }
+
+    pub fn get_generator_diagnostic_data(&self) -> GeneratorDiagnosticData<'tcx> {
+        let generator_interior_type = self.generator_interior_types.map_bound_ref(|vec| {
+            vec.iter()
+                .map(|item| {
+                    GeneratorInteriorTypeCause {
+                        ty: item.ty,
+                        span: item.span,
+                        scope_span: item.scope_span,
+                        yield_span: item.yield_span,
+                        expr: None, //FIXME: Passing expression over crate boundaries is impossible at the moment
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        GeneratorDiagnosticData {
+            generator_interior_types: generator_interior_type,
+            hir_owner: self.hir_owner.to_def_id(),
+            nodes_types: self.node_types.clone(),
+            adjustments: self.adjustments.clone(),
+        }
     }
 
     pub fn node_type(&self, id: hir::HirId) -> Ty<'tcx> {
@@ -1032,6 +1067,28 @@ pub struct GlobalCtxt<'tcx> {
 }
 
 impl<'tcx> TyCtxt<'tcx> {
+    /// Expects a body and returns its codegen attributes.
+    ///
+    /// Unlike `codegen_fn_attrs`, this returns `CodegenFnAttrs::EMPTY` for
+    /// constants.
+    pub fn body_codegen_attrs(self, def_id: DefId) -> &'tcx CodegenFnAttrs {
+        let def_kind = self.def_kind(def_id);
+        if def_kind.has_codegen_attrs() {
+            self.codegen_fn_attrs(def_id)
+        } else if matches!(
+            def_kind,
+            DefKind::AnonConst | DefKind::AssocConst | DefKind::Const | DefKind::InlineConst
+        ) {
+            CodegenFnAttrs::EMPTY
+        } else {
+            bug!(
+                "body_codegen_fn_attrs called on unexpected definition: {:?} {:?}",
+                def_id,
+                def_kind
+            )
+        }
+    }
+
     pub fn typeck_opt_const_arg(
         self,
         def: ty::WithOptConstParam<LocalDefId>,
@@ -1091,9 +1148,8 @@ impl<'tcx> TyCtxt<'tcx> {
     /// `rustc_layout_scalar_valid_range` attribute.
     // FIXME(eddyb) this is an awkward spot for this method, maybe move it?
     pub fn layout_scalar_valid_range(self, def_id: DefId) -> (Bound<u128>, Bound<u128>) {
-        let attrs = self.get_attrs(def_id);
         let get = |name| {
-            let Some(attr) = attrs.iter().find(|a| a.has_name(name)) else {
+            let Some(attr) = self.get_attr(def_id, name) else {
                 return Bound::Unbounded;
             };
             debug!("layout_scalar_valid_range: attr={:?}", attr);
@@ -1458,7 +1514,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 (free_region.scope.expect_local(), free_region.bound_region)
             }
             ty::ReEarlyBound(ref ebr) => (
-                self.parent(ebr.def_id).unwrap().expect_local(),
+                self.local_parent(ebr.def_id.expect_local()),
                 ty::BoundRegionKind::BrNamed(ebr.def_id, ebr.name),
             ),
             _ => return None, // not a free region
@@ -1547,7 +1603,7 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn caller_location_ty(self) -> Ty<'tcx> {
         self.mk_imm_ref(
             self.lifetimes.re_static,
-            self.type_of(self.require_lang_item(LangItem::PanicLocation, None))
+            self.bound_type_of(self.require_lang_item(LangItem::PanicLocation, None))
                 .subst(self, self.mk_substs([self.lifetimes.re_static.into()].iter())),
         )
     }
@@ -1992,23 +2048,23 @@ impl<'tcx, T: 'tcx + ?Sized> IntoPointer for InternedInSet<'tcx, T> {
 }
 
 #[allow(rustc::usage_of_ty_tykind)]
-impl<'tcx> Borrow<TyKind<'tcx>> for InternedInSet<'tcx, TyS<'tcx>> {
+impl<'tcx> Borrow<TyKind<'tcx>> for InternedInSet<'tcx, WithStableHash<TyS<'tcx>>> {
     fn borrow<'a>(&'a self) -> &'a TyKind<'tcx> {
         &self.0.kind
     }
 }
 
-impl<'tcx> PartialEq for InternedInSet<'tcx, TyS<'tcx>> {
-    fn eq(&self, other: &InternedInSet<'tcx, TyS<'tcx>>) -> bool {
+impl<'tcx> PartialEq for InternedInSet<'tcx, WithStableHash<TyS<'tcx>>> {
+    fn eq(&self, other: &InternedInSet<'tcx, WithStableHash<TyS<'tcx>>>) -> bool {
         // The `Borrow` trait requires that `x.borrow() == y.borrow()` equals
         // `x == y`.
         self.0.kind == other.0.kind
     }
 }
 
-impl<'tcx> Eq for InternedInSet<'tcx, TyS<'tcx>> {}
+impl<'tcx> Eq for InternedInSet<'tcx, WithStableHash<TyS<'tcx>>> {}
 
-impl<'tcx> Hash for InternedInSet<'tcx, TyS<'tcx>> {
+impl<'tcx> Hash for InternedInSet<'tcx, WithStableHash<TyS<'tcx>>> {
     fn hash<H: Hasher>(&self, s: &mut H) {
         // The `Borrow` trait requires that `x.borrow().hash(s) == x.hash(s)`.
         self.0.kind.hash(s)
@@ -2276,7 +2332,7 @@ impl<'tcx> TyCtxt<'tcx> {
                         ty_param.into()
                     } else {
                         assert!(has_default);
-                        self.type_of(param.def_id).subst(self, substs).into()
+                        self.bound_type_of(param.def_id).subst(self, substs).into()
                     }
                 }
             });
@@ -2713,11 +2769,6 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn named_region(self, id: HirId) -> Option<resolve_lifetime::Region> {
         debug!(?id, "named_region");
         self.named_region_map(id.owner).and_then(|map| map.get(&id.local_id).cloned())
-    }
-
-    pub fn is_late_bound(self, id: HirId) -> bool {
-        self.is_late_bound_map(id.owner)
-            .map_or(false, |(owner, set)| owner == id.owner && set.contains(&id.local_id))
     }
 
     pub fn late_bound_vars(self, id: HirId) -> &'tcx List<ty::BoundVariableKind> {

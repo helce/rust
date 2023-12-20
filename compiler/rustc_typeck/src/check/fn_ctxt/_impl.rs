@@ -8,7 +8,7 @@ use crate::check::{BreakableCtxt, Diverges, Expectation, FnCtxt, LocalTy};
 
 use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_errors::{Applicability, Diagnostic, ErrorGuaranteed};
+use rustc_errors::{Applicability, Diagnostic, ErrorGuaranteed, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::DefId;
@@ -23,14 +23,14 @@ use rustc_middle::ty::subst::{
     self, GenericArgKind, InternalSubsts, Subst, SubstsRef, UserSelfTy, UserSubsts,
 };
 use rustc_middle::ty::{
-    self, AdtKind, CanonicalUserType, DefIdTree, GenericParamDefKind, ToPolyTraitRef, ToPredicate,
-    Ty, UserType,
+    self, AdtKind, CanonicalUserType, DefIdTree, EarlyBinder, GenericParamDefKind, ToPolyTraitRef,
+    ToPredicate, Ty, UserType,
 };
 use rustc_session::lint;
 use rustc_span::hygiene::DesugaringKind;
 use rustc_span::source_map::{original_sp, DUMMY_SP};
 use rustc_span::symbol::{kw, sym, Ident};
-use rustc_span::{self, BytePos, MultiSpan, Span};
+use rustc_span::{self, BytePos, Span};
 use rustc_trait_selection::infer::InferCtxtExt as _;
 use rustc_trait_selection::traits::error_reporting::InferCtxtExt as _;
 use rustc_trait_selection::traits::{
@@ -347,7 +347,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         T: TypeFoldable<'tcx>,
     {
         debug!("instantiate_type_scheme(value={:?}, substs={:?})", value, substs);
-        let value = value.subst(self.tcx, substs);
+        let value = EarlyBinder(value).subst(self.tcx, substs);
         let result = self.normalize_associated_types_in(span, value);
         debug!("instantiate_type_scheme = {:?}", result);
         result
@@ -757,7 +757,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         formal_args: &[Ty<'tcx>],
     ) -> Vec<Ty<'tcx>> {
         let formal_ret = self.resolve_vars_with_obligations(formal_ret);
-        let Some(ret_ty) = expected_ret.only_has_type(self) else { return Vec::new() };
+        let Some(ret_ty) = expected_ret.only_has_type(self) else { return vec![]; };
 
         // HACK(oli-obk): This is a hack to keep RPIT and TAIT in sync wrt their behaviour.
         // Without it, the inference
@@ -779,7 +779,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 if let ty::subst::GenericArgKind::Type(ty) = ty.unpack() {
                     if let ty::Opaque(def_id, _) = *ty.kind() {
                         if self.infcx.opaque_type_origin(def_id, DUMMY_SP).is_some() {
-                            return Vec::new();
+                            return vec![];
                         }
                     }
                 }
@@ -838,9 +838,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let def_kind = self.tcx.def_kind(def_id);
 
         let item_ty = if let DefKind::Variant = def_kind {
-            self.tcx.type_of(self.tcx.parent(def_id).expect("variant w/out parent"))
+            self.tcx.bound_type_of(self.tcx.parent(def_id))
         } else {
-            self.tcx.type_of(def_id)
+            self.tcx.bound_type_of(def_id)
         };
         let substs = self.infcx.fresh_substs_for_item(span, def_id);
         let ty = item_ty.subst(self.tcx, substs);
@@ -1044,8 +1044,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     ) {
         let (sig, did, substs) = match (&expected.kind(), &found.kind()) {
             (ty::FnDef(did1, substs1), ty::FnDef(did2, substs2)) => {
-                let sig1 = self.tcx.fn_sig(*did1).subst(self.tcx, substs1);
-                let sig2 = self.tcx.fn_sig(*did2).subst(self.tcx, substs2);
+                let sig1 = self.tcx.bound_fn_sig(*did1).subst(self.tcx, substs1);
+                let sig2 = self.tcx.bound_fn_sig(*did2).subst(self.tcx, substs2);
                 if sig1 != sig2 {
                     return;
                 }
@@ -1056,7 +1056,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 (sig1, *did1, substs1)
             }
             (ty::FnDef(did, substs), ty::FnPtr(sig2)) => {
-                let sig1 = self.tcx.fn_sig(*did).subst(self.tcx, substs);
+                let sig1 = self.tcx.bound_fn_sig(*did).subst(self.tcx, substs);
                 if sig1 != *sig2 {
                     return;
                 }
@@ -1401,12 +1401,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             // If we have a default, then we it doesn't matter that we're not
                             // inferring the type arguments: we provide the default where any
                             // is missing.
-                            let default = tcx.type_of(param.def_id);
+                            let default = tcx.bound_type_of(param.def_id);
                             self.fcx
-                                .normalize_ty(
-                                    self.span,
-                                    default.subst_spanned(tcx, substs.unwrap(), Some(self.span)),
-                                )
+                                .normalize_ty(self.span, default.subst(tcx, substs.unwrap()))
                                 .into()
                         } else {
                             // If no type arguments were provided, we have to infer them.
@@ -1418,8 +1415,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                     GenericParamDefKind::Const { has_default } => {
                         if !infer_args && has_default {
-                            tcx.const_param_default(param.def_id)
-                                .subst_spanned(tcx, substs.unwrap(), Some(self.span))
+                            EarlyBinder(tcx.const_param_default(param.def_id))
+                                .subst(tcx, substs.unwrap())
                                 .into()
                         } else {
                             self.fcx.var_for_def(self.span, param)

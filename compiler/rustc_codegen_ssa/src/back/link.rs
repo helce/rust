@@ -5,8 +5,9 @@ use rustc_data_structures::memmap::Mmap;
 use rustc_data_structures::temp_dir::MaybeTempDir;
 use rustc_errors::{ErrorGuaranteed, Handler};
 use rustc_fs_util::fix_windows_verbatim_for_gcc;
-use rustc_hir::def_id::CrateNum;
+use rustc_hir::def_id::{CrateNum, LOCAL_CRATE};
 use rustc_middle::middle::dependency_format::Linkage;
+use rustc_middle::middle::exported_symbols::SymbolExportKind;
 use rustc_session::config::{self, CFGuard, CrateType, DebugInfo, LdImpl, Strip};
 use rustc_session::config::{OutputFilenames, OutputType, PrintRequest, SplitDwarfKind};
 use rustc_session::cstore::DllImport;
@@ -216,7 +217,7 @@ pub fn each_linked_rlib(
             Some(_) => {}
             None => return Err("could not find formats for rlibs".to_string()),
         }
-        let name = &info.crate_name[&cnum];
+        let name = info.crate_name[&cnum];
         let used_crate_source = &info.used_crate_source[&cnum];
         if let Some((path, _)) = &used_crate_source.rlib {
             f(cnum, &path);
@@ -467,7 +468,7 @@ fn link_staticlib<'a, B: ArchiveBuilder<'a>>(
     let mut all_native_libs = vec![];
 
     let res = each_linked_rlib(&codegen_results.crate_info, &mut |cnum, path| {
-        let name = &codegen_results.crate_info.crate_name[&cnum];
+        let name = codegen_results.crate_info.crate_name[&cnum];
         let native_libs = &codegen_results.crate_info.native_libraries[&cnum];
 
         // Here when we include the rlib into our staticlib we need to make a
@@ -987,7 +988,7 @@ fn link_natively<'a, B: ArchiveBuilder<'a>>(
 
         // On MSVC packed debug information is produced by the linker itself so
         // there's no need to do anything else here.
-        SplitDebuginfo::Packed if sess.target.is_like_msvc => {}
+        SplitDebuginfo::Packed if sess.target.is_like_windows => {}
 
         // ... and otherwise we're processing a `*.dwp` packed dwarf file.
         //
@@ -1655,6 +1656,100 @@ fn add_post_link_args(cmd: &mut dyn Linker, sess: &Session, flavor: LinkerFlavor
     }
 }
 
+/// Add a synthetic object file that contains reference to all symbols that we want to expose to
+/// the linker.
+///
+/// Background: we implement rlibs as static library (archives). Linkers treat archives
+/// differently from object files: all object files participate in linking, while archives will
+/// only participate in linking if they can satisfy at least one undefined reference (version
+/// scripts doesn't count). This causes `#[no_mangle]` or `#[used]` items to be ignored by the
+/// linker, and since they never participate in the linking, using `KEEP` in the linker scripts
+/// can't keep them either. This causes #47384.
+///
+/// To keep them around, we could use `--whole-archive` and equivalents to force rlib to
+/// participate in linking like object files, but this proves to be expensive (#93791). Therefore
+/// we instead just introduce an undefined reference to them. This could be done by `-u` command
+/// line option to the linker or `EXTERN(...)` in linker scripts, however they does not only
+/// introduce an undefined reference, but also make them the GC roots, preventing `--gc-sections`
+/// from removing them, and this is especially problematic for embedded programming where every
+/// byte counts.
+///
+/// This method creates a synthetic object file, which contains undefined references to all symbols
+/// that are necessary for the linking. They are only present in symbol table but not actually
+/// used in any sections, so the linker will therefore pick relevant rlibs for linking, but
+/// unused `#[no_mangle]` or `#[used]` can still be discard by GC sections.
+fn add_linked_symbol_object(
+    cmd: &mut dyn Linker,
+    sess: &Session,
+    tmpdir: &Path,
+    symbols: &[(String, SymbolExportKind)],
+) {
+    if symbols.is_empty() {
+        return;
+    }
+
+    let Some(mut file) = super::metadata::create_object_file(sess) else {
+        return;
+    };
+
+    // NOTE(nbdd0121): MSVC will hang if the input object file contains no sections,
+    // so add an empty section.
+    if file.format() == object::BinaryFormat::Coff {
+        file.add_section(Vec::new(), ".text".into(), object::SectionKind::Text);
+
+        // We handle the name decoration of COFF targets in `symbol_export.rs`, so disable the
+        // default mangler in `object` crate.
+        file.set_mangling(object::write::Mangling::None);
+
+        // Add feature flags to the object file. On MSVC this is optional but LLD will complain if
+        // not present.
+        let mut feature = 0;
+
+        if file.architecture() == object::Architecture::I386 {
+            // Indicate that all SEH handlers are registered in .sxdata section.
+            // We don't have generate any code, so we don't need .sxdata section but LLD still
+            // expects us to set this bit (see #96498).
+            // Reference: https://docs.microsoft.com/en-us/windows/win32/debug/pe-format
+            feature |= 1;
+        }
+
+        file.add_symbol(object::write::Symbol {
+            name: "@feat.00".into(),
+            value: feature,
+            size: 0,
+            kind: object::SymbolKind::Data,
+            scope: object::SymbolScope::Compilation,
+            weak: false,
+            section: object::write::SymbolSection::Absolute,
+            flags: object::SymbolFlags::None,
+        });
+    }
+
+    for (sym, kind) in symbols.iter() {
+        file.add_symbol(object::write::Symbol {
+            name: sym.clone().into(),
+            value: 0,
+            size: 0,
+            kind: match kind {
+                SymbolExportKind::Text => object::SymbolKind::Text,
+                SymbolExportKind::Data => object::SymbolKind::Data,
+                SymbolExportKind::Tls => object::SymbolKind::Tls,
+            },
+            scope: object::SymbolScope::Unknown,
+            weak: false,
+            section: object::write::SymbolSection::Undefined,
+            flags: object::SymbolFlags::None,
+        });
+    }
+
+    let path = tmpdir.join("symbols.o");
+    let result = std::fs::write(&path, file.write().unwrap());
+    if let Err(e) = result {
+        sess.fatal(&format!("failed to write {}: {}", path.display(), e));
+    }
+    cmd.add_object(&path);
+}
+
 /// Add object files containing code from the current crate.
 fn add_local_crate_regular_objects(cmd: &mut dyn Linker, codegen_results: &CodegenResults) {
     for obj in codegen_results.modules.iter().filter_map(|m| m.object.as_ref()) {
@@ -1795,6 +1890,13 @@ fn linker_with_args<'a, B: ArchiveBuilder<'a>>(
     // Pre-link CRT objects.
     add_pre_link_objects(cmd, sess, link_output_kind, crt_objects_fallback);
 
+    add_linked_symbol_object(
+        cmd,
+        sess,
+        tmpdir,
+        &codegen_results.crate_info.linked_symbols[&crate_type],
+    );
+
     // Sanitizer libraries.
     add_sanitizer_libraries(sess, crate_type, cmd);
 
@@ -1845,7 +1947,7 @@ fn linker_with_args<'a, B: ArchiveBuilder<'a>>(
     // This change is somewhat breaking in practice due to local static libraries being linked
     // as whole-archive (#85144), so removing whole-archive may be a pre-requisite.
     if sess.opts.debugging_opts.link_native_libraries {
-        add_local_native_libraries(cmd, sess, codegen_results, crate_type);
+        add_local_native_libraries(cmd, sess, codegen_results);
     }
 
     // Upstream rust libraries and their nobundle static libraries
@@ -1997,8 +2099,14 @@ fn add_order_independent_options(
     // Pass optimization flags down to the linker.
     cmd.optimize();
 
+    let debugger_visualizer_paths = if sess.target.is_like_msvc {
+        collect_debugger_visualizers(tmpdir, sess, &codegen_results.crate_info)
+    } else {
+        Vec::new()
+    };
+
     // Pass debuginfo and strip flags down to the linker.
-    cmd.debuginfo(strip_value(sess));
+    cmd.debuginfo(strip_value(sess), &debugger_visualizer_paths);
 
     // We want to prevent the compiler from accidentally leaking in any system libraries,
     // so by default we tell linkers not to link to any default libraries.
@@ -2017,14 +2125,45 @@ fn add_order_independent_options(
     add_rpath_args(cmd, sess, codegen_results, out_filename);
 }
 
-// A dylib may reexport symbols from the linked rlib or native static library.
-// Even if some symbol is reexported it's still not necessarily counted as used and may be
-// dropped, at least with `ld`-like ELF linkers. So we have to link some rlibs and static
-// libraries as whole-archive to avoid losing reexported symbols.
-// FIXME: Find a way to mark reexported symbols as used and avoid this use of whole-archive.
-fn default_to_whole_archive(sess: &Session, crate_type: CrateType, cmd: &dyn Linker) -> bool {
-    crate_type == CrateType::Dylib
-        && !(sess.target.limit_rdylib_exports && cmd.exported_symbol_means_used_symbol())
+// Write the debugger visualizer files for each crate to the temp directory and gather the file paths.
+fn collect_debugger_visualizers(
+    tmpdir: &Path,
+    sess: &Session,
+    crate_info: &CrateInfo,
+) -> Vec<PathBuf> {
+    let mut visualizer_paths = Vec::new();
+    let debugger_visualizers = &crate_info.debugger_visualizers;
+    let mut index = 0;
+
+    for (&cnum, visualizers) in debugger_visualizers {
+        let crate_name = if cnum == LOCAL_CRATE {
+            crate_info.local_crate_name.as_str()
+        } else {
+            crate_info.crate_name[&cnum].as_str()
+        };
+
+        for visualizer in visualizers {
+            let visualizer_out_file = tmpdir.join(format!("{}-{}.natvis", crate_name, index));
+
+            match fs::write(&visualizer_out_file, &visualizer.src) {
+                Ok(()) => {
+                    visualizer_paths.push(visualizer_out_file.clone());
+                    index += 1;
+                }
+                Err(error) => {
+                    sess.warn(
+                        format!(
+                            "Unable to write debugger visualizer file `{}`: {} ",
+                            visualizer_out_file.display(),
+                            error
+                        )
+                        .as_str(),
+                    );
+                }
+            };
+        }
+    }
+    visualizer_paths
 }
 
 /// # Native library linking
@@ -2040,7 +2179,6 @@ fn add_local_native_libraries(
     cmd: &mut dyn Linker,
     sess: &Session,
     codegen_results: &CodegenResults,
-    crate_type: CrateType,
 ) {
     let filesearch = sess.target_filesearch(PathKind::All);
     for search_path in filesearch.search_paths() {
@@ -2082,7 +2220,6 @@ fn add_local_native_libraries(
             }
             NativeLibKind::Static { whole_archive, bundle, .. } => {
                 if whole_archive == Some(true)
-                    || (whole_archive == None && default_to_whole_archive(sess, crate_type, cmd))
                     // Backward compatibility case: this can be a rlib (so `+whole-archive` cannot
                     // be added explicitly if necessary, see the error in `fn link_rlib`) compiled
                     // as an executable due to `--test`. Use whole-archive implicitly, like before
@@ -2201,7 +2338,7 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
         let src = &codegen_results.crate_info.used_crate_source[&cnum];
         match data[cnum.as_usize() - 1] {
             _ if codegen_results.crate_info.profiler_runtime == Some(cnum) => {
-                add_static_crate::<B>(cmd, sess, codegen_results, tmpdir, crate_type, cnum);
+                add_static_crate::<B>(cmd, sess, codegen_results, tmpdir, cnum);
             }
             // compiler-builtins are always placed last to ensure that they're
             // linked correctly.
@@ -2211,7 +2348,7 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
             }
             Linkage::NotLinked | Linkage::IncludedFromDylib => {}
             Linkage::Static => {
-                add_static_crate::<B>(cmd, sess, codegen_results, tmpdir, crate_type, cnum);
+                add_static_crate::<B>(cmd, sess, codegen_results, tmpdir, cnum);
 
                 // Link static native libs with "-bundle" modifier only if the crate they originate from
                 // is being linked statically to the current crate.  If it's linked dynamically
@@ -2242,10 +2379,7 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
                             lib.kind
                         {
                             let verbatim = lib.verbatim.unwrap_or(false);
-                            if whole_archive == Some(true)
-                                || (whole_archive == None
-                                    && default_to_whole_archive(sess, crate_type, cmd))
-                            {
+                            if whole_archive == Some(true) {
                                 cmd.link_whole_staticlib(
                                     name,
                                     verbatim,
@@ -2272,7 +2406,7 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
     // was already "included" in a dylib (e.g., `libstd` when `-C prefer-dynamic`
     // is used)
     if let Some(cnum) = compiler_builtins {
-        add_static_crate::<B>(cmd, sess, codegen_results, tmpdir, crate_type, cnum);
+        add_static_crate::<B>(cmd, sess, codegen_results, tmpdir, cnum);
     }
 
     // Converts a library file-stem into a cc -l argument
@@ -2303,23 +2437,13 @@ fn add_upstream_rust_crates<'a, B: ArchiveBuilder<'a>>(
         sess: &'a Session,
         codegen_results: &CodegenResults,
         tmpdir: &Path,
-        crate_type: CrateType,
         cnum: CrateNum,
     ) {
         let src = &codegen_results.crate_info.used_crate_source[&cnum];
         let cratepath = &src.rlib.as_ref().unwrap().0;
 
         let mut link_upstream = |path: &Path| {
-            // We don't want to include the whole compiler-builtins crate (e.g., compiler-rt)
-            // regardless of the default because it'll get repeatedly linked anyway.
-            let path = fix_windows_verbatim_for_gcc(path);
-            if default_to_whole_archive(sess, crate_type, cmd)
-                && codegen_results.crate_info.compiler_builtins != Some(cnum)
-            {
-                cmd.link_whole_rlib(&path);
-            } else {
-                cmd.link_rlib(&path);
-            }
+            cmd.link_rlib(&fix_windows_verbatim_for_gcc(path));
         };
 
         // See the comment above in `link_staticlib` and `link_rlib` for why if

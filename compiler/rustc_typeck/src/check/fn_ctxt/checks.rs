@@ -8,10 +8,11 @@ use crate::check::{
     potentially_plural_count, struct_span_err, BreakableCtxt, Diverges, Expectation, FnCtxt,
     LocalTy, Needs, TupleArgumentsFlag,
 };
+use crate::structured_errors::StructuredDiagnostic;
 
 use rustc_ast as ast;
 use rustc_data_structures::sync::Lrc;
-use rustc_errors::{Applicability, Diagnostic, DiagnosticId};
+use rustc_errors::{Applicability, Diagnostic, DiagnosticId, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::DefId;
@@ -21,18 +22,18 @@ use rustc_middle::ty::fold::TypeFoldable;
 use rustc_middle::ty::{self, Ty};
 use rustc_session::Session;
 use rustc_span::symbol::Ident;
-use rustc_span::{self, MultiSpan, Span};
+use rustc_span::{self, Span};
 use rustc_trait_selection::traits::{self, ObligationCauseCode, StatementAsExpression};
 
-use crate::structured_errors::StructuredDiagnostic;
 use std::iter;
 use std::slice;
 
-struct FnArgsAsTuple<'hir> {
-    first: &'hir hir::Expr<'hir>,
-    last: &'hir hir::Expr<'hir>,
+enum TupleMatchFound {
+    None,
+    Single,
+    /// Beginning and end Span
+    Multiple(Span, Span),
 }
-
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     pub(in super::super) fn check_casts(&self) {
         let mut deferred_cast_checks = self.deferred_cast_checks.borrow_mut();
@@ -132,9 +133,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let expected_arg_count = formal_input_tys.len();
 
-        // expected_count, arg_count, error_code, sugg_unit, sugg_tuple_wrap_args
-        let mut arg_count_error: Option<(usize, usize, &str, bool, Option<FnArgsAsTuple<'_>>)> =
-            None;
+        // expected_count, arg_count, error_code, sugg_tuple_wrap_args
+        let mut arg_count_error: Option<(usize, usize, &str, TupleMatchFound)> = None;
 
         // If the arguments should be wrapped in a tuple (ex: closures), unwrap them here
         let (formal_input_tys, expected_input_tys) = if tuple_arguments == TupleArguments {
@@ -144,8 +144,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 ty::Tuple(arg_types) => {
                     // Argument length differs
                     if arg_types.len() != provided_args.len() {
-                        arg_count_error =
-                            Some((arg_types.len(), provided_args.len(), "E0057", false, None));
+                        arg_count_error = Some((
+                            arg_types.len(),
+                            provided_args.len(),
+                            "E0057",
+                            TupleMatchFound::None,
+                        ));
                     }
                     let expected_input_tys = match expected_input_tys.get(0) {
                         Some(&ty) => match ty.kind() {
@@ -177,19 +181,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 (formal_input_tys.to_vec(), expected_input_tys)
             } else {
                 arg_count_error =
-                    Some((expected_arg_count, supplied_arg_count, "E0060", false, None));
+                    Some((expected_arg_count, supplied_arg_count, "E0060", TupleMatchFound::None));
                 (self.err_args(supplied_arg_count), vec![])
             }
         } else {
-            // is the missing argument of type `()`?
-            let sugg_unit = if expected_input_tys.len() == 1 && supplied_arg_count == 0 {
-                self.resolve_vars_if_possible(expected_input_tys[0]).is_unit()
-            } else if formal_input_tys.len() == 1 && supplied_arg_count == 0 {
-                self.resolve_vars_if_possible(formal_input_tys[0]).is_unit()
-            } else {
-                false
-            };
-
             // are we passing elements of a tuple without the tuple parentheses?
             let expected_input_tys = if expected_input_tys.is_empty() {
                 // In most cases we can use expected_input_tys, but some callers won't have the type
@@ -201,13 +196,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
             let sugg_tuple_wrap_args = self.suggested_tuple_wrap(expected_input_tys, provided_args);
 
-            arg_count_error = Some((
-                expected_arg_count,
-                supplied_arg_count,
-                "E0061",
-                sugg_unit,
-                sugg_tuple_wrap_args,
-            ));
+            arg_count_error =
+                Some((expected_arg_count, supplied_arg_count, "E0061", sugg_tuple_wrap_args));
             (self.err_args(supplied_arg_count), vec![])
         };
 
@@ -332,9 +322,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
 
         // If there was an error in parameter count, emit that here
-        if let Some((expected_count, arg_count, err_code, sugg_unit, sugg_tuple_wrap_args)) =
-            arg_count_error
-        {
+        if let Some((expected_count, arg_count, err_code, sugg_tuple_wrap_args)) = arg_count_error {
             let (span, start_span, args, ctor_of) = match &call_expr.kind {
                 hir::ExprKind::Call(
                     hir::Expr {
@@ -425,34 +413,38 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let def_kind = tcx.def_kind(def_id);
                 err.span_note(spans, &format!("{} defined here", def_kind.descr(def_id)));
             }
-            if sugg_unit {
-                let sugg_span = tcx.sess.source_map().end_point(call_expr.span);
-                // remove closing `)` from the span
-                let sugg_span = sugg_span.shrink_to_lo();
-                err.span_suggestion(
-                    sugg_span,
-                    "expected the unit value `()`; create it with empty parentheses",
-                    String::from("()"),
-                    Applicability::MachineApplicable,
-                );
-            } else if let Some(FnArgsAsTuple { first, last }) = sugg_tuple_wrap_args {
-                err.multipart_suggestion(
-                    "use parentheses to construct a tuple",
-                    vec![
-                        (first.span.shrink_to_lo(), '('.to_string()),
-                        (last.span.shrink_to_hi(), ')'.to_string()),
-                    ],
-                    Applicability::MachineApplicable,
-                );
-            } else {
-                err.span_label(
-                    span,
-                    format!(
-                        "expected {}{}",
-                        if c_variadic { "at least " } else { "" },
-                        potentially_plural_count(expected_count, "argument")
-                    ),
-                );
+            match sugg_tuple_wrap_args {
+                TupleMatchFound::Single => {
+                    let sugg_span = tcx.sess.source_map().end_point(call_expr.span);
+                    // remove closing `)` from the span
+                    let sugg_span = sugg_span.shrink_to_lo();
+                    err.span_suggestion(
+                        sugg_span,
+                        "expected the unit value `()`; create it with empty parentheses",
+                        String::from("()"),
+                        Applicability::MachineApplicable,
+                    );
+                }
+                TupleMatchFound::Multiple(first, last) => {
+                    err.multipart_suggestion(
+                        "use parentheses to construct a tuple",
+                        vec![
+                            (first.shrink_to_lo(), '('.to_string()),
+                            (last.shrink_to_hi(), ')'.to_string()),
+                        ],
+                        Applicability::MachineApplicable,
+                    );
+                }
+                _ => {
+                    err.span_label(
+                        span,
+                        format!(
+                            "expected {}{}",
+                            if c_variadic { "at least " } else { "" },
+                            potentially_plural_count(expected_count, "argument")
+                        ),
+                    );
+                }
             }
             err.emit();
         }
@@ -464,7 +456,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // We also need to make sure we at least write the ty of the other
                 // arguments which we skipped above, either because they were additional
                 // c_variadic args, or because we had an argument count mismatch.
-                fn variadic_error<'tcx>(sess: &Session, span: Span, ty: Ty<'tcx>, cast_ty: &str) {
+                fn variadic_error<'tcx>(sess: &'tcx Session, span: Span, ty: Ty<'tcx>, cast_ty: &str) {
                     use crate::structured_errors::MissingCastForVariadicArg;
 
                     MissingCastForVariadicArg { sess, span, ty, cast_ty }.diagnostic().emit();
@@ -498,27 +490,31 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         expected_input_tys: &[Ty<'tcx>],
         provided_args: &'tcx [hir::Expr<'tcx>],
-    ) -> Option<FnArgsAsTuple<'_>> {
-        let [expected_arg_type] = expected_input_tys[..] else { return None };
-
+    ) -> TupleMatchFound {
+        // Only handle the case where we expect only one tuple arg
+        let [expected_arg_type] = expected_input_tys[..] else { return TupleMatchFound::None };
         let &ty::Tuple(expected_types) = self.resolve_vars_if_possible(expected_arg_type).kind()
-            else { return None };
+            else { return TupleMatchFound::None };
+
+        // First check that there are the same number of types.
+        if expected_types.len() != provided_args.len() {
+            return TupleMatchFound::None;
+        }
 
         let supplied_types: Vec<_> = provided_args.iter().map(|arg| self.check_expr(arg)).collect();
 
         let all_match = iter::zip(expected_types, supplied_types)
             .all(|(expected, supplied)| self.can_eq(self.param_env, expected, supplied).is_ok());
 
-        if all_match {
-            match provided_args {
-                [] => None,
-                [_] => unreachable!(
-                    "shouldn't reach here - need count mismatch between 1-tuple and 1-argument"
-                ),
-                [first, .., last] => Some(FnArgsAsTuple { first, last }),
+        if !all_match {
+            return TupleMatchFound::None;
+        }
+        match provided_args {
+            [] => TupleMatchFound::None,
+            [_] => TupleMatchFound::Single,
+            [first, .., last] => {
+                TupleMatchFound::Multiple(first.span.shrink_to_lo(), last.span.shrink_to_hi())
             }
-        } else {
-            None
         }
     }
 
@@ -910,7 +906,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     /// A common error is to add an extra semicolon:
     ///
-    /// ```
+    /// ```compile_fail,E0308
     /// fn foo() -> usize {
     ///     22;
     /// }
@@ -936,7 +932,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             } else {
                 err.span_suggestion_short(
                     span_semi,
-                    "consider removing this semicolon",
+                    "remove this semicolon",
                     String::new(),
                     Applicability::MachineApplicable,
                 );

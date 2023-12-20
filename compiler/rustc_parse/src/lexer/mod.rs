@@ -1,6 +1,6 @@
 use crate::lexer::unicode_chars::UNICODE_ARRAY;
 use rustc_ast::ast::{self, AttrStyle};
-use rustc_ast::token::{self, CommentKind, Token, TokenKind};
+use rustc_ast::token::{self, CommentKind, Delimiter, Token, TokenKind};
 use rustc_ast::tokenstream::{Spacing, TokenStream};
 use rustc_ast::util::unicode::contains_text_flow_control_chars;
 use rustc_errors::{error_code, Applicability, DiagnosticBuilder, ErrorGuaranteed, PResult};
@@ -24,8 +24,8 @@ use unescape_error_reporting::{emit_unescape_error, escaped_char};
 
 #[derive(Clone, Debug)]
 pub struct UnmatchedBrace {
-    pub expected_delim: token::DelimToken,
-    pub found_delim: Option<token::DelimToken>,
+    pub expected_delim: Delimiter,
+    pub found_delim: Option<Delimiter>,
     pub found_span: Span,
     pub unclosed_span: Option<Span>,
     pub candidate_span: Option<Span>,
@@ -182,16 +182,7 @@ impl<'a> StringReader<'a> {
             }
             rustc_lexer::TokenKind::BlockComment { doc_style, terminated } => {
                 if !terminated {
-                    let msg = match doc_style {
-                        Some(_) => "unterminated block doc-comment",
-                        None => "unterminated block comment",
-                    };
-                    let last_bpos = self.pos;
-                    self.sess.span_diagnostic.span_fatal_with_code(
-                        self.mk_sp(start, last_bpos),
-                        msg,
-                        error_code!(E0758),
-                    );
+                    self.report_unterminated_block_comment(start, doc_style);
                 }
 
                 // Skip non-doc comments
@@ -234,13 +225,13 @@ impl<'a> StringReader<'a> {
             rustc_lexer::TokenKind::InvalidIdent
                 // Do not recover an identifier with emoji if the codepoint is a confusable
                 // with a recoverable substitution token, like `➖`.
-                if UNICODE_ARRAY
+                if !UNICODE_ARRAY
                     .iter()
-                    .find(|&&(c, _, _)| {
+                    .any(|&(c, _, _)| {
                         let sym = self.str_from(start);
                         sym.chars().count() == 1 && c == sym.chars().next().unwrap()
                     })
-                    .is_none() =>
+                     =>
             {
                 let sym = nfc_normalize(self.str_from(start));
                 let span = self.mk_sp(start, self.pos);
@@ -293,12 +284,12 @@ impl<'a> StringReader<'a> {
             rustc_lexer::TokenKind::Semi => token::Semi,
             rustc_lexer::TokenKind::Comma => token::Comma,
             rustc_lexer::TokenKind::Dot => token::Dot,
-            rustc_lexer::TokenKind::OpenParen => token::OpenDelim(token::Paren),
-            rustc_lexer::TokenKind::CloseParen => token::CloseDelim(token::Paren),
-            rustc_lexer::TokenKind::OpenBrace => token::OpenDelim(token::Brace),
-            rustc_lexer::TokenKind::CloseBrace => token::CloseDelim(token::Brace),
-            rustc_lexer::TokenKind::OpenBracket => token::OpenDelim(token::Bracket),
-            rustc_lexer::TokenKind::CloseBracket => token::CloseDelim(token::Bracket),
+            rustc_lexer::TokenKind::OpenParen => token::OpenDelim(Delimiter::Parenthesis),
+            rustc_lexer::TokenKind::CloseParen => token::CloseDelim(Delimiter::Parenthesis),
+            rustc_lexer::TokenKind::OpenBrace => token::OpenDelim(Delimiter::Brace),
+            rustc_lexer::TokenKind::CloseBrace => token::CloseDelim(Delimiter::Brace),
+            rustc_lexer::TokenKind::OpenBracket => token::OpenDelim(Delimiter::Bracket),
+            rustc_lexer::TokenKind::CloseBracket => token::CloseDelim(Delimiter::Bracket),
             rustc_lexer::TokenKind::At => token::At,
             rustc_lexer::TokenKind::Pound => token::Pound,
             rustc_lexer::TokenKind::Tilde => token::Tilde,
@@ -553,6 +544,55 @@ impl<'a> StringReader<'a> {
         err.emit()
     }
 
+    fn report_unterminated_block_comment(&self, start: BytePos, doc_style: Option<DocStyle>) {
+        let msg = match doc_style {
+            Some(_) => "unterminated block doc-comment",
+            None => "unterminated block comment",
+        };
+        let last_bpos = self.pos;
+        let mut err = self.sess.span_diagnostic.struct_span_fatal_with_code(
+            self.mk_sp(start, last_bpos),
+            msg,
+            error_code!(E0758),
+        );
+        let mut nested_block_comment_open_idxs = vec![];
+        let mut last_nested_block_comment_idxs = None;
+        let mut content_chars = self.str_from(start).char_indices().peekable();
+
+        while let Some((idx, current_char)) = content_chars.next() {
+            match content_chars.peek() {
+                Some((_, '*')) if current_char == '/' => {
+                    nested_block_comment_open_idxs.push(idx);
+                }
+                Some((_, '/')) if current_char == '*' => {
+                    last_nested_block_comment_idxs =
+                        nested_block_comment_open_idxs.pop().map(|open_idx| (open_idx, idx));
+                }
+                _ => {}
+            };
+        }
+
+        if let Some((nested_open_idx, nested_close_idx)) = last_nested_block_comment_idxs {
+            err.span_label(self.mk_sp(start, start + BytePos(2)), msg)
+                .span_label(
+                    self.mk_sp(
+                        start + BytePos(nested_open_idx as u32),
+                        start + BytePos(nested_open_idx as u32 + 2),
+                    ),
+                    "...as last nested comment starts here, maybe you want to close this instead?",
+                )
+                .span_label(
+                    self.mk_sp(
+                        start + BytePos(nested_close_idx as u32),
+                        start + BytePos(nested_close_idx as u32 + 2),
+                    ),
+                    "...and last nested comment terminates here.",
+                );
+        }
+
+        err.emit();
+    }
+
     // RFC 3101 introduced the idea of (reserved) prefixes. As of Rust 2021,
     // using a (unknown) prefix is an error. In earlier editions, however, they
     // only result in a (allowed by default) lint, and are treated as regular
@@ -572,14 +612,14 @@ impl<'a> StringReader<'a> {
                 err.span_suggestion_verbose(
                     prefix_span,
                     "use `br` for a raw byte string",
-                    "br".to_string(),
+                    "br",
                     Applicability::MaybeIncorrect,
                 );
             } else if expn_data.is_root() {
                 err.span_suggestion_verbose(
                     prefix_span.shrink_to_hi(),
                     "consider inserting whitespace here",
-                    " ".into(),
+                    " ",
                     Applicability::MaybeIncorrect,
                 );
             }

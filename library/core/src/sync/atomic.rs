@@ -162,6 +162,7 @@ unsafe impl Sync for AtomicBool {}
 /// loads and stores of pointers. Its size depends on the target pointer's size.
 #[cfg(target_has_atomic_load_store = "ptr")]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "AtomicPtr")]
 #[cfg_attr(target_pointer_width = "16", repr(C, align(2)))]
 #[cfg_attr(target_pointer_width = "32", repr(C, align(4)))]
 #[cfg_attr(target_pointer_width = "64", repr(C, align(8)))]
@@ -270,9 +271,9 @@ pub enum Ordering {
 /// An [`AtomicBool`] initialized to `false`.
 #[cfg(target_has_atomic_load_store = "8")]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_deprecated(
+#[deprecated(
     since = "1.34.0",
-    reason = "the `new` function is now preferred",
+    note = "the `new` function is now preferred",
     suggestion = "AtomicBool::new(false)"
 )]
 pub const ATOMIC_BOOL_INIT: AtomicBool = AtomicBool::new(false);
@@ -550,9 +551,9 @@ impl AtomicBool {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_deprecated(
+    #[deprecated(
         since = "1.50.0",
-        reason = "Use `compare_exchange` or `compare_exchange_weak` instead"
+        note = "Use `compare_exchange` or `compare_exchange_weak` instead"
     )]
     #[cfg(target_has_atomic = "8")]
     pub fn compare_and_swap(&self, current: bool, new: bool, order: Ordering) -> bool {
@@ -1234,9 +1235,9 @@ impl<T> AtomicPtr<T> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_deprecated(
+    #[deprecated(
         since = "1.50.0",
-        reason = "Use `compare_exchange` or `compare_exchange_weak` instead"
+        note = "Use `compare_exchange` or `compare_exchange_weak` instead"
     )]
     #[cfg(target_has_atomic = "ptr")]
     pub fn compare_and_swap(&self, current: *mut T, new: *mut T, order: Ordering) -> *mut T {
@@ -1458,6 +1459,7 @@ macro_rules! atomic_int {
      $stable_nand:meta,
      $const_stable:meta,
      $stable_init_const:meta,
+     $diagnostic_item:meta,
      $s_int_type:literal,
      $extra_feature:expr,
      $min_fn:ident, $max_fn:ident,
@@ -1480,6 +1482,7 @@ macro_rules! atomic_int {
         ///
         /// [module-level documentation]: crate::sync::atomic
         #[$stable]
+        #[$diagnostic_item]
         #[repr(C, align($align))]
         pub struct $atomic_type {
             v: UnsafeCell<$int_type>,
@@ -1487,9 +1490,9 @@ macro_rules! atomic_int {
 
         /// An atomic integer initialized to `0`.
         #[$stable_init_const]
-        #[rustc_deprecated(
+        #[deprecated(
             since = "1.34.0",
-            reason = "the `new` function is now preferred",
+            note = "the `new` function is now preferred",
             suggestion = $atomic_new,
         )]
         pub const $atomic_init: $atomic_type = $atomic_type::new(0);
@@ -1809,9 +1812,9 @@ macro_rules! atomic_int {
             /// ```
             #[inline]
             #[$stable]
-            #[rustc_deprecated(
+            #[deprecated(
                 since = "1.50.0",
-                reason = "Use `compare_exchange` or `compare_exchange_weak` instead")
+                note = "Use `compare_exchange` or `compare_exchange_weak` instead")
             ]
             #[$cfg_cas]
             pub fn compare_and_swap(&self,
@@ -2306,6 +2309,7 @@ atomic_int! {
     stable(feature = "integer_atomics_stable", since = "1.34.0"),
     rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
     unstable(feature = "integer_atomics", issue = "32976"),
+    cfg_attr(not(test), rustc_diagnostic_item = "AtomicI8"),
     "i8",
     "",
     atomic_min, atomic_max,
@@ -2325,6 +2329,7 @@ atomic_int! {
     stable(feature = "integer_atomics_stable", since = "1.34.0"),
     rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
     unstable(feature = "integer_atomics", issue = "32976"),
+    cfg_attr(not(test), rustc_diagnostic_item = "AtomicU8"),
     "u8",
     "",
     atomic_umin, atomic_umax,
@@ -2344,6 +2349,7 @@ atomic_int! {
     stable(feature = "integer_atomics_stable", since = "1.34.0"),
     rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
     unstable(feature = "integer_atomics", issue = "32976"),
+    cfg_attr(not(test), rustc_diagnostic_item = "AtomicI16"),
     "i16",
     "",
     atomic_min, atomic_max,
@@ -2363,6 +2369,7 @@ atomic_int! {
     stable(feature = "integer_atomics_stable", since = "1.34.0"),
     rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
     unstable(feature = "integer_atomics", issue = "32976"),
+    cfg_attr(not(test), rustc_diagnostic_item = "AtomicU16"),
     "u16",
     "",
     atomic_umin, atomic_umax,
@@ -2382,6 +2389,7 @@ atomic_int! {
     stable(feature = "integer_atomics_stable", since = "1.34.0"),
     rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
     unstable(feature = "integer_atomics", issue = "32976"),
+    cfg_attr(not(test), rustc_diagnostic_item = "AtomicI32"),
     "i32",
     "",
     atomic_min, atomic_max,
@@ -2401,6 +2409,7 @@ atomic_int! {
     stable(feature = "integer_atomics_stable", since = "1.34.0"),
     rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
     unstable(feature = "integer_atomics", issue = "32976"),
+    cfg_attr(not(test), rustc_diagnostic_item = "AtomicU32"),
     "u32",
     "",
     atomic_umin, atomic_umax,
@@ -2420,6 +2429,7 @@ atomic_int! {
     stable(feature = "integer_atomics_stable", since = "1.34.0"),
     rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
     unstable(feature = "integer_atomics", issue = "32976"),
+    cfg_attr(not(test), rustc_diagnostic_item = "AtomicI64"),
     "i64",
     "",
     atomic_min, atomic_max,
@@ -2439,6 +2449,7 @@ atomic_int! {
     stable(feature = "integer_atomics_stable", since = "1.34.0"),
     rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
     unstable(feature = "integer_atomics", issue = "32976"),
+    cfg_attr(not(test), rustc_diagnostic_item = "AtomicU64"),
     "u64",
     "",
     atomic_umin, atomic_umax,
@@ -2458,6 +2469,7 @@ atomic_int! {
     unstable(feature = "integer_atomics", issue = "32976"),
     rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
     unstable(feature = "integer_atomics", issue = "32976"),
+    cfg_attr(not(test), rustc_diagnostic_item = "AtomicI128"),
     "i128",
     "#![feature(integer_atomics)]\n\n",
     atomic_min, atomic_max,
@@ -2477,6 +2489,7 @@ atomic_int! {
     unstable(feature = "integer_atomics", issue = "32976"),
     rustc_const_stable(feature = "const_integer_atomics", since = "1.34.0"),
     unstable(feature = "integer_atomics", issue = "32976"),
+    cfg_attr(not(test), rustc_diagnostic_item = "AtomicU128"),
     "u128",
     "#![feature(integer_atomics)]\n\n",
     atomic_umin, atomic_umax,
@@ -2500,6 +2513,7 @@ macro_rules! atomic_int_ptr_sized {
             stable(feature = "atomic_nand", since = "1.27.0"),
             rustc_const_stable(feature = "const_ptr_sized_atomics", since = "1.24.0"),
             stable(feature = "rust1", since = "1.0.0"),
+            cfg_attr(not(test), rustc_diagnostic_item = "AtomicIsize"),
             "isize",
             "",
             atomic_min, atomic_max,
@@ -2520,6 +2534,7 @@ macro_rules! atomic_int_ptr_sized {
             stable(feature = "atomic_nand", since = "1.27.0"),
             rustc_const_stable(feature = "const_ptr_sized_atomics", since = "1.24.0"),
             stable(feature = "rust1", since = "1.0.0"),
+            cfg_attr(not(test), rustc_diagnostic_item = "AtomicUsize"),
             "usize",
             "",
             atomic_umin, atomic_umax,
@@ -3008,7 +3023,7 @@ impl<T> fmt::Pointer for AtomicPtr<T> {
 /// [`hint::spin_loop`]: crate::hint::spin_loop
 #[inline]
 #[stable(feature = "spin_loop_hint", since = "1.24.0")]
-#[rustc_deprecated(since = "1.51.0", reason = "use hint::spin_loop instead")]
+#[deprecated(since = "1.51.0", note = "use hint::spin_loop instead")]
 pub fn spin_loop_hint() {
     spin_loop()
 }

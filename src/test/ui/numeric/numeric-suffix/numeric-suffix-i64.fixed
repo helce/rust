@@ -1,0 +1,40 @@
+// run-rustfix
+
+fn foo<N>(_x: N) {}
+
+fn main() {
+    foo::<i64>(42_i64);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<i64>(42_i64);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<i64>(42_i64);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<i64>(42_i64);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<i64>(42_i64);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<i64>(42_i64);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<i64>(42_i64);
+    foo::<i64>(42_i64);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<i64>(42_i64);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<i64>(42_i64);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<i64>(42i64);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+    foo::<i64>(42i64);
+    //~^ ERROR mismatched types
+    //~| NOTE expected
+}

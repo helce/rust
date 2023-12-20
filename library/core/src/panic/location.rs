@@ -123,6 +123,7 @@ impl<'a> Location<'a> {
     /// ```
     #[must_use]
     #[stable(feature = "panic_hooks", since = "1.10.0")]
+    #[inline]
     pub fn file(&self) -> &str {
         self.file
     }
@@ -146,6 +147,7 @@ impl<'a> Location<'a> {
     /// ```
     #[must_use]
     #[stable(feature = "panic_hooks", since = "1.10.0")]
+    #[inline]
     pub fn line(&self) -> u32 {
         self.line
     }
@@ -169,6 +171,7 @@ impl<'a> Location<'a> {
     /// ```
     #[must_use]
     #[stable(feature = "panic_col", since = "1.25.0")]
+    #[inline]
     pub fn column(&self) -> u32 {
         self.col
     }

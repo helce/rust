@@ -1,27 +1,31 @@
 use either::Either;
 use rustc_const_eval::util::CallKind;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder, ErrorGuaranteed};
+use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder, ErrorGuaranteed, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_hir::{AsyncGeneratorKind, GeneratorKind};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_infer::traits::ObligationCause;
+use rustc_middle::mir::tcx::PlaceTy;
 use rustc_middle::mir::{
     self, AggregateKind, BindingForm, BorrowKind, ClearCrossCrate, ConstraintCategory,
     FakeReadCause, LocalDecl, LocalInfo, LocalKind, Location, Operand, Place, PlaceRef,
     ProjectionElem, Rvalue, Statement, StatementKind, Terminator, TerminatorKind, VarBindingForm,
 };
-use rustc_middle::ty::{self, subst::Subst, suggest_constraining_type_params, PredicateKind, Ty};
+use rustc_middle::ty::{
+    self, subst::Subst, suggest_constraining_type_params, EarlyBinder, PredicateKind, Ty,
+};
 use rustc_mir_dataflow::move_paths::{InitKind, MoveOutIndex, MovePathIndex};
 use rustc_span::symbol::sym;
-use rustc_span::{BytePos, MultiSpan, Span};
+use rustc_span::{BytePos, Span};
 use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::traits::TraitEngineExt as _;
 
 use crate::borrow_set::TwoPhaseActivation;
 use crate::borrowck_errors;
 
+use crate::diagnostics::conflict_errors::StorageDeadOrDrop::LocalStorageDead;
 use crate::diagnostics::find_all_local_uses;
 use crate::{
     borrow_set::BorrowData, diagnostics::Instance, prefixes::IsPrefixOf,
@@ -334,7 +338,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         let find_fn_kind_from_did = |predicates: &[(ty::Predicate<'tcx>, Span)], substs| {
             predicates.iter().find_map(|(pred, _)| {
                 let pred = if let Some(substs) = substs {
-                    pred.subst(tcx, substs).kind().skip_binder()
+                    EarlyBinder(*pred).subst(tcx, substs).kind().skip_binder()
                 } else {
                     pred.kind().skip_binder()
                 };
@@ -772,14 +776,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             Some((issued_span, span)),
         );
 
-        self.suggest_using_local_if_applicable(
-            &mut err,
-            location,
-            (place, span),
-            gen_borrow_kind,
-            issued_borrow,
-            explanation,
-        );
+        self.suggest_using_local_if_applicable(&mut err, location, issued_borrow, explanation);
 
         err
     }
@@ -789,17 +786,24 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         &self,
         err: &mut Diagnostic,
         location: Location,
-        (place, span): (Place<'tcx>, Span),
-        gen_borrow_kind: BorrowKind,
         issued_borrow: &BorrowData<'tcx>,
         explanation: BorrowExplanation,
     ) {
-        let used_in_call =
-            matches!(explanation, BorrowExplanation::UsedLater(LaterUseKind::Call, _call_span, _));
+        let used_in_call = matches!(
+            explanation,
+            BorrowExplanation::UsedLater(LaterUseKind::Call | LaterUseKind::Other, _call_span, _)
+        );
         if !used_in_call {
             debug!("not later used in call");
             return;
         }
+
+        let use_span =
+            if let BorrowExplanation::UsedLater(LaterUseKind::Other, use_span, _) = explanation {
+                Some(use_span)
+            } else {
+                None
+            };
 
         let outer_call_loc =
             if let TwoPhaseActivation::ActivatedAt(loc) = issued_borrow.activation_location {
@@ -822,7 +826,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             return;
         };
         let inner_param_uses = find_all_local_uses::find(self.body, inner_param.local);
-        let Some((inner_call_loc,inner_call_term)) = inner_param_uses.into_iter().find_map(|loc| {
+        let Some((inner_call_loc, inner_call_term)) = inner_param_uses.into_iter().find_map(|loc| {
             let Either::Right(term) = self.body.stmt_at(loc) else {
                 debug!("{:?} is a statement, so it can't be a call", loc);
                 return None;
@@ -833,7 +837,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             };
             debug!("checking call args for uses of inner_param: {:?}", args);
             if args.contains(&Operand::Move(inner_param)) {
-                Some((loc,term))
+                Some((loc, term))
             } else {
                 None
             }
@@ -844,7 +848,10 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         debug!("===> outer_call_loc = {:?}, inner_call_loc = {:?}", outer_call_loc, inner_call_loc);
 
         let inner_call_span = inner_call_term.source_info.span;
-        let outer_call_span = outer_call_stmt.either(|s| s.source_info, |t| t.source_info).span;
+        let outer_call_span = match use_span {
+            Some(span) => span,
+            None => outer_call_stmt.either(|s| s.source_info, |t| t.source_info).span,
+        };
         if outer_call_span == inner_call_span || !outer_call_span.contains(inner_call_span) {
             // FIXME: This stops the suggestion in some cases where it should be emitted.
             //        Fix the spans for those cases so it's emitted correctly.
@@ -854,8 +861,20 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
             );
             return;
         }
-        err.span_help(inner_call_span, "try adding a local storing this argument...");
-        err.span_help(outer_call_span, "...and then using that local as the argument to this call");
+        err.span_help(
+            inner_call_span,
+            &format!(
+                "try adding a local storing this{}...",
+                if use_span.is_some() { "" } else { " argument" }
+            ),
+        );
+        err.span_help(
+            outer_call_span,
+            &format!(
+                "...and then using that local {}",
+                if use_span.is_some() { "here" } else { "as the argument to this call" }
+            ),
+        );
     }
 
     fn suggest_split_at_mut_if_applicable(
@@ -879,20 +898,23 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
     ///
     /// In the simplest case, where there are no unions involved, if a mutable borrow of `x` is
     /// attempted while a shared borrow is live, then this function will return:
-    ///
-    ///     ("x", "", "")
-    ///
+    /// ```
+    /// ("x", "", "")
+    /// # ;
+    /// ```
     /// In the simple union case, if a mutable borrow of a union field `x.z` is attempted while
     /// a shared borrow of another field `x.y`, then this function will return:
-    ///
-    ///     ("x", "x.z", "x.y")
-    ///
+    /// ```
+    /// ("x", "x.z", "x.y")
+    /// # ;
+    /// ```
     /// In the more complex union case, where the union is a field of a struct, then if a mutable
     /// borrow of a union field in a struct `x.u.z` is attempted while a shared borrow of
     /// another field `x.u.y`, then this function will return:
-    ///
-    ///     ("x.u", "x.u.z", "x.u.y")
-    ///
+    /// ```
+    /// ("x.u", "x.u.z", "x.u.y")
+    /// # ;
+    /// ```
     /// This is used when creating error messages like below:
     ///
     /// ```text
@@ -1469,7 +1491,7 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
                         err.span_suggestion_hidden(
                             return_span,
                             "use `.collect()` to allocate the iterator",
-                            format!("{}{}", snippet, ".collect::<Vec<_>>()"),
+                            format!("{snippet}.collect::<Vec<_>>()"),
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -1921,10 +1943,8 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
         } else {
             "cannot assign twice to immutable variable"
         };
-        if span != assigned_span {
-            if !from_arg {
-                err.span_label(assigned_span, format!("first assignment to {}", place_description));
-            }
+        if span != assigned_span && !from_arg {
+            err.span_label(assigned_span, format!("first assignment to {}", place_description));
         }
         if let Some(decl) = local_decl
             && let Some(name) = local_name
@@ -1943,45 +1963,46 @@ impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
 
     fn classify_drop_access_kind(&self, place: PlaceRef<'tcx>) -> StorageDeadOrDrop<'tcx> {
         let tcx = self.infcx.tcx;
-        match place.last_projection() {
-            None => StorageDeadOrDrop::LocalStorageDead,
-            Some((place_base, elem)) => {
-                // FIXME(spastorino) make this iterate
-                let base_access = self.classify_drop_access_kind(place_base);
-                match elem {
-                    ProjectionElem::Deref => match base_access {
-                        StorageDeadOrDrop::LocalStorageDead
-                        | StorageDeadOrDrop::BoxedStorageDead => {
-                            assert!(
-                                place_base.ty(self.body, tcx).ty.is_box(),
-                                "Drop of value behind a reference or raw pointer"
-                            );
-                            StorageDeadOrDrop::BoxedStorageDead
-                        }
-                        StorageDeadOrDrop::Destructor(_) => base_access,
-                    },
-                    ProjectionElem::Field(..) | ProjectionElem::Downcast(..) => {
-                        let base_ty = place_base.ty(self.body, tcx).ty;
-                        match base_ty.kind() {
-                            ty::Adt(def, _) if def.has_dtor(tcx) => {
-                                // Report the outermost adt with a destructor
-                                match base_access {
-                                    StorageDeadOrDrop::Destructor(_) => base_access,
-                                    StorageDeadOrDrop::LocalStorageDead
-                                    | StorageDeadOrDrop::BoxedStorageDead => {
-                                        StorageDeadOrDrop::Destructor(base_ty)
+        let (kind, _place_ty) = place.projection.iter().fold(
+            (LocalStorageDead, PlaceTy::from_ty(self.body.local_decls[place.local].ty)),
+            |(kind, place_ty), &elem| {
+                (
+                    match elem {
+                        ProjectionElem::Deref => match kind {
+                            StorageDeadOrDrop::LocalStorageDead
+                            | StorageDeadOrDrop::BoxedStorageDead => {
+                                assert!(
+                                    place_ty.ty.is_box(),
+                                    "Drop of value behind a reference or raw pointer"
+                                );
+                                StorageDeadOrDrop::BoxedStorageDead
+                            }
+                            StorageDeadOrDrop::Destructor(_) => kind,
+                        },
+                        ProjectionElem::Field(..) | ProjectionElem::Downcast(..) => {
+                            match place_ty.ty.kind() {
+                                ty::Adt(def, _) if def.has_dtor(tcx) => {
+                                    // Report the outermost adt with a destructor
+                                    match kind {
+                                        StorageDeadOrDrop::Destructor(_) => kind,
+                                        StorageDeadOrDrop::LocalStorageDead
+                                        | StorageDeadOrDrop::BoxedStorageDead => {
+                                            StorageDeadOrDrop::Destructor(place_ty.ty)
+                                        }
                                     }
                                 }
+                                _ => kind,
                             }
-                            _ => base_access,
                         }
-                    }
-                    ProjectionElem::ConstantIndex { .. }
-                    | ProjectionElem::Subslice { .. }
-                    | ProjectionElem::Index(_) => base_access,
-                }
-            }
-        }
+                        ProjectionElem::ConstantIndex { .. }
+                        | ProjectionElem::Subslice { .. }
+                        | ProjectionElem::Index(_) => kind,
+                    },
+                    place_ty.projection_ty(tcx, elem),
+                )
+            },
+        );
+        kind
     }
 
     /// Describe the reason for the fake borrow that was assigned to `place`.

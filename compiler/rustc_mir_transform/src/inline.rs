@@ -260,7 +260,7 @@ impl<'tcx> Inliner<'tcx> {
                     return None;
                 }
 
-                let fn_sig = self.tcx.fn_sig(def_id).subst(self.tcx, substs);
+                let fn_sig = self.tcx.bound_fn_sig(def_id).subst(self.tcx, substs);
 
                 return Some(CallSite {
                     callee,
@@ -369,6 +369,7 @@ impl<'tcx> Inliner<'tcx> {
                 match stmt.kind {
                     StatementKind::StorageLive(_)
                     | StatementKind::StorageDead(_)
+                    | StatementKind::Deinit(_)
                     | StatementKind::Nop => {}
                     _ => cost += INSTR_COST,
                 }

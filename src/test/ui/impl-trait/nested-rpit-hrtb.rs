@@ -53,7 +53,6 @@ fn two_htrb_trait_param() -> impl for<'a> Foo<'a, Assoc = impl for<'b> Qux<'b>> 
 // `'b` is not in scope for the outlives bound.
 fn two_htrb_outlives() -> impl for<'a> Foo<'a, Assoc = impl for<'b> Sized + 'b> {}
 //~^ ERROR use of undeclared lifetime name `'b` [E0261]
-//~| ERROR lifetime name `'b` shadows a lifetime name that is already in scope [E0496]
 
 // This should pass.
 fn two_htrb_trait_param_uses() -> impl for<'a> Bar<'a, Assoc = impl for<'b> Qux<'b>> {}
@@ -61,6 +60,5 @@ fn two_htrb_trait_param_uses() -> impl for<'a> Bar<'a, Assoc = impl for<'b> Qux<
 // `'b` is not in scope for the outlives bound.
 fn two_htrb_outlives_uses() -> impl for<'a> Bar<'a, Assoc = impl for<'b> Sized + 'b> {}
 //~^ ERROR use of undeclared lifetime name `'b` [E0261]
-//~| ERROR lifetime name `'b` shadows a lifetime name that is already in scope [E0496]
 
 fn main() {}

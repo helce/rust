@@ -2,10 +2,11 @@ pub mod on_unimplemented;
 pub mod suggestions;
 
 use super::{
-    EvaluationResult, FulfillmentContext, FulfillmentError, FulfillmentErrorCode,
-    MismatchedProjectionTypes, Obligation, ObligationCause, ObligationCauseCode,
-    OnUnimplementedDirective, OnUnimplementedNote, OutputTypeParameterMismatch, Overflow,
-    PredicateObligation, SelectionContext, SelectionError, TraitNotObjectSafe,
+    DerivedObligationCause, EvaluationResult, FulfillmentContext, FulfillmentError,
+    FulfillmentErrorCode, ImplDerivedObligationCause, MismatchedProjectionTypes, Obligation,
+    ObligationCause, ObligationCauseCode, OnUnimplementedDirective, OnUnimplementedNote,
+    OutputTypeParameterMismatch, Overflow, PredicateObligation, SelectionContext, SelectionError,
+    TraitNotObjectSafe,
 };
 
 use crate::infer::error_reporting::{TyCategory, TypeAnnotationNeeded as ErrorCode};
@@ -14,6 +15,7 @@ use crate::infer::{self, InferCtxt, TyCtxtInferExt};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{
     pluralize, struct_span_err, Applicability, Diagnostic, DiagnosticBuilder, ErrorGuaranteed,
+    MultiSpan, Style,
 };
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
@@ -28,12 +30,13 @@ use rustc_middle::traits::select::OverflowError;
 use rustc_middle::ty::error::ExpectedFound;
 use rustc_middle::ty::fold::TypeFolder;
 use rustc_middle::ty::{
-    self, SubtypePredicate, ToPolyTraitRef, ToPredicate, Ty, TyCtxt, TypeFoldable,
+    self, SubtypePredicate, ToPolyTraitRef, ToPredicate, TraitRef, Ty, TyCtxt, TypeFoldable,
 };
 use rustc_span::symbol::{kw, sym};
-use rustc_span::{ExpnKind, MultiSpan, Span, DUMMY_SP};
+use rustc_span::{ExpnKind, Span, DUMMY_SP};
 use std::fmt;
 use std::iter;
+use std::ops::ControlFlow;
 
 use crate::traits::query::evaluate_obligation::InferCtxtExt as _;
 use crate::traits::query::normalize::AtExt as _;
@@ -354,7 +357,7 @@ impl<'a, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'a, 'tcx> {
                         let have_alt_message = message.is_some() || label.is_some();
                         let is_try_conversion = self.is_try_conversion(span, trait_ref.def_id());
                         let is_unsize =
-                            { Some(trait_ref.def_id()) == self.tcx.lang_items().unsize_trait() };
+                            Some(trait_ref.def_id()) == self.tcx.lang_items().unsize_trait();
                         let (message, note, append_const_msg) = if is_try_conversion {
                             (
                                 Some(format!(
@@ -363,7 +366,7 @@ impl<'a, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'a, 'tcx> {
                                 )),
                                 Some(
                                     "the question mark operation (`?`) implicitly performs a \
-                                        conversion on the error value using the `From` trait"
+                                     conversion on the error value using the `From` trait"
                                         .to_owned(),
                                 ),
                                 Some(None),
@@ -437,6 +440,13 @@ impl<'a, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'a, 'tcx> {
                             }
                         }
 
+                        if Some(trait_ref.def_id()) == tcx.lang_items().drop_trait()
+                            && predicate_is_const
+                        {
+                            err.note("`~const Drop` was renamed to `~const Destruct`");
+                            err.note("See <https://github.com/rust-lang/rust/pull/94901> for more details");
+                        }
+
                         let explanation = if let ObligationCauseCode::MainFunctionType =
                             obligation.cause.code()
                         {
@@ -472,6 +482,12 @@ impl<'a, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'a, 'tcx> {
                             }
                         } else {
                             err.span_label(span, explanation);
+                        }
+
+                        if let ObligationCauseCode::ObjectCastObligation(obj_ty) = obligation.cause.code().peel_derives() &&
+                           let Some(self_ty) = trait_predicate.self_ty().no_bound_vars() &&
+                           Some(trait_ref.def_id()) == self.tcx.lang_items().sized_trait() {
+                            self.suggest_borrowing_for_object_cast(&mut err, &obligation, self_ty, *obj_ty);
                         }
 
                         if trait_predicate.is_const_if_const() && obligation.param_env.is_const() {
@@ -519,10 +535,12 @@ impl<'a, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'a, 'tcx> {
                         }
 
                         self.suggest_floating_point_literal(&obligation, &mut err, &trait_ref);
-                        self.suggest_dereferences(&obligation, &mut err, trait_predicate);
-                        self.suggest_fn_call(&obligation, &mut err, trait_predicate);
-                        self.suggest_remove_reference(&obligation, &mut err, trait_predicate);
-                        self.suggest_semicolon_removal(
+                        let mut suggested =
+                            self.suggest_dereferences(&obligation, &mut err, trait_predicate);
+                        suggested |= self.suggest_fn_call(&obligation, &mut err, trait_predicate);
+                        suggested |=
+                            self.suggest_remove_reference(&obligation, &mut err, trait_predicate);
+                        suggested |= self.suggest_semicolon_removal(
                             &obligation,
                             &mut err,
                             span,
@@ -530,6 +548,7 @@ impl<'a, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'a, 'tcx> {
                         );
                         self.note_version_mismatch(&mut err, &trait_ref);
                         self.suggest_remove_await(&obligation, &mut err);
+                        self.suggest_derive(&obligation, &mut err, trait_predicate);
 
                         if Some(trait_ref.def_id()) == tcx.lang_items().try_trait() {
                             self.suggest_await_before_try(
@@ -648,10 +667,80 @@ impl<'a, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'a, 'tcx> {
                                 trait_predicate,
                                 obligation.cause.body_id,
                             );
-                        } else if !have_alt_message {
+                        } else if !suggested {
                             // Can't show anything else useful, try to find similar impls.
                             let impl_candidates = self.find_similar_impl_candidates(trait_ref);
-                            self.report_similar_impl_candidates(impl_candidates, &mut err);
+                            if !self.report_similar_impl_candidates(
+                                impl_candidates,
+                                trait_ref,
+                                &mut err,
+                            ) {
+                                // This is *almost* equivalent to
+                                // `obligation.cause.code().peel_derives()`, but it gives us the
+                                // trait predicate for that corresponding root obligation. This
+                                // lets us get a derived obligation from a type parameter, like
+                                // when calling `string.strip_suffix(p)` where `p` is *not* an
+                                // implementer of `Pattern<'_>`.
+                                let mut code = obligation.cause.code();
+                                let mut trait_pred = trait_predicate;
+                                let mut peeled = false;
+                                loop {
+                                    match &*code {
+                                        ObligationCauseCode::FunctionArgumentObligation {
+                                            parent_code,
+                                            ..
+                                        } => {
+                                            code = &parent_code;
+                                        }
+                                        ObligationCauseCode::ImplDerivedObligation(
+                                            box ImplDerivedObligationCause {
+                                                derived:
+                                                    DerivedObligationCause {
+                                                        parent_code,
+                                                        parent_trait_pred,
+                                                    },
+                                                ..
+                                            },
+                                        )
+                                        | ObligationCauseCode::BuiltinDerivedObligation(
+                                            DerivedObligationCause {
+                                                parent_code,
+                                                parent_trait_pred,
+                                            },
+                                        )
+                                        | ObligationCauseCode::DerivedObligation(
+                                            DerivedObligationCause {
+                                                parent_code,
+                                                parent_trait_pred,
+                                            },
+                                        ) => {
+                                            peeled = true;
+                                            code = &parent_code;
+                                            trait_pred = *parent_trait_pred;
+                                        }
+                                        _ => break,
+                                    };
+                                }
+                                let def_id = trait_pred.def_id();
+                                // Mention *all* the `impl`s for the *top most* obligation, the
+                                // user might have meant to use one of them, if any found. We skip
+                                // auto-traits or fundamental traits that might not be exactly what
+                                // the user might expect to be presented with. Instead this is
+                                // useful for less general traits.
+                                if peeled
+                                    && !self.tcx.trait_is_auto(def_id)
+                                    && !self.tcx.lang_items().items().contains(&Some(def_id))
+                                {
+                                    let trait_ref = trait_pred.to_poly_trait_ref();
+                                    let impl_candidates =
+                                        self.find_similar_impl_candidates(trait_ref);
+                                    self.report_similar_impl_candidates(
+                                        impl_candidates,
+                                        trait_ref,
+                                        &mut err,
+                                    );
+                                }
+                            }
                         }
 
                         // Changing mutability doesn't make a difference to whether we have
@@ -676,7 +765,6 @@ impl<'a, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'a, 'tcx> {
                             });
                             let unit_obligation = obligation.with(predicate.to_predicate(tcx));
                             if self.predicate_may_hold(&unit_obligation) {
-                                err.note("this trait is implemented for `()`");
                                 err.note(
                                     "this error might have been caused by changes to \
                                     Rust's type-inference algorithm (see issue #48950 \
@@ -1301,8 +1389,9 @@ trait InferCtxtPrivExt<'hir, 'tcx> {
     fn report_similar_impl_candidates(
         &self,
         impl_candidates: Vec<ImplCandidate<'tcx>>,
+        trait_ref: ty::PolyTraitRef<'tcx>,
         err: &mut Diagnostic,
-    );
+    ) -> bool;
 
     /// Gets the parent trait chain start
     fn get_parent_trait_ref(
@@ -1313,7 +1402,11 @@ trait InferCtxtPrivExt<'hir, 'tcx> {
     /// If the `Self` type of the unsatisfied trait `trait_ref` implements a trait
     /// with the same path as `trait_ref`, a help message about
     /// a probable version mismatch is added to `err`
-    fn note_version_mismatch(&self, err: &mut Diagnostic, trait_ref: &ty::PolyTraitRef<'tcx>);
+    fn note_version_mismatch(
+        &self,
+        err: &mut Diagnostic,
+        trait_ref: &ty::PolyTraitRef<'tcx>,
+    ) -> bool;
 
     /// Creates a `PredicateObligation` with `new_self_ty` replacing the existing type in the
     /// `trait_ref`.
@@ -1561,7 +1654,15 @@ impl<'a, 'tcx> InferCtxtPrivExt<'a, 'tcx> for InferCtxt<'a, 'tcx> {
                     }),
                 _ => None,
             };
-            self.note_type_err(&mut diag, &obligation.cause, secondary_span, values, err, true);
+            self.note_type_err(
+                &mut diag,
+                &obligation.cause,
+                secondary_span,
+                values,
+                err,
+                true,
+                false,
+            );
             self.note_obligation_cause(&mut diag, obligation);
             diag.emit();
         });
@@ -1626,6 +1727,7 @@ impl<'a, 'tcx> InferCtxtPrivExt<'a, 'tcx> for InferCtxt<'a, 'tcx> {
         } else if cat_a == cat_b {
             match (a.kind(), b.kind()) {
                 (ty::Adt(def_a, _), ty::Adt(def_b, _)) => def_a == def_b,
+                (ty::Foreign(def_a), ty::Foreign(def_b)) => def_a == def_b,
                 // Matching on references results in a lot of unhelpful
                 // suggestions, so let's just not do that for now.
                 //
@@ -1675,14 +1777,82 @@ impl<'a, 'tcx> InferCtxtPrivExt<'a, 'tcx> for InferCtxt<'a, 'tcx> {
     fn report_similar_impl_candidates(
         &self,
         impl_candidates: Vec<ImplCandidate<'tcx>>,
+        trait_ref: ty::PolyTraitRef<'tcx>,
         err: &mut Diagnostic,
-    ) {
-        if impl_candidates.is_empty() {
-            return;
-        }
+    ) -> bool {
+        let report = |mut candidates: Vec<TraitRef<'tcx>>, err: &mut Diagnostic| {
+            candidates.sort();
+            candidates.dedup();
+            let len = candidates.len();
+            if candidates.len() == 0 {
+                return false;
+            }
+            if candidates.len() == 1 {
+                err.highlighted_help(vec![
+                    (
+                        format!("the trait `{}` ", candidates[0].print_only_trait_path()),
+                        Style::NoStyle,
+                    ),
+                    ("is".to_string(), Style::Highlight),
+                    (" implemented for `".to_string(), Style::NoStyle),
+                    (candidates[0].self_ty().to_string(), Style::Highlight),
+                    ("`".to_string(), Style::NoStyle),
+                ]);
+                return true;
+            }
+            let trait_ref = TraitRef::identity(self.tcx, candidates[0].def_id);
+            // Check if the trait is the same in all cases. If so, we'll only show the type.
+            let mut traits: Vec<_> =
+                candidates.iter().map(|c| c.print_only_trait_path().to_string()).collect();
+            traits.sort();
+            traits.dedup();
 
-        let len = impl_candidates.len();
-        let end = if impl_candidates.len() <= 5 { impl_candidates.len() } else { 4 };
+            let mut candidates: Vec<String> = candidates
+                .into_iter()
+                .map(|c| {
+                    if traits.len() == 1 {
+                        format!("\n  {}", c.self_ty())
+                    } else {
+                        format!("\n  {}", c)
+                    }
+                })
+                .collect();
+
+            candidates.sort();
+            candidates.dedup();
+            let end = if candidates.len() <= 9 { candidates.len() } else { 8 };
+            err.help(&format!(
+                "the following other types implement trait `{}`:{}{}",
+                trait_ref.print_only_trait_path(),
+                candidates[..end].join(""),
+                if len > 9 { format!("\nand {} others", len - 8) } else { String::new() }
+            ));
+            true
+        };
+
+        let def_id = trait_ref.def_id();
+        if impl_candidates.is_empty() {
+            if self.tcx.trait_is_auto(def_id)
+                || self.tcx.lang_items().items().contains(&Some(def_id))
+                || self.tcx.get_diagnostic_name(def_id).is_some()
+            {
+                // Mentioning implementers of `Copy`, `Debug` and friends is not useful.
+                return false;
+            }
+            let normalized_impl_candidates: Vec<_> = self
+                .tcx
+                .all_impls(def_id)
+                // Ignore automatically derived impls and `!Trait` impls.
+                .filter(|&def_id| {
+                    self.tcx.impl_polarity(def_id) != ty::ImplPolarity::Negative
+                        || self.tcx.is_builtin_derive(def_id)
+                })
+                .filter_map(|def_id| self.tcx.impl_trait_ref(def_id))
+                // Avoid mentioning type parameters.
+                .filter(|trait_ref| !matches!(trait_ref.self_ty().kind(), ty::Param(_)))
+                .collect();
+            return report(normalized_impl_candidates, err);
+        }
 
         let normalize = |candidate| {
             self.tcx.infer_ctxt().enter(|ref infcx| {
@@ -1691,8 +1861,8 @@ impl<'a, 'tcx> InferCtxtPrivExt<'a, 'tcx> for InferCtxt<'a, 'tcx> {
                     .normalize(candidate)
                     .ok();
                 match normalized {
-                    Some(normalized) => format!("\n  {}", normalized.value),
-                    None => format!("\n  {}", candidate),
+                    Some(normalized) => normalized.value,
+                    None => candidate,
                 }
             })
         };
@@ -1711,17 +1881,14 @@ impl<'a, 'tcx> InferCtxtPrivExt<'a, 'tcx> for InferCtxt<'a, 'tcx> {
             })
             .collect::<Vec<_>>();
         normalized_impl_candidates_and_similarities.sort();
+        normalized_impl_candidates_and_similarities.dedup();
 
         let normalized_impl_candidates = normalized_impl_candidates_and_similarities
             .into_iter()
             .map(|(_, normalized)| normalized)
             .collect::<Vec<_>>();
 
-        err.help(&format!(
-            "the following implementations were found:{}{}",
-            normalized_impl_candidates[..end].join(""),
-            if len > 5 { format!("\nand {} others", len - 4) } else { String::new() }
-        ));
+        report(normalized_impl_candidates, err)
     }
 
     /// Gets the parent trait chain start
@@ -1752,7 +1919,11 @@ impl<'a, 'tcx> InferCtxtPrivExt<'a, 'tcx> for InferCtxt<'a, 'tcx> {
     /// If the `Self` type of the unsatisfied trait `trait_ref` implements a trait
     /// with the same path as `trait_ref`, a help message about
     /// a probable version mismatch is added to `err`
-    fn note_version_mismatch(&self, err: &mut Diagnostic, trait_ref: &ty::PolyTraitRef<'tcx>) {
+    fn note_version_mismatch(
+        &self,
+        err: &mut Diagnostic,
+        trait_ref: &ty::PolyTraitRef<'tcx>,
+    ) -> bool {
         let get_trait_impl = |trait_def_id| {
             self.tcx.find_map_relevant_impl(trait_def_id, trait_ref.skip_binder().self_ty(), Some)
         };
@@ -1763,6 +1934,7 @@ impl<'a, 'tcx> InferCtxtPrivExt<'a, 'tcx> for InferCtxt<'a, 'tcx> {
             .filter(|trait_def_id| *trait_def_id != trait_ref.def_id())
             .filter(|trait_def_id| self.tcx.def_path_str(*trait_def_id) == required_trait_path)
             .collect();
+        let mut suggested = false;
         for trait_with_same_path in traits_with_same_path {
             if let Some(impl_def_id) = get_trait_impl(trait_with_same_path) {
                 let impl_span = self.tcx.def_span(impl_def_id);
@@ -1773,8 +1945,10 @@ impl<'a, 'tcx> InferCtxtPrivExt<'a, 'tcx> for InferCtxt<'a, 'tcx> {
                     trait_crate
                 );
                 err.note(&crate_msg);
+                suggested = true;
             }
         }
+        suggested
     }
 
     fn mk_trait_obligation_with_new_self_ty(
@@ -2069,9 +2243,10 @@ impl<'a, 'tcx> InferCtxtPrivExt<'a, 'tcx> for InferCtxt<'a, 'tcx> {
         post.dedup();
 
         if self.is_tainted_by_errors()
-            && crate_names.len() == 1
-            && ["`core`", "`alloc`", "`std`"].contains(&crate_names[0].as_str())
-            && spans.len() == 0
+            && (crate_names.len() == 1
+                && spans.len() == 0
+                && ["`core`", "`alloc`", "`std`"].contains(&crate_names[0].as_str())
+                || predicate.visit_with(&mut HasNumericInferVisitor).is_break())
         {
             // Avoid complaining about other inference issues for expressions like
             // `42 >> 1`, where the types are still `{integer}`, but we want to
@@ -2244,26 +2419,15 @@ impl<'a, 'tcx> InferCtxtPrivExt<'a, 'tcx> for InferCtxt<'a, 'tcx> {
         };
         let sized_trait = self.tcx.lang_items().sized_trait();
         debug!("maybe_suggest_unsized_generics: generics.params={:?}", generics.params);
-        debug!("maybe_suggest_unsized_generics: generics.where_clause={:?}", generics.where_clause);
-        let param = generics.params.iter().filter(|param| param.span == span).find(|param| {
-            // Check that none of the explicit trait bounds is `Sized`. Assume that an explicit
-            // `Sized` bound is there intentionally and we don't need to suggest relaxing it.
-            param
-                .bounds
-                .iter()
-                .all(|bound| bound.trait_ref().and_then(|tr| tr.trait_def_id()) != sized_trait)
-        });
-        let Some(param) = param else {
+        debug!("maybe_suggest_unsized_generics: generics.predicates={:?}", generics.predicates);
+        let Some(param) = generics.params.iter().find(|param| param.span == span) else {
             return;
         };
-        let param_def_id = self.tcx.hir().local_def_id(param.hir_id).to_def_id();
-        let preds = generics.where_clause.predicates.iter();
-        let explicitly_sized = preds
-            .filter_map(|pred| match pred {
-                hir::WherePredicate::BoundPredicate(bp) => Some(bp),
-                _ => None,
-            })
-            .filter(|bp| bp.is_param_bound(param_def_id))
+        let param_def_id = self.tcx.hir().local_def_id(param.hir_id);
+        // Check that none of the explicit trait bounds is `Sized`. Assume that an explicit
+        // `Sized` bound is there intentionally and we don't need to suggest relaxing it.
+        let explicitly_sized = generics
+            .bounds_for_param(param_def_id)
             .flat_map(|bp| bp.bounds)
             .any(|bound| bound.trait_ref().and_then(|tr| tr.trait_def_id()) == sized_trait);
         if explicitly_sized {
@@ -2286,9 +2450,11 @@ impl<'a, 'tcx> InferCtxtPrivExt<'a, 'tcx> for InferCtxt<'a, 'tcx> {
             _ => {}
         };
         // Didn't add an indirection suggestion, so add a general suggestion to relax `Sized`.
-        let (span, separator) = match param.bounds {
-            [] => (span.shrink_to_hi(), ":"),
-            [.., bound] => (bound.span().shrink_to_hi(), " +"),
+        let (span, separator) = if let Some(s) = generics.bounds_span_for_suggestions(param_def_id)
+        {
+            (s, " +")
+        } else {
+            (span.shrink_to_hi(), ":")
         };
         err.span_suggestion_verbose(
             span,
@@ -2506,6 +2672,20 @@ impl ArgKind {
                 tys.iter().map(|ty| ("_".to_owned(), ty.to_string())).collect::<Vec<_>>(),
             ),
             _ => ArgKind::Arg("_".to_owned(), t.to_string()),
+        }
+    }
+}
+
+struct HasNumericInferVisitor;
+
+impl<'tcx> ty::TypeVisitor<'tcx> for HasNumericInferVisitor {
+    type BreakTy = ();
+
+    fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
+        if matches!(ty.kind(), ty::Infer(ty::FloatVar(_) | ty::IntVar(_))) {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::CONTINUE
         }
     }
 }

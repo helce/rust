@@ -11,7 +11,7 @@ use rustc_errors::{Applicability, Diagnostic};
 use rustc_feature::GateIssue;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{DefId, LocalDefId, CRATE_DEF_INDEX};
+use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::{self, HirId};
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_session::lint::builtin::{DEPRECATED, DEPRECATED_IN_FUTURE, SOFT_UNSTABLE};
@@ -118,8 +118,7 @@ pub fn deprecation_in_effect(depr: &Deprecation) -> bool {
     }
 
     if !is_since_rustc_version {
-        // The `since` field doesn't have semantic purpose in the stable `deprecated`
-        // attribute, only in `rustc_deprecated`.
+        // The `since` field doesn't have semantic purpose without `#![staged_api]`.
         return true;
     }
 
@@ -289,7 +288,7 @@ fn suggestion_for_allocator_api(
     feature: Symbol,
 ) -> Option<(Span, String, String, Applicability)> {
     if feature == sym::allocator_api {
-        if let Some(trait_) = tcx.parent(def_id) {
+        if let Some(trait_) = tcx.opt_parent(def_id) {
             if tcx.is_diagnostic_item(sym::Vec, trait_) {
                 let sm = tcx.sess.parse_sess.source_map();
                 let inner_types = sm.span_extend_to_prev_char(span, '<', true);
@@ -336,7 +335,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 // topmost deprecation. For example, if a struct is deprecated,
                 // the use of a field won't be linted.
                 //
-                // #[rustc_deprecated] however wants to emit down the whole
+                // With #![staged_api], we want to emit down the whole
                 // hierarchy.
                 let depr_attr = &depr_entry.attr;
                 if !skip || depr_attr.is_since_rustc_version {
@@ -370,8 +369,7 @@ impl<'tcx> TyCtxt<'tcx> {
             };
         }
 
-        let is_staged_api =
-            self.lookup_stability(DefId { index: CRATE_DEF_INDEX, ..def_id }).is_some();
+        let is_staged_api = self.lookup_stability(def_id.krate.as_def_id()).is_some();
         if !is_staged_api {
             return EvalResult::Allow;
         }

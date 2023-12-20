@@ -38,7 +38,7 @@ use rustc_middle::ty::fold::BottomUpFolder;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::relate::TypeRelation;
 use rustc_middle::ty::subst::{GenericArgKind, Subst, SubstsRef};
-use rustc_middle::ty::{self, PolyProjectionPredicate, ToPolyTraitRef, ToPredicate};
+use rustc_middle::ty::{self, EarlyBinder, PolyProjectionPredicate, ToPolyTraitRef, ToPredicate};
 use rustc_middle::ty::{Ty, TyCtxt, TypeFoldable};
 use rustc_span::symbol::sym;
 
@@ -386,6 +386,10 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             match self.infcx.leak_check(true, snapshot) {
                 Ok(()) => {}
                 Err(_) => return Ok(EvaluatedToErr),
+            }
+
+            if self.infcx.opaque_types_added_in_snapshot(snapshot) {
+                return Ok(result.max(EvaluatedToOkModuloOpaqueTypes));
             }
 
             match self.infcx.region_constraints_added_in_snapshot(snapshot) {
@@ -741,39 +745,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         if reached_depth >= stack.depth {
             debug!(?result, "CACHE MISS");
             self.insert_evaluation_cache(param_env, fresh_trait_pred, dep_node, result);
-
-            stack.cache().on_completion(
-                stack.dfn,
-                |fresh_trait_pred, provisional_result, provisional_dep_node| {
-                    // Create a new `DepNode` that has dependencies on:
-                    // * The `DepNode` for the original evaluation that resulted in a provisional cache
-                    // entry being crated
-                    // * The `DepNode` for the *current* evaluation, which resulted in us completing
-                    // provisional caches entries and inserting them into the evaluation cache
-                    //
-                    // This ensures that when a query reads this entry from the evaluation cache,
-                    // it will end up (transitively) depending on all of the incr-comp dependencies
-                    // created during the evaluation of this trait. For example, evaluating a trait
-                    // will usually require us to invoke `type_of(field_def_id)` to determine the
-                    // constituent types, and we want any queries reading from this evaluation
-                    // cache entry to end up with a transitive `type_of(field_def_id`)` dependency.
-                    //
-                    // By using `in_task`, we're also creating an edge from the *current* query
-                    // to the newly-created `combined_dep_node`. This is probably redundant,
-                    // but it's better to add too many dep graph edges than to add too few
-                    // dep graph edges.
-                    let ((), combined_dep_node) = self.in_task(|this| {
-                        this.tcx().dep_graph.read_index(provisional_dep_node);
-                        this.tcx().dep_graph.read_index(dep_node);
-                    });
-                    self.insert_evaluation_cache(
-                        param_env,
-                        fresh_trait_pred,
-                        combined_dep_node,
-                        provisional_result.max(result),
-                    );
-                },
-            );
+            stack.cache().on_completion(stack.dfn);
         } else {
             debug!(?result, "PROVISIONAL");
             debug!(
@@ -782,13 +754,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 fresh_trait_pred, stack.depth, reached_depth,
             );
 
-            stack.cache().insert_provisional(
-                stack.dfn,
-                reached_depth,
-                fresh_trait_pred,
-                result,
-                dep_node,
-            );
+            stack.cache().insert_provisional(stack.dfn, reached_depth, fresh_trait_pred, result);
         }
 
         Ok(result)
@@ -1194,9 +1160,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         if let ImplCandidate(def_id) = candidate {
             if let ty::ImplPolarity::Reservation = tcx.impl_polarity(def_id) {
                 if let Some(intercrate_ambiguity_clauses) = &mut self.intercrate_ambiguity_causes {
-                    let attrs = tcx.get_attrs(def_id);
-                    let attr = tcx.sess.find_by_name(&attrs, sym::rustc_reservation_impl);
-                    let value = attr.and_then(|a| a.value_str());
+                    let value = tcx
+                        .get_attr(def_id, sym::rustc_reservation_impl)
+                        .and_then(|a| a.value_str());
                     if let Some(value) = value {
                         debug!(
                             "filter_reservation_impls: \
@@ -1379,7 +1345,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 );
             }
         };
-        let bounds = tcx.item_bounds(def_id).subst(tcx, substs);
+        let bounds = tcx.bound_item_bounds(def_id).subst(tcx, substs);
 
         // The bounds returned by `item_bounds` may contain duplicates after
         // normalization, so try to deduplicate when possible to avoid
@@ -1833,11 +1799,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             ty::Adt(def, substs) => {
                 let sized_crit = def.sized_constraint(self.tcx());
                 // (*) binder moved here
-                Where(
-                    obligation.predicate.rebind({
-                        sized_crit.iter().map(|ty| ty.subst(self.tcx(), substs)).collect()
-                    }),
-                )
+                Where(obligation.predicate.rebind({
+                    sized_crit.iter().map(|ty| EarlyBinder(*ty).subst(self.tcx(), substs)).collect()
+                }))
             }
 
             ty::Projection(_) | ty::Param(_) | ty::Opaque(..) => None,
@@ -1929,7 +1893,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     ///
     /// Here are some (simple) examples:
     ///
-    /// ```
+    /// ```ignore (illustrative)
     /// (i32, u32) -> [i32, u32]
     /// Foo where struct Foo { x: i32, y: u32 } -> [i32, u32]
     /// Bar<i32> where struct Bar<T> { x: T, y: u32 } -> [i32, u32]
@@ -2000,7 +1964,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 // We can resolve the `impl Trait` to its concrete type,
                 // which enforces a DAG between the functions requiring
                 // the auto trait bounds in question.
-                t.rebind(vec![self.tcx().type_of(def_id).subst(self.tcx(), substs)])
+                t.rebind(vec![self.tcx().bound_type_of(def_id).subst(self.tcx(), substs)])
             }
         }
     }
@@ -2106,12 +2070,12 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         impl_def_id: DefId,
         obligation: &TraitObligation<'tcx>,
     ) -> Result<Normalized<'tcx, SubstsRef<'tcx>>, ()> {
-        let impl_trait_ref = self.tcx().impl_trait_ref(impl_def_id).unwrap();
+        let impl_trait_ref = self.tcx().bound_impl_trait_ref(impl_def_id).unwrap();
 
         // Before we create the substitutions and everything, first
         // consider a "quick reject". This avoids creating more types
         // and so forth that we need to.
-        if self.fast_reject_trait_refs(obligation, &impl_trait_ref) {
+        if self.fast_reject_trait_refs(obligation, &impl_trait_ref.0) {
             return Err(());
         }
 
@@ -2370,7 +2334,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 param_env,
                 cause.clone(),
                 recursion_depth,
-                predicate.subst(tcx, substs),
+                EarlyBinder(*predicate).subst(tcx, substs),
                 &mut obligations,
             );
             obligations.push(Obligation { cause, recursion_depth, param_env, predicate });
@@ -2531,11 +2495,6 @@ struct ProvisionalEvaluation {
     from_dfn: usize,
     reached_depth: usize,
     result: EvaluationResult,
-    /// The `DepNodeIndex` created for the `evaluate_stack` call for this provisional
-    /// evaluation. When we create an entry in the evaluation cache using this provisional
-    /// cache entry (see `on_completion`), we use this `dep_node` to ensure that future reads from
-    /// the cache will have all of the necessary incr comp dependencies tracked.
-    dep_node: DepNodeIndex,
 }
 
 impl<'tcx> Default for ProvisionalEvaluationCache<'tcx> {
@@ -2578,7 +2537,6 @@ impl<'tcx> ProvisionalEvaluationCache<'tcx> {
         reached_depth: usize,
         fresh_trait_pred: ty::PolyTraitPredicate<'tcx>,
         result: EvaluationResult,
-        dep_node: DepNodeIndex,
     ) {
         debug!(?from_dfn, ?fresh_trait_pred, ?result, "insert_provisional");
 
@@ -2604,10 +2562,7 @@ impl<'tcx> ProvisionalEvaluationCache<'tcx> {
             }
         }
 
-        map.insert(
-            fresh_trait_pred,
-            ProvisionalEvaluation { from_dfn, reached_depth, result, dep_node },
-        );
+        map.insert(fresh_trait_pred, ProvisionalEvaluation { from_dfn, reached_depth, result });
     }
 
     /// Invoked when the node with dfn `dfn` does not get a successful
@@ -2633,8 +2588,7 @@ impl<'tcx> ProvisionalEvaluationCache<'tcx> {
     /// Invoked when the node at depth `depth` completed without
     /// depending on anything higher in the stack (if that completion
     /// was a failure, then `on_failure` should have been invoked
-    /// already). The callback `op` will be invoked for each
-    /// provisional entry that we can now confirm.
+    /// already).
     ///
     /// Note that we may still have provisional cache items remaining
     /// in the cache when this is done. For example, if there is a
@@ -2655,19 +2609,26 @@ impl<'tcx> ProvisionalEvaluationCache<'tcx> {
     /// would be 2, representing the C node, and hence we would
     /// remove the result for D, which has DFN 3, but not the results for
     /// A and B, which have DFNs 0 and 1 respectively).
-    fn on_completion(
-        &self,
-        dfn: usize,
-        mut op: impl FnMut(ty::PolyTraitPredicate<'tcx>, EvaluationResult, DepNodeIndex),
-    ) {
+    ///
+    /// Note that we *do not* attempt to cache these cycle participants
+    /// in the evaluation cache. Doing so would require carefully computing
+    /// the correct `DepNode` to store in the cache entry:
+    /// cycle participants may implicitly depend on query results
+    /// related to other participants in the cycle, due to our logic
+    /// which examines the evaluation stack.
+    ///
+    /// We used to try to perform this caching,
+    /// but it lead to multiple incremental compilation ICEs
+    /// (see #92987 and #96319), and was very hard to understand.
+    /// Fortunately, removing the caching didn't seem to
+    /// have a performance impact in practice.
+    fn on_completion(&self, dfn: usize) {
         debug!(?dfn, "on_completion");
 
         for (fresh_trait_pred, eval) in
             self.map.borrow_mut().drain_filter(|_k, eval| eval.from_dfn >= dfn)
         {
             debug!(?fresh_trait_pred, ?eval, "on_completion");
-
-            op(fresh_trait_pred, eval.result, eval.dep_node);
         }
     }
 }

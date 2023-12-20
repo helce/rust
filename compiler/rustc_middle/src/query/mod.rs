@@ -45,6 +45,13 @@ rustc_queries! {
         desc { "get the crate HIR" }
     }
 
+    /// All items in the crate.
+    query hir_crate_items(_: ()) -> rustc_middle::hir::ModuleItems {
+        storage(ArenaCacheSelector<'tcx>)
+        eval_always
+        desc { "get HIR crate items" }
+    }
+
     /// The items in a module.
     ///
     /// This can be conveniently accessed by `tcx.hir().visit_item_likes_in_module`.
@@ -148,6 +155,25 @@ rustc_queries! {
     query analysis(key: ()) -> Result<(), ErrorGuaranteed> {
         eval_always
         desc { "running analysis passes on this crate" }
+    }
+
+    /// This query checks the fulfillment of collected lint expectations.
+    /// All lint emitting queries have to be done before this is executed
+    /// to ensure that all expectations can be fulfilled.
+    ///
+    /// This is an extra query to enable other drivers (like rustdoc) to
+    /// only execute a small subset of the `analysis` query, while allowing
+    /// lints to be expected. In rustc, this query will be executed as part of
+    /// the `analysis` query and doesn't have to be called a second time.
+    ///
+    /// Tools can additionally pass in a tool filter. That will restrict the
+    /// expectations to only trigger for lints starting with the listed tool
+    /// name. This is useful for cases were not all linting code from rustc
+    /// was called. With the default `None` all registered lints will also
+    /// be checked for expectation fulfillment.
+    query check_expectations(key: Option<Symbol>) -> () {
+        eval_always
+        desc { "checking lint expectations (RFC 2383)" }
     }
 
     /// Maps from the `DefId` of an item (trait/struct/enum/fn) to its
@@ -517,10 +543,7 @@ rustc_queries! {
     /// To avoid cycles within the predicates of a single item we compute
     /// per-type-parameter predicates for resolving `T::AssocTy`.
     query type_param_predicates(key: (DefId, LocalDefId, rustc_span::symbol::Ident)) -> ty::GenericPredicates<'tcx> {
-        desc { |tcx| "computing the bounds for type parameter `{}`", {
-            let id = tcx.hir().local_def_id_to_hir_id(key.1);
-            tcx.hir().ty_param_name(id)
-        }}
+        desc { |tcx| "computing the bounds for type parameter `{}`", tcx.hir().ty_param_name(key.1) }
     }
 
     query trait_def(key: DefId) -> ty::TraitDef {
@@ -932,6 +955,11 @@ rustc_queries! {
         remap_env_constness
     }
 
+    /// Converts a type level constant value into `ConstValue`
+    query valtree_to_const_val(key: (Ty<'tcx>, ty::ValTree<'tcx>)) -> ConstValue<'tcx> {
+        desc { "convert type-level constant value to mir constant value"}
+    }
+
     /// Destructure a constant ADT or array into its variant index and its
     /// field values or return `None` if constant is invalid.
     ///
@@ -1044,6 +1072,9 @@ rustc_queries! {
         desc { |tcx| "checking whether `{}` is `doc(hidden)`", tcx.def_path_str(def_id) }
     }
 
+    /// Returns the attributes on the item at `def_id`.
+    ///
+    /// Do not use this directly, use `tcx.get_attrs` instead.
     query item_attrs(def_id: DefId) -> &'tcx [ast::Attribute] {
         desc { |tcx| "collecting attributes of `{}`", tcx.def_path_str(def_id) }
         separate_provide_extern
@@ -1052,7 +1083,8 @@ rustc_queries! {
     query codegen_fn_attrs(def_id: DefId) -> CodegenFnAttrs {
         desc { |tcx| "computing codegen attributes of `{}`", tcx.def_path_str(def_id) }
         storage(ArenaCacheSelector<'tcx>)
-        cache_on_disk_if { true }
+        cache_on_disk_if { def_id.is_local() }
+        separate_provide_extern
     }
 
     query asm_target_features(def_id: DefId) -> &'tcx FxHashSet<Symbol> {
@@ -1116,7 +1148,7 @@ rustc_queries! {
 
     query codegen_fulfill_obligation(
         key: (ty::ParamEnv<'tcx>, ty::PolyTraitRef<'tcx>)
-    ) -> Result<&'tcx ImplSource<'tcx, ()>, ErrorGuaranteed> {
+    ) -> Result<&'tcx ImplSource<'tcx, ()>, traits::CodegenObligationError> {
         cache_on_disk_if { true }
         desc { |tcx|
             "checking if `{}` fulfills its obligations",
@@ -1355,7 +1387,7 @@ rustc_queries! {
     // Does not include external symbols that don't have a corresponding DefId,
     // like the compiler-generated `main` function and so on.
     query reachable_non_generics(_: CrateNum)
-        -> DefIdMap<SymbolExportLevel> {
+        -> DefIdMap<SymbolExportInfo> {
         storage(ArenaCacheSelector<'tcx>)
         desc { "looking up the exported symbols of a crate" }
         separate_provide_extern
@@ -1505,8 +1537,7 @@ rustc_queries! {
         Option<&'tcx FxHashMap<ItemLocalId, Region>> {
         desc { "looking up a named region" }
     }
-    query is_late_bound_map(_: LocalDefId) ->
-        Option<(LocalDefId, &'tcx FxHashSet<ItemLocalId>)> {
+    query is_late_bound_map(_: LocalDefId) -> Option<(LocalDefId, &'tcx FxIndexSet<LocalDefId>)> {
         desc { "testing if a region is late bound" }
     }
     /// For a given item (like a struct), gets the default lifetimes to be used
@@ -1620,6 +1651,12 @@ rustc_queries! {
         desc { "looking at the source for a crate" }
         separate_provide_extern
     }
+    /// Returns the debugger visualizers defined for this crate.
+    query debugger_visualizers(_: CrateNum) -> Vec<rustc_span::DebuggerVisualizerFile> {
+        storage(ArenaCacheSelector<'tcx>)
+        desc { "looking up the debugger visualizers for this crate" }
+        separate_provide_extern
+    }
     query postorder_cnums(_: ()) -> &'tcx [CrateNum] {
         eval_always
         desc { "generating a postorder list of CrateNums" }
@@ -1672,7 +1709,7 @@ rustc_queries! {
     ///   correspond to a publicly visible symbol in `cnum` machine code.
     /// - The `exported_symbols` sets of different crates do not intersect.
     query exported_symbols(_: CrateNum)
-        -> &'tcx [(ExportedSymbol<'tcx>, SymbolExportLevel)] {
+        -> &'tcx [(ExportedSymbol<'tcx>, SymbolExportInfo)] {
         desc { "exported_symbols" }
         separate_provide_extern
     }
@@ -1965,5 +2002,11 @@ rustc_queries! {
         storage(ArenaCacheSelector<'tcx>)
         eval_always
         desc { "computing the backend features for CLI flags" }
+    }
+
+    query generator_diagnostic_data(key: DefId) -> Option<GeneratorDiagnosticData<'tcx>> {
+        storage(ArenaCacheSelector<'tcx>)
+        desc { |tcx| "looking up generator diagnostic data of `{}`", tcx.def_path_str(key) }
+        separate_provide_extern
     }
 }

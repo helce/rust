@@ -1,13 +1,14 @@
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use crate::ty::print::{FmtPrinter, Printer};
 use crate::ty::subst::{InternalSubsts, Subst};
-use crate::ty::{self, SubstsRef, Ty, TyCtxt, TypeFoldable};
+use crate::ty::{self, EarlyBinder, SubstsRef, Ty, TyCtxt, TypeFoldable};
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir::def::Namespace;
 use rustc_hir::def_id::{CrateNum, DefId};
 use rustc_hir::lang_items::LangItem;
 use rustc_macros::HashStable;
 use rustc_middle::ty::normalize_erasing_regions::NormalizationError;
+use rustc_span::Symbol;
 
 use std::fmt;
 
@@ -185,8 +186,8 @@ impl<'tcx> InstanceDef<'tcx> {
     }
 
     #[inline]
-    pub fn attrs(&self, tcx: TyCtxt<'tcx>) -> ty::Attributes<'tcx> {
-        tcx.get_attrs(self.def_id())
+    pub fn get_attrs(&self, tcx: TyCtxt<'tcx>, attr: Symbol) -> ty::Attributes<'tcx> {
+        tcx.get_attrs(self.def_id(), attr)
     }
 
     /// Returns `true` if the LLVM version of this instance is unconditionally
@@ -246,7 +247,7 @@ impl<'tcx> InstanceDef<'tcx> {
         match *self {
             InstanceDef::Item(ty::WithOptConstParam { did: def_id, .. })
             | InstanceDef::Virtual(def_id, _) => {
-                tcx.codegen_fn_attrs(def_id).flags.contains(CodegenFnAttrFlags::TRACK_CALLER)
+                tcx.body_codegen_attrs(def_id).flags.contains(CodegenFnAttrFlags::TRACK_CALLER)
             }
             InstanceDef::ClosureOnceShim { call_once: _, track_caller } => track_caller,
             _ => false,
@@ -337,7 +338,7 @@ impl<'tcx> Instance<'tcx> {
     /// Returns `Ok(None)` if we cannot resolve `Instance` to a specific instance.
     /// For example, in a context like this,
     ///
-    /// ```
+    /// ```ignore (illustrative)
     /// fn foo<T: Debug>(t: T) { ... }
     /// ```
     ///
@@ -557,7 +558,11 @@ impl<'tcx> Instance<'tcx> {
     where
         T: TypeFoldable<'tcx> + Copy,
     {
-        if let Some(substs) = self.substs_for_mir_body() { v.subst(tcx, substs) } else { *v }
+        if let Some(substs) = self.substs_for_mir_body() {
+            EarlyBinder(*v).subst(tcx, substs)
+        } else {
+            *v
+        }
     }
 
     #[inline(always)]

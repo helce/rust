@@ -1,11 +1,11 @@
 use crate::check::coercion::{AsCoercionSite, CoerceMany};
 use crate::check::{Diverges, Expectation, FnCtxt, Needs};
-use rustc_errors::{Applicability, Diagnostic};
+use rustc_errors::{Applicability, Diagnostic, MultiSpan};
 use rustc_hir::{self as hir, ExprKind};
 use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_infer::traits::Obligation;
 use rustc_middle::ty::{self, ToPredicate, Ty, TypeFoldable};
-use rustc_span::{MultiSpan, Span};
+use rustc_span::Span;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
 use rustc_trait_selection::traits::{
     IfExpressionCause, MatchExpressionArmCause, ObligationCause, ObligationCauseCode,
@@ -260,10 +260,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             &mut |err| {
                 if let Some((span, msg)) = &ret_reason {
                     err.span_label(*span, msg.as_str());
-                } else if let ExprKind::Block(block, _) = &then_expr.kind {
-                    if let Some(expr) = &block.expr {
-                        err.span_label(expr.span, "found here".to_string());
-                    }
+                } else if let ExprKind::Block(block, _) = &then_expr.kind
+                    && let Some(expr) = &block.expr
+                {
+                    err.span_label(expr.span, "found here".to_string());
                 }
                 err.note("`if` expressions without `else` evaluate to `()`");
                 err.help("consider adding an `else` block that evaluates to the expected type");
@@ -293,7 +293,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     return self.get_fn_decl(hir_id).and_then(|(fn_decl, _)| {
                         let span = fn_decl.output.span();
                         let snippet = self.tcx.sess.source_map().span_to_snippet(span).ok()?;
-                        Some((span, format!("expected `{}` because of this return type", snippet)))
+                        Some((span, format!("expected `{snippet}` because of this return type")))
                     });
                 }
             }

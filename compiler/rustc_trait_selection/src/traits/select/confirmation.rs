@@ -12,7 +12,7 @@ use rustc_index::bit_set::GrowableBitSet;
 use rustc_infer::infer::InferOk;
 use rustc_infer::infer::LateBoundRegionConversionTime::HigherRankedType;
 use rustc_middle::ty::subst::{GenericArg, GenericArgKind, InternalSubsts, Subst, SubstsRef};
-use rustc_middle::ty::{self, GenericParamDefKind, Ty};
+use rustc_middle::ty::{self, EarlyBinder, GenericParamDefKind, Ty};
 use rustc_middle::ty::{ToPolyTraitRef, ToPredicate};
 use rustc_span::def_id::DefId;
 
@@ -174,7 +174,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 _ => bug!("projection candidate for unexpected type: {:?}", placeholder_self_ty),
             };
 
-            let candidate_predicate = tcx.item_bounds(def_id)[idx].subst(tcx, substs);
+            let candidate_predicate =
+                tcx.bound_item_bounds(def_id).map_bound(|i| i[idx]).subst(tcx, substs);
             let candidate = candidate_predicate
                 .to_opt_poly_trait_pred()
                 .expect("projection candidate is not a trait predicate")
@@ -500,7 +501,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // This maybe belongs in wf, but that can't (doesn't) handle
             // higher-ranked things.
             // Prevent, e.g., `dyn Iterator<Item = str>`.
-            for bound in self.tcx().item_bounds(assoc_type) {
+            for bound in self.tcx().bound_item_bounds(assoc_type).transpose_iter() {
                 let subst_bound =
                     if defs.count() == 0 {
                         bound.subst(tcx, trait_predicate.trait_ref.substs)
@@ -509,9 +510,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         substs.extend(trait_predicate.trait_ref.substs.iter());
                         let mut bound_vars: smallvec::SmallVec<[ty::BoundVariableKind; 8]> =
                             smallvec::SmallVec::with_capacity(
-                                bound.kind().bound_vars().len() + defs.count(),
+                                bound.0.kind().bound_vars().len() + defs.count(),
                             );
-                        bound_vars.extend(bound.kind().bound_vars().into_iter());
+                        bound_vars.extend(bound.0.kind().bound_vars().into_iter());
                         InternalSubsts::fill_single(&mut substs, defs, &mut |param, _| match param
                             .kind
                         {
@@ -558,7 +559,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         let assoc_ty_substs = tcx.intern_substs(&substs);
 
                         let bound_vars = tcx.mk_bound_variable_kinds(bound_vars.into_iter());
-                        let bound = bound.kind().skip_binder().subst(tcx, assoc_ty_substs);
+                        let bound =
+                            EarlyBinder(bound.0.kind().skip_binder()).subst(tcx, assoc_ty_substs);
                         tcx.mk_predicate(ty::Binder::bind_with_vars(bound, bound_vars))
                     };
                 let normalized_bound = normalize_with_depth_to(
@@ -712,9 +714,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     /// and we desugared it so that the type of the expression is
     /// `Closure`, and `Closure` expects `i32` as argument. Then it
     /// is "as if" the compiler generated this impl:
-    ///
-    ///     impl Fn(i32) for Closure { ... }
-    ///
+    /// ```ignore (illustrative)
+    /// impl Fn(i32) for Closure { ... }
+    /// ```
     /// Now imagine our obligation is `Closure: Fn(usize)`. So far
     /// we have matched the self type `Closure`. At this point we'll
     /// compare the `i32` to `usize` and generate an error.
@@ -1005,10 +1007,10 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 // The last field of the structure has to exist and contain type/const parameters.
                 let (tail_field, prefix_fields) =
                     def.non_enum_variant().fields.split_last().ok_or(Unimplemented)?;
-                let tail_field_ty = tcx.type_of(tail_field.did);
+                let tail_field_ty = tcx.bound_type_of(tail_field.did);
 
                 let mut unsizing_params = GrowableBitSet::new_empty();
-                for arg in tail_field_ty.walk() {
+                for arg in tail_field_ty.0.walk() {
                     if let Some(i) = maybe_unsizing_param_idx(arg) {
                         unsizing_params.insert(i);
                     }
@@ -1106,13 +1108,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         }
 
         let drop_trait = self.tcx().require_lang_item(LangItem::Drop, None);
-        // FIXME: remove if statement below when beta is bumped
-        #[cfg(bootstrap)]
-        {}
-
-        if obligation.predicate.skip_binder().def_id() == drop_trait {
-            return Ok(ImplSourceConstDestructData { nested: vec![] });
-        }
 
         let tcx = self.tcx();
         let self_ty = self.infcx.shallow_resolve(obligation.self_ty());

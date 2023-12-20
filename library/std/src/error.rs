@@ -26,6 +26,7 @@ use crate::borrow::Cow;
 use crate::cell;
 use crate::char;
 use crate::fmt::{self, Debug, Display, Write};
+use crate::io;
 use crate::mem::transmute;
 use crate::num;
 use crate::str;
@@ -52,6 +53,7 @@ use crate::time;
 /// high-level module to provide its own errors while also revealing some of the
 /// implementation for debugging via `source` chains.
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "Error")]
 pub trait Error: Debug + Display {
     /// The lower-level source of this error, if any.
     ///
@@ -143,15 +145,15 @@ pub trait Error: Debug + Display {
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_deprecated(since = "1.42.0", reason = "use the Display impl or to_string()")]
+    #[deprecated(since = "1.42.0", note = "use the Display impl or to_string()")]
     fn description(&self) -> &str {
         "description() is deprecated; use Display"
     }
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_deprecated(
+    #[deprecated(
         since = "1.33.0",
-        reason = "replaced by Error::source, which can support downcasting"
+        note = "replaced by Error::source, which can support downcasting"
     )]
     #[allow(missing_docs)]
     fn cause(&self) -> Option<&dyn Error> {
@@ -516,6 +518,14 @@ impl<T: Error> Error for Box<T> {
     }
 }
 
+#[unstable(feature = "thin_box", issue = "92791")]
+impl<T: ?Sized + crate::error::Error> crate::error::Error for crate::boxed::ThinBox<T> {
+    fn source(&self) -> Option<&(dyn crate::error::Error + 'static)> {
+        use core::ops::Deref;
+        self.deref().source()
+    }
+}
+
 #[stable(feature = "error_by_ref", since = "1.51.0")]
 impl<'a, T: Error + ?Sized> Error for &'a T {
     #[allow(deprecated, deprecated_in_future)]
@@ -603,6 +613,48 @@ impl Error for alloc::collections::TryReserveError {}
 
 #[unstable(feature = "duration_checked_float", issue = "83400")]
 impl Error for time::FromFloatSecsError {}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Error for alloc::ffi::NulError {
+    #[allow(deprecated)]
+    fn description(&self) -> &str {
+        "nul byte found in data"
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl From<alloc::ffi::NulError> for io::Error {
+    /// Converts a [`alloc::ffi::NulError`] into a [`io::Error`].
+    fn from(_: alloc::ffi::NulError) -> io::Error {
+        io::const_io_error!(io::ErrorKind::InvalidInput, "data provided contains a nul byte")
+    }
+}
+
+#[stable(feature = "frombyteswithnulerror_impls", since = "1.17.0")]
+impl Error for core::ffi::FromBytesWithNulError {
+    #[allow(deprecated)]
+    fn description(&self) -> &str {
+        self.__description()
+    }
+}
+
+#[unstable(feature = "cstr_from_bytes_until_nul", issue = "95027")]
+impl Error for core::ffi::FromBytesUntilNulError {}
+
+#[stable(feature = "cstring_from_vec_with_nul", since = "1.58.0")]
+impl Error for alloc::ffi::FromVecWithNulError {}
+
+#[stable(feature = "cstring_into", since = "1.7.0")]
+impl Error for alloc::ffi::IntoStringError {
+    #[allow(deprecated)]
+    fn description(&self) -> &str {
+        "C string contained non-utf8 bytes"
+    }
+
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.__source())
+    }
+}
 
 // Copied from `any.rs`.
 impl dyn Error + 'static {

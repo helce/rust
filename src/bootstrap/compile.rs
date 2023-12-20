@@ -43,7 +43,7 @@ impl Step for Std {
         // When downloading stage1, the standard library has already been copied to the sysroot, so
         // there's no need to rebuild it.
         let download_rustc = run.builder.config.download_rustc;
-        run.all_krates("test").default_condition(!download_rustc)
+        run.all_krates("test").path("library").default_condition(!download_rustc)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -175,6 +175,7 @@ fn copy_third_party_objects(
     }
 
     if target == "x86_64-fortanix-unknown-sgx"
+        || target.contains("pc-windows-gnullvm")
         || builder.config.llvm_libunwind == LlvmLibunwind::InTree
             && (target.contains("linux") || target.contains("fuchsia"))
     {
@@ -246,7 +247,7 @@ fn copy_self_contained_objects(
                 DependencyType::TargetSelfContained,
             );
         }
-    } else if target.contains("windows-gnu") {
+    } else if target.ends_with("windows-gnu") {
         for obj in ["crt2.o", "dllcrt2.o"].iter() {
             let src = compiler_file(builder, builder.cc(target), target, CLang::C, obj);
             let target = libdir_self_contained.join(obj);
@@ -477,7 +478,7 @@ impl Step for StartupObjects {
     fn run(self, builder: &Builder<'_>) -> Vec<(PathBuf, DependencyType)> {
         let for_compiler = self.compiler;
         let target = self.target;
-        if !target.contains("windows-gnu") {
+        if !target.ends_with("windows-gnu") {
             return vec![];
         }
 
@@ -737,7 +738,7 @@ pub fn rustc_cargo_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetS
             );
             cargo.env("LLVM_STATIC_STDCPP", file);
         }
-        if builder.config.llvm_link_shared {
+        if builder.llvm_link_shared() {
             cargo.env("LLVM_LINK_SHARED", "1");
         }
         if builder.config.llvm_use_libcxx {
@@ -795,7 +796,7 @@ impl Step for CodegenBackend {
     const DEFAULT: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("compiler/rustc_codegen_cranelift")
+        run.paths(&["compiler/rustc_codegen_cranelift", "compiler/rustc_codegen_gcc"])
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -1047,7 +1048,7 @@ impl Step for Assemble {
     const ONLY_HOSTS: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("compiler/rustc")
+        run.path("compiler/rustc").path("compiler")
     }
 
     fn make_run(run: RunConfig<'_>) {

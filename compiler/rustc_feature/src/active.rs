@@ -244,7 +244,6 @@ declare_features! (
 
     // Unstable `#[target_feature]` directives.
     (active, aarch64_ver_target_feature, "1.27.0", Some(44839), None),
-    (active, adx_target_feature, "1.32.0", Some(44839), None),
     (active, arm_target_feature, "1.27.0", Some(44839), None),
     (active, avx512_target_feature, "1.27.0", Some(44839), None),
     (active, bpf_target_feature, "1.54.0", Some(44839), None),
@@ -358,6 +357,8 @@ declare_features! (
     (active, custom_inner_attributes, "1.30.0", Some(54726), None),
     /// Allows custom test frameworks with `#![test_runner]` and `#[test_case]`.
     (active, custom_test_frameworks, "1.30.0", Some(50297), None),
+    /// Allows using `#[debugger_visualizer]`.
+    (active, debugger_visualizer, "1.62.0", Some(95939), None),
     /// Allows declarative macros 2.0 (`macro`).
     (active, decl_macro, "1.17.0", Some(39412), None),
     /// Allows rustc to inject a default alloc_error_handler
@@ -368,8 +369,6 @@ declare_features! (
     (active, deprecated_safe, "1.61.0", Some(94978), None),
     /// Allows having using `suggestion` in the `#[deprecated]` attribute.
     (active, deprecated_suggestion, "1.61.0", Some(94785), None),
-    /// Allows `#[derive(Default)]` and `#[default]` on enums.
-    (active, derive_default_enum, "1.56.0", Some(86985), None),
     /// Tells rustdoc to automatically generate `#[doc(cfg(...))]`.
     (active, doc_auto_cfg, "1.58.0", Some(43781), None),
     /// Allows `#[doc(cfg(...))]`.
@@ -505,6 +504,8 @@ declare_features! (
     (active, static_nobundle, "1.16.0", Some(37403), None),
     /// Allows attributes on expressions and non-item statements.
     (active, stmt_expr_attributes, "1.6.0", Some(15701), None),
+    /// Allows lints part of the strict provenance effort.
+    (active, strict_provenance, "1.61.0", Some(95228), None),
     /// Allows the use of `#[target_feature]` on safe functions.
     (active, target_feature_11, "1.45.0", Some(69098), None),
     /// Allows using `#[thread_local]` on `static` items.
@@ -544,6 +545,8 @@ declare_features! (
     (active, used_with_arg, "1.60.0", Some(93798), None),
     /// Allows `extern "wasm" fn`
     (active, wasm_abi, "1.53.0", Some(83788), None),
+    /// Allows `do yeet` expressions
+    (active, yeet_expr, "1.62.0", Some(96373), None),
     // !!!!    !!!!    !!!!    !!!!   !!!!    !!!!    !!!!    !!!!    !!!!    !!!!    !!!!
     // Features are listed in alphabetical order. Tidy will fail if you don't keep it this way.
     // !!!!    !!!!    !!!!    !!!!   !!!!    !!!!    !!!!    !!!!    !!!!    !!!!    !!!!

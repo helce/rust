@@ -134,7 +134,7 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
             sym::va_arg => {
                 match fn_abi.ret.layout.abi {
                     abi::Abi::Scalar(scalar) => {
-                        match scalar.value {
+                        match scalar.primitive() {
                             Primitive::Int(..) => {
                                 if self.cx().size_of(ret_ty).bytes() < 4 {
                                     // `va_arg` should not be called on an integer type
@@ -816,6 +816,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
     span: Span,
 ) -> Result<&'ll Value, ()> {
     // macros for error handling:
+    #[cfg_attr(not(bootstrap), allow(unused_macro_rules))]
     macro_rules! emit_error {
         ($msg: tt) => {
             emit_error!($msg, )
@@ -1144,6 +1145,7 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
         span: Span,
         args: &[OperandRef<'tcx, &'ll Value>],
     ) -> Result<&'ll Value, ()> {
+        #[cfg_attr(not(bootstrap), allow(unused_macro_rules))]
         macro_rules! emit_error {
             ($msg: tt) => {
                 emit_error!($msg, )
@@ -1837,6 +1839,27 @@ unsupported {} from `{}` with element `{}` of size `{}` to `{}`"#,
     }
     arith_unary! {
         simd_neg: Int => neg, Float => fneg;
+    }
+
+    if name == sym::simd_arith_offset {
+        // This also checks that the first operand is a ptr type.
+        let pointee = in_elem.builtin_deref(true).unwrap_or_else(|| {
+            span_bug!(span, "must be called with a vector of pointer types as first argument")
+        });
+        let layout = bx.layout_of(pointee.ty);
+        let ptrs = args[0].immediate();
+        // The second argument must be a ptr-sized integer.
+        // (We don't care about the signedness, this is wrapping anyway.)
+        let (_offsets_len, offsets_elem) = arg_tys[1].simd_size_and_type(bx.tcx());
+        if !matches!(offsets_elem.kind(), ty::Int(ty::IntTy::Isize) | ty::Uint(ty::UintTy::Usize)) {
+            span_bug!(
+                span,
+                "must be called with a vector of pointer-sized integers as second argument"
+            );
+        }
+        let offsets = args[1].immediate();
+
+        return Ok(bx.gep(bx.backend_type(layout), ptrs, &[offsets]));
     }
 
     if name == sym::simd_saturating_add || name == sym::simd_saturating_sub {

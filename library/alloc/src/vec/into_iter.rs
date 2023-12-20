@@ -121,6 +121,11 @@ impl<T, A: Allocator> IntoIter<T, A> {
             ptr::drop_in_place(remaining);
         }
     }
+
+    /// Forgets to Drop the remaining elements while still allowing the backing allocation to be freed.
+    pub(crate) fn forget_remaining_elements(&mut self) {
+        self.ptr = self.end;
+    }
 }
 
 #[stable(feature = "vec_intoiter_as_ref", since = "1.46.0")]
@@ -164,7 +169,7 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
         let exact = if mem::size_of::<T>() == 0 {
             self.end.addr().wrapping_sub(self.ptr.addr())
         } else {
-            unsafe { self.end.offset_from(self.ptr) as usize }
+            unsafe { self.end.sub_ptr(self.ptr) }
         };
         (exact, Some(exact))
     }
@@ -197,7 +202,6 @@ impl<T, A: Allocator> Iterator for IntoIter<T, A> {
         self.len()
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, i: usize) -> Self::Item
     where
         Self: TrustedRandomAccessNoCoerce,

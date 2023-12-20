@@ -8,12 +8,16 @@
     html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/",
     test(attr(deny(warnings)))
 )]
+#![feature(associated_type_bounds)]
 #![feature(box_patterns)]
+#![feature(const_default_impls)]
+#![feature(const_trait_impl)]
 #![feature(crate_visibility_modifier)]
 #![feature(if_let_guard)]
 #![feature(label_break_value)]
 #![feature(let_chains)]
 #![feature(min_specialization)]
+#![feature(negative_impls)]
 #![feature(nll)]
 #![feature(slice_internals)]
 #![feature(stmt_expr_attributes)]
@@ -31,7 +35,7 @@ pub mod util {
 }
 
 pub mod ast;
-pub mod ast_like;
+pub mod ast_traits;
 pub mod attr;
 pub mod entry;
 pub mod expand;
@@ -43,7 +47,7 @@ pub mod tokenstream;
 pub mod visit;
 
 pub use self::ast::*;
-pub use self::ast_like::{AstLike, AstLikeWrapper};
+pub use self::ast_traits::{AstDeref, AstNodeWrapper, HasAttrs, HasNodeId, HasSpan, HasTokens};
 
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 

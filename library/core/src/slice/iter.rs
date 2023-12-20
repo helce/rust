@@ -358,6 +358,20 @@ impl<'a, T: 'a, P: FnMut(&T) -> bool> Split<'a, T, P> {
     pub(super) fn new(slice: &'a [T], pred: P) -> Self {
         Self { v: slice, pred, finished: false }
     }
+    /// Returns a slice which contains items not yet handled by split.
+    /// # Example
+    ///
+    /// ```
+    /// #![feature(split_as_slice)]
+    /// let slice = [1,2,3,4,5];
+    /// let mut split = slice.split(|v| v % 2 == 0);
+    /// assert!(split.next().is_some());
+    /// assert_eq!(split.as_slice(), &[3,4,5]);
+    /// ```
+    #[unstable(feature = "split_as_slice", issue = "96137")]
+    pub fn as_slice(&self) -> &'a [T] {
+        if self.finished { &[] } else { &self.v }
+    }
 }
 
 #[stable(feature = "core_impl_debug", since = "1.9.0")]
@@ -1308,7 +1322,6 @@ impl<'a, T> Iterator for Windows<'a, T> {
         }
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item {
         // SAFETY: since the caller guarantees that `i` is in bounds,
         // which means that `i` cannot overflow an `isize`, and the
@@ -1464,7 +1477,6 @@ impl<'a, T> Iterator for Chunks<'a, T> {
         }
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item {
         let start = idx * self.chunk_size;
         // SAFETY: the caller guarantees that `i` is in bounds,
@@ -1643,7 +1655,6 @@ impl<'a, T> Iterator for ChunksMut<'a, T> {
         }
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item {
         let start = idx * self.chunk_size;
         // SAFETY: see comments for `Chunks::__iterator_get_unchecked`.
@@ -1816,7 +1827,6 @@ impl<'a, T> Iterator for ChunksExact<'a, T> {
         self.next_back()
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item {
         let start = idx * self.chunk_size;
         // SAFETY: mostly identical to `Chunks::__iterator_get_unchecked`.
@@ -1970,7 +1980,6 @@ impl<'a, T> Iterator for ChunksExactMut<'a, T> {
         self.next_back()
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item {
         let start = idx * self.chunk_size;
         // SAFETY: see comments for `ChunksMut::__iterator_get_unchecked`.
@@ -2234,7 +2243,6 @@ impl<'a, T, const N: usize> Iterator for ArrayChunks<'a, T, N> {
         self.iter.last()
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, i: usize) -> &'a [T; N] {
         // SAFETY: The safety guarantees of `__iterator_get_unchecked` are
         // transferred to the caller.
@@ -2353,7 +2361,6 @@ impl<'a, T, const N: usize> Iterator for ArrayChunksMut<'a, T, N> {
         self.iter.last()
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, i: usize) -> &'a mut [T; N] {
         // SAFETY: The safety guarantees of `__iterator_get_unchecked` are transferred to
         // the caller.
@@ -2506,7 +2513,6 @@ impl<'a, T> Iterator for RChunks<'a, T> {
         }
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item {
         let end = self.v.len() - idx * self.chunk_size;
         let start = match end.checked_sub(self.chunk_size) {
@@ -2675,7 +2681,6 @@ impl<'a, T> Iterator for RChunksMut<'a, T> {
         }
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item {
         let end = self.v.len() - idx * self.chunk_size;
         let start = match end.checked_sub(self.chunk_size) {
@@ -2842,7 +2847,6 @@ impl<'a, T> Iterator for RChunksExact<'a, T> {
         self.next_back()
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item {
         let end = self.v.len() - idx * self.chunk_size;
         let start = end - self.chunk_size;
@@ -3002,7 +3006,6 @@ impl<'a, T> Iterator for RChunksExactMut<'a, T> {
         self.next_back()
     }
 
-    #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> Self::Item {
         let end = self.v.len() - idx * self.chunk_size;
         let start = end - self.chunk_size;

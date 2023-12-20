@@ -31,17 +31,19 @@ All tier 1 targets with host tools support the full standard library.
 target | notes
 -------|-------
 `aarch64-unknown-linux-gnu` | ARM64 Linux (kernel 4.2, glibc 2.17+) [^missing-stack-probes]
-`i686-pc-windows-gnu` | 32-bit MinGW (Windows 7+)
-`i686-pc-windows-msvc` | 32-bit MSVC (Windows 7+)
+`i686-pc-windows-gnu` | 32-bit MinGW (Windows 7+) [^windows-support]
+`i686-pc-windows-msvc` | 32-bit MSVC (Windows 7+) [^windows-support]
 `i686-unknown-linux-gnu` | 32-bit Linux (kernel 2.6.32+, glibc 2.11+)
 `x86_64-apple-darwin` | 64-bit macOS (10.7+, Lion+)
-`x86_64-pc-windows-gnu` | 64-bit MinGW (Windows 7+)
-`x86_64-pc-windows-msvc` | 64-bit MSVC (Windows 7+)
+`x86_64-pc-windows-gnu` | 64-bit MinGW (Windows 7+) [^windows-support]
+`x86_64-pc-windows-msvc` | 64-bit MSVC (Windows 7+) [^windows-support]
 `x86_64-unknown-linux-gnu` | 64-bit Linux (kernel 2.6.32+, glibc 2.11+)
 
 [^missing-stack-probes]: Stack probes support is missing on
   `aarch64-unknown-linux-gnu`, but it's planned to be implemented in the near
   future. The implementation is tracked on [issue #77071][77071].
+
+[^windows-support]: Only Windows 10 currently undergoes automated testing. Earlier versions of Windows rely on testing and support from the community.
 
 [77071]: https://github.com/rust-lang/rust/issues/77071
 
@@ -183,6 +185,7 @@ target | std | notes
 `x86_64-linux-android` | ✓ | 64-bit x86 Android
 `x86_64-pc-solaris` | ✓ | 64-bit Solaris 10/11, illumos
 `x86_64-unknown-linux-gnux32` | ✓ | 64-bit Linux (x32 ABI) (kernel 4.15, glibc 2.27)
+[`x86_64-unknown-none`](platform-support/x86_64-unknown-none.md) | * | Freestanding/bare-metal x86_64, softfloat
 `x86_64-unknown-redox` | ✓ | Redox OS
 
 [Fortanix ABI]: https://edp.fortanix.com/
@@ -211,6 +214,7 @@ target | std | host | notes
 `aarch64-apple-ios-macabi` | ? |  | Apple Catalyst on ARM64
 `aarch64-apple-tvos` | * |  | ARM64 tvOS
 [`aarch64-kmc-solid_asp3`](platform-support/kmc-solid.md) | ✓ |  | ARM64 SOLID with TOPPERS/ASP3
+[`aarch64-pc-windows-gnullvm`](platform-support/pc-windows-gnullvm.md) | ✓ | ✓ |
 `aarch64-unknown-freebsd` | ✓ | ✓ | ARM64 FreeBSD
 `aarch64-unknown-hermit` | ✓ |  | ARM64 HermitCore
 `aarch64-unknown-uefi` | * |  | ARM64 UEFI
@@ -251,9 +255,9 @@ target | std | host | notes
 `i686-uwp-windows-gnu` | ? |  |
 `i686-uwp-windows-msvc` | ? |  |
 `i686-wrs-vxworks` | ? |  |
-`m68k-unknown-linux-gnu` | ? |  | Motorola 680x0 Linux
+[`m68k-unknown-linux-gnu`](platform-support/m68k-unknown-linux-gnu.md) | ? |  | Motorola 680x0 Linux
 `mips-unknown-linux-uclibc` | ✓ |  | MIPS Linux with uClibc
-`mips64-openwrt-linux-musl` | ? |  | MIPS64 for OpenWrt Linux MUSL
+[`mips64-openwrt-linux-musl`](platform-support/mips64-openwrt-linux-musl.md) | ? |  | MIPS64 for OpenWrt Linux MUSL
 `mipsel-sony-psp` | * |  | MIPS (LE) Sony PlayStation Portable (PSP)
 `mipsel-unknown-linux-uclibc` | ✓ |  | MIPS (LE) Linux with uClibc
 `mipsel-unknown-none` | * |  | Bare MIPS (LE) softfloat
@@ -291,13 +295,13 @@ target | std | host | notes
 [`wasm64-unknown-unknown`](platform-support/wasm64-unknown-unknown.md) | ? |  | WebAssembly
 `x86_64-apple-ios-macabi` | ✓ |  | Apple Catalyst on x86_64
 `x86_64-apple-tvos` | * | | x86 64-bit tvOS
+[`x86_64-pc-windows-gnullvm`](platform-support/pc-windows-gnullvm.md) | ✓ | ✓ |
 `x86_64-pc-windows-msvc` | * |  | 64-bit Windows XP support
 `x86_64-sun-solaris` | ? |  | Deprecated target for 64-bit Solaris 10/11, illumos
 `x86_64-unknown-dragonfly` | ✓ | ✓ | 64-bit DragonFlyBSD
 `x86_64-unknown-haiku` | ✓ | ✓ | 64-bit Haiku
 `x86_64-unknown-hermit` | ✓ |  | HermitCore
 `x86_64-unknown-l4re-uclibc` | ? |  |
-[`x86_64-unknown-none`](platform-support/x86_64-unknown-none.md) | * |  | Freestanding/bare-metal x86_64, softfloat
 `x86_64-unknown-none-linuxkernel` | * |  | Linux kernel modules
 [`x86_64-unknown-openbsd`](platform-support/openbsd.md) | ✓ | ✓ | 64-bit OpenBSD
 `x86_64-unknown-uefi` | * |  | 64-bit UEFI

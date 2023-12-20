@@ -485,7 +485,7 @@ impl<'a, 'tcx> CoverageSpans<'a, 'tcx> {
             }) {
                 let merged_prefix_len = self.curr_original_span.lo() - self.curr().span.lo();
                 let after_macro_bang =
-                    merged_prefix_len + BytePos(visible_macro.as_str().bytes().count() as u32 + 1);
+                    merged_prefix_len + BytePos(visible_macro.as_str().len() as u32 + 1);
                 let mut macro_name_cov = self.curr().clone();
                 self.curr_mut().span =
                     self.curr().span.with_lo(self.curr().span.lo() + after_macro_bang);
@@ -827,6 +827,7 @@ pub(super) fn filtered_statement_span(statement: &Statement<'_>) -> Option<Span>
         | StatementKind::CopyNonOverlapping(..)
         | StatementKind::Assign(_)
         | StatementKind::SetDiscriminant { .. }
+        | StatementKind::Deinit(..)
         | StatementKind::Retag(_, _)
         | StatementKind::AscribeUserType(_, _) => {
             Some(statement.source_info.span)

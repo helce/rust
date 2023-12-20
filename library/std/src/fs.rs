@@ -85,6 +85,12 @@ use crate::time::SystemTime;
 /// by different processes. Avoid assuming that holding a `&File` means that the
 /// file will not change.
 ///
+/// # Platform-specific behavior
+///
+/// On Windows, the implementation of [`Read`] and [`Write`] traits for `File`
+/// perform synchronous I/O operations. Therefore the underlying file must not
+/// have been opened for asynchronous I/O (e.g. by using `FILE_FLAG_OVERLAPPED`).
+///
 /// [`BufReader<R>`]: io::BufReader
 /// [`sync_all`]: File::sync_all
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -126,6 +132,16 @@ pub struct ReadDir(fs_imp::ReadDir);
 /// An instance of `DirEntry` represents an entry inside of a directory on the
 /// filesystem. Each entry can be inspected via methods to learn about the full
 /// path or possibly other metadata through per-platform extension traits.
+///
+/// # Platform-specific behavior
+///
+/// On Unix, the `DirEntry` struct contains an internal reference to the open
+/// directory. Holding `DirEntry` objects will consume a file handle even
+/// after the `ReadDir` iterator is dropped.
+///
+/// Note that this [may change in the future][changes].
+///
+/// [changes]: io#platform-specific-behavior
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct DirEntry(fs_imp::DirEntry);
 
@@ -1835,10 +1851,10 @@ pub fn hard_link<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Re
 /// }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_deprecated(
+#[deprecated(
     since = "1.1.0",
-    reason = "replaced with std::os::unix::fs::symlink and \
-              std::os::windows::fs::{symlink_file, symlink_dir}"
+    note = "replaced with std::os::unix::fs::symlink and \
+            std::os::windows::fs::{symlink_file, symlink_dir}"
 )]
 pub fn soft_link<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Result<()> {
     fs_imp::symlink(original.as_ref(), link.as_ref())
@@ -1914,6 +1930,8 @@ pub fn read_link<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 ///     Ok(())
 /// }
 /// ```
+#[doc(alias = "realpath")]
+#[doc(alias = "GetFinalPathNameByHandle")]
 #[stable(feature = "fs_canonicalize", since = "1.5.0")]
 pub fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     fs_imp::canonicalize(path.as_ref())

@@ -99,7 +99,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         }
         let (a, b) = if a_is_expected { (a, b) } else { (b, a) };
         let process = |a: Ty<'tcx>, b: Ty<'tcx>| match *a.kind() {
-            ty::Opaque(def_id, substs) => {
+            ty::Opaque(def_id, substs) if def_id.is_local() => {
                 let origin = if self.defining_use_anchor.is_some() {
                     // Check that this is `impl Trait` type is
                     // declared by `parent_def_id` -- i.e., one whose
@@ -309,14 +309,22 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
     /// the same as generating an outlives constraint on `Tc` itself.
     /// For example, if we had a function like this:
     ///
-    /// ```rust
+    /// ```
+    /// # #![feature(type_alias_impl_trait)]
+    /// # fn main() {}
+    /// # trait Foo<'a> {}
+    /// # impl<'a, T> Foo<'a> for (&'a u32, T) {}
     /// fn foo<'a, T>(x: &'a u32, y: T) -> impl Foo<'a> {
     ///   (x, y)
     /// }
     ///
     /// // Equivalent to:
+    /// # mod dummy { use super::*;
     /// type FooReturn<'a, T> = impl Foo<'a>;
-    /// fn foo<'a, T>(..) -> FooReturn<'a, T> { .. }
+    /// fn foo<'a, T>(x: &'a u32, y: T) -> FooReturn<'a, T> {
+    ///   (x, y)
+    /// }
+    /// # }
     /// ```
     ///
     /// then the hidden type `Tc` would be `(&'0 u32, T)` (where `'0`
@@ -553,9 +561,9 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
             obligations = self.at(&cause, param_env).eq(prev, hidden_ty)?.obligations;
         }
 
-        let item_bounds = tcx.explicit_item_bounds(def_id);
+        let item_bounds = tcx.bound_explicit_item_bounds(def_id);
 
-        for (predicate, _) in item_bounds {
+        for predicate in item_bounds.transpose_iter().map(|e| e.map_bound(|(p, _)| *p)) {
             debug!(?predicate);
             let predicate = predicate.subst(tcx, substs);
 
@@ -602,17 +610,17 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
 /// Returns `true` if `opaque_hir_id` is a sibling or a child of a sibling of `def_id`.
 ///
 /// Example:
-/// ```rust
+/// ```ignore UNSOLVED (is this a bug?)
+/// # #![feature(type_alias_impl_trait)]
 /// pub mod foo {
 ///     pub mod bar {
-///         pub trait Bar { .. }
-///
+///         pub trait Bar { /* ... */ }
 ///         pub type Baz = impl Bar;
 ///
-///         fn f1() -> Baz { .. }
+///         # impl Bar for () {}
+///         fn f1() -> Baz { /* ... */ }
 ///     }
-///
-///     fn f2() -> bar::Baz { .. }
+///     fn f2() -> bar::Baz { /* ... */ }
 /// }
 /// ```
 ///

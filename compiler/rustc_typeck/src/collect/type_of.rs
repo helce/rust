@@ -14,6 +14,7 @@ use rustc_span::{Span, DUMMY_SP};
 
 use super::ItemCtxt;
 use super::{bad_placeholder, is_suggestable_infer_ty};
+use crate::errors::UnconstrainedOpaqueType;
 
 /// Computes the relevant generic parameter for a potential generic const argument.
 ///
@@ -337,8 +338,8 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                         icx.to_ty(ty)
                     }
                 }
-                ItemKind::TyAlias(self_ty, _)
-                | ItemKind::Impl(hir::Impl { self_ty, .. }) => icx.to_ty(self_ty),
+                ItemKind::TyAlias(self_ty, _) => icx.to_ty(self_ty),
+                ItemKind::Impl(hir::Impl { self_ty, .. }) => icx.to_ty(*self_ty),
                 ItemKind::Fn(..) => {
                     let substs = InternalSubsts::identity_for_item(tcx, def_id.to_def_id());
                     tcx.mk_fn_def(def_id.to_def_id(), substs)
@@ -356,7 +357,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                     let concrete_ty = tcx
                         .mir_borrowck(owner)
                         .concrete_opaque_types
-                        .get_value_matching(|(key, _)| key.def_id == def_id.to_def_id())
+                        .get(&def_id.to_def_id())
                         .copied()
                         .map(|concrete| concrete.ty)
                         .unwrap_or_else(|| {
@@ -450,7 +451,8 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                 Node::Expr(&Expr { kind: ExprKind::InlineAsm(asm), .. })
                 | Node::Item(&Item { kind: ItemKind::GlobalAsm(asm), .. })
                     if asm.operands.iter().any(|(op, _op_sp)| match op {
-                        hir::InlineAsmOperand::Const { anon_const } => anon_const.hir_id == hir_id,
+                        hir::InlineAsmOperand::Const { anon_const }
+                        | hir::InlineAsmOperand::SymFn { anon_const } => anon_const.hir_id == hir_id,
                         _ => false,
                     }) =>
                 {
@@ -530,7 +532,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
 /// In particular, definitions of opaque types can only use other generics as arguments,
 /// and they cannot repeat an argument. Example:
 ///
-/// ```rust
+/// ```ignore (illustrative)
 /// type Foo<A, B> = impl Bar<A, B>;
 ///
 /// // Okay -- `Foo` is applied to two distinct, generic types.
@@ -591,31 +593,17 @@ fn find_opaque_ty_constraints(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Ty<'_> {
             // Use borrowck to get the type with unerased regions.
             let concrete_opaque_types = &self.tcx.mir_borrowck(def_id).concrete_opaque_types;
             debug!(?concrete_opaque_types);
-            for &(opaque_type_key, concrete_type) in concrete_opaque_types {
-                if opaque_type_key.def_id != self.def_id {
+            for &(def_id, concrete_type) in concrete_opaque_types {
+                if def_id != self.def_id {
                     // Ignore constraints for other opaque types.
                     continue;
                 }
 
-                debug!(?concrete_type, ?opaque_type_key.substs, "found constraint");
+                debug!(?concrete_type, "found constraint");
 
                 if let Some(prev) = self.found {
                     if concrete_type.ty != prev.ty && !(concrete_type, prev).references_error() {
-                        // Found different concrete types for the opaque type.
-                        let mut err = self.tcx.sess.struct_span_err(
-                            concrete_type.span,
-                            "concrete type differs from previous defining opaque type use",
-                        );
-                        err.span_label(
-                            concrete_type.span,
-                            format!("expected `{}`, got `{}`", prev.ty, concrete_type.ty),
-                        );
-                        if prev.span == concrete_type.span {
-                            err.span_label(prev.span, "this expression supplies two conflicting concrete types for the same opaque type");
-                        } else {
-                            err.span_note(prev.span, "previous use here");
-                        }
-                        err.emit();
+                        prev.report_mismatch(&concrete_type, self.tcx);
                     }
                 } else {
                     self.found = Some(concrete_type);
@@ -695,13 +683,10 @@ fn find_opaque_ty_constraints(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Ty<'_> {
     match locator.found {
         Some(hidden) => hidden.ty,
         None => {
-            let span = tcx.def_span(def_id);
-            let name = tcx.item_name(tcx.parent(def_id.to_def_id()).unwrap());
-            let label = format!(
-                "`{}` must be used in combination with a concrete type within the same module",
-                name
-            );
-            tcx.sess.struct_span_err(span, "unconstrained opaque type").note(&label).emit();
+            tcx.sess.emit_err(UnconstrainedOpaqueType {
+                span: tcx.def_span(def_id),
+                name: tcx.item_name(tcx.local_parent(def_id).to_def_id()),
+            });
             tcx.ty_error()
         }
     }

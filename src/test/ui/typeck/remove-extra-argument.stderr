@@ -1,0 +1,17 @@
+error[E0061]: this function takes 1 argument but 2 arguments were supplied
+  --> $DIR/remove-extra-argument.rs:5:5
+   |
+LL |     l(vec![], vec![])
+   |     ^ ------  ------ supplied 2 arguments
+   |     |
+   |     expected 1 argument
+   |
+note: function defined here
+  --> $DIR/remove-extra-argument.rs:2:4
+   |
+LL | fn l(_a: Vec<u8>) {}
+   |    ^ -----------
+
+error: aborting due to previous error
+
+For more information about this error, try `rustc --explain E0061`.

@@ -70,6 +70,8 @@ impl<'tcx> Visitor<'tcx> for UnsafetyChecker<'_, 'tcx> {
 
             TerminatorKind::Call { ref func, .. } => {
                 let func_ty = func.ty(self.body, self.tcx);
+                let func_id =
+                    if let ty::FnDef(func_id, _) = func_ty.kind() { Some(func_id) } else { None };
                 let sig = func_ty.fn_sig(self.tcx);
                 if let hir::Unsafety::Unsafe = sig.unsafety() {
                     self.require_unsafe(
@@ -78,7 +80,7 @@ impl<'tcx> Visitor<'tcx> for UnsafetyChecker<'_, 'tcx> {
                     )
                 }
 
-                if let ty::FnDef(func_id, _) = func_ty.kind() {
+                if let Some(func_id) = func_id {
                     self.check_target_features(*func_id);
                 }
             }
@@ -97,6 +99,7 @@ impl<'tcx> Visitor<'tcx> for UnsafetyChecker<'_, 'tcx> {
             StatementKind::Assign(..)
             | StatementKind::FakeRead(..)
             | StatementKind::SetDiscriminant { .. }
+            | StatementKind::Deinit(..)
             | StatementKind::StorageLive(..)
             | StatementKind::StorageDead(..)
             | StatementKind::Retag { .. }
@@ -372,7 +375,8 @@ impl<'tcx> UnsafetyChecker<'_, 'tcx> {
         }
 
         let callee_features = &self.tcx.codegen_fn_attrs(func_did).target_features;
-        let self_features = &self.tcx.codegen_fn_attrs(self.body_did).target_features;
+        // The body might be a constant, so it doesn't have codegen attributes.
+        let self_features = &self.tcx.body_codegen_attrs(self.body_did.to_def_id()).target_features;
 
         // Is `callee_features` a subset of `calling_features`?
         if !callee_features.iter().all(|feature| self_features.contains(feature)) {
@@ -538,13 +542,13 @@ fn report_unused_unsafe(tcx: TyCtxt<'_>, kind: UnusedUnsafe, id: HirId) {
             UnusedUnsafe::InUnsafeBlock(id) => {
                 db.span_label(
                     tcx.sess.source_map().guess_head_span(tcx.hir().span(id)),
-                    format!("because it's nested under this `unsafe` block"),
+                    "because it's nested under this `unsafe` block",
                 );
             }
             UnusedUnsafe::InUnsafeFn(id, usage_lint_root) => {
                 db.span_label(
                     tcx.sess.source_map().guess_head_span(tcx.hir().span(id)),
-                    format!("because it's nested under this `unsafe` fn"),
+                    "because it's nested under this `unsafe` fn",
                 )
                 .note(
                     "this `unsafe` block does contain unsafe operations, \

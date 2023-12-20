@@ -749,6 +749,10 @@ declare_lint! {
 declare_lint! {
     /// The `unused_macros` lint detects macros that were not used.
     ///
+    /// Note that this lint is distinct from the `unused_macro_rules` lint,
+    /// which checks for single rules that never match of an otherwise used
+    /// macro, and thus never expand.
+    ///
     /// ### Example
     ///
     /// ```rust
@@ -773,6 +777,46 @@ declare_lint! {
     pub UNUSED_MACROS,
     Warn,
     "detects macros that were not used"
+}
+
+declare_lint! {
+    /// The `unused_macro_rules` lint detects macro rules that were not used.
+    ///
+    /// Note that the lint is distinct from the `unused_macros` lint, which
+    /// fires if the entire macro is never called, while this lint fires for
+    /// single unused rules of the macro that is otherwise used.
+    /// `unused_macro_rules` fires only if `unused_macros` wouldn't fire.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #[warn(unused_macro_rules)]
+    /// macro_rules! unused_empty {
+    ///     (hello) => { println!("Hello, world!") }; // This rule is unused
+    ///     () => { println!("empty") }; // This rule is used
+    /// }
+    ///
+    /// fn main() {
+    ///     unused_empty!(hello);
+    /// }
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Unused macro rules may signal a mistake or unfinished code. Furthermore,
+    /// they slow down compilation. Right now, silencing the warning is not
+    /// supported on a single rule level, so you have to add an allow to the
+    /// entire macro definition.
+    ///
+    /// If you intended to export the macro to make it
+    /// available outside of the crate, use the [`macro_export` attribute].
+    ///
+    /// [`macro_export` attribute]: https://doc.rust-lang.org/reference/macros-by-example.html#path-based-scope
+    pub UNUSED_MACRO_RULES,
+    Allow,
+    "detects macro rules that were not used"
 }
 
 declare_lint! {
@@ -1109,9 +1153,8 @@ declare_lint! {
     ///
     /// ### Example
     ///
-    /// ```rust,compile_fail
+    /// ```compile_fail
     /// #![deny(unaligned_references)]
-    ///
     /// #[repr(packed)]
     /// pub struct Foo {
     ///     field1: u64,
@@ -1139,10 +1182,11 @@ declare_lint! {
     /// [undefined behavior]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
     /// [issue #82523]: https://github.com/rust-lang/rust/issues/82523
     pub UNALIGNED_REFERENCES,
-    Warn,
+    Deny,
     "detects unaligned references to fields of packed structs",
     @future_incompatible = FutureIncompatibleInfo {
         reference: "issue #82523 <https://github.com/rust-lang/rust/issues/82523>",
+        reason: FutureIncompatibilityReason::FutureReleaseErrorReportNow,
     };
     report_in_external_macro
 }
@@ -2201,13 +2245,12 @@ declare_lint! {
     /// used by user code.
     ///
     /// This lint is only enabled in the standard library. It works with the
-    /// use of `#[rustc_deprecated]` with a `since` field of a version in the
-    /// future. This allows something to be marked as deprecated in a future
-    /// version, and then this lint will ensure that the item is no longer
-    /// used in the standard library. See the [stability documentation] for
-    /// more details.
+    /// use of `#[deprecated]` with a `since` field of a version in the future.
+    /// This allows something to be marked as deprecated in a future version,
+    /// and then this lint will ensure that the item is no longer used in the
+    /// standard library. See the [stability documentation] for more details.
     ///
-    /// [stability documentation]: https://rustc-dev-guide.rust-lang.org/stability.html#rustc_deprecated
+    /// [stability documentation]: https://rustc-dev-guide.rust-lang.org/stability.html#deprecated
     pub DEPRECATED_IN_FUTURE,
     Allow,
     "detects use of items that will be deprecated in a future version",
@@ -2343,40 +2386,6 @@ declare_lint! {
     "ambiguous associated items",
     @future_incompatible = FutureIncompatibleInfo {
         reference: "issue #57644 <https://github.com/rust-lang/rust/issues/57644>",
-    };
-}
-
-declare_lint! {
-    /// The `mutable_borrow_reservation_conflict` lint detects the reservation
-    /// of a two-phased borrow that conflicts with other shared borrows.
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// let mut v = vec![0, 1, 2];
-    /// let shared = &v;
-    /// v.push(shared.len());
-    /// ```
-    ///
-    /// {{produces}}
-    ///
-    /// ### Explanation
-    ///
-    /// This is a [future-incompatible] lint to transition this to a hard error
-    /// in the future. See [issue #59159] for a complete description of the
-    /// problem, and some possible solutions.
-    ///
-    /// [issue #59159]: https://github.com/rust-lang/rust/issues/59159
-    /// [future-incompatible]: ../index.md#future-incompatible-lints
-    pub MUTABLE_BORROW_RESERVATION_CONFLICT,
-    Warn,
-    "reservation of a two-phased borrow conflicts with other shared borrows",
-    @future_incompatible = FutureIncompatibleInfo {
-        reason: FutureIncompatibilityReason::Custom(
-            "this borrowing pattern was not meant to be accepted, \
-            and may become a hard error in the future"
-        ),
-        reference: "issue #59159 <https://github.com/rust-lang/rust/issues/59159>",
     };
 }
 
@@ -2646,6 +2655,96 @@ declare_lint! {
     @future_incompatible = FutureIncompatibleInfo {
         reference: "issue #73333 <https://github.com/rust-lang/rust/issues/73333>",
     };
+}
+
+declare_lint! {
+    /// The `fuzzy_provenance_casts` lint detects an `as` cast between an integer
+    /// and a pointer.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #![feature(strict_provenance)]
+    /// #![warn(fuzzy_provenance_casts)]
+    ///
+    /// fn main() {
+    ///     let _dangling = 16_usize as *const u8;
+    /// }
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// This lint is part of the strict provenance effort, see [issue #95228].
+    /// Casting an integer to a pointer is considered bad style, as a pointer
+    /// contains, besides the *address* also a *provenance*, indicating what
+    /// memory the pointer is allowed to read/write. Casting an integer, which
+    /// doesn't have provenance, to a pointer requires the compiler to assign
+    /// (guess) provenance. The compiler assigns "all exposed valid" (see the
+    /// docs of [`ptr::from_exposed_addr`] for more information about this
+    /// "exposing"). This penalizes the optimiser and is not well suited for
+    /// dynamic analysis/dynamic program verification (e.g. Miri or CHERI
+    /// platforms).
+    ///
+    /// It is much better to use [`ptr::with_addr`] instead to specify the
+    /// provenance you want. If using this function is not possible because the
+    /// code relies on exposed provenance then there is as an escape hatch
+    /// [`ptr::from_exposed_addr`].
+    ///
+    /// [issue #95228]: https://github.com/rust-lang/rust/issues/95228
+    /// [`ptr::with_addr`]: https://doc.rust-lang.org/core/ptr/fn.with_addr
+    /// [`ptr::from_exposed_addr`]: https://doc.rust-lang.org/core/ptr/fn.from_exposed_addr
+    pub FUZZY_PROVENANCE_CASTS,
+    Allow,
+    "a fuzzy integer to pointer cast is used",
+    @feature_gate = sym::strict_provenance;
+}
+
+declare_lint! {
+    /// The `lossy_provenance_casts` lint detects an `as` cast between a pointer
+    /// and an integer.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #![feature(strict_provenance)]
+    /// #![warn(lossy_provenance_casts)]
+    ///
+    /// fn main() {
+    ///     let x: u8 = 37;
+    ///     let _addr: usize = &x as *const u8 as usize;
+    /// }
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// This lint is part of the strict provenance effort, see [issue #95228].
+    /// Casting a pointer to an integer is a lossy operation, because beyond
+    /// just an *address* a pointer may be associated with a particular
+    /// *provenance*. This information is used by the optimiser and for dynamic
+    /// analysis/dynamic program verification (e.g. Miri or CHERI platforms).
+    ///
+    /// Since this cast is lossy, it is considered good style to use the
+    /// [`ptr::addr`] method instead, which has a similar effect, but doesn't
+    /// "expose" the pointer provenance. This improves optimisation potential.
+    /// See the docs of [`ptr::addr`] and [`ptr::expose_addr`] for more information
+    /// about exposing pointer provenance.
+    ///
+    /// If your code can't comply with strict provenance and needs to expose
+    /// the provenance, then there is [`ptr::expose_addr`] as an escape hatch,
+    /// which preserves the behaviour of `as usize` casts while being explicit
+    /// about the semantics.
+    ///
+    /// [issue #95228]: https://github.com/rust-lang/rust/issues/95228
+    /// [`ptr::addr`]: https://doc.rust-lang.org/core/ptr/fn.addr
+    /// [`ptr::expose_addr`]: https://doc.rust-lang.org/core/ptr/fn.expose_addr
+    pub LOSSY_PROVENANCE_CASTS,
+    Allow,
+    "a lossy pointer to integer cast is used",
+    @feature_gate = sym::strict_provenance;
 }
 
 declare_lint! {
@@ -3049,6 +3148,7 @@ declare_lint_pass! {
         OVERLAPPING_RANGE_ENDPOINTS,
         BINDINGS_WITH_VARIANT_NAME,
         UNUSED_MACROS,
+        UNUSED_MACRO_RULES,
         WARNINGS,
         UNUSED_FEATURES,
         STABLE_FEATURES,
@@ -3090,7 +3190,6 @@ declare_lint_pass! {
         META_VARIABLE_MISUSE,
         DEPRECATED_IN_FUTURE,
         AMBIGUOUS_ASSOCIATED_ITEMS,
-        MUTABLE_BORROW_RESERVATION_CONFLICT,
         INDIRECT_STRUCTURAL_MATCH,
         POINTER_STRUCTURAL_MATCH,
         NONTRIVIAL_STRUCTURAL_MATCH,
@@ -3101,6 +3200,8 @@ declare_lint_pass! {
         UNSAFE_OP_IN_UNSAFE_FN,
         INCOMPLETE_INCLUDE,
         CENUM_IMPL_DROP_CAST,
+        FUZZY_PROVENANCE_CASTS,
+        LOSSY_PROVENANCE_CASTS,
         CONST_EVALUATABLE_UNCHECKED,
         INEFFECTIVE_UNSTABLE_TRAIT_IMPL,
         MUST_NOT_SUSPEND,

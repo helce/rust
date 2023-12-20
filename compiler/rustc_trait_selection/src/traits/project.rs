@@ -19,6 +19,7 @@ use super::{Normalized, NormalizedTy, ProjectionCacheEntry, ProjectionCacheKey};
 use crate::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use crate::infer::{InferCtxt, InferOk, LateBoundRegionConversionTime};
 use crate::traits::error_reporting::InferCtxtExt as _;
+use crate::traits::query::evaluate_obligation::InferCtxtExt as _;
 use crate::traits::select::ProjectionMatchesProjection;
 use rustc_data_structures::sso::SsoHashSet;
 use rustc_data_structures::stack::ensure_sufficient_stack;
@@ -30,7 +31,7 @@ use rustc_infer::infer::resolve::OpportunisticRegionResolver;
 use rustc_middle::traits::select::OverflowError;
 use rustc_middle::ty::fold::{MaxUniverse, TypeFoldable, TypeFolder};
 use rustc_middle::ty::subst::Subst;
-use rustc_middle::ty::{self, Term, ToPredicate, Ty, TyCtxt};
+use rustc_middle::ty::{self, EarlyBinder, Term, ToPredicate, Ty, TyCtxt};
 use rustc_span::symbol::sym;
 
 use std::collections::BTreeMap;
@@ -157,9 +158,9 @@ pub(super) enum ProjectAndUnifyResult<'tcx> {
 }
 
 /// Evaluates constraints of the form:
-///
-///     for<...> <T as Trait>::U == V
-///
+/// ```ignore (not-rust)
+/// for<...> <T as Trait>::U == V
+/// ```
 /// If successful, this may result in additional obligations. Also returns
 /// the projection cache key used to track these additional obligations.
 ///
@@ -223,9 +224,9 @@ pub(super) fn poly_project_and_unify_type<'cx, 'tcx>(
 }
 
 /// Evaluates constraints of the form:
-///
-///     <T as Trait>::U == V
-///
+/// ```ignore (not-rust)
+/// <T as Trait>::U == V
+/// ```
 /// If successful, this may result in additional obligations.
 ///
 /// See [poly_project_and_unify_type] for an explanation of the return value.
@@ -514,7 +515,7 @@ impl<'a, 'b, 'tcx> TypeFolder<'tcx> for AssocTypeNormalizer<'a, 'b, 'tcx> {
                         }
 
                         let substs = substs.super_fold_with(self);
-                        let generic_ty = self.tcx().type_of(def_id);
+                        let generic_ty = self.tcx().bound_type_of(def_id);
                         let concrete_ty = generic_ty.subst(self.tcx(), substs);
                         self.depth += 1;
                         let folded_ty = self.fold_ty(concrete_ty);
@@ -1257,7 +1258,7 @@ fn assemble_candidates_from_param_env<'cx, 'tcx>(
 /// In the case of a nested projection like <<A as Foo>::FooT as Bar>::BarT, we may find
 /// that the definition of `Foo` has some clues:
 ///
-/// ```
+/// ```ignore (illustrative)
 /// trait Foo {
 ///     type FooT : Bar<BarT=i32>
 /// }
@@ -1275,8 +1276,8 @@ fn assemble_candidates_from_trait_def<'cx, 'tcx>(
     // Check whether the self-type is itself a projection.
     // If so, extract what we know from the trait and try to come up with a good answer.
     let bounds = match *obligation.predicate.self_ty().kind() {
-        ty::Projection(ref data) => tcx.item_bounds(data.item_def_id).subst(tcx, data.substs),
-        ty::Opaque(def_id, substs) => tcx.item_bounds(def_id).subst(tcx, substs),
+        ty::Projection(ref data) => tcx.bound_item_bounds(data.item_def_id).subst(tcx, data.substs),
+        ty::Opaque(def_id, substs) => tcx.bound_item_bounds(def_id).subst(tcx, substs),
         ty::Infer(ty::TyVar(_)) => {
             // If the self-type is an inference variable, then it MAY wind up
             // being a projected type, so induce an ambiguity.
@@ -1518,18 +1519,22 @@ fn assemble_candidates_from_impls<'cx, 'tcx>(
                 // Any type with multiple potential metadata types is therefore not eligible.
                 let self_ty = selcx.infcx().shallow_resolve(obligation.predicate.self_ty());
 
-                let tail = selcx.tcx().struct_tail_with_normalize(self_ty, |ty| {
-                    // We throw away any obligations we get from this, since we normalize
-                    // and confirm these obligations once again during confirmation
-                    normalize_with_depth(
-                        selcx,
-                        obligation.param_env,
-                        obligation.cause.clone(),
-                        obligation.recursion_depth + 1,
-                        ty,
-                    )
-                    .value
-                });
+                let tail = selcx.tcx().struct_tail_with_normalize(
+                    self_ty,
+                    |ty| {
+                        // We throw away any obligations we get from this, since we normalize
+                        // and confirm these obligations once again during confirmation
+                        normalize_with_depth(
+                            selcx,
+                            obligation.param_env,
+                            obligation.cause.clone(),
+                            obligation.recursion_depth + 1,
+                            ty,
+                        )
+                        .value
+                    },
+                    || {},
+                );
 
                 match tail.kind() {
                     ty::Bool
@@ -1562,7 +1567,16 @@ fn assemble_candidates_from_impls<'cx, 'tcx>(
                     // type parameters, opaques, and unnormalized projections have pointer
                     // metadata if they're known (e.g. by the param_env) to be sized
                     ty::Param(_) | ty::Projection(..) | ty::Opaque(..)
-                        if tail.is_sized(selcx.tcx().at(obligation.cause.span), obligation.param_env) =>
+                        if selcx.infcx().predicate_must_hold_modulo_regions(
+                            &obligation.with(
+                                ty::Binder::dummy(ty::TraitRef::new(
+                                    selcx.tcx().require_lang_item(LangItem::Sized, None),
+                                    selcx.tcx().mk_substs_trait(self_ty, &[]),
+                                ))
+                                .without_const()
+                                .to_predicate(selcx.tcx()),
+                            ),
+                        ) =>
                     {
                         true
                     }
@@ -2018,7 +2032,7 @@ fn confirm_impl_candidate<'cx, 'tcx>(
         Progress { term: err.into(), obligations: nested }
     } else {
         assoc_ty_own_obligations(selcx, obligation, &mut nested);
-        Progress { term: term.subst(tcx, substs), obligations: nested }
+        Progress { term: EarlyBinder(term).subst(tcx, substs), obligations: nested }
     }
 }
 

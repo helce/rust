@@ -1,6 +1,6 @@
 use crate::parse::ParseSess;
 use crate::session::Session;
-use rustc_ast::token::{self, DelimToken, Nonterminal, Token};
+use rustc_ast::token::{self, Delimiter, Nonterminal, Token};
 use rustc_ast::tokenstream::CanSynthesizeMissingTokens;
 use rustc_ast::tokenstream::{DelimSpan, TokenStream, TokenTree};
 use rustc_data_structures::profiling::VerboseTimingGuard;
@@ -18,6 +18,7 @@ impl Session {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encodable, Decodable)]
+#[derive(HashStable_Generic)]
 pub enum NativeLibKind {
     /// Static library (e.g. `libfoo.a` on Linux or `foo.lib` on Windows/MSVC)
     Static {
@@ -57,9 +58,8 @@ impl NativeLibKind {
     }
 }
 
-rustc_data_structures::impl_stable_hash_via_hash!(NativeLibKind);
-
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Encodable, Decodable)]
+#[derive(HashStable_Generic)]
 pub struct NativeLib {
     pub name: String,
     pub new_name: Option<String>,
@@ -72,8 +72,6 @@ impl NativeLib {
         self.verbatim.is_some() || self.kind.has_modifiers()
     }
 }
-
-rustc_data_structures::impl_stable_hash_via_hash!(NativeLib);
 
 /// A path that has been canonicalized along with its original, non-canonicalized form
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -139,7 +137,7 @@ impl<'a> FlattenNonterminals<'a> {
                 let tts = (self.nt_to_tokenstream)(&nt, self.parse_sess, self.synthesize_tokens);
                 TokenTree::Delimited(
                     DelimSpan::from_single(token.span),
-                    DelimToken::NoDelim,
+                    Delimiter::Invisible,
                     self.process_token_stream(tts),
                 )
                 .into()

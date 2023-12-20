@@ -18,8 +18,7 @@ use crate::context::{EarlyContext, LintContext, LintStore};
 use crate::passes::{EarlyLintPass, EarlyLintPassObject};
 use rustc_ast::ptr::P;
 use rustc_ast::visit::{self as ast_visit, Visitor};
-use rustc_ast::AstLike;
-use rustc_ast::{self as ast, walk_list};
+use rustc_ast::{self as ast, walk_list, HasAttrs};
 use rustc_middle::ty::RegisteredTools;
 use rustc_session::lint::{BufferedEarlyLint, LintBuffer, LintPass};
 use rustc_session::Session;
@@ -158,7 +157,7 @@ impl<'a, T: EarlyLintPass> ast_visit::Visitor<'a> for EarlyContextAndPass<'a, T>
 
         // Explicitly check for lints associated with 'closure_id', since
         // it does not have a corresponding AST node
-        if let ast_visit::FnKind::Fn(_, _, sig, _, _) = fk {
+        if let ast_visit::FnKind::Fn(_, _, sig, _, _, _) = fk {
             if let ast::Async::Yes { closure_id, .. } = sig.header.asyncness {
                 self.check_id(closure_id);
             }
@@ -282,6 +281,11 @@ impl<'a, T: EarlyLintPass> ast_visit::Visitor<'a> for EarlyContextAndPass<'a, T>
         run_early_pass!(self, check_path, p, id);
         self.check_id(id);
         ast_visit::walk_path(self, p);
+    }
+
+    fn visit_path_segment(&mut self, path_span: Span, s: &'a ast::PathSegment) {
+        self.check_id(s.id);
+        ast_visit::walk_path_segment(self, path_span, s);
     }
 
     fn visit_attribute(&mut self, attr: &'a ast::Attribute) {

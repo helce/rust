@@ -187,12 +187,14 @@ pub enum TyKind<'tcx> {
     /// Looking at the following example, the witness for this generator
     /// may end up as something like `for<'a> [Vec<i32>, &'a Vec<i32>]`:
     ///
-    /// ```rust
+    /// ```ignore UNSOLVED (ask @compiler-errors, should this error? can we just swap the yields?)
+    /// #![feature(generators)]
     /// |a| {
     ///     let x = &vec![3];
     ///     yield a;
     ///     yield x[0];
     /// }
+    /// # ;
     /// ```
     GeneratorWitness(Binder<'tcx, &'tcx List<Ty<'tcx>>>),
 
@@ -276,9 +278,9 @@ impl<'tcx> TyKind<'tcx> {
 static_assert_size!(TyKind<'_>, 32);
 
 /// A closure can be modeled as a struct that looks like:
-///
-///     struct Closure<'l0...'li, T0...Tj, CK, CS, U>(...U);
-///
+/// ```ignore (illustrative)
+/// struct Closure<'l0...'li, T0...Tj, CK, CS, U>(...U);
+/// ```
 /// where:
 ///
 /// - 'l0...'li and T0...Tj are the generic parameters
@@ -295,25 +297,25 @@ static_assert_size!(TyKind<'_>, 32);
 ///    and the up-var has the type `Foo`, then that field of U will be `&Foo`).
 ///
 /// So, for example, given this function:
-///
-///     fn foo<'a, T>(data: &'a mut T) {
-///          do(|| data.count += 1)
-///     }
-///
+/// ```ignore (illustrative)
+/// fn foo<'a, T>(data: &'a mut T) {
+///      do(|| data.count += 1)
+/// }
+/// ```
 /// the type of the closure would be something like:
-///
-///     struct Closure<'a, T, U>(...U);
-///
+/// ```ignore (illustrative)
+/// struct Closure<'a, T, U>(...U);
+/// ```
 /// Note that the type of the upvar is not specified in the struct.
 /// You may wonder how the impl would then be able to use the upvar,
 /// if it doesn't know it's type? The answer is that the impl is
 /// (conceptually) not fully generic over Closure but rather tied to
 /// instances with the expected upvar types:
-///
-///     impl<'b, 'a, T> FnMut() for Closure<'a, T, (&'b mut &'a mut T,)> {
-///         ...
-///     }
-///
+/// ```ignore (illustrative)
+/// impl<'b, 'a, T> FnMut() for Closure<'a, T, (&'b mut &'a mut T,)> {
+///     ...
+/// }
+/// ```
 /// You can see that the *impl* fully specified the type of the upvar
 /// and thus knows full well that `data` has type `&'b mut &'a mut T`.
 /// (Here, I am assuming that `data` is mut-borrowed.)
@@ -711,7 +713,9 @@ impl<'tcx> GeneratorSubsts<'tcx> {
     ) -> impl Iterator<Item = impl Iterator<Item = Ty<'tcx>> + Captures<'tcx>> {
         let layout = tcx.generator_layout(def_id).unwrap();
         layout.variant_fields.iter().map(move |variant| {
-            variant.iter().map(move |field| layout.field_tys[*field].subst(tcx, self.substs))
+            variant
+                .iter()
+                .map(move |field| EarlyBinder(layout.field_tys[*field]).subst(tcx, self.substs))
         })
     }
 
@@ -760,9 +764,9 @@ impl<'tcx> UpvarSubsts<'tcx> {
 }
 
 /// An inline const is modeled like
-///
-///     const InlineConst<'l0...'li, T0...Tj, R>: R;
-///
+/// ```ignore (illustrative)
+/// const InlineConst<'l0...'li, T0...Tj, R>: R;
+/// ```
 /// where:
 ///
 /// - 'l0...'li and T0...Tj are the generic parameters
@@ -936,9 +940,9 @@ impl<'tcx> List<ty::Binder<'tcx, ExistentialPredicate<'tcx>>> {
 
 /// A complete reference to a trait. These take numerous guises in syntax,
 /// but perhaps the most recognizable form is in a where-clause:
-///
-///     T: Foo<U>
-///
+/// ```ignore (illustrative)
+/// T: Foo<U>
+/// ```
 /// This would be represented by a trait-reference where the `DefId` is the
 /// `DefId` for the trait `Foo` and the substs define `T` as parameter 0,
 /// and `U` as parameter 1.
@@ -1012,9 +1016,9 @@ impl<'tcx> PolyTraitRef<'tcx> {
 
 /// An existential reference to a trait, where `Self` is erased.
 /// For example, the trait object `Trait<'a, 'b, X, Y>` is:
-///
-///     exists T. T: Trait<'a, 'b, X, Y>
-///
+/// ```ignore (illustrative)
+/// exists T. T: Trait<'a, 'b, X, Y>
+/// ```
 /// The substitutions don't include the erased `Self`, only trait
 /// type and lifetime parameters (`[X, Y]` and `['a, 'b]` above).
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, TyDecodable)]
@@ -1063,6 +1067,69 @@ impl<'tcx> PolyExistentialTraitRef<'tcx> {
     /// or some placeholder type.
     pub fn with_self_ty(&self, tcx: TyCtxt<'tcx>, self_ty: Ty<'tcx>) -> ty::PolyTraitRef<'tcx> {
         self.map_bound(|trait_ref| trait_ref.with_self_ty(tcx, self_ty))
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Encodable, Decodable, HashStable)]
+pub struct EarlyBinder<T>(pub T);
+
+impl<T> EarlyBinder<T> {
+    pub fn as_ref(&self) -> EarlyBinder<&T> {
+        EarlyBinder(&self.0)
+    }
+
+    pub fn map_bound_ref<F, U>(&self, f: F) -> EarlyBinder<U>
+    where
+        F: FnOnce(&T) -> U,
+    {
+        self.as_ref().map_bound(f)
+    }
+
+    pub fn map_bound<F, U>(self, f: F) -> EarlyBinder<U>
+    where
+        F: FnOnce(T) -> U,
+    {
+        let value = f(self.0);
+        EarlyBinder(value)
+    }
+
+    pub fn try_map_bound<F, U, E>(self, f: F) -> Result<EarlyBinder<U>, E>
+    where
+        F: FnOnce(T) -> Result<U, E>,
+    {
+        let value = f(self.0)?;
+        Ok(EarlyBinder(value))
+    }
+}
+
+impl<T> EarlyBinder<Option<T>> {
+    pub fn transpose(self) -> Option<EarlyBinder<T>> {
+        self.0.map(|v| EarlyBinder(v))
+    }
+}
+
+impl<T, U> EarlyBinder<(T, U)> {
+    pub fn transpose_tuple2(self) -> (EarlyBinder<T>, EarlyBinder<U>) {
+        (EarlyBinder(self.0.0), EarlyBinder(self.0.1))
+    }
+}
+
+pub struct EarlyBinderIter<T> {
+    t: T,
+}
+
+impl<T: IntoIterator> EarlyBinder<T> {
+    pub fn transpose_iter(self) -> EarlyBinderIter<T::IntoIter> {
+        EarlyBinderIter { t: self.0.into_iter() }
+    }
+}
+
+impl<T: Iterator> Iterator for EarlyBinderIter<T> {
+    type Item = EarlyBinder<T::Item>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.t.next().map(|i| EarlyBinder(i))
     }
 }
 
@@ -1434,7 +1501,7 @@ impl<'tcx> fmt::Debug for Region<'tcx> {
 ///
 /// In general, the region lattice looks like
 ///
-/// ```
+/// ```text
 /// static ----------+-----...------+       (greatest)
 /// |                |              |
 /// early-bound and  |              |
@@ -1780,14 +1847,14 @@ impl<'tcx> Region<'tcx> {
     /// Given an early-bound or free region, returns the `DefId` where it was bound.
     /// For example, consider the regions in this snippet of code:
     ///
-    /// ```
+    /// ```ignore (illustrative)
     /// impl<'a> Foo {
-    ///      ^^ -- early bound, declared on an impl
+    /// //   ^^ -- early bound, declared on an impl
     ///
     ///     fn bar<'b, 'c>(x: &self, y: &'b u32, z: &'c u64) where 'static: 'c
-    ///            ^^  ^^     ^ anonymous, late-bound
-    ///            |   early-bound, appears in where-clauses
-    ///            late-bound, appears only in fn args
+    /// //         ^^  ^^     ^ anonymous, late-bound
+    /// //         |   early-bound, appears in where-clauses
+    /// //         late-bound, appears only in fn args
     ///     {..}
     /// }
     /// ```
@@ -1798,7 +1865,7 @@ impl<'tcx> Region<'tcx> {
     /// function might return the `DefId` of a closure.
     pub fn free_region_binding_scope(self, tcx: TyCtxt<'_>) -> DefId {
         match *self {
-            ty::ReEarlyBound(br) => tcx.parent(br.def_id).unwrap(),
+            ty::ReEarlyBound(br) => tcx.parent(br.def_id),
             ty::ReFree(fr) => fr.scope,
             _ => bug!("free_region_binding_scope invoked on inappropriate region: {:?}", self),
         }
@@ -2137,7 +2204,7 @@ impl<'tcx> Ty<'tcx> {
 
     pub fn fn_sig(self, tcx: TyCtxt<'tcx>) -> PolyFnSig<'tcx> {
         match self.kind() {
-            FnDef(def_id, substs) => tcx.fn_sig(*def_id).subst(tcx, substs),
+            FnDef(def_id, substs) => tcx.bound_fn_sig(*def_id).subst(tcx, substs),
             FnPtr(f) => *f,
             Error(_) => {
                 // ignore errors (#54954)
@@ -2273,7 +2340,7 @@ impl<'tcx> Ty<'tcx> {
         tcx: TyCtxt<'tcx>,
         normalize: impl FnMut(Ty<'tcx>) -> Ty<'tcx>,
     ) -> (Ty<'tcx>, bool) {
-        let tail = tcx.struct_tail_with_normalize(self, normalize);
+        let tail = tcx.struct_tail_with_normalize(self, normalize, || {});
         match tail.kind() {
             // Sized types
             ty::Infer(ty::IntVar(_) | ty::FloatVar(_))
@@ -2304,7 +2371,7 @@ impl<'tcx> Ty<'tcx> {
             ty::Str | ty::Slice(_) => (tcx.types.usize, false),
             ty::Dynamic(..) => {
                 let dyn_metadata = tcx.lang_items().dyn_metadata().unwrap();
-                (tcx.type_of(dyn_metadata).subst(tcx, &[tail.into()]), false)
+                (tcx.bound_type_of(dyn_metadata).subst(tcx, &[tail.into()]), false)
             },
 
             // type parameters only have unit metadata if they're sized, so return true

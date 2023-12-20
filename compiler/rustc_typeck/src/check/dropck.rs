@@ -8,7 +8,7 @@ use rustc_infer::traits::TraitEngineExt as _;
 use rustc_middle::ty::error::TypeError;
 use rustc_middle::ty::relate::{Relate, RelateResult, TypeRelation};
 use rustc_middle::ty::subst::{Subst, SubstsRef};
-use rustc_middle::ty::{self, Predicate, Ty, TyCtxt};
+use rustc_middle::ty::{self, EarlyBinder, Predicate, Ty, TyCtxt};
 use rustc_span::Span;
 use rustc_trait_selection::traits::error_reporting::InferCtxtExt;
 use rustc_trait_selection::traits::query::dropck_outlives::AtExt;
@@ -57,7 +57,7 @@ pub fn check_drop_impl(tcx: TyCtxt<'_>, drop_impl_did: DefId) -> Result<(), Erro
             let span = tcx.def_span(drop_impl_did);
             let reported = tcx.sess.delay_span_bug(
                 span,
-                &format!("should have been rejected by coherence check: {}", dtor_self_type),
+                &format!("should have been rejected by coherence check: {dtor_self_type}"),
             );
             Err(reported)
         }
@@ -84,7 +84,7 @@ fn ensure_drop_params_and_item_params_correspond<'tcx>(
         let drop_impl_span = tcx.def_span(drop_impl_did);
         let fresh_impl_substs =
             infcx.fresh_substs_for_item(drop_impl_span, drop_impl_did.to_def_id());
-        let fresh_impl_self_ty = drop_impl_ty.subst(tcx, fresh_impl_substs);
+        let fresh_impl_self_ty = EarlyBinder(drop_impl_ty).subst(tcx, fresh_impl_substs);
 
         let cause = &ObligationCause::misc(drop_impl_span, drop_impl_hir_id);
         match infcx.at(cause, impl_param_env).eq(named_type, fresh_impl_self_ty) {
@@ -104,8 +104,7 @@ fn ensure_drop_params_and_item_params_correspond<'tcx>(
                     item_span,
                     &format!(
                         "use the same sequence of generic type, lifetime and const parameters \
-                        as the {} definition",
-                        self_descr,
+                        as the {self_descr} definition",
                     ),
                 )
                 .emit();
@@ -262,9 +261,7 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
                 tcx.sess,
                 predicate_sp,
                 E0367,
-                "`Drop` impl requires `{}` but the {} it is implemented for does not",
-                predicate,
-                self_descr,
+                "`Drop` impl requires `{predicate}` but the {self_descr} it is implemented for does not",
             )
             .span_note(item_span, "the implementor must specify the same requirement")
             .emit();

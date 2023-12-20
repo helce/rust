@@ -1,4 +1,4 @@
-use crate::def_id::{DefId, CRATE_DEF_INDEX, LOCAL_CRATE};
+use crate::def_id::DefId;
 use crate::hir;
 
 use rustc_ast as ast;
@@ -124,9 +124,7 @@ impl DefKind {
     pub fn descr(self, def_id: DefId) -> &'static str {
         match self {
             DefKind::Fn => "function",
-            DefKind::Mod if def_id.index == CRATE_DEF_INDEX && def_id.krate != LOCAL_CRATE => {
-                "crate"
-            }
+            DefKind::Mod if def_id.is_crate_root() && !def_id.is_local() => "crate",
             DefKind::Mod => "module",
             DefKind::Static(..) => "static",
             DefKind::Enum => "enum",
@@ -223,6 +221,51 @@ impl DefKind {
             | DefKind::Impl => None,
         }
     }
+
+    #[inline]
+    pub fn is_fn_like(self) -> bool {
+        match self {
+            DefKind::Fn | DefKind::AssocFn | DefKind::Closure | DefKind::Generator => true,
+            _ => false,
+        }
+    }
+
+    /// Whether `query get_codegen_attrs` should be used with this definition.
+    pub fn has_codegen_attrs(self) -> bool {
+        match self {
+            DefKind::Fn
+            | DefKind::AssocFn
+            | DefKind::Ctor(..)
+            | DefKind::Closure
+            | DefKind::Generator
+            | DefKind::Static(_) => true,
+            DefKind::Mod
+            | DefKind::Struct
+            | DefKind::Union
+            | DefKind::Enum
+            | DefKind::Variant
+            | DefKind::Trait
+            | DefKind::TyAlias
+            | DefKind::ForeignTy
+            | DefKind::TraitAlias
+            | DefKind::AssocTy
+            | DefKind::Const
+            | DefKind::AssocConst
+            | DefKind::Macro(..)
+            | DefKind::Use
+            | DefKind::ForeignMod
+            | DefKind::OpaqueTy
+            | DefKind::Impl
+            | DefKind::Field
+            | DefKind::TyParam
+            | DefKind::ConstParam
+            | DefKind::LifetimeParam
+            | DefKind::AnonConst
+            | DefKind::InlineConst
+            | DefKind::GlobalAsm
+            | DefKind::ExternCrate => false,
+        }
+    }
 }
 
 /// The resolution of a path or export.
@@ -306,6 +349,7 @@ pub enum Res<Id = hir::HirId> {
     /// HACK(min_const_generics): self types also have an optional requirement to **not** mention
     /// any generic parameters to allow the following with `min_const_generics`:
     /// ```
+    /// # struct Foo;
     /// impl Foo { fn test() -> [u8; std::mem::size_of::<Self>()] { todo!() } }
     ///
     /// struct Bar([u8; baz::<Self>()]);
@@ -656,5 +700,10 @@ impl<Id> Res<Id> {
     /// Returns whether such a resolved path can occur in a tuple struct/variant pattern
     pub fn expected_in_tuple_struct_pat(&self) -> bool {
         matches!(self, Res::Def(DefKind::Ctor(_, CtorKind::Fn), _) | Res::SelfCtor(..))
+    }
+
+    /// Returns whether such a resolved path can occur in a unit struct/variant pattern
+    pub fn expected_in_unit_struct_pat(&self) -> bool {
+        matches!(self, Res::Def(DefKind::Ctor(_, CtorKind::Const), _) | Res::SelfCtor(..))
     }
 }

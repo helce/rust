@@ -1,13 +1,11 @@
 use std::cell::RefCell;
 use std::default::Default;
-use std::fmt;
 use std::hash::Hash;
-use std::iter;
 use std::lazy::SyncOnceCell as OnceCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::vec;
+use std::{cmp, fmt, iter};
 
 use arrayvec::ArrayVec;
 
@@ -20,7 +18,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::thin_vec::ThinVec;
 use rustc_hir as hir;
 use rustc_hir::def::{CtorKind, DefKind, Res};
-use rustc_hir::def_id::{CrateNum, DefId, DefIndex, CRATE_DEF_INDEX, LOCAL_CRATE};
+use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE};
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{BodyId, Mutability};
 use rustc_index::vec::IndexVec;
@@ -54,6 +52,9 @@ crate use self::Type::{
     RawPointer, Slice, Tuple,
 };
 crate use self::Visibility::{Inherited, Public};
+
+#[cfg(test)]
+mod tests;
 
 crate type ItemIdSet = FxHashSet<ItemId>;
 
@@ -104,14 +105,6 @@ impl ItemId {
             ItemId::Primitive(_, krate) => krate,
         }
     }
-
-    #[inline]
-    crate fn index(self) -> Option<DefIndex> {
-        match self {
-            ItemId::DefId(id) => Some(id.index),
-            _ => None,
-        }
-    }
 }
 
 impl From<DefId> for ItemId {
@@ -160,7 +153,7 @@ impl ExternalCrate {
 
     #[inline]
     crate fn def_id(&self) -> DefId {
-        DefId { krate: self.crate_num, index: CRATE_DEF_INDEX }
+        self.crate_num.as_def_id()
     }
 
     crate fn src(&self, tcx: TyCtxt<'_>) -> FileName {
@@ -217,9 +210,9 @@ impl ExternalCrate {
 
         // Failing that, see if there's an attribute specifying where to find this
         // external crate
-        let did = DefId { krate: self.crate_num, index: CRATE_DEF_INDEX };
-        tcx.get_attrs(did)
-            .lists(sym::doc)
+        let did = self.crate_num.as_def_id();
+        tcx.get_attrs(did, sym::doc)
+            .flat_map(|attr| attr.meta_item_list().unwrap_or_default())
             .filter(|a| a.has_name(sym::html_root_url))
             .filter_map(|a| a.value_str())
             .map(to_remote)
@@ -233,11 +226,13 @@ impl ExternalCrate {
 
         let as_keyword = |res: Res<!>| {
             if let Res::Def(DefKind::Mod, def_id) = res {
-                let attrs = tcx.get_attrs(def_id);
                 let mut keyword = None;
-                for attr in attrs.lists(sym::doc) {
-                    if attr.has_name(sym::keyword) {
-                        if let Some(v) = attr.value_str() {
+                let meta_items = tcx
+                    .get_attrs(def_id, sym::doc)
+                    .flat_map(|attr| attr.meta_item_list().unwrap_or_default());
+                for meta in meta_items {
+                    if meta.has_name(sym::keyword) {
+                        if let Some(v) = meta.value_str() {
                             keyword = Some(v);
                             break;
                         }
@@ -295,11 +290,13 @@ impl ExternalCrate {
         // rendering by delegating everything to a hash map.
         let as_primitive = |res: Res<!>| {
             if let Res::Def(DefKind::Mod, def_id) = res {
-                let attrs = tcx.get_attrs(def_id);
                 let mut prim = None;
-                for attr in attrs.lists(sym::doc) {
-                    if let Some(v) = attr.value_str() {
-                        if attr.has_name(sym::primitive) {
+                let meta_items = tcx
+                    .get_attrs(def_id, sym::doc)
+                    .flat_map(|attr| attr.meta_item_list().unwrap_or_default());
+                for meta in meta_items {
+                    if let Some(v) = meta.value_str() {
+                        if meta.has_name(sym::primitive) {
                             prim = PrimitiveType::from_symbol(v);
                             if prim.is_some() {
                                 break;
@@ -366,7 +363,7 @@ crate struct Item {
     /// Information about this item that is specific to what kind of item it is.
     /// E.g., struct vs enum vs function.
     crate kind: Box<ItemKind>,
-    crate def_id: ItemId,
+    crate item_id: ItemId,
 
     crate cfg: Option<Arc<Cfg>>,
 }
@@ -380,7 +377,7 @@ impl fmt::Debug for Item {
         let mut fmt = f.debug_struct("Item");
         fmt.field("name", &self.name)
             .field("visibility", &self.visibility)
-            .field("def_id", &self.def_id);
+            .field("item_id", &self.item_id);
         // allow printing the full item if someone really wants to
         if alternate {
             fmt.field("attrs", &self.attrs).field("kind", &self.kind).field("cfg", &self.cfg);
@@ -408,19 +405,22 @@ crate fn rustc_span(def_id: DefId, tcx: TyCtxt<'_>) -> Span {
 
 impl Item {
     crate fn stability<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Option<Stability> {
-        self.def_id.as_def_id().and_then(|did| tcx.lookup_stability(did))
+        self.item_id.as_def_id().and_then(|did| tcx.lookup_stability(did))
     }
 
     crate fn const_stability<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Option<ConstStability> {
-        self.def_id.as_def_id().and_then(|did| tcx.lookup_const_stability(did))
+        self.item_id.as_def_id().and_then(|did| tcx.lookup_const_stability(did))
     }
 
     crate fn deprecation(&self, tcx: TyCtxt<'_>) -> Option<Deprecation> {
-        self.def_id.as_def_id().and_then(|did| tcx.lookup_deprecation(did))
+        self.item_id.as_def_id().and_then(|did| tcx.lookup_deprecation(did))
     }
 
     crate fn inner_docs(&self, tcx: TyCtxt<'_>) -> bool {
-        self.def_id.as_def_id().map(|did| tcx.get_attrs(did).inner_docs()).unwrap_or(false)
+        self.item_id
+            .as_def_id()
+            .map(|did| tcx.get_attrs_unchecked(did).inner_docs())
+            .unwrap_or(false)
     }
 
     crate fn span(&self, tcx: TyCtxt<'_>) -> Span {
@@ -432,14 +432,14 @@ impl Item {
             ItemKind::ModuleItem(Module { span, .. }) => *span,
             ItemKind::ImplItem(Impl { kind: ImplKind::Auto, .. }) => Span::dummy(),
             ItemKind::ImplItem(Impl { kind: ImplKind::Blanket(_), .. }) => {
-                if let ItemId::Blanket { impl_id, .. } = self.def_id {
+                if let ItemId::Blanket { impl_id, .. } = self.item_id {
                     rustc_span(impl_id, tcx)
                 } else {
                     panic!("blanket impl item has non-blanket ID")
                 }
             }
             _ => {
-                self.def_id.as_def_id().map(|did| rustc_span(did, tcx)).unwrap_or_else(Span::dummy)
+                self.item_id.as_def_id().map(|did| rustc_span(did, tcx)).unwrap_or_else(Span::dummy)
             }
         }
     }
@@ -471,7 +471,7 @@ impl Item {
         kind: ItemKind,
         cx: &mut DocContext<'_>,
     ) -> Item {
-        let ast_attrs = cx.tcx.get_attrs(def_id);
+        let ast_attrs = cx.tcx.get_attrs_unchecked(def_id);
 
         Self::from_def_id_and_attrs_and_parts(
             def_id,
@@ -503,7 +503,7 @@ impl Item {
             cx.tcx.visibility(def_id).clean(cx)
         };
 
-        Item { def_id: def_id.into(), kind: box kind, name, attrs, visibility, cfg }
+        Item { item_id: def_id.into(), kind: box kind, name, attrs, visibility, cfg }
     }
 
     /// Finds all `doc` attributes as NameValues and returns their corresponding values, joined
@@ -517,7 +517,7 @@ impl Item {
 
         cx.cache()
             .intra_doc_links
-            .get(&self.def_id)
+            .get(&self.item_id)
             .map_or(&[][..], |v| v.as_slice())
             .iter()
             .filter_map(|ItemLink { link: s, link_text, did, ref fragment }| {
@@ -547,7 +547,7 @@ impl Item {
     crate fn link_names(&self, cache: &Cache) -> Vec<RenderedLink> {
         cache
             .intra_doc_links
-            .get(&self.def_id)
+            .get(&self.item_id)
             .map_or(&[][..], |v| v.as_slice())
             .iter()
             .map(|ItemLink { link: s, link_text, .. }| RenderedLink {
@@ -559,7 +559,7 @@ impl Item {
     }
 
     crate fn is_crate(&self) -> bool {
-        self.is_mod() && self.def_id.as_def_id().map_or(false, |did| did.index == CRATE_DEF_INDEX)
+        self.is_mod() && self.item_id.as_def_id().map_or(false, |did| did.is_crate_root())
     }
     crate fn is_mod(&self) -> bool {
         self.type_() == ItemType::Module
@@ -577,10 +577,16 @@ impl Item {
         self.type_() == ItemType::Variant
     }
     crate fn is_associated_type(&self) -> bool {
-        self.type_() == ItemType::AssocType
+        matches!(&*self.kind, AssocTypeItem(..) | StrippedItem(box AssocTypeItem(..)))
+    }
+    crate fn is_ty_associated_type(&self) -> bool {
+        matches!(&*self.kind, TyAssocTypeItem(..) | StrippedItem(box TyAssocTypeItem(..)))
     }
     crate fn is_associated_const(&self) -> bool {
-        self.type_() == ItemType::AssocConst
+        matches!(&*self.kind, AssocConstItem(..) | StrippedItem(box AssocConstItem(..)))
+    }
+    crate fn is_ty_associated_const(&self) -> bool {
+        matches!(&*self.kind, TyAssocConstItem(..) | StrippedItem(box TyAssocConstItem(..)))
     }
     crate fn is_method(&self) -> bool {
         self.type_() == ItemType::Method
@@ -689,7 +695,7 @@ impl Item {
         }
         let header = match *self.kind {
             ItemKind::ForeignFunctionItem(_) => {
-                let abi = tcx.fn_sig(self.def_id.as_def_id().unwrap()).abi();
+                let abi = tcx.fn_sig(self.item_id.as_def_id().unwrap()).abi();
                 hir::FnHeader {
                     unsafety: if abi == Abi::RustIntrinsic {
                         intrinsic_operation_unsafety(self.name.unwrap())
@@ -702,11 +708,11 @@ impl Item {
                 }
             }
             ItemKind::FunctionItem(_) | ItemKind::MethodItem(_, _) => {
-                let def_id = self.def_id.as_def_id().unwrap();
+                let def_id = self.item_id.as_def_id().unwrap();
                 build_fn_header(def_id, tcx, tcx.asyncness(def_id))
             }
             ItemKind::TyMethodItem(_) => {
-                build_fn_header(self.def_id.as_def_id().unwrap(), tcx, hir::IsAsync::NotAsync)
+                build_fn_header(self.item_id.as_def_id().unwrap(), tcx, hir::IsAsync::NotAsync)
             }
             _ => return None,
         };
@@ -726,17 +732,18 @@ crate enum ItemKind {
     EnumItem(Enum),
     FunctionItem(Function),
     ModuleItem(Module),
-    TypedefItem(Typedef, bool /* is associated type */),
+    TypedefItem(Typedef),
     OpaqueTyItem(OpaqueTy),
     StaticItem(Static),
     ConstantItem(Constant),
     TraitItem(Trait),
     TraitAliasItem(TraitAlias),
     ImplItem(Impl),
-    /// A method signature only. Used for required methods in traits (ie,
-    /// non-default-methods).
+    /// A required method in a trait declaration meaning it's only a function signature.
     TyMethodItem(Function),
-    /// A method with a body.
+    /// A method in a trait impl or a provided method in a trait declaration.
+    ///
+    /// Compared to [TyMethodItem], it also contains a method body.
     MethodItem(Function, Option<hir::Defaultness>),
     StructFieldItem(Type),
     VariantItem(Variant),
@@ -749,12 +756,16 @@ crate enum ItemKind {
     MacroItem(Macro),
     ProcMacroItem(ProcMacro),
     PrimitiveItem(PrimitiveType),
-    AssocConstItem(Type, Option<ConstantKind>),
-    /// An associated item in a trait or trait impl.
+    /// A required associated constant in a trait declaration.
+    TyAssocConstItem(Type),
+    /// An associated associated constant in a trait impl or a provided one in a trait declaration.
+    AssocConstItem(Type, ConstantKind),
+    /// A required associated type in a trait declaration.
     ///
     /// The bounds may be non-empty if there is a `where` clause.
-    /// The `Option<Type>` is the default concrete type (e.g. `trait Trait { type Target = usize; }`)
-    AssocTypeItem(Box<Generics>, Vec<GenericBound>, Option<Type>),
+    TyAssocTypeItem(Box<Generics>, Vec<GenericBound>),
+    /// An associated type in a trait impl or a provided one in a trait declaration.
+    AssocTypeItem(Typedef, Vec<GenericBound>),
     /// An item that has been stripped by a rustdoc pass
     StrippedItem(Box<ItemKind>),
     KeywordItem(Symbol),
@@ -776,7 +787,7 @@ impl ItemKind {
             ExternCrateItem { .. }
             | ImportItem(_)
             | FunctionItem(_)
-            | TypedefItem(_, _)
+            | TypedefItem(_)
             | OpaqueTyItem(_)
             | StaticItem(_)
             | ConstantItem(_)
@@ -791,7 +802,9 @@ impl ItemKind {
             | MacroItem(_)
             | ProcMacroItem(_)
             | PrimitiveItem(_)
+            | TyAssocConstItem(_)
             | AssocConstItem(_, _)
+            | TyAssocTypeItem(..)
             | AssocTypeItem(..)
             | StrippedItem(_)
             | KeywordItem(_) => [].iter(),
@@ -1023,6 +1036,86 @@ crate fn collapse_doc_fragments(doc_strings: &[DocFragment]) -> String {
     acc
 }
 
+/// Removes excess indentation on comments in order for the Markdown
+/// to be parsed correctly. This is necessary because the convention for
+/// writing documentation is to provide a space between the /// or //! marker
+/// and the doc text, but Markdown is whitespace-sensitive. For example,
+/// a block of text with four-space indentation is parsed as a code block,
+/// so if we didn't unindent comments, these list items
+///
+/// /// A list:
+/// ///
+/// ///    - Foo
+/// ///    - Bar
+///
+/// would be parsed as if they were in a code block, which is likely not what the user intended.
+fn unindent_doc_fragments(docs: &mut Vec<DocFragment>) {
+    // `add` is used in case the most common sugared doc syntax is used ("/// "). The other
+    // fragments kind's lines are never starting with a whitespace unless they are using some
+    // markdown formatting requiring it. Therefore, if the doc block have a mix between the two,
+    // we need to take into account the fact that the minimum indent minus one (to take this
+    // whitespace into account).
+    //
+    // For example:
+    //
+    // /// hello!
+    // #[doc = "another"]
+    //
+    // In this case, you want "hello! another" and not "hello!  another".
+    let add = if docs.windows(2).any(|arr| arr[0].kind != arr[1].kind)
+        && docs.iter().any(|d| d.kind == DocFragmentKind::SugaredDoc)
+    {
+        // In case we have a mix of sugared doc comments and "raw" ones, we want the sugared one to
+        // "decide" how much the minimum indent will be.
+        1
+    } else {
+        0
+    };
+
+    // `min_indent` is used to know how much whitespaces from the start of each lines must be
+    // removed. Example:
+    //
+    // ///     hello!
+    // #[doc = "another"]
+    //
+    // In here, the `min_indent` is 1 (because non-sugared fragment are always counted with minimum
+    // 1 whitespace), meaning that "hello!" will be considered a codeblock because it starts with 4
+    // (5 - 1) whitespaces.
+    let Some(min_indent) = docs
+        .iter()
+        .map(|fragment| {
+            fragment.doc.as_str().lines().fold(usize::MAX, |min_indent, line| {
+                if line.chars().all(|c| c.is_whitespace()) {
+                    min_indent
+                } else {
+                    // Compare against either space or tab, ignoring whether they are
+                    // mixed or not.
+                    let whitespace = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+                    cmp::min(min_indent, whitespace)
+                        + if fragment.kind == DocFragmentKind::SugaredDoc { 0 } else { add }
+                }
+            })
+        })
+        .min()
+    else {
+        return;
+    };
+
+    for fragment in docs {
+        if fragment.doc == kw::Empty {
+            continue;
+        }
+
+        let min_indent = if fragment.kind != DocFragmentKind::SugaredDoc && min_indent > 0 {
+            min_indent - add
+        } else {
+            min_indent
+        };
+
+        fragment.indent = min_indent;
+    }
+}
+
 /// A link that has not yet been rendered.
 ///
 /// This link will be turned into a rendered link by [`Item::links`].
@@ -1084,35 +1177,37 @@ impl Attributes {
         attrs: &[ast::Attribute],
         additional_attrs: Option<(&[ast::Attribute], DefId)>,
     ) -> Attributes {
-        let mut doc_strings: Vec<DocFragment> = vec![];
-        let clean_attr = |(attr, parent_module): (&ast::Attribute, Option<DefId>)| {
-            if let Some((value, kind)) = attr.doc_str_and_comment_kind() {
-                trace!("got doc_str={:?}", value);
-                let value = beautify_doc_string(value, kind);
+        // Additional documentation should be shown before the original documentation.
+        let attrs1 = additional_attrs
+            .into_iter()
+            .flat_map(|(attrs, def_id)| attrs.iter().map(move |attr| (attr, Some(def_id))));
+        let attrs2 = attrs.iter().map(|attr| (attr, None));
+        Attributes::from_ast_iter(attrs1.chain(attrs2), false)
+    }
+
+    crate fn from_ast_iter<'a>(
+        attrs: impl Iterator<Item = (&'a ast::Attribute, Option<DefId>)>,
+        doc_only: bool,
+    ) -> Attributes {
+        let mut doc_strings = Vec::new();
+        let mut other_attrs = Vec::new();
+        for (attr, parent_module) in attrs {
+            if let Some((doc_str, comment_kind)) = attr.doc_str_and_comment_kind() {
+                trace!("got doc_str={doc_str:?}");
+                let doc = beautify_doc_string(doc_str, comment_kind);
                 let kind = if attr.is_doc_comment() {
                     DocFragmentKind::SugaredDoc
                 } else {
                     DocFragmentKind::RawDoc
                 };
-
-                let frag =
-                    DocFragment { span: attr.span, doc: value, kind, parent_module, indent: 0 };
-
-                doc_strings.push(frag);
-
-                None
-            } else {
-                Some(attr.clone())
+                let fragment = DocFragment { span: attr.span, doc, kind, parent_module, indent: 0 };
+                doc_strings.push(fragment);
+            } else if !doc_only {
+                other_attrs.push(attr.clone());
             }
-        };
+        }
 
-        // Additional documentation should be shown before the original documentation
-        let other_attrs = additional_attrs
-            .into_iter()
-            .flat_map(|(attrs, id)| attrs.iter().map(move |attr| (attr, Some(id))))
-            .chain(attrs.iter().map(|attr| (attr, None)))
-            .filter_map(clean_attr)
-            .collect();
+        unindent_doc_fragments(&mut doc_strings);
 
         Attributes { doc_strings, other_attrs }
     }
@@ -1133,23 +1228,17 @@ impl Attributes {
     }
 
     /// Return the doc-comments on this item, grouped by the module they came from.
-    ///
     /// The module can be different if this is a re-export with added documentation.
-    crate fn collapsed_doc_value_by_module_level(&self) -> FxHashMap<Option<DefId>, String> {
-        let mut ret = FxHashMap::default();
-        if self.doc_strings.len() == 0 {
-            return ret;
+    ///
+    /// The last newline is not trimmed so the produced strings are reusable between
+    /// early and late doc link resolution regardless of their position.
+    crate fn prepare_to_doc_link_resolution(&self) -> FxHashMap<Option<DefId>, String> {
+        let mut res = FxHashMap::default();
+        for fragment in &self.doc_strings {
+            let out_str = res.entry(fragment.parent_module).or_default();
+            add_doc_fragment(out_str, fragment);
         }
-        let last_index = self.doc_strings.len() - 1;
-
-        for (i, new_frag) in self.doc_strings.iter().enumerate() {
-            let out = ret.entry(new_frag.parent_module).or_default();
-            add_doc_fragment(out, new_frag);
-            if i == last_index {
-                out.pop();
-            }
-        }
-        ret
+        res
     }
 
     /// Finds all `doc` attributes as NameValues and returns their corresponding values, joined

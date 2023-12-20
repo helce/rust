@@ -10,7 +10,6 @@ use crate::ty::{self, InferConst, Lift, Term, Ty, TyCtxt};
 use rustc_data_structures::functor::IdFunctor;
 use rustc_hir as hir;
 use rustc_hir::def::Namespace;
-use rustc_hir::def_id::CRATE_DEF_INDEX;
 use rustc_index::vec::{Idx, IndexVec};
 
 use std::fmt;
@@ -71,7 +70,7 @@ impl fmt::Debug for ty::BoundRegionKind {
         match *self {
             ty::BrAnon(n) => write!(f, "BrAnon({:?})", n),
             ty::BrNamed(did, name) => {
-                if did.index == CRATE_DEF_INDEX {
+                if did.is_crate_root() {
                     write!(f, "BrNamed({})", name)
                 } else {
                     write!(f, "BrNamed({:?}, {})", did, name)
@@ -858,6 +857,27 @@ impl<'tcx, T: TypeFoldable<'tcx>> TypeFoldable<'tcx> for Box<[T]> {
 
     fn super_visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> ControlFlow<V::BreakTy> {
         self.iter().try_for_each(|t| t.visit_with(visitor))
+    }
+}
+
+impl<'tcx, T: TypeFoldable<'tcx>> TypeFoldable<'tcx> for ty::EarlyBinder<T> {
+    fn try_super_fold_with<F: FallibleTypeFolder<'tcx>>(
+        self,
+        folder: &mut F,
+    ) -> Result<Self, F::Error> {
+        self.try_map_bound(|ty| ty.try_fold_with(folder))
+    }
+
+    fn try_fold_with<F: FallibleTypeFolder<'tcx>>(self, folder: &mut F) -> Result<Self, F::Error> {
+        self.try_map_bound(|ty| ty.try_fold_with(folder))
+    }
+
+    fn super_visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> ControlFlow<V::BreakTy> {
+        self.as_ref().0.visit_with(visitor)
+    }
+
+    fn visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> ControlFlow<V::BreakTy> {
+        self.as_ref().0.visit_with(visitor)
     }
 }
 

@@ -6,7 +6,7 @@ use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
 use rustc_errors::struct_span_err;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
-use rustc_hir::def_id::{DefId, LocalDefId, CRATE_DEF_ID, CRATE_DEF_INDEX};
+use rustc_hir::def_id::{LocalDefId, CRATE_DEF_ID};
 use rustc_hir::hir_id::CRATE_HIR_ID;
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{FieldDef, Generics, HirId, Item, TraitRef, Ty, TyKind, Variant};
@@ -110,7 +110,7 @@ impl<'a, 'tcx> Annotator<'a, 'tcx> {
     ) where
         F: FnOnce(&mut Self),
     {
-        let attrs = self.tcx.get_attrs(def_id.to_def_id());
+        let attrs = self.tcx.hir().attrs(self.tcx.hir().local_def_id_to_hir_id(def_id));
         debug!("annotate(id = {:?}, attrs = {:?})", def_id, attrs);
 
         let depr = attr::find_deprecation(&self.tcx.sess, attrs);
@@ -133,9 +133,9 @@ impl<'a, 'tcx> Annotator<'a, 'tcx> {
             }
 
             // `Deprecation` is just two pointers, no need to intern it
-            let depr_entry = DeprecationEntry::local(depr.clone(), def_id);
+            let depr_entry = DeprecationEntry::local(*depr, def_id);
             self.index.depr_map.insert(def_id, depr_entry);
-        } else if let Some(parent_depr) = self.parent_depr.clone() {
+        } else if let Some(parent_depr) = self.parent_depr {
             if inherit_deprecation.yes() {
                 is_deprecated = true;
                 info!("tagging child {:?} as deprecated from parent", def_id);
@@ -696,14 +696,14 @@ impl<'tcx> Visitor<'tcx> for Checker<'tcx> {
             hir::ItemKind::ExternCrate(_) => {
                 // compiler-generated `extern crate` items have a dummy span.
                 // `std` is still checked for the `restricted-std` feature.
-                if item.span.is_dummy() && item.ident.as_str() != "std" {
+                if item.span.is_dummy() && item.ident.name != sym::std {
                     return;
                 }
 
                 let Some(cnum) = self.tcx.extern_mod_stmt_cnum(item.def_id) else {
                     return;
                 };
-                let def_id = DefId { krate: cnum, index: CRATE_DEF_INDEX };
+                let def_id = cnum.as_def_id();
                 self.tcx.check_stability(def_id, Some(item.hir_id()), item.span, None);
             }
 
@@ -737,7 +737,7 @@ impl<'tcx> Visitor<'tcx> for Checker<'tcx> {
                     }
                 }
 
-                for impl_item_ref in items {
+                for impl_item_ref in *items {
                     let impl_item = self.tcx.associated_item(impl_item_ref.id.def_id);
 
                     if let Some(def_id) = impl_item.trait_item_def_id {

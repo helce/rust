@@ -8,7 +8,6 @@
 //! In this case we try to build an abstract representation of this constant using
 //! `thir_abstract_const` which can then be checked for structural equality with other
 //! generic constants mentioned in the `caller_bounds` of the current environment.
-use rustc_data_structures::intern::Interned;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir::def::DefKind;
 use rustc_index::vec::IndexVec;
@@ -20,7 +19,7 @@ use rustc_middle::mir::interpret::{
 use rustc_middle::thir;
 use rustc_middle::thir::abstract_const::{self, Node, NodeId, NotConstEvaluatable};
 use rustc_middle::ty::subst::{Subst, SubstsRef};
-use rustc_middle::ty::{self, DelaySpanBugEmitted, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{self, DelaySpanBugEmitted, EarlyBinder, TyCtxt, TypeFoldable};
 use rustc_session::lint;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::Span;
@@ -264,8 +263,10 @@ impl<'tcx> AbstractConst<'tcx> {
     pub fn root(self, tcx: TyCtxt<'tcx>) -> Node<'tcx> {
         let node = self.inner.last().copied().unwrap();
         match node {
-            Node::Leaf(leaf) => Node::Leaf(leaf.subst(tcx, self.substs)),
-            Node::Cast(kind, operand, ty) => Node::Cast(kind, operand, ty.subst(tcx, self.substs)),
+            Node::Leaf(leaf) => Node::Leaf(EarlyBinder(leaf).subst(tcx, self.substs)),
+            Node::Cast(kind, operand, ty) => {
+                Node::Cast(kind, operand, EarlyBinder(ty).subst(tcx, self.substs))
+            }
             // Don't perform substitution on the following as they can't directly contain generic params
             Node::Binop(_, _, _) | Node::UnaryOp(_, _) | Node::FunctionCall(_, _) => node,
         }
@@ -414,14 +415,12 @@ impl<'a, 'tcx> AbstractConstBuilder<'a, 'tcx> {
         self.recurse_build(self.body_id)?;
 
         for n in self.nodes.iter() {
-            if let Node::Leaf(ty::Const(Interned(
-                ty::ConstS { val: ty::ConstKind::Unevaluated(ct), ty: _ },
-                _,
-            ))) = n
-            {
-                // `AbstractConst`s should not contain any promoteds as they require references which
-                // are not allowed.
-                assert_eq!(ct.promoted, None);
+            if let Node::Leaf(ct) = n {
+                if let ty::ConstKind::Unevaluated(ct) = ct.val() {
+                    // `AbstractConst`s should not contain any promoteds as they require references which
+                    // are not allowed.
+                    assert_eq!(ct.promoted, None);
+                }
             }
         }
 
@@ -637,6 +636,7 @@ pub(super) fn thir_abstract_const<'tcx>(
     }
 }
 
+#[instrument(skip(tcx), level = "debug")]
 pub(super) fn try_unify_abstract_consts<'tcx>(
     tcx: TyCtxt<'tcx>,
     (a, b): (ty::Unevaluated<'tcx, ()>, ty::Unevaluated<'tcx, ()>),
