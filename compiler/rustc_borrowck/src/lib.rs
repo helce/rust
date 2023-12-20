@@ -2323,11 +2323,6 @@ mod error {
             t.buffer(&mut self.buffered);
         }
 
-        // For diagnostics we must not set `tainted_by_errors`.
-        pub fn buffer_non_error_diag(&mut self, t: DiagnosticBuilder<'_>) {
-            t.buffer(&mut self.buffered);
-        }
-
         pub fn set_tainted_by_errors(&mut self) {
             self.tainted_by_errors = Some(ErrorGuaranteed::unchecked_claim_error_was_emitted());
         }
