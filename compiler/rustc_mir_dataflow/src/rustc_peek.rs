@@ -1,8 +1,7 @@
 use rustc_span::symbol::sym;
 use rustc_span::Span;
-use rustc_target::spec::abi::Abi;
 
-use rustc_index::bit_set::BitSet;
+use rustc_index::bit_set::ChunkedBitSet;
 use rustc_middle::mir::MirPass;
 use rustc_middle::mir::{self, Body, Local, Location};
 use rustc_middle::ty::{self, Ty, TyCtxt};
@@ -193,9 +192,8 @@ impl PeekCall {
             &terminator.kind
         {
             if let ty::FnDef(def_id, substs) = *func.literal.ty().kind() {
-                let sig = tcx.fn_sig(def_id);
                 let name = tcx.item_name(def_id);
-                if sig.abi() != Abi::RustIntrinsic || name != sym::rustc_peek {
+                if !tcx.is_intrinsic(def_id) || name != sym::rustc_peek {
                     return None;
                 }
 
@@ -273,7 +271,7 @@ impl<'tcx> RustcPeekAt<'tcx> for MaybeLiveLocals {
         &self,
         tcx: TyCtxt<'tcx>,
         place: mir::Place<'tcx>,
-        flow_state: &BitSet<Local>,
+        flow_state: &ChunkedBitSet<Local>,
         call: PeekCall,
     ) {
         info!(?place, "peek_at");

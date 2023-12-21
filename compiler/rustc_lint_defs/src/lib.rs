@@ -14,6 +14,8 @@ use rustc_span::edition::Edition;
 use rustc_span::{sym, symbol::Ident, Span, Symbol};
 use rustc_target::spec::abi::Abi;
 
+use serde::{Deserialize, Serialize};
+
 pub mod builtin;
 
 #[macro_export]
@@ -23,6 +25,9 @@ macro_rules! pluralize {
     };
     ("is", $x:expr) => {
         if $x == 1 { "is" } else { "are" }
+    };
+    ("was", $x:expr) => {
+        if $x == 1 { "was" } else { "were" }
     };
     ("this", $x:expr) => {
         if $x == 1 { "this" } else { "these" }
@@ -34,7 +39,7 @@ macro_rules! pluralize {
 /// All suggestions are marked with an `Applicability`. Tools use the applicability of a suggestion
 /// to determine whether it should be automatically applied or if the user should be consulted
 /// before applying the suggestion.
-#[derive(Copy, Clone, Debug, PartialEq, Hash, Encodable, Decodable)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash, Encodable, Decodable, Serialize, Deserialize)]
 pub enum Applicability {
     /// The suggestion is definitely what the user intended, or maintains the exact meaning of the code.
     /// This suggestion should be automatically applied.
@@ -160,13 +165,19 @@ pub enum Level {
     ///
     /// See RFC 2383.
     ///
-    /// The `LintExpectationId` is used to later link a lint emission to the actual
+    /// The [`LintExpectationId`] is used to later link a lint emission to the actual
     /// expectation. It can be ignored in most cases.
     Expect(LintExpectationId),
     /// The `warn` level will produce a warning if the lint was violated, however the
     /// compiler will continue with its execution.
     Warn,
-    ForceWarn,
+    /// This lint level is a special case of [`Warn`], that can't be overridden. This is used
+    /// to ensure that a lint can't be suppressed. This lint level can currently only be set
+    /// via the console and is therefore session specific.
+    ///
+    /// The [`LintExpectationId`] is intended to fulfill expectations marked via the
+    /// `#[expect]` attribute, that will still be suppressed due to the level.
+    ForceWarn(Option<LintExpectationId>),
     /// The `deny` level will produce an error and stop further execution after the lint
     /// pass is complete.
     Deny,
@@ -182,7 +193,7 @@ impl Level {
             Level::Allow => "allow",
             Level::Expect(_) => "expect",
             Level::Warn => "warn",
-            Level::ForceWarn => "force-warn",
+            Level::ForceWarn(_) => "force-warn",
             Level::Deny => "deny",
             Level::Forbid => "forbid",
         }
@@ -217,7 +228,7 @@ impl Level {
 
     pub fn is_error(self) -> bool {
         match self {
-            Level::Allow | Level::Expect(_) | Level::Warn | Level::ForceWarn => false,
+            Level::Allow | Level::Expect(_) | Level::Warn | Level::ForceWarn(_) => false,
             Level::Deny | Level::Forbid => true,
         }
     }
@@ -423,7 +434,11 @@ pub enum BuiltinLintDiagnostics {
     DeprecatedMacro(Option<Symbol>, Span),
     MissingAbi(Span, Abi),
     UnusedDocComment(Span),
-    UnusedBuiltinAttribute { attr_name: Symbol, macro_name: String, invoc_span: Span },
+    UnusedBuiltinAttribute {
+        attr_name: Symbol,
+        macro_name: String,
+        invoc_span: Span,
+    },
     PatternsInFnsWithoutBody(Span, Ident),
     LegacyDeriveHelpers(Span),
     ProcMacroBackCompat(String),
@@ -435,6 +450,16 @@ pub enum BuiltinLintDiagnostics {
     UnicodeTextFlow(Span, String),
     UnexpectedCfg((Symbol, Span), Option<(Symbol, Span)>),
     DeprecatedWhereclauseLocation(Span, String),
+    SingleUseLifetime {
+        /// Span of the parameter which declares this lifetime.
+        param_span: Span,
+        /// Span of the code that should be removed when eliding this lifetime.
+        /// This span should include leading or trailing comma.
+        deletion_span: Span,
+        /// Span of the single use, or None if the lifetime is never used.
+        /// If true, the lifetime will be fully elided.
+        use_span: Option<(Span, bool)>,
+    },
 }
 
 /// Lints that are buffered up early on in the `Session` before the

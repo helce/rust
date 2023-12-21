@@ -407,11 +407,8 @@ impl Step for Rustc {
                 let gcc_lld_src_dir = src_dir.join("gcc-ld");
                 let gcc_lld_dst_dir = dst_dir.join("gcc-ld");
                 t!(fs::create_dir(&gcc_lld_dst_dir));
-                for flavor in ["ld", "ld64"] {
-                    let exe_name = exe(flavor, compiler.host);
-                    builder
-                        .copy(&gcc_lld_src_dir.join(&exe_name), &gcc_lld_dst_dir.join(&exe_name));
-                }
+                let exe_name = exe("ld", compiler.host);
+                builder.copy(&gcc_lld_src_dir.join(&exe_name), &gcc_lld_dst_dir.join(&exe_name));
             }
 
             // Man pages
@@ -814,7 +811,7 @@ impl Step for Src {
                 "library/backtrace/crates",
                 // these are 30MB combined and aren't necessary for building
                 // the standard library.
-                "library/stdarch/crates/Cargo.toml",
+                "library/stdarch/Cargo.toml",
                 "library/stdarch/crates/stdarch-verify",
                 "library/stdarch/crates/intrinsic-test",
             ],
@@ -848,7 +845,12 @@ impl Step for PlainSourceTarball {
 
     /// Creates the plain source tarball
     fn run(self, builder: &Builder<'_>) -> GeneratedTarball {
-        let tarball = Tarball::new(builder, "rustc", "src");
+        // NOTE: This is a strange component in a lot of ways. It uses `src` as the target, which
+        // means neither rustup nor rustup-toolchain-install-master know how to download it.
+        // It also contains symbolic links, unlike other any other dist tarball.
+        // It's used for distros building rustc from source in a pre-vendored environment.
+        let mut tarball = Tarball::new(builder, "rustc", "src");
+        tarball.permit_symlinks(true);
         let plain_dst_src = tarball.image_dir();
 
         // This is the set of root paths which will become part of the source package
@@ -882,6 +884,9 @@ impl Step for PlainSourceTarball {
 
         // If we're building from git sources, we need to vendor a complete distribution.
         if builder.rust_info.is_git() {
+            // Ensure we have the submodules checked out.
+            builder.update_submodule(Path::new("src/tools/rust-analyzer"));
+
             // Vendor all Cargo dependencies
             let mut cmd = Command::new(&builder.initial_cargo);
             cmd.arg("vendor")
@@ -894,29 +899,6 @@ impl Step for PlainSourceTarball {
         }
 
         tarball.bare()
-    }
-}
-
-// We have to run a few shell scripts, which choke quite a bit on both `\`
-// characters and on `C:\` paths, so normalize both of them away.
-pub fn sanitize_sh(path: &Path) -> String {
-    let path = path.to_str().unwrap().replace("\\", "/");
-    return change_drive(unc_to_lfs(&path)).unwrap_or(path);
-
-    fn unc_to_lfs(s: &str) -> &str {
-        s.strip_prefix("//?/").unwrap_or(s)
-    }
-
-    fn change_drive(s: &str) -> Option<String> {
-        let mut ch = s.chars();
-        let drive = ch.next().unwrap_or('C');
-        if ch.next() != Some(':') {
-            return None;
-        }
-        if ch.next() != Some('/') {
-            return None;
-        }
-        Some(format!("/{}/{}", drive, &s[drive.len_utf8() + 2..]))
     }
 }
 
@@ -1870,7 +1852,6 @@ fn add_env(builder: &Builder<'_>, cmd: &mut Command, target: TargetSelection) {
 
 /// Maybe add LLVM object files to the given destination lib-dir. Allows either static or dynamic linking.
 ///
-
 /// Returns whether the files were actually copied.
 fn maybe_install_llvm(builder: &Builder<'_>, target: TargetSelection, dst_libdir: &Path) -> bool {
     if let Some(config) = builder.config.target_config.get(&target) {
@@ -1980,6 +1961,8 @@ impl Step for LlvmTools {
             }
         }
 
+        builder.ensure(crate::native::Llvm { target });
+
         let mut tarball = Tarball::new(builder, "llvm-tools", &target.triple);
         tarball.set_overlay(OverlayKind::LLVM);
         tarball.is_preview(true);
@@ -2038,6 +2021,9 @@ impl Step for RustDev {
         tarball.set_overlay(OverlayKind::LLVM);
 
         let src_bindir = builder.llvm_out(target).join("bin");
+        // If updating this list, you likely want to change
+        // src/bootstrap/download-ci-llvm-stamp as well, otherwise local users
+        // will not pick up the extra file until LLVM gets bumped.
         for bin in &[
             "llvm-config",
             "llvm-ar",
@@ -2047,6 +2033,7 @@ impl Step for RustDev {
             "llvm-cov",
             "llvm-dwp",
             "llvm-nm",
+            "llvm-dwarfdump",
         ] {
             tarball.add_file(src_bindir.join(exe(bin, target)), "bin", 0o755);
         }

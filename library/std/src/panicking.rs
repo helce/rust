@@ -47,7 +47,7 @@ extern "C" {
 }
 
 #[allow(improper_ctypes)]
-extern "C-unwind" {
+extern "Rust" {
     /// `payload` is passed through another layer of raw pointers as `&mut dyn Trait` is not
     /// FFI-safe. `BoxMeUp` lazily performs allocation only when needed (this avoids allocations
     /// when using the "abort" panic runtime).
@@ -325,7 +325,7 @@ pub mod panic_count {
     pub const ALWAYS_ABORT_FLAG: usize = 1 << (usize::BITS - 1);
 
     // Panic count for the current thread.
-    thread_local! { static LOCAL_PANIC_COUNT: Cell<usize> = Cell::new(0) }
+    thread_local! { static LOCAL_PANIC_COUNT: Cell<usize> = const { Cell::new(0) } }
 
     // Sum of panic counts from all threads. The purpose of this is to have
     // a fast path in `is_zero` (which is used by `panicking`). In any particular

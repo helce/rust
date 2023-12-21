@@ -2,6 +2,7 @@
 #![feature(control_flow_enum)]
 #![feature(let_else)]
 #![feature(let_chains)]
+#![feature(lint_reasons)]
 #![feature(once_cell)]
 #![feature(rustc_private)]
 #![recursion_limit = "512"]
@@ -35,7 +36,6 @@ extern crate rustc_typeck;
 #[macro_use]
 pub mod sym_helper;
 
-#[allow(clippy::module_name_repetitions)]
 pub mod ast_utils;
 pub mod attrs;
 pub mod comparisons;
@@ -58,15 +58,18 @@ pub mod usage;
 pub mod visitors;
 
 pub use self::attrs::*;
-pub use self::hir_utils::{both, count_eq, eq_expr_value, over, SpanlessEq, SpanlessHash};
+pub use self::hir_utils::{
+    both, count_eq, eq_expr_value, hash_expr, hash_stmt, over, HirEqInterExpr, SpanlessEq, SpanlessHash,
+};
 
 use std::collections::hash_map::Entry;
 use std::hash::BuildHasherDefault;
-use std::lazy::SyncOnceCell;
+use std::sync::OnceLock;
 use std::sync::{Mutex, MutexGuard};
 
 use if_chain::if_chain;
 use rustc_ast::ast::{self, LitKind};
+use rustc_ast::Attribute;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::unhash::UnhashMap;
 use rustc_hir as hir;
@@ -74,13 +77,12 @@ use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, CRATE_DEF_ID};
 use rustc_hir::hir_id::{HirIdMap, HirIdSet};
 use rustc_hir::intravisit::{walk_expr, FnKind, Visitor};
-use rustc_hir::itemlikevisit::ItemLikeVisitor;
 use rustc_hir::LangItem::{OptionNone, ResultErr, ResultOk};
 use rustc_hir::{
     def, Arm, ArrayLen, BindingAnnotation, Block, BlockCheckMode, Body, Constness, Destination, Expr, ExprKind, FnDecl,
-    ForeignItem, HirId, Impl, ImplItem, ImplItemKind, IsAsync, Item, ItemKind, LangItem, Local, MatchSource,
-    Mutability, Node, Param, Pat, PatKind, Path, PathSegment, PrimTy, QPath, Stmt, StmtKind, TraitItem, TraitItemKind,
-    TraitRef, TyKind, UnOp,
+    HirId, Impl, ImplItem, ImplItemKind, IsAsync, Item, ItemKind, LangItem, Local, MatchSource, Mutability, Node,
+    Param, Pat, PatKind, Path, PathSegment, PrimTy, QPath, Stmt, StmtKind, TraitItem, TraitItemKind, TraitRef, TyKind,
+    UnOp,
 };
 use rustc_lint::{LateContext, Level, Lint, LintContext};
 use rustc_middle::hir::place::PlaceBase;
@@ -117,8 +119,8 @@ pub fn parse_msrv(msrv: &str, sess: Option<&Session>, span: Option<Span>) -> Opt
     None
 }
 
-pub fn meets_msrv(msrv: Option<&RustcVersion>, lint_msrv: &RustcVersion) -> bool {
-    msrv.map_or(true, |msrv| msrv.meets(*lint_msrv))
+pub fn meets_msrv(msrv: Option<RustcVersion>, lint_msrv: RustcVersion) -> bool {
+    msrv.map_or(true, |msrv| msrv.meets(lint_msrv))
 }
 
 #[macro_export]
@@ -962,7 +964,7 @@ pub fn can_move_expr_to_closure<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'
                         self.captures.entry(l).and_modify(|e| *e |= cap).or_insert(cap);
                     }
                 },
-                ExprKind::Closure(..) => {
+                ExprKind::Closure { .. } => {
                     let closure_id = self.cx.tcx.hir().local_def_id(e.hir_id).to_def_id();
                     for capture in self.cx.typeck_results().closure_min_captures_flattened(closure_id) {
                         let local_id = match capture.place.base {
@@ -1149,7 +1151,7 @@ fn line_span<T: LintContext>(cx: &T, span: Span) -> Span {
     let span = original_sp(span, DUMMY_SP);
     let source_map_and_line = cx.sess().source_map().lookup_line(span.lo()).unwrap();
     let line_no = source_map_and_line.line;
-    let line_start = source_map_and_line.sf.lines[line_no];
+    let line_start = source_map_and_line.sf.lines(|lines| lines[line_no]);
     span.with_lo(line_start)
 }
 
@@ -1200,7 +1202,7 @@ pub fn get_enclosing_loop_or_closure<'tcx>(tcx: TyCtxt<'tcx>, expr: &Expr<'_>) -
         match node {
             Node::Expr(
                 e @ Expr {
-                    kind: ExprKind::Loop(..) | ExprKind::Closure(..),
+                    kind: ExprKind::Loop(..) | ExprKind::Closure { .. },
                     ..
                 },
             ) => return Some(e),
@@ -1443,7 +1445,7 @@ pub fn is_refutable(cx: &LateContext<'_>, pat: &Pat<'_>) -> bool {
         },
         PatKind::Tuple(pats, _) => are_refutable(cx, pats),
         PatKind::Struct(ref qpath, fields, _) => {
-            is_enum_variant(cx, qpath, pat.hir_id) || are_refutable(cx, fields.iter().map(|field| &*field.pat))
+            is_enum_variant(cx, qpath, pat.hir_id) || are_refutable(cx, fields.iter().map(|field| field.pat))
         },
         PatKind::TupleStruct(ref qpath, pats, _) => is_enum_variant(cx, qpath, pat.hir_id) || are_refutable(cx, pats),
         PatKind::Slice(head, middle, tail) => {
@@ -1555,14 +1557,14 @@ pub fn int_bits(tcx: TyCtxt<'_>, ity: rustc_ty::IntTy) -> u64 {
     Integer::from_int_ty(&tcx, ity).size().bits()
 }
 
-#[allow(clippy::cast_possible_wrap)]
+#[expect(clippy::cast_possible_wrap)]
 /// Turn a constant int byte representation into an i128
 pub fn sext(tcx: TyCtxt<'_>, u: u128, ity: rustc_ty::IntTy) -> i128 {
     let amt = 128 - int_bits(tcx, ity);
     ((u as i128) << amt) >> amt
 }
 
-#[allow(clippy::cast_sign_loss)]
+#[expect(clippy::cast_sign_loss)]
 /// clip unused bytes
 pub fn unsext(tcx: TyCtxt<'_>, u: i128, ity: rustc_ty::IntTy) -> u128 {
     let amt = 128 - int_bits(tcx, ity);
@@ -1658,7 +1660,7 @@ pub fn if_sequence<'tcx>(mut expr: &'tcx Expr<'tcx>) -> (Vec<&'tcx Expr<'tcx>>, 
     let mut blocks: Vec<&Block<'_>> = Vec::new();
 
     while let Some(higher::IfOrIfLet { cond, then, r#else }) = higher::IfOrIfLet::hir(expr) {
-        conds.push(&*cond);
+        conds.push(cond);
         if let ExprKind::Block(block, _) = then.kind {
             blocks.push(block);
         } else {
@@ -1693,7 +1695,7 @@ pub fn get_async_fn_body<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'_>) -> Option<&'t
         _,
         &[
             Expr {
-                kind: ExprKind::Closure(_, _, body, _, _),
+                kind: ExprKind::Closure { body, .. },
                 ..
             },
         ],
@@ -1780,7 +1782,7 @@ pub fn is_expr_identity_function(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool 
     }
 
     match expr.kind {
-        ExprKind::Closure(_, _, body_id, _, _) => is_body_identity_function(cx, cx.tcx.hir().body(body_id)),
+        ExprKind::Closure { body, .. } => is_body_identity_function(cx, cx.tcx.hir().body(body)),
         _ => path_def_id(cx, expr).map_or(false, |id| match_def_path(cx, id, &paths::CONVERT_IDENTITY)),
     }
 }
@@ -1916,7 +1918,17 @@ pub fn fn_def_id(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<DefId> {
                 ..
             },
             ..,
-        ) => cx.typeck_results().qpath_res(qpath, *path_hir_id).opt_def_id(),
+        ) => {
+            // Only return Fn-like DefIds, not the DefIds of statics/consts/etc that contain or
+            // deref to fn pointers, dyn Fn, impl Fn - #8850
+            if let Res::Def(DefKind::Fn | DefKind::Ctor(..) | DefKind::AssocFn, id) =
+                cx.typeck_results().qpath_res(qpath, *path_hir_id)
+            {
+                Some(id)
+            } else {
+                None
+            }
+        },
         _ => None,
     }
 }
@@ -2068,47 +2080,37 @@ pub fn is_hir_ty_cfg_dependant(cx: &LateContext<'_>, ty: &hir::Ty<'_>) -> bool {
     false
 }
 
-struct TestItemNamesVisitor<'tcx> {
-    tcx: TyCtxt<'tcx>,
-    names: Vec<Symbol>,
-}
-
-impl<'hir> ItemLikeVisitor<'hir> for TestItemNamesVisitor<'hir> {
-    fn visit_item(&mut self, item: &Item<'_>) {
-        if let ItemKind::Const(ty, _body) = item.kind {
-            if let TyKind::Path(QPath::Resolved(_, path)) = ty.kind {
-                // We could also check for the type name `test::TestDescAndFn`
-                if let Res::Def(DefKind::Struct, _) = path.res {
-                    let has_test_marker = self
-                        .tcx
-                        .hir()
-                        .attrs(item.hir_id())
-                        .iter()
-                        .any(|a| a.has_name(sym::rustc_test_marker));
-                    if has_test_marker {
-                        self.names.push(item.ident.name);
-                    }
-                }
-            }
-        }
-    }
-    fn visit_trait_item(&mut self, _: &TraitItem<'_>) {}
-    fn visit_impl_item(&mut self, _: &ImplItem<'_>) {}
-    fn visit_foreign_item(&mut self, _: &ForeignItem<'_>) {}
-}
-
-static TEST_ITEM_NAMES_CACHE: SyncOnceCell<Mutex<FxHashMap<LocalDefId, Vec<Symbol>>>> = SyncOnceCell::new();
+static TEST_ITEM_NAMES_CACHE: OnceLock<Mutex<FxHashMap<LocalDefId, Vec<Symbol>>>> = OnceLock::new();
 
 fn with_test_item_names<'tcx>(tcx: TyCtxt<'tcx>, module: LocalDefId, f: impl Fn(&[Symbol]) -> bool) -> bool {
     let cache = TEST_ITEM_NAMES_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
     let mut map: MutexGuard<'_, FxHashMap<LocalDefId, Vec<Symbol>>> = cache.lock().unwrap();
-    match map.entry(module) {
+    let value = map.entry(module);
+    match value {
         Entry::Occupied(entry) => f(entry.get()),
         Entry::Vacant(entry) => {
-            let mut visitor = TestItemNamesVisitor { tcx, names: Vec::new() };
-            tcx.hir().visit_item_likes_in_module(module, &mut visitor);
-            visitor.names.sort_unstable();
-            f(&*entry.insert(visitor.names))
+            let mut names = Vec::new();
+            for id in tcx.hir().module_items(module) {
+                if matches!(tcx.def_kind(id.def_id), DefKind::Const)
+                    && let item = tcx.hir().item(id)
+                    && let ItemKind::Const(ty, _body) = item.kind {
+                    if let TyKind::Path(QPath::Resolved(_, path)) = ty.kind {
+                        // We could also check for the type name `test::TestDescAndFn`
+                        if let Res::Def(DefKind::Struct, _) = path.res {
+                            let has_test_marker = tcx
+                                .hir()
+                                .attrs(item.hir_id())
+                                .iter()
+                                .any(|a| a.has_name(sym::rustc_test_marker));
+                            if has_test_marker {
+                                names.push(item.ident.name);
+                            }
+                        }
+                    }
+                }
+            }
+            names.sort_unstable();
+            f(&*entry.insert(names))
         },
     }
 }
@@ -2133,6 +2135,27 @@ pub fn is_in_test_function(tcx: TyCtxt<'_>, id: hir::HirId) -> bool {
                 false
             })
     })
+}
+
+/// Checks if the item containing the given `HirId` has `#[cfg(test)]` attribute applied
+///
+/// Note: Add `// compile-flags: --test` to UI tests with a `#[cfg(test)]` function
+pub fn is_in_cfg_test(tcx: TyCtxt<'_>, id: hir::HirId) -> bool {
+    fn is_cfg_test(attr: &Attribute) -> bool {
+        if attr.has_name(sym::cfg)
+            && let Some(items) = attr.meta_item_list()
+            && let [item] = &*items
+            && item.has_name(sym::test)
+        {
+            true
+        } else {
+            false
+        }
+    }
+    tcx.hir()
+        .parent_iter(id)
+        .flat_map(|(parent_id, _)| tcx.hir().attrs(parent_id))
+        .any(is_cfg_test)
 }
 
 /// Checks whether item either has `test` attribute applied, or

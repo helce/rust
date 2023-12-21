@@ -114,6 +114,9 @@ pub struct FnCtxt<'a, 'tcx> {
     /// either given explicitly or inferred from, say, an `Fn*` trait
     /// bound. Used for diagnostic purposes only.
     pub(super) return_type_pre_known: bool,
+
+    /// True if the return type has an Opaque type
+    pub(super) return_type_has_opaque: bool,
 }
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
@@ -140,6 +143,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }),
             inh,
             return_type_pre_known: true,
+            return_type_has_opaque: false,
         }
     }
 
@@ -255,7 +259,7 @@ impl<'a, 'tcx> AstConv<'tcx> for FnCtxt<'a, 'tcx> {
         item_segment: &hir::PathSegment<'_>,
         poly_trait_ref: ty::PolyTraitRef<'tcx>,
     ) -> Ty<'tcx> {
-        let (trait_ref, _) = self.replace_bound_vars_with_fresh_vars(
+        let trait_ref = self.replace_bound_vars_with_fresh_vars(
             span,
             infer::LateBoundRegionConversionTime::AssocTypeProjection(item_def_id),
             poly_trait_ref,

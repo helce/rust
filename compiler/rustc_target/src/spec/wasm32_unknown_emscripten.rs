@@ -16,15 +16,7 @@ pub fn target() -> Target {
     let mut post_link_args = LinkArgs::new();
     post_link_args.insert(
         LinkerFlavor::Em,
-        vec![
-            "-s".into(),
-            "ERROR_ON_UNDEFINED_SYMBOLS=1".into(),
-            "-s".into(),
-            "ASSERTIONS=1".into(),
-            "-s".into(),
-            "ABORTING_MALLOC=0".into(),
-            "-Wl,--fatal-warnings".into(),
-        ],
+        vec!["-sABORTING_MALLOC=0".into(), "-Wl,--fatal-warnings".into()],
     );
 
     let opts = TargetOptions {
@@ -34,8 +26,8 @@ pub fn target() -> Target {
         // functionality, and a .wasm file.
         exe_suffix: ".js".into(),
         linker: None,
-        is_like_emscripten: true,
         panic_strategy: PanicStrategy::Unwind,
+        no_default_libraries: false,
         post_link_args,
         families: cvs!["unix", "wasm"],
         ..options

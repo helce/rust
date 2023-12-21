@@ -115,6 +115,14 @@ impl Drop for TimeIt {
     }
 }
 
+/// Used for download caching
+pub(crate) fn program_out_of_date(stamp: &Path, key: &str) -> bool {
+    if !stamp.exists() {
+        return true;
+    }
+    t!(fs::read_to_string(stamp)) != key
+}
+
 /// Symlinks two directories, using junctions on Windows and normal symlinks on
 /// Unix.
 pub fn symlink_dir(config: &Config, src: &Path, dest: &Path) -> io::Result<()> {
@@ -346,6 +354,24 @@ pub fn try_run(cmd: &mut Command, print_cmd_on_fail: bool) -> bool {
     status.success()
 }
 
+pub fn check_run(cmd: &mut Command, print_cmd_on_fail: bool) -> bool {
+    let status = match cmd.status() {
+        Ok(status) => status,
+        Err(e) => {
+            println!("failed to execute command: {:?}\nerror: {}", cmd, e);
+            return false;
+        }
+    };
+    if !status.success() && print_cmd_on_fail {
+        println!(
+            "\n\ncommand did not execute successfully: {:?}\n\
+             expected success, got: {}\n\n",
+            cmd, status
+        );
+    }
+    status.success()
+}
+
 pub fn run_suppressed(cmd: &mut Command) {
     if !try_run_suppressed(cmd) {
         std::process::exit(1);
@@ -437,7 +463,7 @@ fn dir_up_to_date(src: &Path, threshold: SystemTime) -> bool {
 }
 
 fn fail(s: &str) -> ! {
-    println!("\n\n{}\n\n", s);
+    eprintln!("\n\n{}\n\n", s);
     std::process::exit(1);
 }
 

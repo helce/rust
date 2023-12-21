@@ -1,4 +1,4 @@
-//! This crates defines the trait resolution method.
+//! This crate defines the trait resolution method.
 //!
 //! - **Traits.** Trait resolution is implemented in the `traits` module.
 //!
@@ -14,13 +14,12 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![feature(box_patterns)]
 #![feature(control_flow_enum)]
-#![feature(crate_visibility_modifier)]
-#![cfg_attr(bootstrap, feature(derive_default_enum))]
 #![feature(drain_filter)]
 #![feature(hash_drain_filter)]
 #![feature(label_break_value)]
 #![feature(let_chains)]
 #![feature(let_else)]
+#![feature(if_let_guard)]
 #![feature(never_type)]
 #![recursion_limit = "512"] // For rustdoc
 

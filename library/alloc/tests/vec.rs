@@ -266,8 +266,8 @@ fn test_clone() {
 #[test]
 fn test_clone_from() {
     let mut v = vec![];
-    let three: Vec<Box<_>> = vec![box 1, box 2, box 3];
-    let two: Vec<Box<_>> = vec![box 4, box 5];
+    let three: Vec<Box<_>> = vec![Box::new(1), Box::new(2), Box::new(3)];
+    let two: Vec<Box<_>> = vec![Box::new(4), Box::new(5)];
     // zero, long
     v.clone_from(&three);
     assert_eq!(v, three);
@@ -407,11 +407,11 @@ fn test_dedup_by() {
 
 #[test]
 fn test_dedup_unique() {
-    let mut v0: Vec<Box<_>> = vec![box 1, box 1, box 2, box 3];
+    let mut v0: Vec<Box<_>> = vec![Box::new(1), Box::new(1), Box::new(2), Box::new(3)];
     v0.dedup();
-    let mut v1: Vec<Box<_>> = vec![box 1, box 2, box 2, box 3];
+    let mut v1: Vec<Box<_>> = vec![Box::new(1), Box::new(2), Box::new(2), Box::new(3)];
     v1.dedup();
-    let mut v2: Vec<Box<_>> = vec![box 1, box 2, box 3, box 3];
+    let mut v2: Vec<Box<_>> = vec![Box::new(1), Box::new(2), Box::new(3), Box::new(3)];
     v2.dedup();
     // If the boxed pointers were leaked or otherwise misused, valgrind
     // and/or rt should raise errors.
@@ -2126,6 +2126,15 @@ fn test_vec_cycle_wrapped() {
     c2.refs.v[1].set(Some(&c3));
     c3.refs.v[0].set(Some(&c1));
     c3.refs.v[1].set(Some(&c2));
+}
+
+#[test]
+fn test_zero_sized_capacity() {
+    for len in [0, 1, 2, 4, 8, 16, 32, 64, 128, 256] {
+        let v = Vec::<()>::with_capacity(len);
+        assert_eq!(v.len(), 0);
+        assert_eq!(v.capacity(), usize::MAX);
+    }
 }
 
 #[test]

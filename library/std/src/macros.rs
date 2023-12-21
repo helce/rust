@@ -62,9 +62,9 @@ macro_rules! panic {
 #[cfg_attr(not(test), rustc_diagnostic_item = "print_macro")]
 #[allow_internal_unstable(print_internals)]
 macro_rules! print {
-    ($($arg:tt)*) => {
-        $crate::io::_print($crate::format_args!($($arg)*))
-    };
+    ($($arg:tt)*) => {{
+        $crate::io::_print($crate::format_args!($($arg)*));
+    }};
 }
 
 /// Prints to the standard output, with a newline.
@@ -72,7 +72,7 @@ macro_rules! print {
 /// On all platforms, the newline is the LINE FEED character (`\n`/`U+000A`) alone
 /// (no additional CARRIAGE RETURN (`\r`/`U+000D`)).
 ///
-/// Use the [`format!`] syntax to write data to the standard output.
+/// This macro uses the same syntax as [`format!`], but writes to the standard output instead.
 /// See [`std::fmt`] for more information.
 ///
 /// Use `println!` only for the primary output of your program. Use
@@ -133,9 +133,9 @@ macro_rules! println {
 #[cfg_attr(not(test), rustc_diagnostic_item = "eprint_macro")]
 #[allow_internal_unstable(print_internals)]
 macro_rules! eprint {
-    ($($arg:tt)*) => {
-        $crate::io::_eprint($crate::format_args!($($arg)*))
-    };
+    ($($arg:tt)*) => {{
+        $crate::io::_eprint($crate::format_args!($($arg)*));
+    }};
 }
 
 /// Prints to the standard error, with a newline.

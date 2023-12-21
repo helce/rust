@@ -17,6 +17,7 @@ use rustc_middle::hir::place::ProjectionKind;
 use rustc_middle::mir::FakeReadCause;
 use rustc_middle::ty::{self, adjustment, AdtKind, Ty, TyCtxt};
 use rustc_target::abi::VariantIdx;
+use ty::BorrowKind::ImmBorrow;
 
 use crate::mem_categorization as mc;
 
@@ -69,7 +70,12 @@ pub trait Delegate<'tcx> {
     }
 
     /// The `place` should be a fake read because of specified `cause`.
-    fn fake_read(&mut self, place: Place<'tcx>, cause: FakeReadCause, diag_expr_id: hir::HirId);
+    fn fake_read(
+        &mut self,
+        place_with_id: &PlaceWithHirId<'tcx>,
+        cause: FakeReadCause,
+        diag_expr_id: hir::HirId,
+    );
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -327,7 +333,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                     };
 
                     self.delegate.fake_read(
-                        discr_place.place.clone(),
+                        &discr_place,
                         FakeReadCause::ForMatchedPlace(closure_def_id),
                         discr_place.hir_id,
                     );
@@ -431,7 +437,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                 self.consume_expr(base);
             }
 
-            hir::ExprKind::Closure(..) => {
+            hir::ExprKind::Closure { .. } => {
                 self.walk_captures(expr);
             }
 
@@ -617,16 +623,16 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
         };
 
         self.delegate.fake_read(
-            discr_place.place.clone(),
+            discr_place,
             FakeReadCause::ForMatchedPlace(closure_def_id),
             discr_place.hir_id,
         );
-        self.walk_pat(discr_place, arm.pat);
+        self.walk_pat(discr_place, arm.pat, arm.guard.is_some());
 
         if let Some(hir::Guard::If(e)) = arm.guard {
             self.consume_expr(e)
-        } else if let Some(hir::Guard::IfLet(_, ref e)) = arm.guard {
-            self.consume_expr(e)
+        } else if let Some(hir::Guard::IfLet(ref l)) = arm.guard {
+            self.consume_expr(l.init)
         }
 
         self.consume_expr(arm.body);
@@ -641,16 +647,21 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
         };
 
         self.delegate.fake_read(
-            discr_place.place.clone(),
+            discr_place,
             FakeReadCause::ForLet(closure_def_id),
             discr_place.hir_id,
         );
-        self.walk_pat(discr_place, pat);
+        self.walk_pat(discr_place, pat, false);
     }
 
     /// The core driver for walking a pattern
-    fn walk_pat(&mut self, discr_place: &PlaceWithHirId<'tcx>, pat: &hir::Pat<'_>) {
-        debug!("walk_pat(discr_place={:?}, pat={:?})", discr_place, pat);
+    fn walk_pat(
+        &mut self,
+        discr_place: &PlaceWithHirId<'tcx>,
+        pat: &hir::Pat<'_>,
+        has_guard: bool,
+    ) {
+        debug!("walk_pat(discr_place={:?}, pat={:?}, has_guard={:?})", discr_place, pat, has_guard);
 
         let tcx = self.tcx();
         let ExprUseVisitor { ref mc, body_owner: _, ref mut delegate } = *self;
@@ -669,6 +680,13 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                     let def = Res::Local(canonical_id);
                     if let Ok(ref binding_place) = mc.cat_res(pat.hir_id, pat.span, pat_ty, def) {
                         delegate.bind(binding_place, binding_place.hir_id);
+                    }
+
+                    // Subtle: MIR desugaring introduces immutable borrows for each pattern
+                    // binding when lowering pattern guards to ensure that the guard does not
+                    // modify the scrutinee.
+                    if has_guard {
+                        delegate.borrow(place, discr_place.hir_id, ImmBorrow);
                     }
 
                     // It is also a borrow or copy/move of the value being matched.
@@ -764,7 +782,11 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                         );
                     }
                 };
-                self.delegate.fake_read(fake_read.clone(), *cause, *hir_id);
+                self.delegate.fake_read(
+                    &PlaceWithHirId { place: fake_read.clone(), hir_id: *hir_id },
+                    *cause,
+                    *hir_id,
+                );
             }
         }
 

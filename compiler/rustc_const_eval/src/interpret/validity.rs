@@ -338,6 +338,10 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                         { "invalid drop function pointer in vtable (not pointing to a function)" },
                     err_ub!(InvalidVtableDropFn(..)) =>
                         { "invalid drop function pointer in vtable (function has incompatible signature)" },
+                    // Stacked Borrows errors can happen here, see https://github.com/rust-lang/miri/issues/2123.
+                    // (We assume there are no other MachineStop errors possible here.)
+                    InterpError::MachineStop(_) =>
+                        { "vtable pointer does not have permission to read drop function pointer" },
                 );
                 try_validation!(
                     self.ecx.read_size_and_align_from_vtable(vtable),
@@ -347,6 +351,10 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                     err_ub!(InvalidVtableAlignment(msg)) =>
                         { "invalid vtable: alignment {}", msg },
                     err_unsup!(ReadPointerAsBytes) => { "invalid size or align in vtable" },
+                    // Stacked Borrows errors can happen here, see https://github.com/rust-lang/miri/issues/2123.
+                    // (We assume there are no other MachineStop errors possible here.)
+                    InterpError::MachineStop(_) =>
+                        { "vtable pointer does not have permission to read size and alignment" },
                 );
                 // FIXME: More checks for the vtable.
             }
@@ -412,22 +420,27 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
             self.path,
             err_ub!(AlignmentCheckFailed { required, has }) =>
                 {
-                    "an unaligned {} (required {} byte alignment but found {})",
-                    kind,
+                    "an unaligned {kind} (required {} byte alignment but found {})",
                     required.bytes(),
                     has.bytes()
                 },
             err_ub!(DanglingIntPointer(0, _)) =>
-                { "a null {}", kind },
+                { "a null {kind}" },
             err_ub!(DanglingIntPointer(i, _)) =>
-                { "a dangling {} (address 0x{:x} is unallocated)", kind, i },
+                { "a dangling {kind} (address 0x{i:x} is unallocated)" },
             err_ub!(PointerOutOfBounds { .. }) =>
-                { "a dangling {} (going beyond the bounds of its allocation)", kind },
+                { "a dangling {kind} (going beyond the bounds of its allocation)" },
             // This cannot happen during const-eval (because interning already detects
             // dangling pointers), but it can happen in Miri.
             err_ub!(PointerUseAfterFree(..)) =>
-                { "a dangling {} (use-after-free)", kind },
+                { "a dangling {kind} (use-after-free)" },
         );
+        // Do not allow pointers to uninhabited types.
+        if place.layout.abi.is_uninhabited() {
+            throw_validation_failure!(self.path,
+                { "a {kind} pointing to uninhabited type {}", place.layout.ty }
+            )
+        }
         // Recursive checking
         if let Some(ref mut ref_tracking) = self.ref_tracking {
             // Proceed recursively even for ZST, no reason to skip them!
@@ -531,15 +544,23 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                 let value = self.read_scalar(value)?;
                 // NOTE: Keep this in sync with the array optimization for int/float
                 // types below!
-                if M::enforce_number_validity(self.ecx) {
-                    // Integers/floats with number validity: Must be scalar bits, pointers are dangerous.
+                if M::enforce_number_init(self.ecx) {
+                    try_validation!(
+                        value.check_init(),
+                        self.path,
+                        err_ub!(InvalidUninitBytes(..)) =>
+                            { "{:x}", value } expected { "initialized bytes" }
+                    );
+                }
+                // Always check for number provenance during CTFE validation, even if the machine
+                // internally temporarily accepts number provenance.
+                if self.ctfe_mode.is_some() || M::enforce_number_no_provenance(self.ecx) {
                     // As a special exception we *do* match on a `Scalar` here, since we truly want
                     // to know its underlying representation (and *not* cast it to an integer).
-                    let is_bits =
-                        value.check_init().map_or(false, |v| matches!(v, Scalar::Int(..)));
-                    if !is_bits {
+                    let is_ptr = value.check_init().map_or(false, |v| matches!(v, Scalar::Ptr(..)));
+                    if is_ptr {
                         throw_validation_failure!(self.path,
-                            { "{:x}", value } expected { "initialized plain (non-pointer) bytes" }
+                            { "{:x}", value } expected { "plain (non-pointer) bytes" }
                         )
                     }
                 }
@@ -646,7 +667,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
         let size = scalar_layout.size(self.ecx);
         let is_full_range = match scalar_layout {
             ScalarAbi::Initialized { .. } => {
-                if M::enforce_number_validity(self.ecx) {
+                if M::enforce_number_init(self.ecx) {
                     false // not "full" since uninit is not accepted
                 } else {
                     scalar_layout.is_always_valid(self.ecx)
@@ -905,10 +926,12 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
                     return Ok(());
                 };
 
-                let allow_uninit_and_ptr = !M::enforce_number_validity(self.ecx);
+                // Always check for number provenance during CTFE validation, even if the machine
+                // internally temporarily accepts number provenance.
                 match alloc.check_bytes(
                     alloc_range(Size::ZERO, size),
-                    allow_uninit_and_ptr,
+                    /*allow_uninit*/ !M::enforce_number_init(self.ecx),
+                    /*allow_ptr*/ !(self.ctfe_mode.is_some() || M::enforce_number_no_provenance(self.ecx)),
                 ) {
                     // In the happy case, we needn't check anything else.
                     Ok(()) => {}

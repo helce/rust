@@ -750,7 +750,7 @@ impl<K: DepKind> DepGraph<K> {
             dep_node
         );
 
-        if unlikely!(!side_effects.is_empty()) {
+        if !side_effects.is_empty() {
             self.emit_side_effects(tcx, data, dep_node_index, side_effects);
         }
 
@@ -842,7 +842,7 @@ impl<K: DepKind> DepGraph<K> {
         if let Some(data) = &self.data {
             data.current.encoder.steal().finish(profiler)
         } else {
-            Ok(())
+            Ok(0)
         }
     }
 
@@ -887,7 +887,7 @@ impl<K: DepKind> DepGraph<K> {
 pub struct WorkProduct {
     pub cgu_name: String,
     /// Saved file associated with this CGU.
-    pub saved_file: Option<String>,
+    pub saved_file: String,
 }
 
 // Index type for `DepNodeData`'s edges.

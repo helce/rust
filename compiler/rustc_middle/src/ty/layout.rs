@@ -2163,7 +2163,7 @@ impl<'tcx> SizeSkeleton<'tcx> {
         }
     }
 
-    pub fn same_size(self, other: SizeSkeleton<'_>) -> bool {
+    pub fn same_size(self, other: SizeSkeleton<'tcx>) -> bool {
         match (self, other) {
             (SizeSkeleton::Known(a), SizeSkeleton::Known(b)) => a == b,
             (SizeSkeleton::Pointer { tail: a, .. }, SizeSkeleton::Pointer { tail: b, .. }) => {
@@ -2888,6 +2888,14 @@ pub fn fn_can_unwind<'tcx>(tcx: TyCtxt<'tcx>, fn_def_id: Option<DefId>, abi: Spe
             return false;
         }
 
+        // With `-C panic=abort`, all non-FFI functions are required to not unwind.
+        //
+        // Note that this is true regardless ABI specified on the function -- a `extern "C-unwind"`
+        // function defined in Rust is also required to abort.
+        if tcx.sess.panic_strategy() == PanicStrategy::Abort && !tcx.is_foreign_item(did) {
+            return false;
+        }
+
         // With -Z panic-in-drop=abort, drop_in_place never unwinds.
         //
         // This is not part of `codegen_fn_attrs` as it can differ between crates
@@ -2963,7 +2971,7 @@ pub fn fn_can_unwind<'tcx>(tcx: TyCtxt<'tcx>, fn_def_id: Option<DefId>, abi: Spe
         | RustIntrinsic
         | PlatformIntrinsic
         | Unadjusted => false,
-        Rust | RustCall => tcx.sess.panic_strategy() == PanicStrategy::Unwind,
+        Rust | RustCall | RustCold => tcx.sess.panic_strategy() == PanicStrategy::Unwind,
     }
 }
 
@@ -2972,6 +2980,7 @@ pub fn conv_from_spec_abi(tcx: TyCtxt<'_>, abi: SpecAbi) -> Conv {
     use rustc_target::spec::abi::Abi::*;
     match tcx.sess.target.adjust_abi(abi) {
         RustIntrinsic | PlatformIntrinsic | Rust | RustCall => Conv::Rust,
+        RustCold => Conv::RustCold,
 
         // It's the ABI's job to select this, not ours.
         System { .. } => bug!("system abi should be selected elsewhere"),

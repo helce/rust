@@ -133,9 +133,11 @@ pub trait Machine<'mir, 'tcx>: Sized {
     /// Whether to enforce the validity invariant
     fn enforce_validity(ecx: &InterpCx<'mir, 'tcx, Self>) -> bool;
 
-    /// Whether to enforce validity (e.g., initialization and not having ptr provenance)
-    /// of integers and floats.
-    fn enforce_number_validity(ecx: &InterpCx<'mir, 'tcx, Self>) -> bool;
+    /// Whether to enforce integers and floats being initialized.
+    fn enforce_number_init(ecx: &InterpCx<'mir, 'tcx, Self>) -> bool;
+
+    /// Whether to enforce integers and floats not having provenance.
+    fn enforce_number_no_provenance(ecx: &InterpCx<'mir, 'tcx, Self>) -> bool;
 
     /// Whether function calls should be [ABI](Abi)-checked.
     fn enforce_abi(_ecx: &InterpCx<'mir, 'tcx, Self>) -> bool {
@@ -167,7 +169,8 @@ pub trait Machine<'mir, 'tcx>: Sized {
         instance: ty::Instance<'tcx>,
         abi: Abi,
         args: &[OpTy<'tcx, Self::PointerTag>],
-        ret: Option<(&PlaceTy<'tcx, Self::PointerTag>, mir::BasicBlock)>,
+        destination: &PlaceTy<'tcx, Self::PointerTag>,
+        target: Option<mir::BasicBlock>,
         unwind: StackPopUnwind,
     ) -> InterpResult<'tcx, Option<(&'mir mir::Body<'tcx>, ty::Instance<'tcx>)>>;
 
@@ -178,7 +181,8 @@ pub trait Machine<'mir, 'tcx>: Sized {
         fn_val: Self::ExtraFnVal,
         abi: Abi,
         args: &[OpTy<'tcx, Self::PointerTag>],
-        ret: Option<(&PlaceTy<'tcx, Self::PointerTag>, mir::BasicBlock)>,
+        destination: &PlaceTy<'tcx, Self::PointerTag>,
+        target: Option<mir::BasicBlock>,
         unwind: StackPopUnwind,
     ) -> InterpResult<'tcx>;
 
@@ -188,7 +192,8 @@ pub trait Machine<'mir, 'tcx>: Sized {
         ecx: &mut InterpCx<'mir, 'tcx, Self>,
         instance: ty::Instance<'tcx>,
         args: &[OpTy<'tcx, Self::PointerTag>],
-        ret: Option<(&PlaceTy<'tcx, Self::PointerTag>, mir::BasicBlock)>,
+        destination: &PlaceTy<'tcx, Self::PointerTag>,
+        target: Option<mir::BasicBlock>,
         unwind: StackPopUnwind,
     ) -> InterpResult<'tcx>;
 
@@ -289,11 +294,10 @@ pub trait Machine<'mir, 'tcx>: Sized {
     fn ptr_from_addr_cast(
         ecx: &InterpCx<'mir, 'tcx, Self>,
         addr: u64,
-    ) -> Pointer<Option<Self::PointerTag>>;
+    ) -> InterpResult<'tcx, Pointer<Option<Self::PointerTag>>>;
 
-    // FIXME: Transmuting an integer to a pointer should just always return a `None`
-    // provenance, but that causes problems with function pointers in Miri.
     /// Hook for returning a pointer from a transmute-like operation on an addr.
+    /// This is only needed to support Miri's (unsound) "allow-ptr-int-transmute" flag.
     fn ptr_from_addr_transmute(
         ecx: &InterpCx<'mir, 'tcx, Self>,
         addr: u64,
@@ -330,12 +334,14 @@ pub trait Machine<'mir, 'tcx>: Sized {
     /// allocation (because a copy had to be done to add tags or metadata), machine memory will
     /// cache the result. (This relies on `AllocMap::get_or` being able to add the
     /// owned allocation to the map even when the map is shared.)
+    ///
+    /// This must only fail if `alloc` contains relocations.
     fn init_allocation_extra<'b>(
         ecx: &InterpCx<'mir, 'tcx, Self>,
         id: AllocId,
         alloc: Cow<'b, Allocation>,
         kind: Option<MemoryKind<Self::MemoryKind>>,
-    ) -> Cow<'b, Allocation<Self::PointerTag, Self::AllocExtra>>;
+    ) -> InterpResult<'tcx, Cow<'b, Allocation<Self::PointerTag, Self::AllocExtra>>>;
 
     /// Hook for performing extra checks on a memory read access.
     ///
@@ -453,8 +459,13 @@ pub macro compile_time_machine(<$mir: lifetime, $tcx: lifetime>) {
     }
 
     #[inline(always)]
-    fn enforce_number_validity(_ecx: &InterpCx<$mir, $tcx, Self>) -> bool {
+    fn enforce_number_init(_ecx: &InterpCx<$mir, $tcx, Self>) -> bool {
         true
+    }
+
+    #[inline(always)]
+    fn enforce_number_no_provenance(_ecx: &InterpCx<$mir, $tcx, Self>) -> bool {
+        false
     }
 
     #[inline(always)]
@@ -463,7 +474,8 @@ pub macro compile_time_machine(<$mir: lifetime, $tcx: lifetime>) {
         fn_val: !,
         _abi: Abi,
         _args: &[OpTy<$tcx>],
-        _ret: Option<(&PlaceTy<$tcx>, mir::BasicBlock)>,
+        _destination: &PlaceTy<$tcx, Self::PointerTag>,
+        _target: Option<mir::BasicBlock>,
         _unwind: StackPopUnwind,
     ) -> InterpResult<$tcx> {
         match fn_val {}
@@ -475,9 +487,9 @@ pub macro compile_time_machine(<$mir: lifetime, $tcx: lifetime>) {
         _id: AllocId,
         alloc: Cow<'b, Allocation>,
         _kind: Option<MemoryKind<Self::MemoryKind>>,
-    ) -> Cow<'b, Allocation<Self::PointerTag>> {
+    ) -> InterpResult<$tcx, Cow<'b, Allocation<Self::PointerTag>>> {
         // We do not use a tag so we can just cheaply forward the allocation
-        alloc
+        Ok(alloc)
     }
 
     fn extern_static_base_pointer(
@@ -508,8 +520,10 @@ pub macro compile_time_machine(<$mir: lifetime, $tcx: lifetime>) {
     fn ptr_from_addr_cast(
         _ecx: &InterpCx<$mir, $tcx, Self>,
         addr: u64,
-    ) -> Pointer<Option<AllocId>> {
-        Pointer::new(None, Size::from_bytes(addr))
+    ) -> InterpResult<$tcx, Pointer<Option<AllocId>>> {
+        // Allow these casts, but make the pointer not dereferenceable.
+        // (I.e., they behave like transmutation.)
+        Ok(Pointer::new(None, Size::from_bytes(addr)))
     }
 
     #[inline(always)]

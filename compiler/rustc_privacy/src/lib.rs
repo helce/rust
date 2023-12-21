@@ -1,5 +1,4 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![feature(nll)]
 #![feature(control_flow_enum)]
 #![feature(try_blocks)]
 #![feature(associated_type_defaults)]
@@ -14,18 +13,17 @@ use rustc_errors::struct_span_err;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId, LocalDefIdSet, CRATE_DEF_ID};
-use rustc_hir::intravisit::{self, DeepVisitor, Visitor};
-use rustc_hir::{AssocItemKind, HirIdSet, Node, PatKind};
+use rustc_hir::intravisit::{self, Visitor};
+use rustc_hir::{AssocItemKind, HirIdSet, ItemId, Node, PatKind};
 use rustc_middle::bug;
 use rustc_middle::hir::nested_filter;
 use rustc_middle::middle::privacy::{AccessLevel, AccessLevels};
 use rustc_middle::span_bug;
 use rustc_middle::thir::abstract_const::Node as ACNode;
-use rustc_middle::ty::fold::TypeVisitor;
 use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::subst::InternalSubsts;
 use rustc_middle::ty::{self, Const, DefIdTree, GenericParamDefKind};
-use rustc_middle::ty::{TraitRef, Ty, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{TraitRef, Ty, TyCtxt, TypeFoldable, TypeSuperFoldable, TypeVisitor};
 use rustc_session::lint;
 use rustc_span::hygiene::Transparency;
 use rustc_span::symbol::{kw, Ident};
@@ -182,7 +180,8 @@ where
 
     fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<V::BreakTy> {
         let tcx = self.def_id_visitor.tcx();
-        // InternalSubsts are not visited here because they are visited below in `super_visit_with`.
+        // InternalSubsts are not visited here because they are visited below
+        // in `super_visit_with`.
         match *ty.kind() {
             ty::Adt(ty::AdtDef(Interned(&ty::AdtDefData { did: def_id, .. }, _)), ..)
             | ty::Foreign(def_id)
@@ -775,7 +774,14 @@ impl<'tcx> Visitor<'tcx> for EmbargoVisitor<'tcx> {
                         }
                         // Corner case: if the variant is reachable, but its
                         // enum is not, make the enum reachable as well.
-                        self.update(item.def_id, variant_level);
+                        self.reach(item.def_id, variant_level).ty();
+                    }
+                    if let Some(hir_id) = variant.data.ctor_hir_id() {
+                        let ctor_def_id = self.tcx.hir().local_def_id(hir_id);
+                        let ctor_level = self.get(ctor_def_id);
+                        if ctor_level.is_some() {
+                            self.reach(item.def_id, ctor_level).ty();
+                        }
                     }
                 }
             }
@@ -801,6 +807,13 @@ impl<'tcx> Visitor<'tcx> for EmbargoVisitor<'tcx> {
                         if field_level.is_some() {
                             self.reach(def_id, field_level).ty();
                         }
+                    }
+                }
+                if let Some(hir_id) = struct_def.ctor_hir_id() {
+                    let ctor_def_id = self.tcx.hir().local_def_id(hir_id);
+                    let ctor_level = self.get(ctor_def_id);
+                    if ctor_level.is_some() {
+                        self.reach(item.def_id, ctor_level).ty();
                     }
                 }
             }
@@ -1802,12 +1815,12 @@ impl<'tcx> DefIdVisitor<'tcx> for SearchInterfaceForPrivateItemsVisitor<'tcx> {
     }
 }
 
-struct PrivateItemsInPublicInterfacesVisitor<'tcx> {
+struct PrivateItemsInPublicInterfacesChecker<'tcx> {
     tcx: TyCtxt<'tcx>,
     old_error_set_ancestry: LocalDefIdSet,
 }
 
-impl<'tcx> PrivateItemsInPublicInterfacesVisitor<'tcx> {
+impl<'tcx> PrivateItemsInPublicInterfacesChecker<'tcx> {
     fn check(
         &self,
         def_id: LocalDefId,
@@ -1841,110 +1854,110 @@ impl<'tcx> PrivateItemsInPublicInterfacesVisitor<'tcx> {
             check.ty();
         }
     }
-}
 
-impl<'tcx> Visitor<'tcx> for PrivateItemsInPublicInterfacesVisitor<'tcx> {
-    type NestedFilter = nested_filter::OnlyBodies;
-
-    fn nested_visit_map(&mut self) -> Self::Map {
-        self.tcx.hir()
-    }
-
-    fn visit_item(&mut self, item: &'tcx hir::Item<'tcx>) {
+    pub fn check_item(&mut self, id: ItemId) {
         let tcx = self.tcx;
-        let item_visibility = tcx.visibility(item.def_id);
+        let item_visibility = tcx.visibility(id.def_id);
+        let def_kind = tcx.def_kind(id.def_id);
 
-        match item.kind {
-            // Crates are always public.
-            hir::ItemKind::ExternCrate(..) => {}
-            // All nested items are checked by `visit_item`.
-            hir::ItemKind::Mod(..) => {}
-            // Checked in resolve.
-            hir::ItemKind::Use(..) => {}
-            // No subitems.
-            hir::ItemKind::Macro(..) | hir::ItemKind::GlobalAsm(..) => {}
-            // Subitems of these items have inherited publicity.
-            hir::ItemKind::Const(..)
-            | hir::ItemKind::Static(..)
-            | hir::ItemKind::Fn(..)
-            | hir::ItemKind::TyAlias(..) => {
-                self.check(item.def_id, item_visibility).generics().predicates().ty();
+        match def_kind {
+            DefKind::Const | DefKind::Static(_) | DefKind::Fn | DefKind::TyAlias => {
+                self.check(id.def_id, item_visibility).generics().predicates().ty();
             }
-            hir::ItemKind::OpaqueTy(..) => {
+            DefKind::OpaqueTy => {
                 // `ty()` for opaque types is the underlying type,
                 // it's not a part of interface, so we skip it.
-                self.check(item.def_id, item_visibility).generics().bounds();
+                self.check(id.def_id, item_visibility).generics().bounds();
             }
-            hir::ItemKind::Trait(.., trait_item_refs) => {
-                self.check(item.def_id, item_visibility).generics().predicates();
+            DefKind::Trait => {
+                let item = tcx.hir().item(id);
+                if let hir::ItemKind::Trait(.., trait_item_refs) = item.kind {
+                    self.check(item.def_id, item_visibility).generics().predicates();
 
-                for trait_item_ref in trait_item_refs {
-                    self.check_assoc_item(
-                        trait_item_ref.id.def_id,
-                        trait_item_ref.kind,
-                        trait_item_ref.defaultness,
-                        item_visibility,
-                    );
+                    for trait_item_ref in trait_item_refs {
+                        self.check_assoc_item(
+                            trait_item_ref.id.def_id,
+                            trait_item_ref.kind,
+                            trait_item_ref.defaultness,
+                            item_visibility,
+                        );
 
-                    if let AssocItemKind::Type = trait_item_ref.kind {
-                        self.check(trait_item_ref.id.def_id, item_visibility).bounds();
+                        if let AssocItemKind::Type = trait_item_ref.kind {
+                            self.check(trait_item_ref.id.def_id, item_visibility).bounds();
+                        }
                     }
                 }
             }
-            hir::ItemKind::TraitAlias(..) => {
-                self.check(item.def_id, item_visibility).generics().predicates();
+            DefKind::TraitAlias => {
+                self.check(id.def_id, item_visibility).generics().predicates();
             }
-            hir::ItemKind::Enum(ref def, _) => {
-                self.check(item.def_id, item_visibility).generics().predicates();
+            DefKind::Enum => {
+                let item = tcx.hir().item(id);
+                if let hir::ItemKind::Enum(ref def, _) = item.kind {
+                    self.check(item.def_id, item_visibility).generics().predicates();
 
-                for variant in def.variants {
-                    for field in variant.data.fields() {
-                        self.check(self.tcx.hir().local_def_id(field.hir_id), item_visibility).ty();
+                    for variant in def.variants {
+                        for field in variant.data.fields() {
+                            self.check(self.tcx.hir().local_def_id(field.hir_id), item_visibility)
+                                .ty();
+                        }
                     }
                 }
             }
             // Subitems of foreign modules have their own publicity.
-            hir::ItemKind::ForeignMod { items, .. } => {
-                for foreign_item in items {
-                    let vis = tcx.visibility(foreign_item.id.def_id);
-                    self.check(foreign_item.id.def_id, vis).generics().predicates().ty();
+            DefKind::ForeignMod => {
+                let item = tcx.hir().item(id);
+                if let hir::ItemKind::ForeignMod { items, .. } = item.kind {
+                    for foreign_item in items {
+                        let vis = tcx.visibility(foreign_item.id.def_id);
+                        self.check(foreign_item.id.def_id, vis).generics().predicates().ty();
+                    }
                 }
             }
             // Subitems of structs and unions have their own publicity.
-            hir::ItemKind::Struct(ref struct_def, _) | hir::ItemKind::Union(ref struct_def, _) => {
-                self.check(item.def_id, item_visibility).generics().predicates();
+            DefKind::Struct | DefKind::Union => {
+                let item = tcx.hir().item(id);
+                if let hir::ItemKind::Struct(ref struct_def, _)
+                | hir::ItemKind::Union(ref struct_def, _) = item.kind
+                {
+                    self.check(item.def_id, item_visibility).generics().predicates();
 
-                for field in struct_def.fields() {
-                    let def_id = tcx.hir().local_def_id(field.hir_id);
-                    let field_visibility = tcx.visibility(def_id);
-                    self.check(def_id, min(item_visibility, field_visibility, tcx)).ty();
+                    for field in struct_def.fields() {
+                        let def_id = tcx.hir().local_def_id(field.hir_id);
+                        let field_visibility = tcx.visibility(def_id);
+                        self.check(def_id, min(item_visibility, field_visibility, tcx)).ty();
+                    }
                 }
             }
             // An inherent impl is public when its type is public
             // Subitems of inherent impls have their own publicity.
             // A trait impl is public when both its type and its trait are public
             // Subitems of trait impls have inherited publicity.
-            hir::ItemKind::Impl(ref impl_) => {
-                let impl_vis = ty::Visibility::of_impl(item.def_id, tcx, &Default::default());
-                // check that private components do not appear in the generics or predicates of inherent impls
-                // this check is intentionally NOT performed for impls of traits, per #90586
-                if impl_.of_trait.is_none() {
-                    self.check(item.def_id, impl_vis).generics().predicates();
-                }
-                for impl_item_ref in impl_.items {
-                    let impl_item_vis = if impl_.of_trait.is_none() {
-                        min(tcx.visibility(impl_item_ref.id.def_id), impl_vis, tcx)
-                    } else {
-                        impl_vis
-                    };
-                    self.check_assoc_item(
-                        impl_item_ref.id.def_id,
-                        impl_item_ref.kind,
-                        impl_item_ref.defaultness,
-                        impl_item_vis,
-                    );
+            DefKind::Impl => {
+                let item = tcx.hir().item(id);
+                if let hir::ItemKind::Impl(ref impl_) = item.kind {
+                    let impl_vis = ty::Visibility::of_impl(item.def_id, tcx, &Default::default());
+                    // check that private components do not appear in the generics or predicates of inherent impls
+                    // this check is intentionally NOT performed for impls of traits, per #90586
+                    if impl_.of_trait.is_none() {
+                        self.check(item.def_id, impl_vis).generics().predicates();
+                    }
+                    for impl_item_ref in impl_.items {
+                        let impl_item_vis = if impl_.of_trait.is_none() {
+                            min(tcx.visibility(impl_item_ref.id.def_id), impl_vis, tcx)
+                        } else {
+                            impl_vis
+                        };
+                        self.check_assoc_item(
+                            impl_item_ref.id.def_id,
+                            impl_item_ref.kind,
+                            impl_item_ref.defaultness,
+                            impl_item_vis,
+                        );
+                    }
                 }
             }
+            _ => {}
         }
     }
 }
@@ -1968,7 +1981,7 @@ fn visibility(tcx: TyCtxt<'_>, def_id: DefId) -> ty::Visibility {
             match tcx.hir().get(hir_id) {
                 // Unique types created for closures participate in type privacy checking.
                 // They have visibilities inherited from the module they are defined in.
-                Node::Expr(hir::Expr { kind: hir::ExprKind::Closure(..), .. })
+                Node::Expr(hir::Expr { kind: hir::ExprKind::Closure{..}, .. })
                 // - AST lowering creates dummy `use` items which don't
                 //   get their entries in the resolver's visibility table.
                 // - AST lowering also creates opaque type items with inherited visibilities.
@@ -2069,7 +2082,7 @@ fn check_private_in_public(tcx: TyCtxt<'_>, (): ()) {
     }
 
     // Check for private types and traits in public interfaces.
-    let mut visitor = PrivateItemsInPublicInterfacesVisitor {
+    let mut checker = PrivateItemsInPublicInterfacesChecker {
         tcx,
         // Only definition IDs are ever searched in `old_error_set_ancestry`,
         // so we can filter away all non-definition IDs at this point.
@@ -2078,5 +2091,8 @@ fn check_private_in_public(tcx: TyCtxt<'_>, (): ()) {
             .filter_map(|hir_id| tcx.hir().opt_local_def_id(hir_id))
             .collect(),
     };
-    tcx.hir().visit_all_item_likes(&mut DeepVisitor::new(&mut visitor));
+
+    for id in tcx.hir().items() {
+        checker.check_item(id);
+    }
 }

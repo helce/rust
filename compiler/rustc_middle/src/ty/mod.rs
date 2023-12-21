@@ -9,7 +9,9 @@
 //!
 //! ["The `ty` module: representing types"]: https://rustc-dev-guide.rust-lang.org/ty.html
 
-pub use self::fold::{FallibleTypeFolder, TypeFoldable, TypeFolder, TypeVisitor};
+pub use self::fold::{
+    FallibleTypeFolder, TypeFoldable, TypeFolder, TypeSuperFoldable, TypeVisitor,
+};
 pub use self::AssocItemContainer::*;
 pub use self::BorrowKind::*;
 pub use self::IntVarValue::*;
@@ -20,28 +22,30 @@ use crate::mir::{Body, GeneratorLayout};
 use crate::traits::{self, Reveal};
 use crate::ty;
 use crate::ty::fast_reject::SimplifiedType;
-use crate::ty::subst::{GenericArg, InternalSubsts, Subst, SubstsRef};
 use crate::ty::util::Discr;
 pub use adt::*;
 pub use assoc::*;
 pub use generics::*;
 use rustc_ast as ast;
+use rustc_ast::node_id::NodeMap;
 use rustc_attr as attr;
 use rustc_data_structures::fingerprint::Fingerprint;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
+use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_data_structures::intern::{Interned, WithStableHash};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::tagged_ptr::CopyTaggedPtr;
 use rustc_hir as hir;
-use rustc_hir::def::{CtorKind, CtorOf, DefKind, Res};
+use rustc_hir::def::{CtorKind, CtorOf, DefKind, LifetimeRes, Res};
 use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LocalDefIdMap};
 use rustc_hir::Node;
+use rustc_index::vec::IndexVec;
 use rustc_macros::HashStable;
 use rustc_query_system::ich::StableHashingContext;
-use rustc_session::cstore::CrateStoreDyn;
+use rustc_span::hygiene::MacroKind;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::Span;
-use rustc_target::abi::Align;
+use rustc_span::{ExpnId, Span};
+use rustc_target::abi::{Align, VariantIdx};
+pub use subst::*;
 pub use vtable::*;
 
 use std::fmt::Debug;
@@ -51,6 +55,8 @@ use std::{fmt, str};
 
 pub use crate::ty::diagnostics::*;
 pub use rustc_type_ir::InferTy::*;
+pub use rustc_type_ir::RegionKind::*;
+pub use rustc_type_ir::TyKind::*;
 pub use rustc_type_ir::*;
 
 pub use self::binding::BindingMode;
@@ -72,17 +78,17 @@ pub use self::context::{
 };
 pub use self::instance::{Instance, InstanceDef};
 pub use self::list::List;
+pub use self::parameterized::ParameterizedOverTcx;
+pub use self::rvalue_scopes::RvalueScopes;
 pub use self::sty::BoundRegionKind::*;
-pub use self::sty::RegionKind::*;
-pub use self::sty::TyKind::*;
 pub use self::sty::{
-    Binder, BoundRegion, BoundRegionKind, BoundTy, BoundTyKind, BoundVar, BoundVariableKind,
-    CanonicalPolyFnSig, ClosureSubsts, ClosureSubstsParts, ConstVid, EarlyBinder, EarlyBoundRegion,
-    ExistentialPredicate, ExistentialProjection, ExistentialTraitRef, FnSig, FreeRegion, GenSig,
-    GeneratorSubsts, GeneratorSubstsParts, InlineConstSubsts, InlineConstSubstsParts, ParamConst,
-    ParamTy, PolyExistentialProjection, PolyExistentialTraitRef, PolyFnSig, PolyGenSig,
-    PolyTraitRef, ProjectionTy, Region, RegionKind, RegionVid, TraitRef, TyKind, TypeAndMut,
-    UpvarSubsts, VarianceDiagInfo,
+    Article, Binder, BoundRegion, BoundRegionKind, BoundTy, BoundTyKind, BoundVar,
+    BoundVariableKind, CanonicalPolyFnSig, ClosureSubsts, ClosureSubstsParts, ConstVid,
+    EarlyBinder, EarlyBoundRegion, ExistentialPredicate, ExistentialProjection,
+    ExistentialTraitRef, FnSig, FreeRegion, GenSig, GeneratorSubsts, GeneratorSubstsParts,
+    InlineConstSubsts, InlineConstSubstsParts, ParamConst, ParamTy, PolyExistentialProjection,
+    PolyExistentialTraitRef, PolyFnSig, PolyGenSig, PolyTraitRef, ProjectionTy, Region, RegionKind,
+    RegionVid, TraitRef, TyKind, TypeAndMut, UpvarSubsts, VarianceDiagInfo,
 };
 pub use self::trait_def::TraitDef;
 
@@ -118,6 +124,8 @@ mod generics;
 mod impls_ty;
 mod instance;
 mod list;
+mod parameterized;
+mod rvalue_scopes;
 mod structural_impls;
 mod sty;
 
@@ -127,14 +135,16 @@ pub type RegisteredTools = FxHashSet<Ident>;
 
 #[derive(Debug)]
 pub struct ResolverOutputs {
-    pub definitions: rustc_hir::definitions::Definitions,
-    pub cstore: Box<CrateStoreDyn>,
     pub visibilities: FxHashMap<LocalDefId, Visibility>,
     /// This field is used to decide whether we should make `PRIVATE_IN_PUBLIC` a hard error.
     pub has_pub_restricted: bool,
+    /// Item with a given `LocalDefId` was defined during macro expansion with ID `ExpnId`.
+    pub expn_that_defined: FxHashMap<LocalDefId, ExpnId>,
+    /// Reference span for definitions.
+    pub source_span: IndexVec<LocalDefId, Span>,
     pub access_levels: AccessLevels,
     pub extern_crate_map: FxHashMap<LocalDefId, CrateNum>,
-    pub maybe_unused_trait_imports: FxHashSet<LocalDefId>,
+    pub maybe_unused_trait_imports: FxIndexSet<LocalDefId>,
     pub maybe_unused_extern_crates: Vec<(LocalDefId, Span)>,
     pub reexport_map: FxHashMap<LocalDefId, Vec<ModChild>>,
     pub glob_map: FxHashMap<LocalDefId, FxHashSet<Symbol>>,
@@ -150,6 +160,34 @@ pub struct ResolverOutputs {
     /// exist under `std`. For example, wrote `str::from_utf8` instead of `std::str::from_utf8`.
     pub confused_type_with_std_module: FxHashMap<Span, Span>,
     pub registered_tools: RegisteredTools,
+}
+
+/// Resolutions that should only be used for lowering.
+/// This struct is meant to be consumed by lowering.
+#[derive(Debug)]
+pub struct ResolverAstLowering {
+    pub legacy_const_generic_args: FxHashMap<DefId, Option<Vec<usize>>>,
+
+    /// Resolutions for nodes that have a single resolution.
+    pub partial_res_map: NodeMap<hir::def::PartialRes>,
+    /// Resolutions for import nodes, which have multiple resolutions in different namespaces.
+    pub import_res_map: NodeMap<hir::def::PerNS<Option<Res<ast::NodeId>>>>,
+    /// Resolutions for labels (node IDs of their corresponding blocks or loops).
+    pub label_res_map: NodeMap<ast::NodeId>,
+    /// Resolutions for lifetimes.
+    pub lifetimes_res_map: NodeMap<LifetimeRes>,
+    /// Lifetime parameters that lowering will have to introduce.
+    pub extra_lifetime_params_map: NodeMap<Vec<(Ident, ast::NodeId, LifetimeRes)>>,
+
+    pub next_node_id: ast::NodeId,
+
+    pub node_id_to_def_id: FxHashMap<ast::NodeId, LocalDefId>,
+    pub def_id_to_node_id: IndexVec<LocalDefId, ast::NodeId>,
+
+    pub trait_map: NodeMap<Vec<hir::TraitCandidate>>,
+    /// A small map keeping true kinds of built-in macros that appear to be fn-like on
+    /// the surface (`macro` items in libcore), but are actually attributes or derives.
+    pub builtin_macro_kinds: FxHashMap<LocalDefId, MacroKind>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -227,7 +265,7 @@ impl fmt::Display for ImplPolarity {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Copy, Hash, TyEncodable, TyDecodable, HashStable)]
+#[derive(Clone, Debug, PartialEq, Eq, Copy, Hash, Encodable, Decodable, HashStable)]
 pub enum Visibility {
     /// Visible everywhere (including in other crates).
     Public,
@@ -409,7 +447,7 @@ pub struct CReaderCacheKey {
 ///   of the relevant methods.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 #[allow(rustc::usage_of_ty_tykind)]
-crate struct TyS<'tcx> {
+pub(crate) struct TyS<'tcx> {
     /// This field shouldn't be used directly and may be removed in the future.
     /// Use `Ty::kind()` instead.
     kind: TyKind<'tcx>,
@@ -459,16 +497,18 @@ static_assert_size!(WithStableHash<TyS<'_>>, 56);
 #[rustc_pass_by_value]
 pub struct Ty<'tcx>(Interned<'tcx, WithStableHash<TyS<'tcx>>>);
 
-// Statics only used for internal testing.
-pub static BOOL_TY: Ty<'static> = Ty(Interned::new_unchecked(&WithStableHash {
-    internee: BOOL_TYS,
-    stable_hash: Fingerprint::ZERO,
-}));
-const BOOL_TYS: TyS<'static> = TyS {
-    kind: ty::Bool,
-    flags: TypeFlags::empty(),
-    outer_exclusive_binder: DebruijnIndex::from_usize(0),
-};
+impl<'tcx> TyCtxt<'tcx> {
+    /// A "bool" type used in rustc_mir_transform unit tests when we
+    /// have not spun up a TyCtxt.
+    pub const BOOL_TY_FOR_UNIT_TESTING: Ty<'tcx> = Ty(Interned::new_unchecked(&WithStableHash {
+        internee: TyS {
+            kind: ty::Bool,
+            flags: TypeFlags::empty(),
+            outer_exclusive_binder: DebruijnIndex::from_usize(0),
+        },
+        stable_hash: Fingerprint::ZERO,
+    }));
+}
 
 impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for TyS<'tcx> {
     #[inline]
@@ -500,7 +540,7 @@ impl ty::EarlyBoundRegion {
 /// See comments on `TyS`, which apply here too (albeit for
 /// `PredicateS`/`Predicate` rather than `TyS`/`Ty`).
 #[derive(Debug)]
-crate struct PredicateS<'tcx> {
+pub(crate) struct PredicateS<'tcx> {
     kind: Binder<'tcx, PredicateKind<'tcx>>,
     flags: TypeFlags,
     /// See the comment for the corresponding field of [TyS].
@@ -764,7 +804,7 @@ pub type PolyTraitPredicate<'tcx> = ty::Binder<'tcx, TraitPredicate<'tcx>>;
 
 impl<'tcx> TraitPredicate<'tcx> {
     pub fn remap_constness(&mut self, tcx: TyCtxt<'tcx>, param_env: &mut ParamEnv<'tcx>) {
-        if unlikely!(Some(self.trait_ref.def_id) == tcx.lang_items().drop_trait()) {
+        if std::intrinsics::unlikely(Some(self.trait_ref.def_id) == tcx.lang_items().drop_trait()) {
             // remap without changing constness of this predicate.
             // this is because `T: ~const Drop` has a different meaning to `T: Drop`
             // FIXME(fee1-dead): remove this logic after beta bump
@@ -1122,83 +1162,6 @@ impl<'tcx> OpaqueHiddenType<'tcx> {
     }
 }
 
-rustc_index::newtype_index! {
-    /// "Universes" are used during type- and trait-checking in the
-    /// presence of `for<..>` binders to control what sets of names are
-    /// visible. Universes are arranged into a tree: the root universe
-    /// contains names that are always visible. Each child then adds a new
-    /// set of names that are visible, in addition to those of its parent.
-    /// We say that the child universe "extends" the parent universe with
-    /// new names.
-    ///
-    /// To make this more concrete, consider this program:
-    ///
-    /// ```ignore (illustrative)
-    /// struct Foo { }
-    /// fn bar<T>(x: T) {
-    ///   let y: for<'a> fn(&'a u8, Foo) = ...;
-    /// }
-    /// ```
-    ///
-    /// The struct name `Foo` is in the root universe U0. But the type
-    /// parameter `T`, introduced on `bar`, is in an extended universe U1
-    /// -- i.e., within `bar`, we can name both `T` and `Foo`, but outside
-    /// of `bar`, we cannot name `T`. Then, within the type of `y`, the
-    /// region `'a` is in a universe U2 that extends U1, because we can
-    /// name it inside the fn type but not outside.
-    ///
-    /// Universes are used to do type- and trait-checking around these
-    /// "forall" binders (also called **universal quantification**). The
-    /// idea is that when, in the body of `bar`, we refer to `T` as a
-    /// type, we aren't referring to any type in particular, but rather a
-    /// kind of "fresh" type that is distinct from all other types we have
-    /// actually declared. This is called a **placeholder** type, and we
-    /// use universes to talk about this. In other words, a type name in
-    /// universe 0 always corresponds to some "ground" type that the user
-    /// declared, but a type name in a non-zero universe is a placeholder
-    /// type -- an idealized representative of "types in general" that we
-    /// use for checking generic functions.
-    pub struct UniverseIndex {
-        derive [HashStable]
-        DEBUG_FORMAT = "U{}",
-    }
-}
-
-impl UniverseIndex {
-    pub const ROOT: UniverseIndex = UniverseIndex::from_u32(0);
-
-    /// Returns the "next" universe index in order -- this new index
-    /// is considered to extend all previous universes. This
-    /// corresponds to entering a `forall` quantifier. So, for
-    /// example, suppose we have this type in universe `U`:
-    ///
-    /// ```ignore (illustrative)
-    /// for<'a> fn(&'a u32)
-    /// ```
-    ///
-    /// Once we "enter" into this `for<'a>` quantifier, we are in a
-    /// new universe that extends `U` -- in this new universe, we can
-    /// name the region `'a`, but that region was not nameable from
-    /// `U` because it was not in scope there.
-    pub fn next_universe(self) -> UniverseIndex {
-        UniverseIndex::from_u32(self.private.checked_add(1).unwrap())
-    }
-
-    /// Returns `true` if `self` can name a name from `other` -- in other words,
-    /// if the set of names in `self` is a superset of those in
-    /// `other` (`self >= other`).
-    pub fn can_name(self, other: UniverseIndex) -> bool {
-        self.private >= other.private
-    }
-
-    /// Returns `true` if `self` cannot name some names from `other` -- in other
-    /// words, if the set of names in `self` is a strict subset of
-    /// those in `other` (`self < other`).
-    pub fn cannot_name(self, other: UniverseIndex) -> bool {
-        self.private < other.private
-    }
-}
-
 /// The "placeholder index" fully defines a placeholder region, type, or const. Placeholders are
 /// identified by both a universe, as well as a name residing within that universe. Distinct bound
 /// regions/types/consts within the same universe simply have an unknown relationship to one
@@ -1429,7 +1392,7 @@ impl<'a, 'tcx> HashStable<StableHashingContext<'a>> for ParamEnv<'tcx> {
 }
 
 impl<'tcx> TypeFoldable<'tcx> for ParamEnv<'tcx> {
-    fn try_super_fold_with<F: ty::fold::FallibleTypeFolder<'tcx>>(
+    fn try_fold_with<F: ty::fold::FallibleTypeFolder<'tcx>>(
         self,
         folder: &mut F,
     ) -> Result<Self, F::Error> {
@@ -1440,7 +1403,7 @@ impl<'tcx> TypeFoldable<'tcx> for ParamEnv<'tcx> {
         ))
     }
 
-    fn super_visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> ControlFlow<V::BreakTy> {
+    fn visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> ControlFlow<V::BreakTy> {
         self.caller_bounds().visit_with(visitor)?;
         self.reveal().visit_with(visitor)?;
         self.constness().visit_with(visitor)
@@ -1629,7 +1592,7 @@ where
     }
 }
 
-#[derive(Copy, Clone, Debug, HashStable)]
+#[derive(Copy, Clone, Debug, HashStable, Encodable, Decodable)]
 pub struct Destructor {
     /// The `DefId` of the destructor method
     pub did: DefId,
@@ -1996,7 +1959,7 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     /// Look up the name of a definition across crates. This does not look at HIR.
-    fn opt_item_name(self, def_id: DefId) -> Option<Symbol> {
+    pub fn opt_item_name(self, def_id: DefId) -> Option<Symbol> {
         if let Some(cnum) = def_id.as_crate_root() {
             Some(self.crate_name(cnum))
         } else {
@@ -2154,22 +2117,28 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     /// Returns the possibly-auto-generated MIR of a `(DefId, Subst)` pair.
+    #[instrument(skip(self), level = "debug")]
     pub fn instance_mir(self, instance: ty::InstanceDef<'tcx>) -> &'tcx Body<'tcx> {
         match instance {
-            ty::InstanceDef::Item(def) => match self.def_kind(def.did) {
-                DefKind::Const
-                | DefKind::Static(..)
-                | DefKind::AssocConst
-                | DefKind::Ctor(..)
-                | DefKind::AnonConst
-                | DefKind::InlineConst => self.mir_for_ctfe_opt_const_arg(def),
-                // If the caller wants `mir_for_ctfe` of a function they should not be using
-                // `instance_mir`, so we'll assume const fn also wants the optimized version.
-                _ => {
-                    assert_eq!(def.const_param_did, None);
-                    self.optimized_mir(def.did)
+            ty::InstanceDef::Item(def) => {
+                debug!("calling def_kind on def: {:?}", def);
+                let def_kind = self.def_kind(def.did);
+                debug!("returned from def_kind: {:?}", def_kind);
+                match def_kind {
+                    DefKind::Const
+                    | DefKind::Static(..)
+                    | DefKind::AssocConst
+                    | DefKind::Ctor(..)
+                    | DefKind::AnonConst
+                    | DefKind::InlineConst => self.mir_for_ctfe_opt_const_arg(def),
+                    // If the caller wants `mir_for_ctfe` of a function they should not be using
+                    // `instance_mir`, so we'll assume const fn also wants the optimized version.
+                    _ => {
+                        assert_eq!(def.const_param_did, None);
+                        self.optimized_mir(def.did)
+                    }
                 }
-            },
+            }
             ty::InstanceDef::VtableShim(..)
             | ty::InstanceDef::ReifyShim(..)
             | ty::InstanceDef::Intrinsic(..)
@@ -2296,7 +2265,12 @@ impl<'tcx> TyCtxt<'tcx> {
     #[inline]
     pub fn is_const_fn_raw(self, def_id: DefId) -> bool {
         matches!(self.def_kind(def_id), DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(..))
-            && self.impl_constness(def_id) == hir::Constness::Const
+            && self.constness(def_id) == hir::Constness::Const
+    }
+
+    #[inline]
+    pub fn is_const_default_method(self, def_id: DefId) -> bool {
+        matches!(self.trait_of_item(def_id), Some(trait_id) if self.has_attr(trait_id, sym::const_trait))
     }
 }
 
@@ -2434,4 +2408,11 @@ pub struct FoundRelationships {
     /// This is true if we identified that this Ty (`?T`) is found in a `<_ as
     /// _>::AssocType = ?T`
     pub output: bool,
+}
+
+/// The constituent parts of a type level constant of kind ADT or array.
+#[derive(Copy, Clone, Debug, HashStable)]
+pub struct DestructuredConst<'tcx> {
+    pub variant: Option<VariantIdx>,
+    pub fields: &'tcx [ty::Const<'tcx>],
 }

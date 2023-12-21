@@ -354,14 +354,14 @@ fn fat_lto(
     Ok(LtoModuleCodegen::Fat { module, _serialized_bitcode: serialized_bitcode })
 }
 
-crate struct Linker<'a>(&'a mut llvm::Linker<'a>);
+pub(crate) struct Linker<'a>(&'a mut llvm::Linker<'a>);
 
 impl<'a> Linker<'a> {
-    crate fn new(llmod: &'a llvm::Module) -> Self {
+    pub(crate) fn new(llmod: &'a llvm::Module) -> Self {
         unsafe { Linker(llvm::LLVMRustLinkerNew(llmod)) }
     }
 
-    crate fn add(&mut self, bytecode: &[u8]) -> Result<(), ()> {
+    pub(crate) fn add(&mut self, bytecode: &[u8]) -> Result<(), ()> {
         unsafe {
             if llvm::LLVMRustLinkerAdd(
                 self.0,
@@ -586,9 +586,21 @@ pub(crate) fn run_pass_manager(
     // LTO-specific optimization passes that LLVM provides.
     //
     // This code is based off the code found in llvm's LTO code generator:
-    //      tools/lto/LTOCodeGenerator.cpp
+    //      llvm/lib/LTO/LTOCodeGenerator.cpp
     debug!("running the pass manager");
     unsafe {
+        if !llvm::LLVMRustHasModuleFlag(
+            module.module_llvm.llmod(),
+            "LTOPostLink".as_ptr().cast(),
+            11,
+        ) {
+            llvm::LLVMRustAddModuleFlag(
+                module.module_llvm.llmod(),
+                llvm::LLVMModFlagBehavior::Error,
+                "LTOPostLink\0".as_ptr().cast(),
+                1,
+            );
+        }
         if llvm_util::should_use_new_llvm_pass_manager(
             &config.new_llvm_pass_manager,
             &cgcx.target_arch,

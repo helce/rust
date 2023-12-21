@@ -3,8 +3,9 @@ use std::fmt::Write;
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::io::{self, BufReader};
-use std::lazy::SyncLazy as Lazy;
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
+use std::sync::LazyLock as Lazy;
 
 use itertools::Itertools;
 use rustc_data_structures::flock;
@@ -121,11 +122,13 @@ impl Context<'_> {
         if minify {
             let contents = contents.as_ref();
             let contents = if resource.extension() == Some(OsStr::new("css")) {
-                minifier::css::minify(contents).map_err(|e| {
-                    Error::new(format!("failed to minify CSS file: {}", e), resource.path(self))
-                })?
+                minifier::css::minify(contents)
+                    .map_err(|e| {
+                        Error::new(format!("failed to minify CSS file: {}", e), resource.path(self))
+                    })?
+                    .to_string()
             } else {
-                minifier::js::minify(contents)
+                minifier::js::minify(contents).to_string()
             };
             self.write_shared(resource, contents, emit)
         } else {
@@ -135,7 +138,7 @@ impl Context<'_> {
 }
 
 pub(super) fn write_shared(
-    cx: &Context<'_>,
+    cx: &mut Context<'_>,
     krate: &Crate,
     search_index: String,
     options: &RenderOptions,
@@ -238,7 +241,6 @@ pub(super) fn write_shared(
         write_toolchain("favicon-16x16.png", static_files::RUST_FAVICON_PNG_16)?;
         write_toolchain("favicon-32x32.png", static_files::RUST_FAVICON_PNG_32)?;
     }
-    write_toolchain("brush.svg", static_files::BRUSH_SVG)?;
     write_toolchain("wheel.svg", static_files::WHEEL_SVG)?;
     write_toolchain("clipboard.svg", static_files::CLIPBOARD_SVG)?;
     write_toolchain("down-arrow.svg", static_files::DOWN_ARROW_SVG)?;
@@ -439,7 +441,13 @@ pub(super) fn write_shared(
     write_crate("search-index.js", &|| {
         let mut v = String::from("var searchIndex = JSON.parse('{\\\n");
         v.push_str(&all_indexes.join(",\\\n"));
-        v.push_str("\\\n}');\nif (window.initSearch) {window.initSearch(searchIndex)};");
+        v.push_str(
+            r#"\
+}');
+if (typeof window !== 'undefined' && window.initSearch) {window.initSearch(searchIndex)};
+if (typeof exports !== 'undefined') {exports.searchIndex = searchIndex};
+"#,
+        );
         Ok(v.into_bytes())
     })?;
 
@@ -457,17 +465,16 @@ pub(super) fn write_shared(
             crate::markdown::render(&index_page, md_opts, cx.shared.edition())
                 .map_err(|e| Error::new(e, &index_page))?;
         } else {
+            let shared = Rc::clone(&cx.shared);
             let dst = cx.dst.join("index.html");
             let page = layout::Page {
                 title: "Index of crates",
                 css_class: "mod",
                 root_path: "./",
-                static_root_path: cx.shared.static_root_path.as_deref(),
+                static_root_path: shared.static_root_path.as_deref(),
                 description: "List of crates",
                 keywords: BASIC_KEYWORDS,
-                resource_suffix: &cx.shared.resource_suffix,
-                extra_scripts: &[],
-                static_extra_scripts: &[],
+                resource_suffix: &shared.resource_suffix,
             };
 
             let content = format!(
@@ -485,8 +492,8 @@ pub(super) fn write_shared(
                     })
                     .collect::<String>()
             );
-            let v = layout::render(&cx.shared.layout, &page, "", content, &cx.shared.style_files);
-            cx.shared.fs.write(dst, v)?;
+            let v = layout::render(&shared.layout, &page, "", content, &shared.style_files);
+            shared.fs.write(dst, v)?;
         }
     }
 

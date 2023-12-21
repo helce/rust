@@ -60,7 +60,7 @@ fn eval_body_using_ecx<'mir, 'tcx>(
     ecx.push_stack_frame(
         cid.instance,
         body,
-        Some(&ret.into()),
+        &ret.into(),
         StackPopCleanup::Root { cleanup: false },
     )?;
 
@@ -135,7 +135,7 @@ pub(super) fn op_to_const<'tcx>(
     } else {
         // It is guaranteed that any non-slice scalar pair is actually ByRef here.
         // When we come back from raw const eval, we are always by-ref. The only way our op here is
-        // by-val is if we are in destructure_const, i.e., if this is (a field of) something that we
+        // by-val is if we are in destructure_mir_constant, i.e., if this is (a field of) something that we
         // "tried to make immediate" before. We wouldn't do that for non-slice scalar pairs or
         // structs containing such.
         op.try_as_mplace()
@@ -196,7 +196,7 @@ pub(super) fn op_to_const<'tcx>(
 }
 
 #[instrument(skip(tcx), level = "debug")]
-fn turn_into_const_value<'tcx>(
+pub(crate) fn turn_into_const_value<'tcx>(
     tcx: TyCtxt<'tcx>,
     constant: ConstAlloc<'tcx>,
     key: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>,
@@ -222,6 +222,7 @@ fn turn_into_const_value<'tcx>(
     const_val
 }
 
+#[instrument(skip(tcx), level = "debug")]
 pub fn eval_to_const_value_raw_provider<'tcx>(
     tcx: TyCtxt<'tcx>,
     key: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>,
@@ -256,6 +257,7 @@ pub fn eval_to_const_value_raw_provider<'tcx>(
     tcx.eval_to_allocation_raw(key).map(|val| turn_into_const_value(tcx, val, key))
 }
 
+#[instrument(skip(tcx), level = "debug")]
 pub fn eval_to_allocation_raw_provider<'tcx>(
     tcx: TyCtxt<'tcx>,
     key: ty::ParamEnvAnd<'tcx, GlobalId<'tcx>>,

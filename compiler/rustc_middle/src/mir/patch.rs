@@ -166,11 +166,8 @@ impl<'tcx> MirPatch<'tcx> {
             // get terminator's targets and apply the statement to all of them.
             if loc.statement_index > body[loc.block].statements.len() {
                 let term = body[loc.block].terminator();
-                let successors = term.successors().clone();
-
-                for i in successors {
-                    stmts_and_targets
-                        .push((Statement { source_info, kind: stmt.clone() }, i.clone()));
+                for i in term.successors() {
+                    stmts_and_targets.push((Statement { source_info, kind: stmt.clone() }, i));
                 }
                 delta += 1;
                 continue;
@@ -194,7 +191,7 @@ impl<'tcx> MirPatch<'tcx> {
         }
     }
 
-    pub fn source_info_for_location(&self, body: &Body<'_>, loc: Location) -> SourceInfo {
+    pub fn source_info_for_location(&self, body: &Body<'tcx>, loc: Location) -> SourceInfo {
         let data = match loc.block.index().checked_sub(body.basic_blocks().len()) {
             Some(new) => &self.new_blocks[new],
             None => &body[loc.block],

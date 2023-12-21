@@ -1,27 +1,34 @@
 use crate::build;
+pub(crate) use crate::build::expr::as_constant::lit_to_mir_constant;
 use crate::build::expr::as_place::PlaceBuilder;
 use crate::build::scope::DropKind;
 use crate::thir::pattern::pat_from_hir;
+use rustc_apfloat::ieee::{Double, Single};
+use rustc_apfloat::Float;
+use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::lang_items::LangItem;
-use rustc_hir::{GeneratorKind, HirIdMap, Node};
+use rustc_hir::{GeneratorKind, Node};
 use rustc_index::vec::{Idx, IndexVec};
 use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
 use rustc_middle::hir::place::PlaceBase as HirPlaceBase;
 use rustc_middle::middle::region;
+use rustc_middle::mir::interpret::ConstValue;
+use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::mir::*;
-use rustc_middle::thir::{BindingMode, Expr, ExprId, LintLevel, PatKind, Thir};
+use rustc_middle::thir::{BindingMode, Expr, ExprId, LintLevel, LocalVarId, PatKind, Thir};
 use rustc_middle::ty::subst::Subst;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable, TypeckResults};
 use rustc_span::symbol::sym;
 use rustc_span::Span;
+use rustc_span::Symbol;
 use rustc_target::spec::abi::Abi;
 
 use super::lints;
 
-crate fn mir_built<'tcx>(
+pub(crate) fn mir_built<'tcx>(
     tcx: TyCtxt<'tcx>,
     def: ty::WithOptConstParam<LocalDefId>,
 ) -> &'tcx rustc_data_structures::steal::Steal<Body<'tcx>> {
@@ -61,8 +68,8 @@ fn mir_build(tcx: TyCtxt<'_>, def: ty::WithOptConstParam<LocalDefId>) -> Body<'_
 
     // Figure out what primary body this item has.
     let (body_id, return_ty_span, span_with_body) = match tcx.hir().get(id) {
-        Node::Expr(hir::Expr { kind: hir::ExprKind::Closure(_, decl, body_id, _, _), .. }) => {
-            (*body_id, decl.output.span(), None)
+        Node::Expr(hir::Expr { kind: hir::ExprKind::Closure { fn_decl, body, .. }, .. }) => {
+            (*body, fn_decl.output.span(), None)
         }
         Node::Item(hir::Item {
             kind: hir::ItemKind::Fn(hir::FnSig { decl, .. }, _, body_id),
@@ -389,7 +396,7 @@ struct Builder<'a, 'tcx> {
 
     /// Maps `HirId`s of variable bindings to the `Local`s created for them.
     /// (A match binding can have two locals; the 2nd is for the arm's guard.)
-    var_indices: HirIdMap<LocalsForNode>,
+    var_indices: FxHashMap<LocalVarId, LocalsForNode>,
     local_decls: IndexVec<Local, LocalDecl<'tcx>>,
     canonical_user_type_annotations: ty::CanonicalUserTypeAnnotations<'tcx>,
     upvar_mutbls: Vec<Mutability>,
@@ -399,11 +406,11 @@ struct Builder<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> Builder<'a, 'tcx> {
-    fn is_bound_var_in_guard(&self, id: hir::HirId) -> bool {
+    fn is_bound_var_in_guard(&self, id: LocalVarId) -> bool {
         self.guard_context.iter().any(|frame| frame.locals.iter().any(|local| local.id == id))
     }
 
-    fn var_local_id(&self, id: hir::HirId, for_guard: ForGuard) -> Local {
+    fn var_local_id(&self, id: LocalVarId, for_guard: ForGuard) -> Local {
         self.var_indices[&id].local_id(for_guard)
     }
 }
@@ -487,11 +494,11 @@ enum LocalsForNode {
 
 #[derive(Debug)]
 struct GuardFrameLocal {
-    id: hir::HirId,
+    id: LocalVarId,
 }
 
 impl GuardFrameLocal {
-    fn new(id: hir::HirId, _binding_mode: BindingMode) -> Self {
+    fn new(id: LocalVarId, _binding_mode: BindingMode) -> Self {
         GuardFrameLocal { id }
     }
 }
@@ -1076,6 +1083,70 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 self.unit_temp = Some(tmp);
                 tmp
             }
+        }
+    }
+}
+
+fn parse_float_into_constval<'tcx>(
+    num: Symbol,
+    float_ty: ty::FloatTy,
+    neg: bool,
+) -> Option<ConstValue<'tcx>> {
+    parse_float_into_scalar(num, float_ty, neg).map(ConstValue::Scalar)
+}
+
+pub(crate) fn parse_float_into_scalar(
+    num: Symbol,
+    float_ty: ty::FloatTy,
+    neg: bool,
+) -> Option<Scalar> {
+    let num = num.as_str();
+    match float_ty {
+        ty::FloatTy::F32 => {
+            let Ok(rust_f) = num.parse::<f32>() else { return None };
+            let mut f = num.parse::<Single>().unwrap_or_else(|e| {
+                panic!("apfloat::ieee::Single failed to parse `{}`: {:?}", num, e)
+            });
+
+            assert!(
+                u128::from(rust_f.to_bits()) == f.to_bits(),
+                "apfloat::ieee::Single gave different result for `{}`: \
+                 {}({:#x}) vs Rust's {}({:#x})",
+                rust_f,
+                f,
+                f.to_bits(),
+                Single::from_bits(rust_f.to_bits().into()),
+                rust_f.to_bits()
+            );
+
+            if neg {
+                f = -f;
+            }
+
+            Some(Scalar::from_f32(f))
+        }
+        ty::FloatTy::F64 => {
+            let Ok(rust_f) = num.parse::<f64>() else { return None };
+            let mut f = num.parse::<Double>().unwrap_or_else(|e| {
+                panic!("apfloat::ieee::Double failed to parse `{}`: {:?}", num, e)
+            });
+
+            assert!(
+                u128::from(rust_f.to_bits()) == f.to_bits(),
+                "apfloat::ieee::Double gave different result for `{}`: \
+                 {}({:#x}) vs Rust's {}({:#x})",
+                rust_f,
+                f,
+                f.to_bits(),
+                Double::from_bits(rust_f.to_bits().into()),
+                rust_f.to_bits()
+            );
+
+            if neg {
+                f = -f;
+            }
+
+            Some(Scalar::from_f64(f))
         }
     }
 }

@@ -7,6 +7,7 @@
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "dragonfly",
+    target_os = "fuchsia",
 )))]
 
 use crate::cell::UnsafeCell;
@@ -115,7 +116,7 @@ impl Parker {
                 target_os = "redox"
             ))] {
                 addr_of_mut!((*parker).cvar).write(UnsafeCell::new(libc::PTHREAD_COND_INITIALIZER));
-            } else if #[cfg(target_os = "espidf")] {
+            } else if #[cfg(any(target_os = "espidf", target_os = "horizon"))] {
                 let r = libc::pthread_cond_init(addr_of_mut!((*parker).cvar).cast(), crate::ptr::null());
                 assert_eq!(r, 0);
             } else {

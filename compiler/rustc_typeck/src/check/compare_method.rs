@@ -28,7 +28,7 @@ use super::{potentially_plural_count, FnCtxt, Inherited};
 /// - `impl_m_span`: span to use for reporting errors
 /// - `trait_m`: the method in the trait
 /// - `impl_trait_ref`: the TraitRef corresponding to the trait implementation
-crate fn compare_impl_method<'tcx>(
+pub(crate) fn compare_impl_method<'tcx>(
     tcx: TyCtxt<'tcx>,
     impl_m: &ty::AssocItem,
     impl_m_span: Span,
@@ -255,7 +255,7 @@ fn compare_predicate_entailment<'tcx>(
 
         let mut wf_tys = FxHashSet::default();
 
-        let (impl_sig, _) = infcx.replace_bound_vars_with_fresh_vars(
+        let impl_sig = infcx.replace_bound_vars_with_fresh_vars(
             impl_m_span,
             infer::HigherRankedType,
             tcx.fn_sig(impl_m.def_id),
@@ -354,7 +354,7 @@ fn compare_predicate_entailment<'tcx>(
                                         diag.span_suggestion_verbose(sp, msg, sugg, ap);
                                     }
                                     hir::FnRetTy::Return(hir_ty) => {
-                                        let sugg = trait_sig.output().to_string();
+                                        let sugg = trait_sig.output();
                                         diag.span_suggestion(hir_ty.span, msg, sugg, ap);
                                     }
                                 };
@@ -365,7 +365,7 @@ fn compare_predicate_entailment<'tcx>(
                         diag.span_suggestion(
                             impl_err_span,
                             "change the parameter type to match the trait",
-                            trait_ty.to_string(),
+                            trait_ty,
                             Applicability::MachineApplicable,
                         );
                     }
@@ -628,24 +628,40 @@ fn compare_number_of_generics<'tcx>(
     let mut err_occurred = None;
     for (kind, trait_count, impl_count) in matchings {
         if impl_count != trait_count {
+            let arg_spans = |kind: ty::AssocKind, generics: &hir::Generics<'_>| {
+                let mut spans = generics
+                    .params
+                    .iter()
+                    .filter(|p| match p.kind {
+                        hir::GenericParamKind::Lifetime {
+                            kind: hir::LifetimeParamKind::Elided,
+                        } => {
+                            // A fn can have an arbitrary number of extra elided lifetimes for the
+                            // same signature.
+                            !matches!(kind, ty::AssocKind::Fn)
+                        }
+                        _ => true,
+                    })
+                    .map(|p| p.span)
+                    .collect::<Vec<Span>>();
+                if spans.is_empty() {
+                    spans = vec![generics.span]
+                }
+                spans
+            };
             let (trait_spans, impl_trait_spans) = if let Some(def_id) = trait_.def_id.as_local() {
                 let trait_item = tcx.hir().expect_trait_item(def_id);
-                if trait_item.generics.params.is_empty() {
-                    (Some(vec![trait_item.generics.span]), vec![])
-                } else {
-                    let arg_spans: Vec<Span> =
-                        trait_item.generics.params.iter().map(|p| p.span).collect();
-                    let impl_trait_spans: Vec<Span> = trait_item
-                        .generics
-                        .params
-                        .iter()
-                        .filter_map(|p| match p.kind {
-                            GenericParamKind::Type { synthetic: true, .. } => Some(p.span),
-                            _ => None,
-                        })
-                        .collect();
-                    (Some(arg_spans), impl_trait_spans)
-                }
+                let arg_spans: Vec<Span> = arg_spans(trait_.kind, trait_item.generics);
+                let impl_trait_spans: Vec<Span> = trait_item
+                    .generics
+                    .params
+                    .iter()
+                    .filter_map(|p| match p.kind {
+                        GenericParamKind::Type { synthetic: true, .. } => Some(p.span),
+                        _ => None,
+                    })
+                    .collect();
+                (Some(arg_spans), impl_trait_spans)
             } else {
                 (trait_span.map(|s| vec![s]), vec![])
             };
@@ -660,8 +676,8 @@ fn compare_number_of_generics<'tcx>(
                     _ => None,
                 })
                 .collect();
-            let spans = impl_item.generics.spans();
-            let span = spans.primary_span();
+            let spans = arg_spans(impl_.kind, impl_item.generics);
+            let span = spans.first().copied();
 
             let mut err = tcx.sess.struct_span_err_with_code(
                 spans,
@@ -1038,7 +1054,7 @@ fn compare_generic_param_kinds<'tcx>(
     Ok(())
 }
 
-crate fn compare_const_impl<'tcx>(
+pub(crate) fn compare_const_impl<'tcx>(
     tcx: TyCtxt<'tcx>,
     impl_c: &ty::AssocItem,
     impl_c_span: Span,
@@ -1144,7 +1160,7 @@ crate fn compare_const_impl<'tcx>(
     });
 }
 
-crate fn compare_ty_impl<'tcx>(
+pub(crate) fn compare_ty_impl<'tcx>(
     tcx: TyCtxt<'tcx>,
     impl_ty: &ty::AssocItem,
     impl_ty_span: Span,
@@ -1363,7 +1379,7 @@ pub fn check_type_bounds<'tcx>(
             bound_vars.push(bound_var);
             tcx.mk_const(ty::ConstS {
                 ty: tcx.type_of(param.def_id),
-                val: ty::ConstKind::Bound(
+                kind: ty::ConstKind::Bound(
                     ty::INNERMOST,
                     ty::BoundVar::from_usize(bound_vars.len() - 1),
                 ),

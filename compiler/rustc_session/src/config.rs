@@ -547,23 +547,6 @@ pub enum PrintRequest {
     LinkArgs,
 }
 
-#[derive(Copy, Clone)]
-pub enum BorrowckMode {
-    Mir,
-    Migrate,
-}
-
-impl BorrowckMode {
-    /// Returns whether we should run the MIR-based borrow check, but also fall back
-    /// on the AST borrow check if the MIR-based one errors.
-    pub fn migrate(self) -> bool {
-        match self {
-            BorrowckMode::Mir => false,
-            BorrowckMode::Migrate => true,
-        }
-    }
-}
-
 pub enum Input {
     /// Load source code from a file.
     File(PathBuf),
@@ -741,7 +724,6 @@ impl Default for Options {
             incremental: None,
             debugging_opts: Default::default(),
             prints: Vec::new(),
-            borrowck_mode: BorrowckMode::Migrate,
             cg: Default::default(),
             error_format: ErrorOutputType::default(),
             externs: Externs(BTreeMap::new()),
@@ -1120,41 +1102,96 @@ impl CrateCheckConfig {
             .extend(atomic_values);
 
         // Target specific values
-        for target in
-            TARGETS.iter().map(|target| Target::expect_builtin(&TargetTriple::from_triple(target)))
+        #[cfg(bootstrap)]
         {
-            self.values_valid
-                .entry(sym::target_os)
-                .or_default()
-                .insert(Symbol::intern(&target.options.os));
-            self.values_valid
-                .entry(sym::target_family)
-                .or_default()
-                .extend(target.options.families.iter().map(|family| Symbol::intern(family)));
-            self.values_valid
-                .entry(sym::target_arch)
-                .or_default()
-                .insert(Symbol::intern(&target.arch));
-            self.values_valid
-                .entry(sym::target_endian)
-                .or_default()
-                .insert(Symbol::intern(&target.options.endian.as_str()));
-            self.values_valid
-                .entry(sym::target_env)
-                .or_default()
-                .insert(Symbol::intern(&target.options.env));
-            self.values_valid
-                .entry(sym::target_abi)
-                .or_default()
-                .insert(Symbol::intern(&target.options.abi));
-            self.values_valid
-                .entry(sym::target_vendor)
-                .or_default()
-                .insert(Symbol::intern(&target.options.vendor));
-            self.values_valid
-                .entry(sym::target_pointer_width)
-                .or_default()
-                .insert(sym::integer(target.pointer_width));
+            for target in TARGETS
+                .iter()
+                .map(|target| Target::expect_builtin(&TargetTriple::from_triple(target)))
+            {
+                self.values_valid
+                    .entry(sym::target_os)
+                    .or_default()
+                    .insert(Symbol::intern(&target.options.os));
+                self.values_valid
+                    .entry(sym::target_family)
+                    .or_default()
+                    .extend(target.options.families.iter().map(|family| Symbol::intern(family)));
+                self.values_valid
+                    .entry(sym::target_arch)
+                    .or_default()
+                    .insert(Symbol::intern(&target.arch));
+                self.values_valid
+                    .entry(sym::target_endian)
+                    .or_default()
+                    .insert(Symbol::intern(&target.options.endian.as_str()));
+                self.values_valid
+                    .entry(sym::target_env)
+                    .or_default()
+                    .insert(Symbol::intern(&target.options.env));
+                self.values_valid
+                    .entry(sym::target_abi)
+                    .or_default()
+                    .insert(Symbol::intern(&target.options.abi));
+                self.values_valid
+                    .entry(sym::target_vendor)
+                    .or_default()
+                    .insert(Symbol::intern(&target.options.vendor));
+                self.values_valid
+                    .entry(sym::target_pointer_width)
+                    .or_default()
+                    .insert(sym::integer(target.pointer_width));
+            }
+        }
+
+        // Target specific values
+        #[cfg(not(bootstrap))]
+        {
+            const VALUES: [&Symbol; 8] = [
+                &sym::target_os,
+                &sym::target_family,
+                &sym::target_arch,
+                &sym::target_endian,
+                &sym::target_env,
+                &sym::target_abi,
+                &sym::target_vendor,
+                &sym::target_pointer_width,
+            ];
+
+            // Initialize (if not already initialized)
+            for &e in VALUES {
+                self.values_valid.entry(e).or_default();
+            }
+
+            // Get all values map at once otherwise it would be costly.
+            // (8 values * 220 targets ~= 1760 times, at the time of writing this comment).
+            let [
+                values_target_os,
+                values_target_family,
+                values_target_arch,
+                values_target_endian,
+                values_target_env,
+                values_target_abi,
+                values_target_vendor,
+                values_target_pointer_width,
+            ] = self
+                .values_valid
+                .get_many_mut(VALUES)
+                .expect("unable to get all the check-cfg values buckets");
+
+            for target in TARGETS
+                .iter()
+                .map(|target| Target::expect_builtin(&TargetTriple::from_triple(target)))
+            {
+                values_target_os.insert(Symbol::intern(&target.options.os));
+                values_target_family
+                    .extend(target.options.families.iter().map(|family| Symbol::intern(family)));
+                values_target_arch.insert(Symbol::intern(&target.arch));
+                values_target_endian.insert(Symbol::intern(&target.options.endian.as_str()));
+                values_target_env.insert(Symbol::intern(&target.options.env));
+                values_target_abi.insert(Symbol::intern(&target.options.abi));
+                values_target_vendor.insert(Symbol::intern(&target.options.vendor));
+                values_target_pointer_width.insert(sym::integer(target.pointer_width));
+            }
         }
     }
 
@@ -1450,7 +1487,7 @@ pub fn get_cmd_lint_options(
     let mut lint_opts_with_position = vec![];
     let mut describe_lints = false;
 
-    for level in [lint::Allow, lint::Warn, lint::ForceWarn, lint::Deny, lint::Forbid] {
+    for level in [lint::Allow, lint::Warn, lint::ForceWarn(None), lint::Deny, lint::Forbid] {
         for (arg_pos, lint_name) in matches.opt_strs_pos(level.as_str()) {
             if lint_name == "help" {
                 describe_lints = true;
@@ -1912,7 +1949,7 @@ fn select_debuginfo(
     }
 }
 
-crate fn parse_assert_incr_state(
+pub(crate) fn parse_assert_incr_state(
     opt_assertion: &Option<String>,
     error_format: ErrorOutputType,
 ) -> Option<IncrementalStateAssertion> {
@@ -1937,33 +1974,12 @@ fn parse_native_lib_kind(
     };
 
     let kind = match kind {
+        "static" => NativeLibKind::Static { bundle: None, whole_archive: None },
         "dylib" => NativeLibKind::Dylib { as_needed: None },
         "framework" => NativeLibKind::Framework { as_needed: None },
-        "static" => NativeLibKind::Static { bundle: None, whole_archive: None },
-        "static-nobundle" => {
-            early_warn(
-                error_format,
-                "library kind `static-nobundle` has been superseded by specifying \
-                `-bundle` on library kind `static`. Try `static:-bundle`",
-            );
-            if modifiers.is_some() {
-                early_error(
-                    error_format,
-                    "linking modifier can't be used with library kind `static-nobundle`",
-                )
-            }
-            if !nightly_options::match_is_nightly_build(matches) {
-                early_error(
-                    error_format,
-                    "library kind `static-nobundle` are currently unstable and only accepted on \
-                the nightly compiler",
-                );
-            }
-            NativeLibKind::Static { bundle: Some(false), whole_archive: None }
-        }
-        s => early_error(
+        _ => early_error(
             error_format,
-            &format!("unknown library kind `{s}`, expected one of dylib, framework, or static"),
+            &format!("unknown library kind `{kind}`, expected one of: static, dylib, framework"),
         ),
     };
     match modifiers {
@@ -1978,21 +1994,6 @@ fn parse_native_lib_modifiers(
     error_format: ErrorOutputType,
     matches: &getopts::Matches,
 ) -> (NativeLibKind, Option<bool>) {
-    let report_unstable_modifier = |modifier| {
-        if !nightly_options::is_unstable_enabled(matches) {
-            let why = if nightly_options::match_is_nightly_build(matches) {
-                " and only accepted on the nightly compiler"
-            } else {
-                ", the `-Z unstable-options` flag must also be passed to use it"
-            };
-            early_error(
-                error_format,
-                &format!("{modifier} linking modifier is currently unstable{why}"),
-            )
-        }
-    };
-
-    let mut has_duplicate_modifiers = false;
     let mut verbatim = None;
     for modifier in modifiers.split(',') {
         let (modifier, value) = match modifier.strip_prefix(&['+', '-']) {
@@ -2000,56 +2001,60 @@ fn parse_native_lib_modifiers(
             None => early_error(
                 error_format,
                 "invalid linking modifier syntax, expected '+' or '-' prefix \
-                    before one of: bundle, verbatim, whole-archive, as-needed",
+                 before one of: bundle, verbatim, whole-archive, as-needed",
             ),
         };
 
-        match (modifier, &mut kind) {
-            ("bundle", NativeLibKind::Static { bundle, .. }) => {
-                report_unstable_modifier(modifier);
-                if bundle.is_some() {
-                    has_duplicate_modifiers = true;
-                }
-                *bundle = Some(value);
+        let report_unstable_modifier = || {
+            if !nightly_options::is_unstable_enabled(matches) {
+                let why = if nightly_options::match_is_nightly_build(matches) {
+                    " and only accepted on the nightly compiler"
+                } else {
+                    ", the `-Z unstable-options` flag must also be passed to use it"
+                };
+                early_error(
+                    error_format,
+                    &format!("linking modifier `{modifier}` is unstable{why}"),
+                )
             }
+        };
+        let assign_modifier = |dst: &mut Option<bool>| {
+            if dst.is_some() {
+                let msg = format!("multiple `{modifier}` modifiers in a single `-l` option");
+                early_error(error_format, &msg)
+            } else {
+                *dst = Some(value);
+            }
+        };
+        match (modifier, &mut kind) {
+            ("bundle", NativeLibKind::Static { bundle, .. }) => assign_modifier(bundle),
             ("bundle", _) => early_error(
                 error_format,
-                "bundle linking modifier is only compatible with \
-                    `static` linking kind",
+                "linking modifier `bundle` is only compatible with `static` linking kind",
             ),
 
             ("verbatim", _) => {
-                report_unstable_modifier(modifier);
-                if verbatim.is_some() {
-                    has_duplicate_modifiers = true;
-                }
-                verbatim = Some(value);
+                report_unstable_modifier();
+                assign_modifier(&mut verbatim)
             }
 
             ("whole-archive", NativeLibKind::Static { whole_archive, .. }) => {
-                if whole_archive.is_some() {
-                    has_duplicate_modifiers = true;
-                }
-                *whole_archive = Some(value);
+                assign_modifier(whole_archive)
             }
             ("whole-archive", _) => early_error(
                 error_format,
-                "whole-archive linking modifier is only compatible with \
-                    `static` linking kind",
+                "linking modifier `whole-archive` is only compatible with `static` linking kind",
             ),
 
             ("as-needed", NativeLibKind::Dylib { as_needed })
             | ("as-needed", NativeLibKind::Framework { as_needed }) => {
-                report_unstable_modifier(modifier);
-                if as_needed.is_some() {
-                    has_duplicate_modifiers = true;
-                }
-                *as_needed = Some(value);
+                report_unstable_modifier();
+                assign_modifier(as_needed)
             }
             ("as-needed", _) => early_error(
                 error_format,
-                "as-needed linking modifier is only compatible with \
-                    `dylib` and `framework` linking kinds",
+                "linking modifier `as-needed` is only compatible with \
+                 `dylib` and `framework` linking kinds",
             ),
 
             // Note: this error also excludes the case with empty modifier
@@ -2057,14 +2062,11 @@ fn parse_native_lib_modifiers(
             _ => early_error(
                 error_format,
                 &format!(
-                    "unrecognized linking modifier `{modifier}`, expected one \
-                    of: bundle, verbatim, whole-archive, as-needed"
+                    "unknown linking modifier `{modifier}`, expected one \
+                     of: bundle, verbatim, whole-archive, as-needed"
                 ),
             ),
         }
-    }
-    if has_duplicate_modifiers {
-        report_unstable_modifier("duplicating")
     }
 
     (kind, verbatim)
@@ -2093,17 +2095,12 @@ fn parse_libs(matches: &getopts::Matches, error_format: ErrorOutputType) -> Vec<
                 None => (name, None),
                 Some((name, new_name)) => (name.to_string(), Some(new_name.to_owned())),
             };
+            if name.is_empty() {
+                early_error(error_format, "library name must not be empty");
+            }
             NativeLib { name, new_name, kind, verbatim }
         })
         .collect()
-}
-
-fn parse_borrowck_mode(dopts: &DebuggingOptions, error_format: ErrorOutputType) -> BorrowckMode {
-    match dopts.borrowck.as_ref() {
-        "migrate" => BorrowckMode::Migrate,
-        "mir" => BorrowckMode::Mir,
-        m => early_error(error_format, &format!("unknown borrowck mode `{m}`")),
-    }
 }
 
 pub fn parse_externs(
@@ -2443,8 +2440,6 @@ pub fn build_session_options(matches: &getopts::Matches) -> Options {
 
     let test = matches.opt_present("test");
 
-    let borrowck_mode = parse_borrowck_mode(&debugging_opts, error_format);
-
     if !cg.remark.is_empty() && debuginfo == DebugInfo::None {
         early_warn(error_format, "-C remark requires \"-C debuginfo=n\" to show source locations");
     }
@@ -2520,7 +2515,6 @@ pub fn build_session_options(matches: &getopts::Matches) -> Options {
         incremental,
         debugging_opts,
         prints,
-        borrowck_mode,
         cg,
         error_format,
         externs,
@@ -2769,7 +2763,7 @@ impl PpMode {
 /// `Hash` implementation for `DepTrackingHash`. It's important though that
 /// we have an opt-in scheme here, so one is hopefully forced to think about
 /// how the hash should be calculated when adding a new command-line argument.
-crate mod dep_tracking {
+pub(crate) mod dep_tracking {
     use super::{
         BranchProtection, CFGuard, CFProtection, CrateType, DebugInfo, ErrorOutputType,
         InstrumentCoverage, LdImpl, LinkerPluginLto, LocationDetail, LtoCli, OomStrategy, OptLevel,
@@ -2947,7 +2941,7 @@ crate mod dep_tracking {
     }
 
     // This is a stable hash because BTreeMap is a sorted container
-    crate fn stable_hash(
+    pub(crate) fn stable_hash(
         sub_hashes: BTreeMap<&'static str, &dyn DepTrackingHash>,
         hasher: &mut DefaultHasher,
         error_format: ErrorOutputType,

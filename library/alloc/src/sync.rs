@@ -343,11 +343,11 @@ impl<T> Arc<T> {
     pub fn new(data: T) -> Arc<T> {
         // Start the weak pointer count as 1 which is the weak pointer that's
         // held by all the strong pointers (kinda), see std/rc.rs for more info
-        let x: Box<_> = box ArcInner {
+        let x: Box<_> = Box::new(ArcInner {
             strong: atomic::AtomicUsize::new(1),
             weak: atomic::AtomicUsize::new(1),
             data,
-        };
+        });
         unsafe { Self::from_inner(Box::leak(x).into()) }
     }
 
@@ -411,11 +411,11 @@ impl<T> Arc<T> {
     {
         // Construct the inner in the "uninitialized" state with a single
         // weak reference.
-        let uninit_ptr: NonNull<_> = Box::leak(box ArcInner {
+        let uninit_ptr: NonNull<_> = Box::leak(Box::new(ArcInner {
             strong: atomic::AtomicUsize::new(0),
             weak: atomic::AtomicUsize::new(1),
             data: mem::MaybeUninit::<T>::uninit(),
-        })
+        }))
         .into();
         let init_ptr: NonNull<ArcInner<T>> = uninit_ptr.cast();
 
@@ -1355,15 +1355,16 @@ impl<T: ?Sized> Clone for Arc<T> {
         // [1]: (www.boost.org/doc/libs/1_55_0/doc/html/atomic/usage_examples.html)
         let old_size = self.inner().strong.fetch_add(1, Relaxed);
 
-        // However we need to guard against massive refcounts in case someone
-        // is `mem::forget`ing Arcs. If we don't do this the count can overflow
-        // and users will use-after free. We racily saturate to `isize::MAX` on
-        // the assumption that there aren't ~2 billion threads incrementing
-        // the reference count at once. This branch will never be taken in
-        // any realistic program.
+        // However we need to guard against massive refcounts in case someone is `mem::forget`ing
+        // Arcs. If we don't do this the count can overflow and users will use-after free. This
+        // branch will never be taken in any realistic program. We abort because such a program is
+        // incredibly degenerate, and we don't care to support it.
         //
-        // We abort because such a program is incredibly degenerate, and we
-        // don't care to support it.
+        // This check is not 100% water-proof: we error when the refcount grows beyond `isize::MAX`.
+        // But we do that check *after* having done the increment, so there is a chance here that
+        // the worst already happened and we actually do overflow the `usize` counter. However, that
+        // requires the counter to grow from `isize::MAX` to `usize::MAX` between the increment
+        // above and the `abort` below, which seems exceedingly unlikely.
         if old_size > MAX_REFCOUNT {
             abort();
         }
@@ -1393,11 +1394,11 @@ impl<T: Clone> Arc<T> {
     /// referred to as clone-on-write.
     ///
     /// However, if there are no other `Arc` pointers to this allocation, but some [`Weak`]
-    /// pointers, then the [`Weak`] pointers will be disassociated and the inner value will not
+    /// pointers, then the [`Weak`] pointers will be dissociated and the inner value will not
     /// be cloned.
     ///
     /// See also [`get_mut`], which will fail rather than cloning the inner value
-    /// or diassociating [`Weak`] pointers.
+    /// or dissociating [`Weak`] pointers.
     ///
     /// [`clone`]: Clone::clone
     /// [`get_mut`]: Arc::get_mut
@@ -1420,7 +1421,7 @@ impl<T: Clone> Arc<T> {
     /// assert_eq!(*other_data, 12);
     /// ```
     ///
-    /// [`Weak`] pointers will be disassociated:
+    /// [`Weak`] pointers will be dissociated:
     ///
     /// ```
     /// use std::sync::Arc;
@@ -1705,8 +1706,6 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for Arc<T> {
 }
 
 impl Arc<dyn Any + Send + Sync> {
-    #[inline]
-    #[stable(feature = "rc_downcast", since = "1.29.0")]
     /// Attempt to downcast the `Arc<dyn Any + Send + Sync>` to a concrete type.
     ///
     /// # Examples
@@ -1725,9 +1724,11 @@ impl Arc<dyn Any + Send + Sync> {
     /// print_if_string(Arc::new(my_string));
     /// print_if_string(Arc::new(0i8));
     /// ```
+    #[inline]
+    #[stable(feature = "rc_downcast", since = "1.29.0")]
     pub fn downcast<T>(self) -> Result<Arc<T>, Self>
     where
-        T: Any + Send + Sync + 'static,
+        T: Any + Send + Sync,
     {
         if (*self).is::<T>() {
             unsafe {
@@ -1737,6 +1738,45 @@ impl Arc<dyn Any + Send + Sync> {
             }
         } else {
             Err(self)
+        }
+    }
+
+    /// Downcasts the `Arc<dyn Any + Send + Sync>` to a concrete type.
+    ///
+    /// For a safe alternative see [`downcast`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(downcast_unchecked)]
+    ///
+    /// use std::any::Any;
+    /// use std::sync::Arc;
+    ///
+    /// let x: Arc<dyn Any + Send + Sync> = Arc::new(1_usize);
+    ///
+    /// unsafe {
+    ///     assert_eq!(*x.downcast_unchecked::<usize>(), 1);
+    /// }
+    /// ```
+    ///
+    /// # Safety
+    ///
+    /// The contained value must be of type `T`. Calling this method
+    /// with the incorrect type is *undefined behavior*.
+    ///
+    ///
+    /// [`downcast`]: Self::downcast
+    #[inline]
+    #[unstable(feature = "downcast_unchecked", issue = "90850")]
+    pub unsafe fn downcast_unchecked<T>(self) -> Arc<T>
+    where
+        T: Any + Send + Sync,
+    {
+        unsafe {
+            let ptr = self.ptr.cast::<ArcInner<T>>();
+            mem::forget(self);
+            Arc::from_inner(ptr)
         }
     }
 }

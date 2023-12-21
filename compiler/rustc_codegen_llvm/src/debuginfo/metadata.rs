@@ -30,26 +30,28 @@ use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_index::vec::{Idx, IndexVec};
 use rustc_middle::bug;
 use rustc_middle::mir::{self, GeneratorLayout};
-use rustc_middle::ty::layout::LayoutOf;
-use rustc_middle::ty::layout::TyAndLayout;
+use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::subst::GenericArgKind;
-use rustc_middle::ty::{self, AdtKind, Instance, ParamEnv, Ty, TyCtxt, COMMON_VTABLE_ENTRIES};
-use rustc_session::config::{self, DebugInfo};
+use rustc_middle::ty::{
+    self, AdtKind, Instance, ParamEnv, PolyExistentialTraitRef, Ty, TyCtxt, Visibility,
+};
+use rustc_session::config::{self, DebugInfo, Lto};
 use rustc_span::symbol::Symbol;
-use rustc_span::FileNameDisplayPreference;
-use rustc_span::{self, SourceFile, SourceFileHash};
+use rustc_span::FileName;
+use rustc_span::{self, FileNameDisplayPreference, SourceFile};
+use rustc_symbol_mangling::typeid_for_trait_ref;
 use rustc_target::abi::{Align, Size};
 use smallvec::smallvec;
 use tracing::debug;
 
-use libc::{c_longlong, c_uint};
+use libc::{c_char, c_longlong, c_uint};
 use std::borrow::Cow;
-use std::collections::hash_map::Entry;
 use std::fmt::{self, Write};
 use std::hash::{Hash, Hasher};
 use std::iter;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use tracing::instrument;
 
 impl PartialEq for llvm::Metadata {
     fn eq(&self, other: &Self) -> bool {
@@ -527,76 +529,103 @@ fn hex_encode(data: &[u8]) -> String {
 }
 
 pub fn file_metadata<'ll>(cx: &CodegenCx<'ll, '_>, source_file: &SourceFile) -> &'ll DIFile {
-    debug!("file_metadata: file_name: {:?}", source_file.name);
+    let cache_key = Some((source_file.name_hash, source_file.src_hash));
+    return debug_context(cx)
+        .created_files
+        .borrow_mut()
+        .entry(cache_key)
+        .or_insert_with(|| alloc_new_file_metadata(cx, source_file));
 
-    let hash = Some(&source_file.src_hash);
-    let file_name = Some(source_file.name.prefer_remapped().to_string());
-    let directory = if source_file.is_real_file() && !source_file.is_imported() {
-        Some(
-            cx.sess()
-                .opts
-                .working_dir
-                .to_string_lossy(FileNameDisplayPreference::Remapped)
-                .to_string(),
-        )
-    } else {
-        // If the path comes from an upstream crate we assume it has been made
-        // independent of the compiler's working directory one way or another.
-        None
-    };
-    file_metadata_raw(cx, file_name, directory, hash)
+    #[instrument(skip(cx, source_file), level = "debug")]
+    fn alloc_new_file_metadata<'ll>(
+        cx: &CodegenCx<'ll, '_>,
+        source_file: &SourceFile,
+    ) -> &'ll DIFile {
+        debug!(?source_file.name);
+
+        let (directory, file_name) = match &source_file.name {
+            FileName::Real(filename) => {
+                let working_directory = &cx.sess().opts.working_dir;
+                debug!(?working_directory);
+
+                let filename = cx
+                    .sess()
+                    .source_map()
+                    .path_mapping()
+                    .to_embeddable_absolute_path(filename.clone(), working_directory);
+
+                // Construct the absolute path of the file
+                let abs_path = filename.remapped_path_if_available();
+                debug!(?abs_path);
+
+                if let Ok(rel_path) =
+                    abs_path.strip_prefix(working_directory.remapped_path_if_available())
+                {
+                    // If the compiler's working directory (which also is the DW_AT_comp_dir of
+                    // the compilation unit) is a prefix of the path we are about to emit, then
+                    // only emit the part relative to the working directory.
+                    // Because of path remapping we sometimes see strange things here: `abs_path`
+                    // might actually look like a relative path
+                    // (e.g. `<crate-name-and-version>/src/lib.rs`), so if we emit it without
+                    // taking the working directory into account, downstream tooling will
+                    // interpret it as `<working-directory>/<crate-name-and-version>/src/lib.rs`,
+                    // which makes no sense. Usually in such cases the working directory will also
+                    // be remapped to `<crate-name-and-version>` or some other prefix of the path
+                    // we are remapping, so we end up with
+                    // `<crate-name-and-version>/<crate-name-and-version>/src/lib.rs`.
+                    // By moving the working directory portion into the `directory` part of the
+                    // DIFile, we allow LLVM to emit just the relative path for DWARF, while
+                    // still emitting the correct absolute path for CodeView.
+                    (
+                        working_directory.to_string_lossy(FileNameDisplayPreference::Remapped),
+                        rel_path.to_string_lossy().into_owned(),
+                    )
+                } else {
+                    ("".into(), abs_path.to_string_lossy().into_owned())
+                }
+            }
+            other => ("".into(), other.prefer_remapped().to_string_lossy().into_owned()),
+        };
+
+        let hash_kind = match source_file.src_hash.kind {
+            rustc_span::SourceFileHashAlgorithm::Md5 => llvm::ChecksumKind::MD5,
+            rustc_span::SourceFileHashAlgorithm::Sha1 => llvm::ChecksumKind::SHA1,
+            rustc_span::SourceFileHashAlgorithm::Sha256 => llvm::ChecksumKind::SHA256,
+        };
+        let hash_value = hex_encode(source_file.src_hash.hash_bytes());
+
+        unsafe {
+            llvm::LLVMRustDIBuilderCreateFile(
+                DIB(cx),
+                file_name.as_ptr().cast(),
+                file_name.len(),
+                directory.as_ptr().cast(),
+                directory.len(),
+                hash_kind,
+                hash_value.as_ptr().cast(),
+                hash_value.len(),
+            )
+        }
+    }
 }
 
 pub fn unknown_file_metadata<'ll>(cx: &CodegenCx<'ll, '_>) -> &'ll DIFile {
-    file_metadata_raw(cx, None, None, None)
-}
+    debug_context(cx).created_files.borrow_mut().entry(None).or_insert_with(|| unsafe {
+        let file_name = "<unknown>";
+        let directory = "";
+        let hash_value = "";
 
-fn file_metadata_raw<'ll>(
-    cx: &CodegenCx<'ll, '_>,
-    file_name: Option<String>,
-    directory: Option<String>,
-    hash: Option<&SourceFileHash>,
-) -> &'ll DIFile {
-    let key = (file_name, directory);
-
-    match debug_context(cx).created_files.borrow_mut().entry(key) {
-        Entry::Occupied(o) => o.get(),
-        Entry::Vacant(v) => {
-            let (file_name, directory) = v.key();
-            debug!("file_metadata: file_name: {:?}, directory: {:?}", file_name, directory);
-
-            let file_name = file_name.as_deref().unwrap_or("<unknown>");
-            let directory = directory.as_deref().unwrap_or("");
-
-            let (hash_kind, hash_value) = match hash {
-                Some(hash) => {
-                    let kind = match hash.kind {
-                        rustc_span::SourceFileHashAlgorithm::Md5 => llvm::ChecksumKind::MD5,
-                        rustc_span::SourceFileHashAlgorithm::Sha1 => llvm::ChecksumKind::SHA1,
-                        rustc_span::SourceFileHashAlgorithm::Sha256 => llvm::ChecksumKind::SHA256,
-                    };
-                    (kind, hex_encode(hash.hash_bytes()))
-                }
-                None => (llvm::ChecksumKind::None, String::new()),
-            };
-
-            let file_metadata = unsafe {
-                llvm::LLVMRustDIBuilderCreateFile(
-                    DIB(cx),
-                    file_name.as_ptr().cast(),
-                    file_name.len(),
-                    directory.as_ptr().cast(),
-                    directory.len(),
-                    hash_kind,
-                    hash_value.as_ptr().cast(),
-                    hash_value.len(),
-                )
-            };
-
-            v.insert(file_metadata);
-            file_metadata
-        }
-    }
+        llvm::LLVMRustDIBuilderCreateFile(
+            DIB(cx),
+            file_name.as_ptr().cast(),
+            file_name.len(),
+            directory.as_ptr().cast(),
+            directory.len(),
+            llvm::ChecksumKind::None,
+            hash_value.as_ptr().cast(),
+            hash_value.len(),
+        )
+    })
 }
 
 trait MsvcBasicName {
@@ -1337,7 +1366,7 @@ pub fn build_global_var_di_node<'ll>(cx: &CodegenCx<'ll, '_>, def_id: DefId, glo
             is_local_to_unit,
             global,
             None,
-            global_align.bytes() as u32,
+            global_align.bits() as u32,
         );
     }
 }
@@ -1364,7 +1393,7 @@ fn build_vtable_type_di_node<'ll, 'tcx>(
 
         tcx.vtable_entries(trait_ref)
     } else {
-        COMMON_VTABLE_ENTRIES
+        TyCtxt::COMMON_VTABLE_ENTRIES
     };
 
     // All function pointers are described as opaque pointers. This could be improved in the future
@@ -1440,6 +1469,84 @@ fn build_vtable_type_di_node<'ll, 'tcx>(
     .di_node
 }
 
+fn vcall_visibility_metadata<'ll, 'tcx>(
+    cx: &CodegenCx<'ll, 'tcx>,
+    ty: Ty<'tcx>,
+    trait_ref: Option<PolyExistentialTraitRef<'tcx>>,
+    vtable: &'ll Value,
+) {
+    enum VCallVisibility {
+        Public = 0,
+        LinkageUnit = 1,
+        TranslationUnit = 2,
+    }
+
+    let Some(trait_ref) = trait_ref else { return };
+
+    let trait_ref_self = trait_ref.with_self_ty(cx.tcx, ty);
+    let trait_ref_self = cx.tcx.erase_regions(trait_ref_self);
+    let trait_def_id = trait_ref_self.def_id();
+    let trait_vis = cx.tcx.visibility(trait_def_id);
+
+    let cgus = cx.sess().codegen_units();
+    let single_cgu = cgus == 1;
+
+    let lto = cx.sess().lto();
+
+    // Since LLVM requires full LTO for the virtual function elimination optimization to apply,
+    // only the `Lto::Fat` cases are relevant currently.
+    let vcall_visibility = match (lto, trait_vis, single_cgu) {
+        // If there is not LTO and the visibility in public, we have to assume that the vtable can
+        // be seen from anywhere. With multiple CGUs, the vtable is quasi-public.
+        (Lto::No | Lto::ThinLocal, Visibility::Public, _)
+        | (Lto::No, Visibility::Restricted(_) | Visibility::Invisible, false) => {
+            VCallVisibility::Public
+        }
+        // With LTO and a quasi-public visibility, the usages of the functions of the vtable are
+        // all known by the `LinkageUnit`.
+        // FIXME: LLVM only supports this optimization for `Lto::Fat` currently. Once it also
+        // supports `Lto::Thin` the `VCallVisibility` may have to be adjusted for those.
+        (Lto::Fat | Lto::Thin, Visibility::Public, _)
+        | (
+            Lto::ThinLocal | Lto::Thin | Lto::Fat,
+            Visibility::Restricted(_) | Visibility::Invisible,
+            false,
+        ) => VCallVisibility::LinkageUnit,
+        // If there is only one CGU, private vtables can only be seen by that CGU/translation unit
+        // and therefore we know of all usages of functions in the vtable.
+        (_, Visibility::Restricted(_) | Visibility::Invisible, true) => {
+            VCallVisibility::TranslationUnit
+        }
+    };
+
+    let trait_ref_typeid = typeid_for_trait_ref(cx.tcx, trait_ref);
+
+    unsafe {
+        let typeid = llvm::LLVMMDStringInContext(
+            cx.llcx,
+            trait_ref_typeid.as_ptr() as *const c_char,
+            trait_ref_typeid.as_bytes().len() as c_uint,
+        );
+        let v = [cx.const_usize(0), typeid];
+        llvm::LLVMRustGlobalAddMetadata(
+            vtable,
+            llvm::MD_type as c_uint,
+            llvm::LLVMValueAsMetadata(llvm::LLVMMDNodeInContext(
+                cx.llcx,
+                v.as_ptr(),
+                v.len() as c_uint,
+            )),
+        );
+        let vcall_visibility = llvm::LLVMValueAsMetadata(cx.const_u64(vcall_visibility as u64));
+        let vcall_visibility_metadata = llvm::LLVMMDNodeInContext2(cx.llcx, &vcall_visibility, 1);
+        llvm::LLVMGlobalSetMetadata(
+            vtable,
+            llvm::MetadataType::MD_vcall_visibility as c_uint,
+            vcall_visibility_metadata,
+        );
+    }
+}
+
 /// Creates debug information for the given vtable, which is for the
 /// given type.
 ///
@@ -1450,6 +1557,12 @@ pub fn create_vtable_di_node<'ll, 'tcx>(
     poly_trait_ref: Option<ty::PolyExistentialTraitRef<'tcx>>,
     vtable: &'ll Value,
 ) {
+    // FIXME(flip1995): The virtual function elimination optimization only works with full LTO in
+    // LLVM at the moment.
+    if cx.sess().opts.debugging_opts.virtual_function_elimination && cx.sess().lto() == Lto::Fat {
+        vcall_visibility_metadata(cx, ty, poly_trait_ref, vtable);
+    }
+
     if cx.dbg_cx.is_none() {
         return;
     }

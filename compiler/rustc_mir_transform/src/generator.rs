@@ -49,13 +49,14 @@
 //! For generators with state 1 (returned) and state 2 (poisoned) it does nothing.
 //! Otherwise it drops all the values in scope at the last suspension point.
 
+use crate::deref_separator::deref_finder;
 use crate::simplify;
 use crate::util::expand_aggregate;
 use crate::MirPass;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir as hir;
 use rustc_hir::lang_items::LangItem;
-use rustc_index::bit_set::{BitMatrix, BitSet};
+use rustc_index::bit_set::{BitMatrix, BitSet, GrowableBitSet};
 use rustc_index::vec::{Idx, IndexVec};
 use rustc_middle::mir::dump_mir;
 use rustc_middle::mir::visit::{MutVisitor, PlaceContext, Visitor};
@@ -194,6 +195,11 @@ const RETURNED: usize = GeneratorSubsts::RETURNED;
 /// Generator has panicked and is poisoned.
 const POISONED: usize = GeneratorSubsts::POISONED;
 
+/// Number of variants to reserve in generator state. Corresponds to
+/// `UNRESUMED` (beginning of a generator) and `RETURNED`/`POISONED`
+/// (end of a generator) states.
+const RESERVED_VARIANTS: usize = 3;
+
 /// A `yield` point in the generator.
 struct SuspensionPoint<'tcx> {
     /// State discriminant used when suspending or resuming at this point.
@@ -205,7 +211,7 @@ struct SuspensionPoint<'tcx> {
     /// Which block to jump to if the generator is dropped in this state.
     drop: Option<BasicBlock>,
     /// Set of locals that have live storage while at this suspension point.
-    storage_liveness: BitSet<Local>,
+    storage_liveness: GrowableBitSet<Local>,
 }
 
 struct TransformVisitor<'tcx> {
@@ -227,7 +233,7 @@ struct TransformVisitor<'tcx> {
     suspension_points: Vec<SuspensionPoint<'tcx>>,
 
     // The set of locals that have no `StorageLive`/`StorageDead` annotations.
-    always_live_locals: storage::AlwaysLiveLocals,
+    always_live_locals: BitSet<Local>,
 
     // The original RETURN_PLACE local
     new_ret_local: Local,
@@ -344,7 +350,7 @@ impl<'tcx> MutVisitor<'tcx> for TransformVisitor<'tcx> {
             data.statements.extend(self.make_state(state_idx, v, source_info));
             let state = if let Some((resume, mut resume_arg)) = resume {
                 // Yield
-                let state = 3 + self.suspension_points.len();
+                let state = RESERVED_VARIANTS + self.suspension_points.len();
 
                 // The resume arg target location might itself be remapped if its base local is
                 // live across a yield.
@@ -361,7 +367,7 @@ impl<'tcx> MutVisitor<'tcx> for TransformVisitor<'tcx> {
                     resume,
                     resume_arg,
                     drop,
-                    storage_liveness: self.storage_liveness[block].clone().unwrap(),
+                    storage_liveness: self.storage_liveness[block].clone().unwrap().into(),
                 });
 
                 VariantIdx::new(state)
@@ -449,7 +455,7 @@ struct LivenessInfo {
 fn locals_live_across_suspend_points<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
-    always_live_locals: &storage::AlwaysLiveLocals,
+    always_live_locals: &BitSet<Local>,
     movable: bool,
 ) -> LivenessInfo {
     let body_ref: &Body<'_> = &body;
@@ -494,7 +500,8 @@ fn locals_live_across_suspend_points<'tcx>(
             let loc = Location { block, statement_index: data.statements.len() };
 
             liveness.seek_to_block_end(block);
-            let mut live_locals = liveness.get().clone();
+            let mut live_locals: BitSet<_> = BitSet::new_empty(body.local_decls.len());
+            live_locals.union(liveness.get());
 
             if !movable {
                 // The `liveness` variable contains the liveness of MIR locals ignoring borrows.
@@ -614,7 +621,7 @@ impl ops::Deref for GeneratorSavedLocals {
 fn compute_storage_conflicts<'mir, 'tcx>(
     body: &'mir Body<'tcx>,
     saved_locals: &GeneratorSavedLocals,
-    always_live_locals: storage::AlwaysLiveLocals,
+    always_live_locals: BitSet<Local>,
     requires_storage: rustc_mir_dataflow::Results<'tcx, MaybeRequiresStorage<'mir, 'tcx>>,
 ) -> BitMatrix<GeneratorSavedLocal, GeneratorSavedLocal> {
     assert_eq!(body.local_decls.len(), saved_locals.domain_size());
@@ -624,7 +631,7 @@ fn compute_storage_conflicts<'mir, 'tcx>(
 
     // Locals that are always live or ones that need to be stored across
     // suspension points are not eligible for overlap.
-    let mut ineligible_locals = always_live_locals.into_inner();
+    let mut ineligible_locals = always_live_locals;
     ineligible_locals.intersect(&**saved_locals);
 
     // Compute the storage conflicts for all eligible locals.
@@ -790,7 +797,6 @@ fn compute_layout<'tcx>(
     // Leave empty variants for the UNRESUMED, RETURNED, and POISONED states.
     // In debuginfo, these will correspond to the beginning (UNRESUMED) or end
     // (RETURNED, POISONED) of the function.
-    const RESERVED_VARIANTS: usize = 3;
     let body_span = body.source_scopes[OUTERMOST_SOURCE_SCOPE].span;
     let mut variant_source_info: IndexVec<VariantIdx, SourceInfo> = [
         SourceInfo::outermost(body_span.shrink_to_lo()),
@@ -990,7 +996,7 @@ fn insert_panic_block<'tcx>(
         cond: Operand::Constant(Box::new(Constant {
             span: body.span,
             user_ty: None,
-            literal: ty::Const::from_bool(tcx, false).into(),
+            literal: ConstantKind::from_bool(tcx, false),
         })),
         expected: true,
         msg: message,
@@ -1042,8 +1048,7 @@ fn can_unwind<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
             | TerminatorKind::Unreachable
             | TerminatorKind::GeneratorDrop
             | TerminatorKind::FalseEdge { .. }
-            | TerminatorKind::FalseUnwind { .. }
-            | TerminatorKind::InlineAsm { .. } => {}
+            | TerminatorKind::FalseUnwind { .. } => {}
 
             // Resume will *continue* unwinding, but if there's no other unwinding terminator it
             // will never be reached.
@@ -1057,6 +1062,7 @@ fn can_unwind<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
             TerminatorKind::Drop { .. }
             | TerminatorKind::DropAndReplace { .. }
             | TerminatorKind::Call { .. }
+            | TerminatorKind::InlineAsm { .. }
             | TerminatorKind::Assert { .. } => return true,
         }
     }
@@ -1176,6 +1182,8 @@ fn create_cases<'tcx>(
     transform: &TransformVisitor<'tcx>,
     operation: Operation,
 ) -> Vec<(usize, BasicBlock)> {
+    let tcx = transform.tcx;
+
     let source_info = SourceInfo::outermost(body.span);
 
     transform
@@ -1208,13 +1216,85 @@ fn create_cases<'tcx>(
                 if operation == Operation::Resume {
                     // Move the resume argument to the destination place of the `Yield` terminator
                     let resume_arg = Local::new(2); // 0 = return, 1 = self
-                    statements.push(Statement {
-                        source_info,
-                        kind: StatementKind::Assign(Box::new((
-                            point.resume_arg,
-                            Rvalue::Use(Operand::Move(resume_arg.into())),
-                        ))),
-                    });
+
+                    // handle `box yield` properly
+                    let box_place = if let [projection @ .., ProjectionElem::Deref] =
+                        &**point.resume_arg.projection
+                    {
+                        let box_place =
+                            Place::from(point.resume_arg.local).project_deeper(projection, tcx);
+
+                        let box_ty = box_place.ty(&body.local_decls, tcx).ty;
+
+                        if box_ty.is_box() { Some((box_place, box_ty)) } else { None }
+                    } else {
+                        None
+                    };
+
+                    if let Some((box_place, box_ty)) = box_place {
+                        let unique_did = box_ty
+                            .ty_adt_def()
+                            .expect("expected Box to be an Adt")
+                            .non_enum_variant()
+                            .fields[0]
+                            .did;
+
+                        let Some(nonnull_def) = tcx.type_of(unique_did).ty_adt_def() else {
+                            span_bug!(tcx.def_span(unique_did), "expected Box to contain Unique")
+                        };
+
+                        let nonnull_did = nonnull_def.non_enum_variant().fields[0].did;
+
+                        let (unique_ty, nonnull_ty, ptr_ty) =
+                            crate::elaborate_box_derefs::build_ptr_tys(
+                                tcx,
+                                box_ty.boxed_ty(),
+                                unique_did,
+                                nonnull_did,
+                            );
+
+                        let ptr_local = body.local_decls.push(LocalDecl::new(ptr_ty, body.span));
+
+                        statements.push(Statement {
+                            source_info,
+                            kind: StatementKind::StorageLive(ptr_local),
+                        });
+
+                        statements.push(Statement {
+                            source_info,
+                            kind: StatementKind::Assign(Box::new((
+                                Place::from(ptr_local),
+                                Rvalue::Use(Operand::Copy(box_place.project_deeper(
+                                    &crate::elaborate_box_derefs::build_projection(
+                                        unique_ty, nonnull_ty, ptr_ty,
+                                    ),
+                                    tcx,
+                                ))),
+                            ))),
+                        });
+
+                        statements.push(Statement {
+                            source_info,
+                            kind: StatementKind::Assign(Box::new((
+                                Place::from(ptr_local)
+                                    .project_deeper(&[ProjectionElem::Deref], tcx),
+                                Rvalue::Use(Operand::Move(resume_arg.into())),
+                            ))),
+                        });
+
+                        statements.push(Statement {
+                            source_info,
+                            kind: StatementKind::StorageDead(ptr_local),
+                        });
+                    } else {
+                        statements.push(Statement {
+                            source_info,
+                            kind: StatementKind::Assign(Box::new((
+                                point.resume_arg,
+                                Rvalue::Use(Operand::Move(resume_arg.into())),
+                            ))),
+                        });
+                    }
                 }
 
                 // Then jump to the real target
@@ -1299,7 +1379,7 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
             },
         );
 
-        let always_live_locals = storage::AlwaysLiveLocals::new(&body);
+        let always_live_locals = storage::always_live_locals(&body);
 
         let liveness_info =
             locals_live_across_suspend_points(tcx, body, &always_live_locals, movable);
@@ -1368,6 +1448,9 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
 
         // Create the Generator::resume function
         create_generator_resume_function(tcx, transform, body, can_return);
+
+        // Run derefer to fix Derefs that are not in the first place
+        deref_finder(tcx, body);
     }
 }
 
@@ -1459,12 +1542,13 @@ impl<'tcx> Visitor<'tcx> for EnsureGeneratorFieldAssignmentsNeverAlias<'_> {
             TerminatorKind::Call {
                 func,
                 args,
-                destination: Some((dest, _)),
+                destination,
+                target: Some(_),
                 cleanup: _,
                 from_hir_call: _,
                 fn_span: _,
             } => {
-                self.check_assigned_place(*dest, |this| {
+                self.check_assigned_place(*destination, |this| {
                     this.visit_operand(func, location);
                     for arg in args {
                         this.visit_operand(arg, location);

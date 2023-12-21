@@ -2,7 +2,7 @@
 
 "use strict";
 
-(function () {
+(function() {
     // Number of lines shown when code viewer is not expanded
     const MAX_LINES = 10;
 
@@ -98,7 +98,9 @@
             // visible. This is necessary since updateScrapedExample calls scrollToLoc which
             // depends on offsetHeight, a property that requires an element to be visible to
             // compute correctly.
-            setTimeout(() => { onEachLazy(moreExamples, updateScrapedExample); });
+            setTimeout(() => {
+                onEachLazy(moreExamples, updateScrapedExample);
+            });
         }, {once: true});
     });
 })();

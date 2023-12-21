@@ -1,7 +1,7 @@
 use super::{AllocId, ConstAlloc, Pointer, Scalar};
 
 use crate::mir::interpret::ConstValue;
-use crate::ty::{layout, query::TyCtxtAt, tls, FnSig, Ty};
+use crate::ty::{layout, query::TyCtxtAt, tls, FnSig, Ty, ValTree};
 
 use rustc_data_structures::sync::Lock;
 use rustc_errors::{pluralize, struct_span_err, DiagnosticBuilder, ErrorGuaranteed};
@@ -35,6 +35,7 @@ TrivialTypeFoldableAndLiftImpls! {
 
 pub type EvalToAllocationRawResult<'tcx> = Result<ConstAlloc<'tcx>, ErrorHandled>;
 pub type EvalToConstValueResult<'tcx> = Result<ConstValue<'tcx>, ErrorHandled>;
+pub type EvalToValTreeResult<'tcx> = Result<Option<ValTree<'tcx>>, ErrorHandled>;
 
 pub fn struct_error<'tcx>(
     tcx: TyCtxtAt<'tcx>,
@@ -148,8 +149,6 @@ pub enum InvalidProgramInfo<'tcx> {
     /// (which unfortunately typeck does not reject).
     /// Not using `FnAbiError` as that contains a nested `LayoutError`.
     FnAbiAdjustForForeignAbi(call::AdjustForForeignAbiError),
-    /// An invalid transmute happened.
-    TransmuteSizeDiff(Ty<'tcx>, Ty<'tcx>),
     /// SizeOf of unsized type was requested.
     SizeOfUnsizedType(Ty<'tcx>),
 }
@@ -165,11 +164,6 @@ impl fmt::Display for InvalidProgramInfo<'_> {
             }
             Layout(ref err) => write!(f, "{}", err),
             FnAbiAdjustForForeignAbi(ref err) => write!(f, "{}", err),
-            TransmuteSizeDiff(from_ty, to_ty) => write!(
-                f,
-                "transmuting `{}` to `{}` is not possible, because these types do not have the same size",
-                from_ty, to_ty
-            ),
             SizeOfUnsizedType(ty) => write!(f, "size_of called on unsized type `{}`", ty),
         }
     }
@@ -434,7 +428,7 @@ pub enum UnsupportedOpInfo {
     /// Encountered a pointer where we needed raw bytes.
     ReadPointerAsBytes,
     /// Overwriting parts of a pointer; the resulting state cannot be represented in our
-    /// `Allocation` data structure.
+    /// `Allocation` data structure. See <https://github.com/rust-lang/miri/issues/2181>.
     PartialPointerOverwrite(Pointer<AllocId>),
     //
     // The variants below are only reachable from CTFE/const prop, miri will never emit them.

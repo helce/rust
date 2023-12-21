@@ -15,7 +15,7 @@ use std::iter;
 impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// Compile `expr`, storing the result into `destination`, which
     /// is assumed to be uninitialized.
-    crate fn expr_into_dest(
+    pub(crate) fn expr_into_dest(
         &mut self,
         destination: Place<'tcx>,
         mut block: BasicBlock,
@@ -63,6 +63,17 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         (if_then_scope, then_source_info),
                         LintLevel::Inherited,
                         |this| {
+                            let source_info = if this.is_let(cond) {
+                                let variable_scope = this.new_source_scope(
+                                    then_expr.span,
+                                    LintLevel::Inherited,
+                                    None,
+                                );
+                                this.source_scope = variable_scope;
+                                SourceInfo { span: then_expr.span, scope: variable_scope }
+                            } else {
+                                this.source_info(then_expr.span)
+                            };
                             let (then_block, else_block) =
                                 this.in_if_then_scope(condition_scope, |this| {
                                     let then_blk = unpack!(this.then_else_break(
@@ -70,8 +81,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                                         &this.thir[cond],
                                         Some(condition_scope),
                                         condition_scope,
-                                        then_expr.span,
+                                        source_info
                                     ));
+
                                     this.expr_into_dest(destination, then_blk, then_expr)
                                 });
                             then_block.and(else_block)
@@ -97,7 +109,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             ExprKind::Let { expr, ref pat } => {
                 let scope = this.local_scope();
                 let (true_block, false_block) = this.in_if_then_scope(scope, |this| {
-                    this.lower_let_expr(block, &this.thir[expr], pat, scope, expr_span)
+                    this.lower_let_expr(block, &this.thir[expr], pat, scope, None, expr_span)
                 });
 
                 this.cfg.push_assign_constant(
@@ -255,18 +267,19 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         func: fun,
                         args,
                         cleanup: None,
+                        destination,
                         // The presence or absence of a return edge affects control-flow sensitive
                         // MIR checks and ultimately whether code is accepted or not. We can only
                         // omit the return edge if a return type is visibly uninhabited to a module
                         // that makes the call.
-                        destination: if this.tcx.is_ty_uninhabited_from(
+                        target: if this.tcx.is_ty_uninhabited_from(
                             this.parent_module,
                             expr.ty,
                             this.param_env,
                         ) {
                             None
                         } else {
-                            Some((destination, success))
+                            Some(success)
                         },
                         from_hir_call,
                         fn_span,
@@ -434,11 +447,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         }
                         thir::InlineAsmOperand::SymFn { value, span } => {
                             mir::InlineAsmOperand::SymFn {
-                                value: Box::new(Constant {
-                                    span,
-                                    user_ty: None,
-                                    literal: value.into(),
-                                }),
+                                value: Box::new(Constant { span, user_ty: None, literal: value }),
                             }
                         }
                         thir::InlineAsmOperand::SymStatic { def_id } => {
@@ -577,5 +586,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         }
 
         block_and
+    }
+
+    fn is_let(&self, expr: ExprId) -> bool {
+        match self.thir[expr].kind {
+            ExprKind::Let { .. } => true,
+            ExprKind::Scope { value, .. } => self.is_let(value),
+            _ => false,
+        }
     }
 }

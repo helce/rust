@@ -115,12 +115,6 @@ impl<'tcx, Tag: Provenance> std::ops::Deref for MPlaceTy<'tcx, Tag> {
     }
 }
 
-impl<'tcx, Tag: Provenance> std::ops::DerefMut for MPlaceTy<'tcx, Tag> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.mplace
-    }
-}
-
 impl<'tcx, Tag: Provenance> From<MPlaceTy<'tcx, Tag>> for PlaceTy<'tcx, Tag> {
     #[inline(always)]
     fn from(mplace: MPlaceTy<'tcx, Tag>) -> Self {
@@ -194,6 +188,18 @@ impl<'tcx, Tag: Provenance> MPlaceTy<'tcx, Tag> {
     #[inline]
     pub fn from_aligned_ptr(ptr: Pointer<Option<Tag>>, layout: TyAndLayout<'tcx>) -> Self {
         MPlaceTy { mplace: MemPlace::from_ptr(ptr, layout.align.abi), layout }
+    }
+
+    #[inline]
+    pub fn from_aligned_ptr_with_meta(
+        ptr: Pointer<Option<Tag>>,
+        layout: TyAndLayout<'tcx>,
+        meta: MemPlaceMeta<Tag>,
+    ) -> Self {
+        let mut mplace = MemPlace::from_ptr(ptr, layout.align.abi);
+        mplace.meta = meta;
+
+        MPlaceTy { mplace, layout }
     }
 
     #[inline]
@@ -307,6 +313,11 @@ where
     ) -> InterpResult<'tcx, MPlaceTy<'tcx, M::PointerTag>> {
         let val = self.read_immediate(src)?;
         trace!("deref to {} on {:?}", val.layout.ty, *val);
+
+        if val.layout.ty.is_box() {
+            bug!("dereferencing {:?}", val.layout.ty);
+        }
+
         let mplace = self.ref_to_mplace(&val)?;
         self.check_mplace_access(mplace, CheckInAllocMsg::DerefTest)?;
         Ok(mplace)
@@ -495,7 +506,7 @@ where
 
     /// Project into an mplace
     #[instrument(skip(self), level = "debug")]
-    pub(crate) fn mplace_projection(
+    pub(super) fn mplace_projection(
         &self,
         base: &MPlaceTy<'tcx, M::PointerTag>,
         proj_elem: mir::PlaceElem<'tcx>,
@@ -863,8 +874,6 @@ where
             Ok(src_val) => {
                 assert!(!src.layout.is_unsized(), "cannot have unsized immediates");
                 // Yay, we got a value that we can write directly.
-                // FIXME: Add a check to make sure that if `src` is indirect,
-                // it does not overlap with `dest`.
                 return self.write_immediate_no_validate(*src_val, dest);
             }
             Err(mplace) => mplace,
@@ -884,7 +893,7 @@ where
         });
         assert_eq!(src.meta, dest.meta, "Can only copy between equally-sized instances");
 
-        self.mem_copy(src.ptr, src.align, dest.ptr, dest.align, size, /*nonoverlapping*/ true)
+        self.mem_copy(src.ptr, src.align, dest.ptr, dest.align, size, /*nonoverlapping*/ false)
     }
 
     /// Copies the data from an operand to a place. The layouts may disagree, but they must
@@ -900,16 +909,12 @@ where
         }
         // We still require the sizes to match.
         if src.layout.size != dest.layout.size {
-            // FIXME: This should be an assert instead of an error, but if we transmute within an
-            // array length computation, `typeck` may not have yet been run and errored out. In fact
-            // most likely we *are* running `typeck` right now. Investigate whether we can bail out
-            // on `typeck_results().has_errors` at all const eval entry points.
-            debug!("Size mismatch when transmuting!\nsrc: {:#?}\ndest: {:#?}", src, dest);
-            self.tcx.sess.delay_span_bug(
+            span_bug!(
                 self.cur_span(),
-                "size-changing transmute, should have been caught by transmute checking",
+                "size-changing transmute, should have been caught by transmute checking: {:#?}\ndest: {:#?}",
+                src,
+                dest
             );
-            throw_inval!(TransmuteSizeDiff(src.layout.ty, dest.layout.ty));
         }
         // Unsized copies rely on interpreting `src.meta` with `dest.layout`, we want
         // to avoid that here.
@@ -1005,7 +1010,7 @@ where
         &mut self,
         layout: TyAndLayout<'tcx>,
         kind: MemoryKind<M::MemoryKind>,
-    ) -> InterpResult<'static, MPlaceTy<'tcx, M::PointerTag>> {
+    ) -> InterpResult<'tcx, MPlaceTy<'tcx, M::PointerTag>> {
         let ptr = self.allocate_ptr(layout.size, layout.align.abi, kind)?;
         Ok(MPlaceTy::from_aligned_ptr(ptr.into(), layout))
     }

@@ -125,11 +125,13 @@ symbols! {
     Symbols {
         AcqRel,
         Acquire,
+        AddSubdiagnostic,
         Alignment,
         Any,
         Arc,
         Argument,
         ArgumentV1,
+        ArgumentV1Methods,
         Arguments,
         AsMut,
         AsRef,
@@ -156,6 +158,7 @@ symbols! {
         C,
         CStr,
         CString,
+        Capture,
         Center,
         Clone,
         Continue,
@@ -169,6 +172,7 @@ symbols! {
         Decoder,
         Default,
         Deref,
+        DiagnosticMessage,
         DirBuilder,
         Display,
         DoubleEndedIterator,
@@ -205,6 +209,7 @@ symbols! {
         IntoIterator,
         IoRead,
         IoWrite,
+        IrTyKind,
         Is,
         ItemContext,
         Iterator,
@@ -252,16 +257,20 @@ symbols! {
         RustcEncodable,
         Send,
         SeqCst,
+        SessionDiagnostic,
         SliceIndex,
         Some,
         String,
         StructuralEq,
         StructuralPartialEq,
+        SubdiagnosticMessage,
         Sync,
         Target,
         ToOwned,
         ToString,
         Try,
+        TryCaptureGeneric,
+        TryCapturePrintable,
         TryFrom,
         TryInto,
         Ty,
@@ -271,6 +280,7 @@ symbols! {
         UnsafeArg,
         Vec,
         VecDeque,
+        Wrapper,
         Yield,
         _DECLS,
         _Self,
@@ -353,6 +363,7 @@ symbols! {
         assert_receiver_is_total_eq,
         assert_uninit_valid,
         assert_zero_valid,
+        asserting,
         associated_const_equality,
         associated_consts,
         associated_type_bounds,
@@ -427,6 +438,7 @@ symbols! {
         cfg_panic,
         cfg_sanitize,
         cfg_target_abi,
+        cfg_target_compact,
         cfg_target_feature,
         cfg_target_has_atomic,
         cfg_target_has_atomic_equal_alignment,
@@ -503,6 +515,7 @@ symbols! {
         const_raw_ptr_deref,
         const_raw_ptr_to_usize_cast,
         const_refs_to_cell,
+        const_trait,
         const_trait_bound_opt_out,
         const_trait_impl,
         const_transmute,
@@ -721,6 +734,7 @@ symbols! {
         fundamental,
         future,
         future_trait,
+        gdb_script_file,
         ge,
         gen_future,
         gen_kill,
@@ -729,6 +743,7 @@ symbols! {
         generator_state,
         generators,
         generic_arg_infer,
+        generic_assert,
         generic_associated_types,
         generic_associated_types_extended,
         generic_const_exprs,
@@ -1158,6 +1173,7 @@ symbols! {
         rust_2024,
         rust_2024_preview,
         rust_begin_unwind,
+        rust_cold_cc,
         rust_eh_catch_typeinfo,
         rust_eh_personality,
         rust_eh_register_frames,
@@ -1169,6 +1185,7 @@ symbols! {
         rustc_allow_const_fn_unstable,
         rustc_allow_incoherent_impl,
         rustc_attrs,
+        rustc_box,
         rustc_builtin_macro,
         rustc_capture_analysis,
         rustc_clean,
@@ -1177,7 +1194,6 @@ symbols! {
         rustc_const_unstable,
         rustc_conversion_suggestion,
         rustc_def_path,
-        rustc_deprecated,
         rustc_diagnostic_item,
         rustc_diagnostic_macros,
         rustc_dirty,
@@ -1198,6 +1214,7 @@ symbols! {
         rustc_layout_scalar_valid_range_end,
         rustc_layout_scalar_valid_range_start,
         rustc_legacy_const_generics,
+        rustc_lint_diagnostics,
         rustc_lint_query_instability,
         rustc_macro_transparency,
         rustc_main,
@@ -1375,6 +1392,7 @@ symbols! {
         sym,
         sync,
         t32,
+        target,
         target_abi,
         target_arch,
         target_endian,
@@ -1408,6 +1426,7 @@ symbols! {
         thread_local_macro,
         thumb2,
         thumb_mode: "thumb-mode",
+        tmm_reg,
         todo_macro,
         tool_attributes,
         tool_lints,
@@ -1423,6 +1442,7 @@ symbols! {
         truncf32,
         truncf64,
         try_blocks,
+        try_capture,
         try_from,
         try_into,
         try_trait_v2,
@@ -1430,6 +1450,7 @@ symbols! {
         tuple,
         tuple_from_req,
         tuple_indexing,
+        tuple_variadic,
         two_phase,
         ty,
         type_alias_enum_variants,
@@ -1485,6 +1506,7 @@ symbols! {
         unsized_tuple_coercion,
         unstable,
         untagged_unions,
+        unused_imports,
         unused_qualifications,
         unwind,
         unwind_attributes,
@@ -1620,7 +1642,7 @@ impl Ident {
 
 impl PartialEq for Ident {
     fn eq(&self, rhs: &Self) -> bool {
-        self.name == rhs.name && self.span.ctxt() == rhs.span.ctxt()
+        self.name == rhs.name && self.span.eq_ctxt(rhs.span)
     }
 }
 
@@ -1793,8 +1815,8 @@ impl fmt::Display for Symbol {
 }
 
 impl<S: Encoder> Encodable<S> for Symbol {
-    fn encode(&self, s: &mut S) -> Result<(), S::Error> {
-        s.emit_str(self.as_str())
+    fn encode(&self, s: &mut S) {
+        s.emit_str(self.as_str());
     }
 }
 

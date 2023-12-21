@@ -86,7 +86,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         test_place: &PlaceBuilder<'tcx>,
         candidate: &Candidate<'pat, 'tcx>,
         switch_ty: Ty<'tcx>,
-        options: &mut FxIndexMap<ty::Const<'tcx>, u128>,
+        options: &mut FxIndexMap<ConstantKind<'tcx>, u128>,
     ) -> bool {
         let Some(match_pair) = candidate.match_pairs.iter().find(|mp| mp.place == *test_place) else {
             return false;
@@ -264,7 +264,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     );
                 } else if let [success, fail] = *make_target_blocks(self) {
                     assert_eq!(value.ty(), ty);
-                    let expect = self.literal_operand(test.span, value.into());
+                    let expect = self.literal_operand(test.span, value);
                     let val = Operand::Copy(place);
                     self.compare(block, success, fail, source_info, BinOp::Eq, expect, val);
                 } else {
@@ -277,8 +277,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let target_blocks = make_target_blocks(self);
 
                 // Test `val` by computing `lo <= val && val <= hi`, using primitive comparisons.
-                let lo = self.literal_operand(test.span, lo.into());
-                let hi = self.literal_operand(test.span, hi.into());
+                let lo = self.literal_operand(test.span, lo);
+                let hi = self.literal_operand(test.span, hi);
                 let val = Operand::Copy(place);
 
                 let [success, fail] = *target_blocks else {
@@ -366,11 +366,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         block: BasicBlock,
         make_target_blocks: impl FnOnce(&mut Self) -> Vec<BasicBlock>,
         source_info: SourceInfo,
-        value: ty::Const<'tcx>,
+        value: ConstantKind<'tcx>,
         place: Place<'tcx>,
         mut ty: Ty<'tcx>,
     ) {
-        let mut expect = self.literal_operand(source_info.span, value.into());
+        let mut expect = self.literal_operand(source_info.span, value);
         let mut val = Operand::Copy(place);
 
         // If we're using `b"..."` as a pattern, we need to insert an
@@ -444,7 +444,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     literal: method,
                 })),
                 args: vec![val, expect],
-                destination: Some((eq_result, eq_block)),
+                destination: eq_result,
+                target: Some(eq_block),
                 cleanup: None,
                 from_hir_call: false,
                 fn_span: source_info.span,
@@ -631,39 +632,30 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
 
             (&TestKind::Range(test), &PatKind::Range(pat)) => {
+                use std::cmp::Ordering::*;
+
                 if test == pat {
                     self.candidate_without_match_pair(match_pair_index, candidate);
                     return Some(0);
                 }
 
-                let no_overlap = (|| {
-                    use rustc_hir::RangeEnd::*;
-                    use std::cmp::Ordering::*;
-
-                    let tcx = self.tcx;
-
-                    let test_ty = test.lo.ty();
-                    let lo = compare_const_vals(tcx, test.lo, pat.hi, self.param_env, test_ty)?;
-                    let hi = compare_const_vals(tcx, test.hi, pat.lo, self.param_env, test_ty)?;
-
-                    match (test.end, pat.end, lo, hi) {
-                        // pat < test
-                        (_, _, Greater, _) |
-                        (_, Excluded, Equal, _) |
-                        // pat > test
-                        (_, _, _, Less) |
-                        (Excluded, _, _, Equal) => Some(true),
-                        _ => Some(false),
-                    }
-                })();
-
-                if let Some(true) = no_overlap {
-                    // Testing range does not overlap with pattern range,
-                    // so the pattern can be matched only if this test fails.
+                // For performance, it's important to only do the second
+                // `compare_const_vals` if necessary.
+                let no_overlap = if matches!(
+                    (compare_const_vals(self.tcx, test.hi, pat.lo, self.param_env)?, test.end),
+                    (Less, _) | (Equal, RangeEnd::Excluded) // test < pat
+                ) || matches!(
+                    (compare_const_vals(self.tcx, test.lo, pat.hi, self.param_env)?, pat.end),
+                    (Greater, _) | (Equal, RangeEnd::Excluded) // test > pat
+                ) {
                     Some(1)
                 } else {
                     None
-                }
+                };
+
+                // If the testing range does not overlap with pattern range,
+                // the pattern can be matched only if this test fails.
+                no_overlap
             }
 
             (&TestKind::Range(range), &PatKind::Constant { value }) => {
@@ -760,24 +752,28 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         span_bug!(match_pair.pattern.span, "simplifyable pattern found: {:?}", match_pair.pattern)
     }
 
-    fn const_range_contains(&self, range: PatRange<'tcx>, value: ty::Const<'tcx>) -> Option<bool> {
+    fn const_range_contains(
+        &self,
+        range: PatRange<'tcx>,
+        value: ConstantKind<'tcx>,
+    ) -> Option<bool> {
         use std::cmp::Ordering::*;
 
-        let tcx = self.tcx;
-
-        let a = compare_const_vals(tcx, range.lo, value, self.param_env, range.lo.ty())?;
-        let b = compare_const_vals(tcx, value, range.hi, self.param_env, range.lo.ty())?;
-
-        match (b, range.end) {
-            (Less, _) | (Equal, RangeEnd::Included) if a != Greater => Some(true),
-            _ => Some(false),
-        }
+        // For performance, it's important to only do the second
+        // `compare_const_vals` if necessary.
+        Some(
+            matches!(compare_const_vals(self.tcx, range.lo, value, self.param_env)?, Less | Equal)
+                && matches!(
+                    (compare_const_vals(self.tcx, value, range.hi, self.param_env)?, range.end),
+                    (Less, _) | (Equal, RangeEnd::Included)
+                ),
+        )
     }
 
     fn values_not_contained_in_range(
         &self,
         range: PatRange<'tcx>,
-        options: &FxIndexMap<ty::Const<'tcx>, u128>,
+        options: &FxIndexMap<ConstantKind<'tcx>, u128>,
     ) -> Option<bool> {
         for &val in options.keys() {
             if self.const_range_contains(range, val)? {

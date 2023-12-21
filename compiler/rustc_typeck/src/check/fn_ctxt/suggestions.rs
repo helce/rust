@@ -8,15 +8,14 @@ use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind};
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{
-    Expr, ExprKind, GenericBound, ItemKind, Node, Path, QPath, Stmt, StmtKind, TyKind,
-    WherePredicate,
+    Expr, ExprKind, GenericBound, Node, Path, QPath, Stmt, StmtKind, TyKind, WherePredicate,
 };
 use rustc_infer::infer::{self, TyCtxtInferExt};
 use rustc_infer::traits;
 use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::subst::GenericArgKind;
-use rustc_middle::ty::{self, Binder, ToPredicate, Ty};
-use rustc_span::symbol::{kw, sym};
+use rustc_middle::ty::{self, Binder, IsSuggestable, Subst, ToPredicate, Ty};
+use rustc_span::symbol::sym;
 use rustc_span::Span;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
 
@@ -27,7 +26,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         err.span_suggestion_short(
             span.shrink_to_hi(),
             "consider using a semicolon here",
-            ";".to_string(),
+            ";",
             Applicability::MachineApplicable,
         );
     }
@@ -46,12 +45,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         blk_id: hir::HirId,
     ) -> bool {
         let expr = expr.peel_drop_temps();
-        // If the expression is from an external macro, then do not suggest
-        // adding a semicolon, because there's nowhere to put it.
-        // See issue #81943.
-        if expr.can_have_side_effects() && !in_external_macro(self.tcx.sess, expr.span) {
-            self.suggest_missing_semicolon(err, expr, expected);
-        }
+        self.suggest_missing_semicolon(err, expr, expected, false);
         let mut pointing_at_return_type = false;
         if let Some((fn_decl, can_suggest)) = self.get_fn_decl(blk_id) {
             let fn_id = self.tcx.hir().get_return_block(blk_id).unwrap();
@@ -83,124 +77,88 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expected: Ty<'tcx>,
         found: Ty<'tcx>,
     ) -> bool {
-        let hir = self.tcx.hir();
-        let (def_id, sig) = match *found.kind() {
-            ty::FnDef(def_id, _) => (def_id, found.fn_sig(self.tcx)),
-            ty::Closure(def_id, substs) => (def_id, substs.as_closure().sig()),
+        let (def_id, output, inputs) = match *found.kind() {
+            ty::FnDef(def_id, _) => {
+                let fn_sig = found.fn_sig(self.tcx);
+                (def_id, fn_sig.output(), fn_sig.inputs().skip_binder().len())
+            }
+            ty::Closure(def_id, substs) => {
+                let fn_sig = substs.as_closure().sig();
+                (def_id, fn_sig.output(), fn_sig.inputs().skip_binder().len() - 1)
+            }
+            ty::Opaque(def_id, substs) => {
+                let sig = self.tcx.bound_item_bounds(def_id).subst(self.tcx, substs).iter().find_map(|pred| {
+                    if let ty::PredicateKind::Projection(proj) = pred.kind().skip_binder()
+                    && Some(proj.projection_ty.item_def_id) == self.tcx.lang_items().fn_once_output()
+                    // args tuple will always be substs[1]
+                    && let ty::Tuple(args) = proj.projection_ty.substs.type_at(1).kind()
+                    {
+                        Some((
+                            pred.kind().rebind(proj.term.ty().unwrap()),
+                            args.len(),
+                        ))
+                    } else {
+                        None
+                    }
+                });
+                if let Some((output, inputs)) = sig {
+                    (def_id, output, inputs)
+                } else {
+                    return false;
+                }
+            }
             _ => return false,
         };
 
-        let sig = self.replace_bound_vars_with_fresh_vars(expr.span, infer::FnCall, sig).0;
-        let sig = self.normalize_associated_types_in(expr.span, sig);
-        if self.can_coerce(sig.output(), expected) {
-            let (mut sugg_call, applicability) = if sig.inputs().is_empty() {
-                (String::new(), Applicability::MachineApplicable)
-            } else {
-                ("...".to_string(), Applicability::HasPlaceholders)
+        let output = self.replace_bound_vars_with_fresh_vars(expr.span, infer::FnCall, output);
+        let output = self.normalize_associated_types_in(expr.span, output);
+        if !output.is_ty_var() && self.can_coerce(output, expected) {
+            let (sugg_call, mut applicability) = match inputs {
+                0 => ("".to_string(), Applicability::MachineApplicable),
+                1..=4 => (
+                    (0..inputs).map(|_| "_").collect::<Vec<_>>().join(", "),
+                    Applicability::MachineApplicable,
+                ),
+                _ => ("...".to_string(), Applicability::HasPlaceholders),
             };
-            let mut msg = "call this function";
-            match hir.get_if_local(def_id) {
-                Some(
-                    Node::Item(hir::Item { kind: ItemKind::Fn(.., body_id), .. })
-                    | Node::ImplItem(hir::ImplItem {
-                        kind: hir::ImplItemKind::Fn(_, body_id), ..
-                    })
-                    | Node::TraitItem(hir::TraitItem {
-                        kind: hir::TraitItemKind::Fn(.., hir::TraitFn::Provided(body_id)),
-                        ..
-                    }),
-                ) => {
-                    let body = hir.body(*body_id);
-                    sugg_call = body
-                        .params
-                        .iter()
-                        .map(|param| match &param.pat.kind {
-                            hir::PatKind::Binding(_, _, ident, None)
-                                if ident.name != kw::SelfLower =>
-                            {
-                                ident.to_string()
-                            }
-                            _ => "_".to_string(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
+
+            let msg = match self.tcx.def_kind(def_id) {
+                DefKind::Fn => "call this function",
+                DefKind::Closure | DefKind::OpaqueTy => "call this closure",
+                DefKind::Ctor(CtorOf::Struct, _) => "instantiate this tuple struct",
+                DefKind::Ctor(CtorOf::Variant, _) => "instantiate this tuple variant",
+                _ => "call this function",
+            };
+
+            let sugg = match expr.kind {
+                hir::ExprKind::Call(..)
+                | hir::ExprKind::Path(..)
+                | hir::ExprKind::Index(..)
+                | hir::ExprKind::Lit(..) => {
+                    vec![(expr.span.shrink_to_hi(), format!("({sugg_call})"))]
                 }
-                Some(Node::Expr(hir::Expr {
-                    kind: ExprKind::Closure(_, _, body_id, _, _),
-                    span: full_closure_span,
-                    ..
-                })) => {
-                    if *full_closure_span == expr.span {
-                        return false;
-                    }
-                    msg = "call this closure";
-                    let body = hir.body(*body_id);
-                    sugg_call = body
-                        .params
-                        .iter()
-                        .map(|param| match &param.pat.kind {
-                            hir::PatKind::Binding(_, _, ident, None)
-                                if ident.name != kw::SelfLower =>
-                            {
-                                ident.to_string()
-                            }
-                            _ => "_".to_string(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                hir::ExprKind::Closure { .. } => {
+                    // Might be `{ expr } || { bool }`
+                    applicability = Applicability::MaybeIncorrect;
+                    vec![
+                        (expr.span.shrink_to_lo(), "(".to_string()),
+                        (expr.span.shrink_to_hi(), format!(")({sugg_call})")),
+                    ]
                 }
-                Some(Node::Ctor(hir::VariantData::Tuple(fields, _))) => {
-                    sugg_call = fields.iter().map(|_| "_").collect::<Vec<_>>().join(", ");
-                    match def_id.as_local().map(|def_id| self.tcx.def_kind(def_id)) {
-                        Some(DefKind::Ctor(hir::def::CtorOf::Variant, _)) => {
-                            msg = "instantiate this tuple variant";
-                        }
-                        Some(DefKind::Ctor(CtorOf::Struct, _)) => {
-                            msg = "instantiate this tuple struct";
-                        }
-                        _ => {}
-                    }
+                _ => {
+                    vec![
+                        (expr.span.shrink_to_lo(), "(".to_string()),
+                        (expr.span.shrink_to_hi(), format!(")({sugg_call})")),
+                    ]
                 }
-                Some(Node::ForeignItem(hir::ForeignItem {
-                    kind: hir::ForeignItemKind::Fn(_, idents, _),
-                    ..
-                })) => {
-                    sugg_call = idents
-                        .iter()
-                        .map(|ident| {
-                            if ident.name != kw::SelfLower {
-                                ident.to_string()
-                            } else {
-                                "_".to_string()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-                Some(Node::TraitItem(hir::TraitItem {
-                    kind: hir::TraitItemKind::Fn(.., hir::TraitFn::Required(idents)),
-                    ..
-                })) => {
-                    sugg_call = idents
-                        .iter()
-                        .map(|ident| {
-                            if ident.name != kw::SelfLower {
-                                ident.to_string()
-                            } else {
-                                "_".to_string()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-                _ => {}
-            }
-            err.span_suggestion_verbose(
-                expr.span.shrink_to_hi(),
-                &format!("use parentheses to {}", msg),
-                format!("({})", sugg_call),
+            };
+
+            err.multipart_suggestion_verbose(
+                format!("use parentheses to {msg}"),
+                sugg,
                 applicability,
             );
+
             return true;
         }
         false
@@ -449,7 +407,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         err.span_suggestion(
                             fn_name.span,
                             "use `Box::pin` to pin and box this expression",
-                            "Box::pin".to_string(),
+                            "Box::pin",
                             Applicability::MachineApplicable,
                         );
                         true
@@ -473,11 +431,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// This routine checks if the return expression in a block would make sense on its own as a
     /// statement and the return type has been left as default or has been specified as `()`. If so,
     /// it suggests adding a semicolon.
-    fn suggest_missing_semicolon(
+    ///
+    /// If the expression is the expression of a closure without block (`|| expr`), a
+    /// block is needed to be added too (`|| { expr; }`). This is denoted by `needs_block`.
+    pub fn suggest_missing_semicolon(
         &self,
         err: &mut Diagnostic,
         expression: &'tcx hir::Expr<'tcx>,
         expected: Ty<'tcx>,
+        needs_block: bool,
     ) {
         if expected.is_unit() {
             // `BlockTailExpression` only relevant if the tail expr would be
@@ -489,14 +451,29 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 | ExprKind::If(..)
                 | ExprKind::Match(..)
                 | ExprKind::Block(..)
-                    if expression.can_have_side_effects() =>
+                    if expression.can_have_side_effects()
+                        // If the expression is from an external macro, then do not suggest
+                        // adding a semicolon, because there's nowhere to put it.
+                        // See issue #81943.
+                        && !in_external_macro(self.tcx.sess, expression.span) =>
                 {
-                    err.span_suggestion(
-                        expression.span.shrink_to_hi(),
-                        "consider using a semicolon here",
-                        ";".to_string(),
-                        Applicability::MachineApplicable,
-                    );
+                    if needs_block {
+                        err.multipart_suggestion(
+                            "consider using a semicolon here",
+                            vec![
+                                (expression.span.shrink_to_lo(), "{ ".to_owned()),
+                                (expression.span.shrink_to_hi(), "; }".to_owned()),
+                            ],
+                            Applicability::MachineApplicable,
+                        );
+                    } else {
+                        err.span_suggestion(
+                            expression.span.shrink_to_hi(),
+                            "consider using a semicolon here",
+                            ";",
+                            Applicability::MachineApplicable,
+                        );
+                    }
                 }
                 _ => (),
             }

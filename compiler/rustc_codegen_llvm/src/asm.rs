@@ -605,7 +605,8 @@ fn reg_to_llvm(reg: InlineAsmRegOrRegClass, layout: Option<&TyAndLayout<'_>>) ->
             InlineAsmRegClass::X86(
                 X86InlineAsmRegClass::x87_reg
                 | X86InlineAsmRegClass::mmx_reg
-                | X86InlineAsmRegClass::kreg0,
+                | X86InlineAsmRegClass::kreg0
+                | X86InlineAsmRegClass::tmm_reg,
             ) => unreachable!("clobber-only"),
             InlineAsmRegClass::Wasm(WasmInlineAsmRegClass::local) => "r",
             InlineAsmRegClass::Bpf(BpfInlineAsmRegClass::reg) => "r",
@@ -694,7 +695,8 @@ fn modifier_to_llvm(
         InlineAsmRegClass::X86(
             X86InlineAsmRegClass::x87_reg
             | X86InlineAsmRegClass::mmx_reg
-            | X86InlineAsmRegClass::kreg0,
+            | X86InlineAsmRegClass::kreg0
+            | X86InlineAsmRegClass::tmm_reg,
         ) => {
             unreachable!("clobber-only")
         }
@@ -769,7 +771,8 @@ fn dummy_output_type<'ll>(cx: &CodegenCx<'ll, '_>, reg: InlineAsmRegClass) -> &'
         InlineAsmRegClass::X86(
             X86InlineAsmRegClass::x87_reg
             | X86InlineAsmRegClass::mmx_reg
-            | X86InlineAsmRegClass::kreg0,
+            | X86InlineAsmRegClass::kreg0
+            | X86InlineAsmRegClass::tmm_reg,
         ) => {
             unreachable!("clobber-only")
         }

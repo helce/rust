@@ -27,7 +27,7 @@ use crate::infer::{ConstVarValue, ConstVariableValue};
 use crate::infer::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::ty::error::TypeError;
-use rustc_middle::ty::fold::{TypeFoldable, TypeVisitor};
+use rustc_middle::ty::fold::{TypeFoldable, TypeSuperFoldable, TypeVisitor};
 use rustc_middle::ty::relate::{self, Relate, RelateResult, TypeRelation};
 use rustc_middle::ty::{self, InferConst, Ty, TyCtxt};
 use rustc_span::Span;
@@ -659,10 +659,14 @@ where
             b = self.infcx.shallow_resolve(b);
         }
 
-        match b.val() {
+        match b.kind() {
             ty::ConstKind::Infer(InferConst::Var(_)) if D::forbid_inference_vars() => {
                 // Forbid inference variables in the RHS.
-                bug!("unexpected inference var {:?}", b)
+                self.infcx.tcx.sess.delay_span_bug(
+                    self.delegate.span(),
+                    format!("unexpected inference var {:?}", b,),
+                );
+                Ok(a)
             }
             // FIXME(invariance): see the related FIXME above.
             _ => self.infcx.super_combine_consts(self, a, b),
@@ -859,7 +863,7 @@ where
 
     delegate: &'me mut D,
 
-    /// After we generalize this type, we are going to relative it to
+    /// After we generalize this type, we are going to relate it to
     /// some other type. What will be the variance at this point?
     ambient_variance: ty::Variance,
 
@@ -1034,7 +1038,7 @@ where
         a: ty::Const<'tcx>,
         _: ty::Const<'tcx>,
     ) -> RelateResult<'tcx, ty::Const<'tcx>> {
-        match a.val() {
+        match a.kind() {
             ty::ConstKind::Infer(InferConst::Var(_)) if D::forbid_inference_vars() => {
                 bug!("unexpected inference variable encountered in NLL generalization: {:?}", a);
             }

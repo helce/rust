@@ -425,17 +425,25 @@ impl<T> Vec<T> {
         Vec { buf: RawVec::NEW, len: 0 }
     }
 
-    /// Constructs a new, empty `Vec<T>` with the specified capacity.
+    /// Constructs a new, empty `Vec<T>` with at least the specified capacity.
     ///
-    /// The vector will be able to hold exactly `capacity` elements without
-    /// reallocating. If `capacity` is 0, the vector will not allocate.
+    /// The vector will be able to hold at least `capacity` elements without
+    /// reallocating. This method is allowed to allocate for more elements than
+    /// `capacity`. If `capacity` is 0, the vector will not allocate.
     ///
     /// It is important to note that although the returned vector has the
-    /// *capacity* specified, the vector will have a zero *length*. For an
-    /// explanation of the difference between length and capacity, see
+    /// minimum *capacity* specified, the vector will have a zero *length*. For
+    /// an explanation of the difference between length and capacity, see
     /// *[Capacity and reallocation]*.
     ///
+    /// If it is imporant to know the exact allocated capacity of a `Vec`,
+    /// always use the [`capacity`] method after construction.
+    ///
+    /// For `Vec<T>` where `T` is a zero-sized type, there will be no allocation
+    /// and the capacity will always be `usize::MAX`.
+    ///
     /// [Capacity and reallocation]: #capacity-and-reallocation
+    /// [`capacity`]: Vec::capacity
     ///
     /// # Panics
     ///
@@ -448,19 +456,24 @@ impl<T> Vec<T> {
     ///
     /// // The vector contains no items, even though it has capacity for more
     /// assert_eq!(vec.len(), 0);
-    /// assert_eq!(vec.capacity(), 10);
+    /// assert!(vec.capacity() >= 10);
     ///
     /// // These are all done without reallocating...
     /// for i in 0..10 {
     ///     vec.push(i);
     /// }
     /// assert_eq!(vec.len(), 10);
-    /// assert_eq!(vec.capacity(), 10);
+    /// assert!(vec.capacity() >= 10);
     ///
     /// // ...but this may make the vector reallocate
     /// vec.push(11);
     /// assert_eq!(vec.len(), 11);
     /// assert!(vec.capacity() >= 11);
+    ///
+    /// // A vector of a zero-sized type will always over-allocate, since no
+    /// // allocation is necessary
+    /// let vec_units = Vec::<()>::with_capacity(10);
+    /// assert_eq!(vec_units.capacity(), usize::MAX);
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[inline]
@@ -566,18 +579,26 @@ impl<T, A: Allocator> Vec<T, A> {
         Vec { buf: RawVec::new_in(alloc), len: 0 }
     }
 
-    /// Constructs a new, empty `Vec<T, A>` with the specified capacity with the provided
-    /// allocator.
+    /// Constructs a new, empty `Vec<T, A>` with at least the specified capacity
+    /// with the provided allocator.
     ///
-    /// The vector will be able to hold exactly `capacity` elements without
-    /// reallocating. If `capacity` is 0, the vector will not allocate.
+    /// The vector will be able to hold at least `capacity` elements without
+    /// reallocating. This method is allowed to allocate for more elements than
+    /// `capacity`. If `capacity` is 0, the vector will not allocate.
     ///
     /// It is important to note that although the returned vector has the
-    /// *capacity* specified, the vector will have a zero *length*. For an
-    /// explanation of the difference between length and capacity, see
+    /// minimum *capacity* specified, the vector will have a zero *length*. For
+    /// an explanation of the difference between length and capacity, see
     /// *[Capacity and reallocation]*.
     ///
+    /// If it is imporant to know the exact allocated capacity of a `Vec`,
+    /// always use the [`capacity`] method after construction.
+    ///
+    /// For `Vec<T, A>` where `T` is a zero-sized type, there will be no allocation
+    /// and the capacity will always be `usize::MAX`.
+    ///
     /// [Capacity and reallocation]: #capacity-and-reallocation
+    /// [`capacity`]: Vec::capacity
     ///
     /// # Panics
     ///
@@ -607,6 +628,11 @@ impl<T, A: Allocator> Vec<T, A> {
     /// vec.push(11);
     /// assert_eq!(vec.len(), 11);
     /// assert!(vec.capacity() >= 11);
+    ///
+    /// // A vector of a zero-sized type will always over-allocate, since no
+    /// // allocation is necessary
+    /// let vec_units = Vec::<(), System>::with_capacity_in(10, System);
+    /// assert_eq!(vec_units.capacity(), usize::MAX);
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[inline]
@@ -793,10 +819,10 @@ impl<T, A: Allocator> Vec<T, A> {
     }
 
     /// Reserves capacity for at least `additional` more elements to be inserted
-    /// in the given `Vec<T>`. The collection may reserve more space to avoid
-    /// frequent reallocations. After calling `reserve`, capacity will be
-    /// greater than or equal to `self.len() + additional`. Does nothing if
-    /// capacity is already sufficient.
+    /// in the given `Vec<T>`. The collection may reserve more space to
+    /// speculatively avoid frequent reallocations. After calling `reserve`,
+    /// capacity will be greater than or equal to `self.len() + additional`.
+    /// Does nothing if capacity is already sufficient.
     ///
     /// # Panics
     ///
@@ -815,10 +841,12 @@ impl<T, A: Allocator> Vec<T, A> {
         self.buf.reserve(self.len, additional);
     }
 
-    /// Reserves the minimum capacity for exactly `additional` more elements to
-    /// be inserted in the given `Vec<T>`. After calling `reserve_exact`,
-    /// capacity will be greater than or equal to `self.len() + additional`.
-    /// Does nothing if the capacity is already sufficient.
+    /// Reserves the minimum capacity for at least `additional` more elements to
+    /// be inserted in the given `Vec<T>`. Unlike [`reserve`], this will not
+    /// deliberately over-allocate to speculatively avoid frequent allocations.
+    /// After calling `reserve_exact`, capacity will be greater than or equal to
+    /// `self.len() + additional`. Does nothing if the capacity is already
+    /// sufficient.
     ///
     /// Note that the allocator may give the collection more space than it
     /// requests. Therefore, capacity can not be relied upon to be precisely
@@ -844,10 +872,10 @@ impl<T, A: Allocator> Vec<T, A> {
     }
 
     /// Tries to reserve capacity for at least `additional` more elements to be inserted
-    /// in the given `Vec<T>`. The collection may reserve more space to avoid
+    /// in the given `Vec<T>`. The collection may reserve more space to speculatively avoid
     /// frequent reallocations. After calling `try_reserve`, capacity will be
-    /// greater than or equal to `self.len() + additional`. Does nothing if
-    /// capacity is already sufficient.
+    /// greater than or equal to `self.len() + additional` if it returns
+    /// `Ok(())`. Does nothing if capacity is already sufficient.
     ///
     /// # Errors
     ///
@@ -879,10 +907,11 @@ impl<T, A: Allocator> Vec<T, A> {
         self.buf.try_reserve(self.len, additional)
     }
 
-    /// Tries to reserve the minimum capacity for exactly `additional`
-    /// elements to be inserted in the given `Vec<T>`. After calling
-    /// `try_reserve_exact`, capacity will be greater than or equal to
-    /// `self.len() + additional` if it returns `Ok(())`.
+    /// Tries to reserve the minimum capacity for at least `additional`
+    /// elements to be inserted in the given `Vec<T>`. Unlike [`try_reserve`],
+    /// this will not deliberately over-allocate to speculatively avoid frequent
+    /// allocations. After calling `try_reserve_exact`, capacity will be greater
+    /// than or equal to `self.len() + additional` if it returns `Ok(())`.
     /// Does nothing if the capacity is already sufficient.
     ///
     /// Note that the allocator may give the collection more space than it
@@ -1107,7 +1136,8 @@ impl<T, A: Allocator> Vec<T, A> {
         self
     }
 
-    /// Returns a raw pointer to the vector's buffer.
+    /// Returns a raw pointer to the vector's buffer, or a dangling raw pointer
+    /// valid for zero sized reads if the vector didn't allocate.
     ///
     /// The caller must ensure that the vector outlives the pointer this
     /// function returns, or else it will end up pointing to garbage.
@@ -1144,7 +1174,8 @@ impl<T, A: Allocator> Vec<T, A> {
         ptr
     }
 
-    /// Returns an unsafe mutable pointer to the vector's buffer.
+    /// Returns an unsafe mutable pointer to the vector's buffer, or a dangling
+    /// raw pointer valid for zero sized reads if the vector didn't allocate.
     ///
     /// The caller must ensure that the vector outlives the pointer this
     /// function returns, or else it will end up pointing to garbage.
@@ -1470,11 +1501,11 @@ impl<T, A: Allocator> Vec<T, A> {
     ///
     /// ```
     /// let mut vec = vec![1, 2, 3, 4];
-    /// vec.retain_mut(|x| if *x > 3 {
-    ///     false
-    /// } else {
+    /// vec.retain_mut(|x| if *x <= 3 {
     ///     *x += 1;
     ///     true
+    /// } else {
+    ///     false
     /// });
     /// assert_eq!(vec, [2, 3, 4]);
     /// ```
@@ -1771,7 +1802,7 @@ impl<T, A: Allocator> Vec<T, A> {
     ///
     /// # Panics
     ///
-    /// Panics if the number of elements in the vector overflows a `usize`.
+    /// Panics if the new capacity exceeds `isize::MAX` bytes.
     ///
     /// # Examples
     ///
@@ -2470,7 +2501,7 @@ impl<T: Copy, A: Allocator> ExtendFromWithinSpec for Vec<T, A> {
             // SAFETY:
             // - Both pointers are created from unique slice references (`&mut [_]`)
             //   so they are valid and do not overlap.
-            // - Elements are :Copy so it's OK to to copy them, without doing
+            // - Elements are :Copy so it's OK to copy them, without doing
             //   anything with the original values
             // - `count` is equal to the len of `source`, so source is valid for
             //   `count` reads
@@ -2493,6 +2524,7 @@ impl<T: Copy, A: Allocator> ExtendFromWithinSpec for Vec<T, A> {
 impl<T, A: Allocator> ops::Deref for Vec<T, A> {
     type Target = [T];
 
+    #[inline]
     fn deref(&self) -> &[T] {
         unsafe { slice::from_raw_parts(self.as_ptr(), self.len) }
     }
@@ -2500,6 +2532,7 @@ impl<T, A: Allocator> ops::Deref for Vec<T, A> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T, A: Allocator> ops::DerefMut for Vec<T, A> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut [T] {
         unsafe { slice::from_raw_parts_mut(self.as_mut_ptr(), self.len) }
     }
@@ -2626,10 +2659,13 @@ impl<T, A: Allocator> IntoIterator for Vec<T, A> {
     ///
     /// ```
     /// let v = vec!["a".to_string(), "b".to_string()];
-    /// for s in v.into_iter() {
-    ///     // s has type String, not &String
-    ///     println!("{s}");
-    /// }
+    /// let mut v_iter = v.into_iter();
+    ///
+    /// let first_element: Option<String> = v_iter.next();
+    ///
+    /// assert_eq!(first_element, Some("a".to_string()));
+    /// assert_eq!(v_iter.next(), Some("b".to_string()));
+    /// assert_eq!(v_iter.next(), None);
     /// ```
     #[inline]
     fn into_iter(self) -> IntoIter<T, A> {
@@ -2980,12 +3016,15 @@ impl<T, const N: usize> From<[T; N]> for Vec<T> {
     /// ```
     #[cfg(not(test))]
     fn from(s: [T; N]) -> Vec<T> {
-        <[T]>::into_vec(box s)
+        <[T]>::into_vec(
+            #[cfg_attr(not(bootstrap), rustc_box)]
+            Box::new(s),
+        )
     }
 
     #[cfg(test)]
     fn from(s: [T; N]) -> Vec<T> {
-        crate::slice::into_vec(box s)
+        crate::slice::into_vec(Box::new(s))
     }
 }
 

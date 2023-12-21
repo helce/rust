@@ -42,7 +42,7 @@ pub type PoloniusOutput = Output<RustcFacts>;
 
 /// The output of `nll::compute_regions`. This includes the computed `RegionInferenceContext`, any
 /// closure requirements to propagate, and any generated errors.
-crate struct NllOutput<'tcx> {
+pub(crate) struct NllOutput<'tcx> {
     pub regioncx: RegionInferenceContext<'tcx>,
     pub opaque_type_values: VecMap<DefId, OpaqueHiddenType<'tcx>>,
     pub polonius_input: Option<Box<AllFacts>>,
@@ -108,7 +108,7 @@ fn populate_polonius_move_facts(
                     // We are at the terminator of an init that has a panic path,
                     // and where the init should not happen on panic
 
-                    for &successor in block_data.terminator().successors() {
+                    for successor in block_data.terminator().successors() {
                         if body[successor].is_cleanup {
                             continue;
                         }
@@ -299,7 +299,7 @@ pub(crate) fn compute_regions<'cx, 'tcx>(
 
     // Solve the region constraints.
     let (closure_region_requirements, nll_errors) =
-        regioncx.solve(infcx, &body, polonius_output.clone());
+        regioncx.solve(infcx, param_env, &body, polonius_output.clone());
 
     if !nll_errors.is_empty() {
         // Suppress unhelpful extra errors in `infer_opaque_types`.
@@ -457,6 +457,6 @@ impl ToRegionVid for RegionVid {
     }
 }
 
-crate trait ConstraintDescription {
+pub(crate) trait ConstraintDescription {
     fn description(&self) -> &'static str;
 }

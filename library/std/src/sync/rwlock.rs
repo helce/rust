@@ -146,7 +146,9 @@ impl<T> RwLock<T> {
     /// let lock = RwLock::new(5);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn new(t: T) -> RwLock<T> {
+    #[rustc_const_stable(feature = "const_locks", since = "1.63.0")]
+    #[inline]
+    pub const fn new(t: T) -> RwLock<T> {
         RwLock {
             inner: sys::MovableRwLock::new(),
             poison: poison::Flag::new(),
@@ -368,6 +370,45 @@ impl<T: ?Sized> RwLock<T> {
         self.poison.get()
     }
 
+    /// Clear the poisoned state from a lock
+    ///
+    /// If the lock is poisoned, it will remain poisoned until this function is called. This allows
+    /// recovering from a poisoned state and marking that it has recovered. For example, if the
+    /// value is overwritten by a known-good value, then the mutex can be marked as un-poisoned. Or
+    /// possibly, the value could be inspected to determine if it is in a consistent state, and if
+    /// so the poison is removed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(mutex_unpoison)]
+    ///
+    /// use std::sync::{Arc, RwLock};
+    /// use std::thread;
+    ///
+    /// let lock = Arc::new(RwLock::new(0));
+    /// let c_lock = Arc::clone(&lock);
+    ///
+    /// let _ = thread::spawn(move || {
+    ///     let _lock = c_lock.write().unwrap();
+    ///     panic!(); // the mutex gets poisoned
+    /// }).join();
+    ///
+    /// assert_eq!(lock.is_poisoned(), true);
+    /// let guard = lock.write().unwrap_or_else(|mut e| {
+    ///     **e.get_mut() = 1;
+    ///     lock.clear_poison();
+    ///     e.into_inner()
+    /// });
+    /// assert_eq!(lock.is_poisoned(), false);
+    /// assert_eq!(*guard, 1);
+    /// ```
+    #[inline]
+    #[unstable(feature = "mutex_unpoison", issue = "96469")]
+    pub fn clear_poison(&self) {
+        self.poison.clear();
+    }
+
     /// Consumes this `RwLock`, returning the underlying data.
     ///
     /// # Errors
@@ -395,7 +436,7 @@ impl<T: ?Sized> RwLock<T> {
         T: Sized,
     {
         let data = self.data.into_inner();
-        poison::map_result(self.poison.borrow(), |_| data)
+        poison::map_result(self.poison.borrow(), |()| data)
     }
 
     /// Returns a mutable reference to the underlying data.
@@ -422,7 +463,7 @@ impl<T: ?Sized> RwLock<T> {
     #[stable(feature = "rwlock_get_mut", since = "1.6.0")]
     pub fn get_mut(&mut self) -> LockResult<&mut T> {
         let data = self.data.get_mut();
-        poison::map_result(self.poison.borrow(), |_| data)
+        poison::map_result(self.poison.borrow(), |()| data)
     }
 }
 
@@ -471,13 +512,13 @@ impl<T> From<T> for RwLock<T> {
 
 impl<'rwlock, T: ?Sized> RwLockReadGuard<'rwlock, T> {
     unsafe fn new(lock: &'rwlock RwLock<T>) -> LockResult<RwLockReadGuard<'rwlock, T>> {
-        poison::map_result(lock.poison.borrow(), |_| RwLockReadGuard { lock })
+        poison::map_result(lock.poison.borrow(), |()| RwLockReadGuard { lock })
     }
 }
 
 impl<'rwlock, T: ?Sized> RwLockWriteGuard<'rwlock, T> {
     unsafe fn new(lock: &'rwlock RwLock<T>) -> LockResult<RwLockWriteGuard<'rwlock, T>> {
-        poison::map_result(lock.poison.borrow(), |guard| RwLockWriteGuard { lock, poison: guard })
+        poison::map_result(lock.poison.guard(), |guard| RwLockWriteGuard { lock, poison: guard })
     }
 }
 

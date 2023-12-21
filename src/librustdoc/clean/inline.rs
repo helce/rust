@@ -38,7 +38,7 @@ type Attrs<'hir> = &'hir [ast::Attribute];
 /// and `Some` of a vector of items if it was successfully expanded.
 ///
 /// `parent_module` refers to the parent of the *re-export*, not the original item.
-crate fn try_inline(
+pub(crate) fn try_inline(
     cx: &mut DocContext<'_>,
     parent_module: DefId,
     import_def_id: Option<DefId>,
@@ -134,10 +134,11 @@ crate fn try_inline(
     Some(ret)
 }
 
-crate fn try_inline_glob(
+pub(crate) fn try_inline_glob(
     cx: &mut DocContext<'_>,
     res: Res,
     visited: &mut FxHashSet<DefId>,
+    inlined_names: &mut FxHashSet<(ItemType, Symbol)>,
 ) -> Option<Vec<clean::Item>> {
     let did = res.opt_def_id()?;
     if did.is_local() {
@@ -146,15 +147,24 @@ crate fn try_inline_glob(
 
     match res {
         Res::Def(DefKind::Mod, did) => {
-            let m = build_module(cx, did, visited);
-            Some(m.items)
+            let mut items = build_module_items(cx, did, visited, inlined_names);
+            items.drain_filter(|item| {
+                if let Some(name) = item.name {
+                    // If an item with the same type and name already exists,
+                    // it takes priority over the inlined stuff.
+                    !inlined_names.insert((item.type_(), name))
+                } else {
+                    false
+                }
+            });
+            Some(items)
         }
         // glob imports on things like enums aren't inlined even for local exports, so just bail
         _ => None,
     }
 }
 
-crate fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> Attrs<'hir> {
+pub(crate) fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> Attrs<'hir> {
     cx.tcx.get_attrs_unchecked(did)
 }
 
@@ -162,7 +172,7 @@ crate fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> Attrs<'hir> {
 ///
 /// These names are used later on by HTML rendering to generate things like
 /// source links back to the original item.
-crate fn record_extern_fqn(cx: &mut DocContext<'_>, did: DefId, kind: ItemType) {
+pub(crate) fn record_extern_fqn(cx: &mut DocContext<'_>, did: DefId, kind: ItemType) {
     let crate_name = cx.tcx.crate_name(did.krate);
 
     let relative =
@@ -190,7 +200,7 @@ crate fn record_extern_fqn(cx: &mut DocContext<'_>, did: DefId, kind: ItemType) 
     }
 }
 
-crate fn build_external_trait(cx: &mut DocContext<'_>, did: DefId) -> clean::Trait {
+pub(crate) fn build_external_trait(cx: &mut DocContext<'_>, did: DefId) -> clean::Trait {
     let trait_items = cx
         .tcx
         .associated_items(did)
@@ -218,7 +228,7 @@ crate fn build_external_trait(cx: &mut DocContext<'_>, did: DefId) -> clean::Tra
     }
 }
 
-fn build_external_function(cx: &mut DocContext<'_>, did: DefId) -> clean::Function {
+fn build_external_function<'tcx>(cx: &mut DocContext<'tcx>, did: DefId) -> clean::Function {
     let sig = cx.tcx.fn_sig(did);
 
     let predicates = cx.tcx.predicates_of(did);
@@ -236,7 +246,6 @@ fn build_enum(cx: &mut DocContext<'_>, did: DefId) -> clean::Enum {
 
     clean::Enum {
         generics: clean_ty_generics(cx, cx.tcx.generics_of(did), predicates),
-        variants_stripped: false,
         variants: cx.tcx.adt_def(did).variants().iter().map(|v| v.clean(cx)).collect(),
     }
 }
@@ -249,7 +258,6 @@ fn build_struct(cx: &mut DocContext<'_>, did: DefId) -> clean::Struct {
         struct_type: variant.ctor_kind,
         generics: clean_ty_generics(cx, cx.tcx.generics_of(did), predicates),
         fields: variant.fields.iter().map(|x| x.clean(cx)).collect(),
-        fields_stripped: false,
     }
 }
 
@@ -259,7 +267,7 @@ fn build_union(cx: &mut DocContext<'_>, did: DefId) -> clean::Union {
 
     let generics = clean_ty_generics(cx, cx.tcx.generics_of(did), predicates);
     let fields = variant.fields.iter().map(|x| x.clean(cx)).collect();
-    clean::Union { generics, fields, fields_stripped: false }
+    clean::Union { generics, fields }
 }
 
 fn build_type_alias(cx: &mut DocContext<'_>, did: DefId) -> clean::Typedef {
@@ -274,7 +282,7 @@ fn build_type_alias(cx: &mut DocContext<'_>, did: DefId) -> clean::Typedef {
 }
 
 /// Builds all inherent implementations of an ADT (struct/union/enum) or Trait item/path/reexport.
-crate fn build_impls(
+pub(crate) fn build_impls(
     cx: &mut DocContext<'_>,
     parent_module: Option<DefId>,
     did: DefId,
@@ -318,7 +326,7 @@ fn merge_attrs(
 }
 
 /// Inline an `impl`, inherent or of a trait. The `did` must be for an `impl`.
-crate fn build_impl(
+pub(crate) fn build_impl(
     cx: &mut DocContext<'_>,
     parent_module: Option<DefId>,
     did: DefId,
@@ -344,7 +352,7 @@ crate fn build_impl(
             }
 
             if let Some(stab) = tcx.lookup_stability(did) {
-                if stab.level.is_unstable() && stab.feature == sym::rustc_private {
+                if stab.is_unstable() && stab.feature == sym::rustc_private {
                     return;
                 }
             }
@@ -373,7 +381,7 @@ crate fn build_impl(
             }
 
             if let Some(stab) = tcx.lookup_stability(did) {
-                if stab.level.is_unstable() && stab.feature == sym::rustc_private {
+                if stab.is_unstable() && stab.feature == sym::rustc_private {
                     return;
                 }
             }
@@ -502,7 +510,11 @@ crate fn build_impl(
             for_,
             items: trait_items,
             polarity,
-            kind: ImplKind::Normal,
+            kind: if utils::has_doc_flag(tcx, did, sym::tuple_variadic) {
+                ImplKind::TupleVaradic
+            } else {
+                ImplKind::Normal
+            },
         }),
         box merged_attrs,
         cx,
@@ -515,6 +527,18 @@ fn build_module(
     did: DefId,
     visited: &mut FxHashSet<DefId>,
 ) -> clean::Module {
+    let items = build_module_items(cx, did, visited, &mut FxHashSet::default());
+
+    let span = clean::Span::new(cx.tcx.def_span(did));
+    clean::Module { items, span }
+}
+
+fn build_module_items(
+    cx: &mut DocContext<'_>,
+    did: DefId,
+    visited: &mut FxHashSet<DefId>,
+    inlined_names: &mut FxHashSet<(ItemType, Symbol)>,
+) -> Vec<clean::Item> {
     let mut items = Vec::new();
 
     // If we're re-exporting a re-export it may actually re-export something in
@@ -524,7 +548,13 @@ fn build_module(
         if item.vis.is_public() {
             let res = item.res.expect_non_local();
             if let Some(def_id) = res.mod_def_id() {
-                if did == def_id || !visited.insert(def_id) {
+                // If we're inlining a glob import, it's possible to have
+                // two distinct modules with the same name. We don't want to
+                // inline it, or mark any of its contents as visited.
+                if did == def_id
+                    || inlined_names.contains(&(ItemType::Module, item.ident.name))
+                    || !visited.insert(def_id)
+                {
                     continue;
                 }
             }
@@ -544,7 +574,7 @@ fn build_module(
                                 segments: vec![clean::PathSegment {
                                     name: prim_ty.as_sym(),
                                     args: clean::GenericArgs::AngleBracketed {
-                                        args: Vec::new(),
+                                        args: Default::default(),
                                         bindings: ThinVec::new(),
                                     },
                                 }],
@@ -561,11 +591,10 @@ fn build_module(
         }
     }
 
-    let span = clean::Span::new(cx.tcx.def_span(did));
-    clean::Module { items, span }
+    items
 }
 
-crate fn print_inlined_const(tcx: TyCtxt<'_>, did: DefId) -> String {
+pub(crate) fn print_inlined_const(tcx: TyCtxt<'_>, did: DefId) -> String {
     if let Some(did) = did.as_local() {
         let hir_id = tcx.hir().local_def_id_to_hir_id(did);
         rustc_hir_pretty::id_to_string(&tcx.hir(), hir_id)
@@ -670,7 +699,7 @@ fn separate_supertrait_bounds(
     (g, ty_bounds)
 }
 
-crate fn record_extern_trait(cx: &mut DocContext<'_>, did: DefId) {
+pub(crate) fn record_extern_trait(cx: &mut DocContext<'_>, did: DefId) {
     if did.is_local() {
         return;
     }

@@ -12,22 +12,20 @@ use rustc_index::bit_set::GrowableBitSet;
 use rustc_infer::infer::InferOk;
 use rustc_infer::infer::LateBoundRegionConversionTime::HigherRankedType;
 use rustc_middle::ty::subst::{GenericArg, GenericArgKind, InternalSubsts, Subst, SubstsRef};
-use rustc_middle::ty::{self, EarlyBinder, GenericParamDefKind, Ty};
+use rustc_middle::ty::{self, EarlyBinder, GenericParamDefKind, Ty, TyCtxt};
 use rustc_middle::ty::{ToPolyTraitRef, ToPredicate};
 use rustc_span::def_id::DefId;
 
 use crate::traits::project::{normalize_with_depth, normalize_with_depth_to};
-use crate::traits::select::TraitObligationExt;
 use crate::traits::util::{self, closure_trait_ref_and_return_type, predicate_for_trait_def};
 use crate::traits::{
-    BuiltinDerivedObligation, DerivedObligationCause, ImplDerivedObligation,
-    ImplDerivedObligationCause, ImplSource, ImplSourceAutoImplData, ImplSourceBuiltinData,
-    ImplSourceClosureData, ImplSourceConstDestructData, ImplSourceDiscriminantKindData,
-    ImplSourceFnPointerData, ImplSourceGeneratorData, ImplSourceObjectData, ImplSourcePointeeData,
-    ImplSourceTraitAliasData, ImplSourceTraitUpcastingData, ImplSourceUserDefinedData, Normalized,
-    ObjectCastObligation, Obligation, ObligationCause, OutputTypeParameterMismatch,
-    PredicateObligation, Selection, SelectionError, TraitNotObjectSafe, TraitObligation,
-    Unimplemented, VtblSegment,
+    BuiltinDerivedObligation, ImplDerivedObligation, ImplDerivedObligationCause, ImplSource,
+    ImplSourceAutoImplData, ImplSourceBuiltinData, ImplSourceClosureData,
+    ImplSourceConstDestructData, ImplSourceDiscriminantKindData, ImplSourceFnPointerData,
+    ImplSourceGeneratorData, ImplSourceObjectData, ImplSourcePointeeData, ImplSourceTraitAliasData,
+    ImplSourceTraitUpcastingData, ImplSourceUserDefinedData, Normalized, ObjectCastObligation,
+    Obligation, ObligationCause, OutputTypeParameterMismatch, PredicateObligation, Selection,
+    SelectionError, TraitNotObjectSafe, TraitObligation, Unimplemented, VtblSegment,
 };
 
 use super::BuiltinImplConditions;
@@ -423,14 +421,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         let object_trait_ref = data.principal().unwrap_or_else(|| {
             span_bug!(obligation.cause.span, "object candidate with no principal")
         });
-        let object_trait_ref = self
-            .infcx
-            .replace_bound_vars_with_fresh_vars(
-                obligation.cause.span,
-                HigherRankedType,
-                object_trait_ref,
-            )
-            .0;
+        let object_trait_ref = self.infcx.replace_bound_vars_with_fresh_vars(
+            obligation.cause.span,
+            HigherRankedType,
+            object_trait_ref,
+        );
         let object_trait_ref = object_trait_ref.with_self_ty(self.tcx(), self_ty);
 
         let mut nested = vec![];
@@ -547,7 +542,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                                 bound_vars.push(bound_var);
                                 tcx.mk_const(ty::ConstS {
                                     ty: tcx.type_of(param.def_id),
-                                    val: ty::ConstKind::Bound(
+                                    kind: ty::ConstKind::Bound(
                                         ty::INNERMOST,
                                         ty::BoundVar::from_usize(bound_vars.len() - 1),
                                     ),
@@ -836,7 +831,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             move |segment| {
                 match segment {
                     VtblSegment::MetadataDSA => {
-                        vptr_offset += ty::COMMON_VTABLE_ENTRIES.len();
+                        vptr_offset += TyCtxt::COMMON_VTABLE_ENTRIES.len();
                     }
                     VtblSegment::TraitOwnEntries { trait_ref, emit_vptr } => {
                         vptr_offset += util::count_own_vtable_entries(tcx, trait_ref);
@@ -994,7 +989,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     // Lifetimes aren't allowed to change during unsizing.
                     GenericArgKind::Lifetime(_) => None,
 
-                    GenericArgKind::Const(ct) => match ct.val() {
+                    GenericArgKind::Const(ct) => match ct.kind() {
                         ty::ConstKind::Param(p) => Some(p.index),
                         _ => None,
                     },
@@ -1128,21 +1123,13 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 let substs = self.rematch_impl(impl_def_id, &new_obligation);
                 debug!(?substs, "impl substs");
 
-                let derived = DerivedObligationCause {
-                    parent_trait_pred: obligation.predicate,
-                    parent_code: obligation.cause.clone_code(),
-                };
-                let derived_code = ImplDerivedObligation(Box::new(ImplDerivedObligationCause {
-                    derived,
-                    impl_def_id,
-                    span: obligation.cause.span,
-                }));
-
-                let cause = ObligationCause::new(
-                    obligation.cause.span,
-                    obligation.cause.body_id,
-                    derived_code,
-                );
+                let cause = obligation.derived_cause(|derived| {
+                    ImplDerivedObligation(Box::new(ImplDerivedObligationCause {
+                        derived,
+                        impl_def_id,
+                        span: obligation.cause.span,
+                    }))
+                });
                 ensure_sufficient_stack(|| {
                     self.vtable_impl(
                         impl_def_id,

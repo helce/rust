@@ -5,6 +5,7 @@
 use crate::thir::pattern::pat_from_hir;
 use crate::thir::util::UserAnnotatedTyHelpers;
 
+use rustc_ast as ast;
 use rustc_data_structures::steal::Steal;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
@@ -12,11 +13,13 @@ use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::HirId;
 use rustc_hir::Node;
 use rustc_middle::middle::region;
+use rustc_middle::mir::interpret::{LitToConstError, LitToConstInput};
+use rustc_middle::mir::ConstantKind;
 use rustc_middle::thir::*;
-use rustc_middle::ty::{self, TyCtxt};
+use rustc_middle::ty::{self, RvalueScopes, Ty, TyCtxt};
 use rustc_span::Span;
 
-crate fn thir_body<'tcx>(
+pub(crate) fn thir_body<'tcx>(
     tcx: TyCtxt<'tcx>,
     owner_def: ty::WithOptConstParam<LocalDefId>,
 ) -> Result<(&'tcx Steal<Thir<'tcx>>, ExprId), ErrorGuaranteed> {
@@ -30,7 +33,7 @@ crate fn thir_body<'tcx>(
     Ok((tcx.alloc_steal_thir(cx.thir), expr))
 }
 
-crate fn thir_tree<'tcx>(
+pub(crate) fn thir_tree<'tcx>(
     tcx: TyCtxt<'tcx>,
     owner_def: ty::WithOptConstParam<LocalDefId>,
 ) -> String {
@@ -44,10 +47,11 @@ struct Cx<'tcx> {
     tcx: TyCtxt<'tcx>,
     thir: Thir<'tcx>,
 
-    crate param_env: ty::ParamEnv<'tcx>,
+    pub(crate) param_env: ty::ParamEnv<'tcx>,
 
-    crate region_scope_tree: &'tcx region::ScopeTree,
-    crate typeck_results: &'tcx ty::TypeckResults<'tcx>,
+    pub(crate) region_scope_tree: &'tcx region::ScopeTree,
+    pub(crate) typeck_results: &'tcx ty::TypeckResults<'tcx>,
+    pub(crate) rvalue_scopes: &'tcx RvalueScopes,
 
     /// When applying adjustments to the expression
     /// with the given `HirId`, use the given `Span`,
@@ -70,12 +74,32 @@ impl<'tcx> Cx<'tcx> {
             param_env: tcx.param_env(def.did),
             region_scope_tree: tcx.region_scope_tree(def.did),
             typeck_results,
+            rvalue_scopes: &typeck_results.rvalue_scopes,
             body_owner: def.did.to_def_id(),
             adjustment_span: None,
         }
     }
 
-    crate fn pattern_from_hir(&mut self, p: &hir::Pat<'_>) -> Pat<'tcx> {
+    #[instrument(skip(self), level = "debug")]
+    pub(crate) fn const_eval_literal(
+        &mut self,
+        lit: &'tcx ast::LitKind,
+        ty: Ty<'tcx>,
+        sp: Span,
+        neg: bool,
+    ) -> ConstantKind<'tcx> {
+        match self.tcx.at(sp).lit_to_mir_constant(LitToConstInput { lit, ty, neg }) {
+            Ok(c) => c,
+            Err(LitToConstError::Reported) => {
+                // create a dummy value and continue compiling
+                ConstantKind::Ty(self.tcx.const_error(ty))
+            }
+            Err(LitToConstError::TypeError) => bug!("const_eval_literal: had type error"),
+        }
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub(crate) fn pattern_from_hir(&mut self, p: &hir::Pat<'_>) -> Pat<'tcx> {
         let p = match self.tcx.hir().get(p.hir_id) {
             Node::Pat(p) | Node::Binding(p) => p,
             node => bug!("pattern became {:?}", node),

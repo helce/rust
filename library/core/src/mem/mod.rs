@@ -592,7 +592,7 @@ pub const unsafe fn align_of_val_raw<T: ?Sized>(val: *const T) -> usize {
 #[stable(feature = "needs_drop", since = "1.21.0")]
 #[rustc_const_stable(feature = "const_mem_needs_drop", since = "1.36.0")]
 #[rustc_diagnostic_item = "needs_drop"]
-pub const fn needs_drop<T>() -> bool {
+pub const fn needs_drop<T: ?Sized>() -> bool {
     intrinsics::needs_drop::<T>()
 }
 
@@ -972,6 +972,28 @@ pub const fn replace<T>(dest: &mut T, src: T) -> T {
 #[stable(feature = "rust1", since = "1.0.0")]
 #[cfg_attr(not(test), rustc_diagnostic_item = "mem_drop")]
 pub fn drop<T>(_x: T) {}
+
+/// Bitwise-copies a value.
+///
+/// This function is not magic; it is literally defined as
+/// ```
+/// pub fn copy<T: Copy>(x: &T) -> T { *x }
+/// ```
+///
+/// It is useful when you want to pass a function pointer to a combinator, rather than defining a new closure.
+///
+/// Example:
+/// ```
+/// #![feature(mem_copy_fn)]
+/// use core::mem::copy;
+/// let result_from_ffi_function: Result<(), &i32> = Err(&1);
+/// let result_copied: Result<(), i32> = result_from_ffi_function.map_err(copy);
+/// ```
+#[inline]
+#[unstable(feature = "mem_copy_fn", issue = "98262")]
+pub fn copy<T: Copy>(x: &T) -> T {
+    *x
+}
 
 /// Interprets `src` as having type `&U`, and then reads `src` without moving
 /// the contained value.

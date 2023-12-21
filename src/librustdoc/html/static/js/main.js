@@ -1,7 +1,6 @@
 // Local js definitions:
 /* global addClass, getSettingValue, hasClass, searchState */
 /* global onEach, onEachLazy, removeClass */
-/* global switchTheme, useSystemTheme */
 
 "use strict";
 
@@ -64,28 +63,20 @@ function showMain() {
     removeClass(document.getElementById(MAIN_ID), "hidden");
 }
 
-(function () {
+(function() {
     window.rootPath = getVar("root-path");
     window.currentCrate = getVar("current-crate");
-    window.searchJS =  resourcePath("search", ".js");
-    window.searchIndexJS = resourcePath("search-index", ".js");
-    window.settingsJS = resourcePath("settings", ".js");
-    const sidebarVars = document.getElementById("sidebar-vars");
-    if (sidebarVars) {
-        window.sidebarCurrent = {
-            name: sidebarVars.attributes["data-name"].value,
-            ty: sidebarVars.attributes["data-ty"].value,
-            relpath: sidebarVars.attributes["data-relpath"].value,
-        };
-        // FIXME: It would be nicer to generate this text content directly in HTML,
-        // but with the current code it's hard to get the right information in the right place.
-        const mobileLocationTitle = document.querySelector(".mobile-topbar h2.location");
-        const locationTitle = document.querySelector(".sidebar h2.location");
-        if (mobileLocationTitle && locationTitle) {
-            mobileLocationTitle.innerHTML = locationTitle.innerHTML;
-        }
-    }
 }());
+
+function setMobileTopbar() {
+    // FIXME: It would be nicer to generate this text content directly in HTML,
+    // but with the current code it's hard to get the right information in the right place.
+    const mobileLocationTitle = document.querySelector(".mobile-topbar h2.location");
+    const locationTitle = document.querySelector(".sidebar h2.location");
+    if (mobileLocationTitle && locationTitle) {
+        mobileLocationTitle.innerHTML = locationTitle.innerHTML;
+    }
+}
 
 // Gets the human-readable string for the virtual-key code of the
 // given KeyboardEvent, ev.
@@ -98,31 +89,21 @@ function showMain() {
 //
 // So I guess you could say things are getting pretty interoperable.
 function getVirtualKey(ev) {
-    if ("key" in ev && typeof ev.key != "undefined") {
+    if ("key" in ev && typeof ev.key !== "undefined") {
         return ev.key;
     }
 
     const c = ev.charCode || ev.keyCode;
-    if (c == 27) {
+    if (c === 27) {
         return "Escape";
     }
     return String.fromCharCode(c);
 }
 
-const THEME_PICKER_ELEMENT_ID = "theme-picker";
-const THEMES_ELEMENT_ID = "theme-choices";
 const MAIN_ID = "main-content";
 const SETTINGS_BUTTON_ID = "settings-menu";
 const ALTERNATIVE_DISPLAY_ID = "alternative-display";
 const NOT_DISPLAYED_ID = "not-displayed";
-
-function getThemesElement() {
-    return document.getElementById(THEMES_ELEMENT_ID);
-}
-
-function getThemePickerElement() {
-    return document.getElementById(THEME_PICKER_ELEMENT_ID);
-}
 
 function getSettingsButton() {
     return document.getElementById(SETTINGS_BUTTON_ID);
@@ -133,73 +114,9 @@ function getNakedUrl() {
     return window.location.href.split("?")[0].split("#")[0];
 }
 
-function showThemeButtonState() {
-    const themePicker = getThemePickerElement();
-    const themeChoices = getThemesElement();
-
-    themeChoices.style.display = "block";
-    themePicker.style.borderBottomRightRadius = "0";
-    themePicker.style.borderBottomLeftRadius = "0";
-}
-
-function hideThemeButtonState() {
-    const themePicker = getThemePickerElement();
-    const themeChoices = getThemesElement();
-
-    themeChoices.style.display = "none";
-    themePicker.style.borderBottomRightRadius = "3px";
-    themePicker.style.borderBottomLeftRadius = "3px";
-}
-
 window.hideSettings = () => {
     // Does nothing by default.
 };
-
-// Set up the theme picker list.
-(function () {
-    if (!document.location.href.startsWith("file:///")) {
-        return;
-    }
-    const themeChoices = getThemesElement();
-    const themePicker = getThemePickerElement();
-    const availableThemes = getVar("themes").split(",");
-
-    removeClass(themeChoices.parentElement, "hidden");
-
-    function switchThemeButtonState() {
-        if (themeChoices.style.display === "block") {
-            hideThemeButtonState();
-        } else {
-            showThemeButtonState();
-        }
-    }
-
-    function handleThemeButtonsBlur(e) {
-        const active = document.activeElement;
-        const related = e.relatedTarget;
-
-        if (active.id !== THEME_PICKER_ELEMENT_ID &&
-            (!active.parentNode || active.parentNode.id !== THEMES_ELEMENT_ID) &&
-            (!related ||
-             (related.id !== THEME_PICKER_ELEMENT_ID &&
-              (!related.parentNode || related.parentNode.id !== THEMES_ELEMENT_ID)))) {
-            hideThemeButtonState();
-        }
-    }
-
-    themePicker.onclick = switchThemeButtonState;
-    themePicker.onblur = handleThemeButtonsBlur;
-    availableThemes.forEach(item => {
-        const but = document.createElement("button");
-        but.textContent = item;
-        but.onclick = () => {
-            switchTheme(window.currentTheme, window.mainTheme, item, true);
-            useSystemTheme(false);
-        };
-        but.onblur = handleThemeButtonsBlur;
-        themeChoices.appendChild(but);
-    });
-}());
 
 /**
  * This function inserts `newNode` after `referenceNode`. It doesn't work if `referenceNode`
@@ -302,7 +219,7 @@ function loadCss(cssFileName) {
         // Sending request for the CSS and the JS files at the same time so it will
         // hopefully be loaded when the JS will generate the settings content.
         loadCss("settings");
-        loadScript(window.settingsJS);
+        loadScript(resourcePath("settings", ".js"));
     };
 
     window.searchState = {
@@ -379,8 +296,8 @@ function loadCss(cssFileName) {
             function loadSearch() {
                 if (!searchLoaded) {
                     searchLoaded = true;
-                    loadScript(window.searchJS);
-                    loadScript(window.searchIndexJS);
+                    loadScript(resourcePath("search", ".js"));
+                    loadScript(resourcePath("search-index", ".js"));
                 }
             }
 
@@ -512,7 +429,7 @@ function loadCss(cssFileName) {
             ev.preventDefault();
         }
         searchState.defocus();
-        hideThemeButtonState();
+        window.hideSettings();
     }
 
     const disableShortcuts = getSettingValue("disable-shortcuts") === "true";
@@ -521,8 +438,6 @@ function loadCss(cssFileName) {
         if (ev.ctrlKey || ev.altKey || ev.metaKey || disableShortcuts) {
             return;
         }
-
-        let themePicker;
 
         if (document.activeElement.tagName === "INPUT") {
             switch (getVirtualKey(ev)) {
@@ -553,104 +468,20 @@ function loadCss(cssFileName) {
                 displayHelp(true, ev);
                 break;
 
-            case "t":
-            case "T":
-                displayHelp(false, ev);
-                ev.preventDefault();
-                themePicker = getThemePickerElement();
-                themePicker.click();
-                themePicker.focus();
-                break;
-
             default:
-                if (getThemePickerElement().parentNode.contains(ev.target)) {
-                    handleThemeKeyDown(ev);
-                }
+                break;
             }
-        }
-    }
-
-    function handleThemeKeyDown(ev) {
-        const active = document.activeElement;
-        const themes = getThemesElement();
-        switch (getVirtualKey(ev)) {
-        case "ArrowUp":
-            ev.preventDefault();
-            if (active.previousElementSibling && ev.target.id !== THEME_PICKER_ELEMENT_ID) {
-                active.previousElementSibling.focus();
-            } else {
-                showThemeButtonState();
-                themes.lastElementChild.focus();
-            }
-            break;
-        case "ArrowDown":
-            ev.preventDefault();
-            if (active.nextElementSibling && ev.target.id !== THEME_PICKER_ELEMENT_ID) {
-                active.nextElementSibling.focus();
-            } else {
-                showThemeButtonState();
-                themes.firstElementChild.focus();
-            }
-            break;
-        case "Enter":
-        case "Return":
-        case "Space":
-            if (ev.target.id === THEME_PICKER_ELEMENT_ID && themes.style.display === "none") {
-                ev.preventDefault();
-                showThemeButtonState();
-                themes.firstElementChild.focus();
-            }
-            break;
-        case "Home":
-            ev.preventDefault();
-            themes.firstElementChild.focus();
-            break;
-        case "End":
-            ev.preventDefault();
-            themes.lastElementChild.focus();
-            break;
-        // The escape key is handled in handleEscape, not here,
-        // so that pressing escape will close the menu even if it isn't focused
         }
     }
 
     document.addEventListener("keypress", handleShortcut);
     document.addEventListener("keydown", handleShortcut);
 
-    // delayed sidebar rendering.
-    window.initSidebarItems = items => {
-        const sidebar = document.getElementsByClassName("sidebar-elems")[0];
-        let others;
-        const current = window.sidebarCurrent;
-
-        function addSidebarCrates(crates) {
-            if (!hasClass(document.body, "crate")) {
-                // We only want to list crates on the crate page.
-                return;
-            }
-            // Draw a convenient sidebar of known crates if we have a listing
-            const div = document.createElement("div");
-            div.className = "block crate";
-            div.innerHTML = "<h3>Crates</h3>";
-            const ul = document.createElement("ul");
-            div.appendChild(ul);
-
-            for (const crate of crates) {
-                let klass = "crate";
-                if (window.rootPath !== "./" && crate === window.currentCrate) {
-                    klass += " current";
-                }
-                const link = document.createElement("a");
-                link.href = window.rootPath + crate + "/index.html";
-                link.className = klass;
-                link.textContent = crate;
-
-                const li = document.createElement("li");
-                li.appendChild(link);
-                ul.appendChild(li);
-            }
-            others.appendChild(div);
+    function addSidebarItems() {
+        if (!window.SIDEBAR_ITEMS) {
+            return;
         }
+        const sidebar = document.getElementsByClassName("sidebar-elems")[0];
 
         /**
          * Append to the sidebar a "block" of links - a heading along with a list (`<ul>`) of items.
@@ -661,7 +492,7 @@ function loadCss(cssFileName) {
          *                          "Modules", or "Macros".
          */
         function block(shortty, id, longty) {
-            const filtered = items[shortty];
+            const filtered = window.SIDEBAR_ITEMS[shortty];
             if (!filtered) {
                 return;
             }
@@ -678,17 +509,18 @@ function loadCss(cssFileName) {
                 const desc = item[1]; // can be null
 
                 let klass = shortty;
-                if (name === current.name && shortty === current.ty) {
-                    klass += " current";
-                }
                 let path;
                 if (shortty === "mod") {
                     path = name + "/index.html";
                 } else {
                     path = shortty + "." + name + ".html";
                 }
+                const current_page = document.location.href.split("/").pop();
+                if (path === current_page) {
+                    klass += " current";
+                }
                 const link = document.createElement("a");
-                link.href = current.relpath + path;
+                link.href = path;
                 link.title = desc;
                 link.className = klass;
                 link.textContent = name;
@@ -697,14 +529,10 @@ function loadCss(cssFileName) {
                 ul.appendChild(li);
             }
             div.appendChild(ul);
-            others.appendChild(div);
+            sidebar.appendChild(div);
         }
 
         if (sidebar) {
-            others = document.createElement("div");
-            others.className = "others";
-            sidebar.appendChild(others);
-
             const isModule = hasClass(document.body, "mod");
             if (!isModule) {
                 block("primitive", "primitives", "Primitive Types");
@@ -722,12 +550,8 @@ function loadCss(cssFileName) {
                 block("keyword", "keywords", "Keywords");
                 block("traitalias", "trait-aliases", "Trait Aliases");
             }
-
-            // `crates{version}.js` should always be loaded before this script, so we can use
-            // it safely.
-            addSidebarCrates(window.ALL_CRATES);
         }
-    };
+    }
 
     window.register_implementors = imp => {
         const implementors = document.getElementById("implementors-list");
@@ -812,6 +636,39 @@ function loadCss(cssFileName) {
         window.register_implementors(window.pending_implementors);
     }
 
+    function addSidebarCrates() {
+        if (!window.ALL_CRATES) {
+            return;
+        }
+        const sidebarElems = document.getElementsByClassName("sidebar-elems")[0];
+        if (!sidebarElems) {
+            return;
+        }
+        // Draw a convenient sidebar of known crates if we have a listing
+        const div = document.createElement("div");
+        div.className = "block crate";
+        div.innerHTML = "<h3>Crates</h3>";
+        const ul = document.createElement("ul");
+        div.appendChild(ul);
+
+        for (const crate of window.ALL_CRATES) {
+            let klass = "crate";
+            if (window.rootPath !== "./" && crate === window.currentCrate) {
+                klass += " current";
+            }
+            const link = document.createElement("a");
+            link.href = window.rootPath + crate + "/index.html";
+            link.className = klass;
+            link.textContent = crate;
+
+            const li = document.createElement("li");
+            li.appendChild(link);
+            ul.appendChild(li);
+        }
+        sidebarElems.appendChild(div);
+    }
+
+
     function labelForToggleButton(sectionIsCollapsed) {
         if (sectionIsCollapsed) {
             // button will expand the section
@@ -841,8 +698,8 @@ function loadCss(cssFileName) {
             onEachLazy(document.getElementsByClassName("rustdoc-toggle"), e => {
                 if (e.parentNode.id !== "implementations-list" ||
                     (!hasClass(e, "implementors-toggle") &&
-                     !hasClass(e, "type-contents-toggle")))
-                {
+                     !hasClass(e, "type-contents-toggle"))
+                ) {
                     e.open = false;
                 }
             });
@@ -1006,7 +863,6 @@ function loadCss(cssFileName) {
         const shortcuts = [
             ["?", "Show this help dialog"],
             ["S", "Focus the search field"],
-            ["T", "Focus the theme picker menu"],
             ["↑", "Move up in search results"],
             ["↓", "Move down in search results"],
             ["← / →", "Switch result tab (when results focused)"],
@@ -1015,7 +871,7 @@ function loadCss(cssFileName) {
             ["-", "Collapse all sections"],
         ].map(x => "<dt>" +
             x[0].split(" ")
-                .map((y, index) => (index & 1) === 0 ? "<kbd>" + y + "</kbd>" : " " + y + " ")
+                .map((y, index) => ((index & 1) === 0 ? "<kbd>" + y + "</kbd>" : " " + y + " "))
                 .join("") + "</dt><dd>" + x[1] + "</dd>").join("");
         const div_shortcuts = document.createElement("div");
         addClass(div_shortcuts, "shortcuts");
@@ -1057,12 +913,15 @@ function loadCss(cssFileName) {
         buildHelperPopup = () => {};
     };
 
+    setMobileTopbar();
+    addSidebarItems();
+    addSidebarCrates();
     onHashChange(null);
     window.addEventListener("hashchange", onHashChange);
     searchState.setup();
 }());
 
-(function () {
+(function() {
     let reset_button_timeout = null;
 
     window.copy_path = but => {

@@ -35,14 +35,17 @@
 //! to the list specified by the target, rather than replace.
 
 use crate::abi::Endian;
+use crate::json::{Json, ToJson};
 use crate::spec::abi::{lookup as lookup_abi, Abi};
 use crate::spec::crt_objects::{CrtObjects, CrtObjectsFallback};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_serialize::json::{Json, ToJson};
+use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_span::symbol::{sym, Symbol};
+use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
+use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -108,6 +111,15 @@ pub enum LldFlavor {
 }
 
 impl LldFlavor {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LldFlavor::Wasm => "wasm",
+            LldFlavor::Ld64 => "darwin",
+            LldFlavor::Ld => "gnu",
+            LldFlavor::Link => "link",
+        }
+    }
+
     fn from_str(s: &str) -> Option<Self> {
         Some(match s {
             "darwin" => LldFlavor::Ld64,
@@ -121,13 +133,7 @@ impl LldFlavor {
 
 impl ToJson for LldFlavor {
     fn to_json(&self) -> Json {
-        match *self {
-            LldFlavor::Ld64 => "darwin",
-            LldFlavor::Ld => "gnu",
-            LldFlavor::Link => "link",
-            LldFlavor::Wasm => "wasm",
-        }
-        .to_json()
+        self.as_str().to_json()
     }
 }
 
@@ -208,7 +214,7 @@ impl ToJson for PanicStrategy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Hash, Encodable, Decodable)]
+#[derive(Clone, Copy, Debug, PartialEq, Hash)]
 pub enum RelroLevel {
     Full,
     Partial,
@@ -252,7 +258,7 @@ impl ToJson for RelroLevel {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Hash, Encodable, Decodable)]
+#[derive(Clone, Copy, Debug, PartialEq, Hash)]
 pub enum MergeFunctions {
     Disabled,
     Trampolines,
@@ -545,7 +551,7 @@ impl StackProbeType {
         let object = json.as_object().ok_or_else(|| "expected a JSON object")?;
         let kind = object
             .get("kind")
-            .and_then(|o| o.as_string())
+            .and_then(|o| o.as_str())
             .ok_or_else(|| "expected `kind` to be a string")?;
         match kind {
             "none" => Ok(StackProbeType::None),
@@ -589,11 +595,11 @@ impl ToJson for StackProbeType {
             StackProbeType::Call => {
                 [(String::from("kind"), "call".to_json())].into_iter().collect()
             }
-            StackProbeType::InlineOrCall { min_llvm_version_for_inline } => [
+            StackProbeType::InlineOrCall { min_llvm_version_for_inline: (maj, min, patch) } => [
                 (String::from("kind"), "inline-or-call".to_json()),
                 (
                     String::from("min-llvm-version-for-inline"),
-                    min_llvm_version_for_inline.to_json(),
+                    Json::Array(vec![maj.to_json(), min.to_json(), patch.to_json()]),
                 ),
             ]
             .into_iter()
@@ -924,6 +930,11 @@ supported_targets! {
     ("aarch64-apple-tvos", aarch64_apple_tvos),
     ("x86_64-apple-tvos", x86_64_apple_tvos),
 
+    ("armv7k-apple-watchos", armv7k_apple_watchos),
+    ("arm64_32-apple-watchos", arm64_32_apple_watchos),
+    ("x86_64-apple-watchos-sim", x86_64_apple_watchos_sim),
+    ("aarch64-apple-watchos-sim", aarch64_apple_watchos_sim),
+
     ("armebv7r-none-eabi", armebv7r_none_eabi),
     ("armebv7r-none-eabihf", armebv7r_none_eabihf),
     ("armv7r-none-eabi", armv7r_none_eabi),
@@ -980,6 +991,7 @@ supported_targets! {
     ("riscv32imc-unknown-none-elf", riscv32imc_unknown_none_elf),
     ("riscv32imc-esp-espidf", riscv32imc_esp_espidf),
     ("riscv32imac-unknown-none-elf", riscv32imac_unknown_none_elf),
+    ("riscv32imac-unknown-xous-elf", riscv32imac_unknown_xous_elf),
     ("riscv32gc-unknown-linux-gnu", riscv32gc_unknown_linux_gnu),
     ("riscv32gc-unknown-linux-musl", riscv32gc_unknown_linux_musl),
     ("riscv64imac-unknown-none-elf", riscv64imac_unknown_none_elf),
@@ -1268,12 +1280,6 @@ pub struct TargetOptions {
     ///   - uses SEH-based unwinding,
     ///   - supports control flow guard mechanism.
     pub is_like_msvc: bool,
-    /// Whether the target toolchain is like Emscripten's. Only useful for compiling with
-    /// Emscripten toolchain.
-    /// Defaults to false.
-    pub is_like_emscripten: bool,
-    /// Whether the target toolchain is like Fuchsia's.
-    pub is_like_fuchsia: bool,
     /// Whether a target toolchain is like WASM.
     pub is_like_wasm: bool,
     /// Version of DWARF to use if not using the default.
@@ -1500,9 +1506,7 @@ impl Default for TargetOptions {
             is_like_osx: false,
             is_like_solaris: false,
             is_like_windows: false,
-            is_like_emscripten: false,
             is_like_msvc: false,
-            is_like_fuchsia: false,
             is_like_wasm: false,
             dwarf_version: None,
             linker_is_gnu: true,
@@ -1622,7 +1626,8 @@ impl Target {
             | PlatformIntrinsic
             | Unadjusted
             | Cdecl { .. }
-            | EfiApi => true,
+            | EfiApi
+            | RustCold => true,
             X86Interrupt => ["x86", "x86_64"].contains(&&self.arch[..]),
             Aapcs { .. } => "arm" == self.arch,
             CCmseNonSecureCall => ["arm", "aarch64"].contains(&&self.arch[..]),
@@ -1686,7 +1691,7 @@ impl Target {
     }
 
     /// Loads a target descriptor from a JSON object.
-    pub fn from_json(mut obj: Json) -> Result<(Target, TargetWarnings), String> {
+    pub fn from_json(obj: Json) -> Result<(Target, TargetWarnings), String> {
         // While ugly, this code must remain this way to retain
         // compatibility with existing JSON fields and the internal
         // expected naming of the Target and TargetOptions structs.
@@ -1694,9 +1699,14 @@ impl Target {
         // are round-tripped through this code to catch cases where
         // the JSON parser is not updated to match the structs.
 
+        let mut obj = match obj {
+            Value::Object(obj) => obj,
+            _ => return Err("Expected JSON object for target")?,
+        };
+
         let mut get_req_field = |name: &str| {
-            obj.remove_key(name)
-                .and_then(|j| Json::as_string(&j).map(str::to_string))
+            obj.remove(name)
+                .and_then(|j| j.as_str().map(str::to_string))
                 .ok_or_else(|| format!("Field {} in target specification is required", name))
         };
 
@@ -1715,31 +1725,31 @@ impl Target {
         macro_rules! key {
             ($key_name:ident) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(s) = obj.remove_key(&name).and_then(|j| Json::as_string(&j).map(str::to_string).map(Cow::from)) {
+                if let Some(s) = obj.remove(&name).and_then(|s| s.as_str().map(str::to_string).map(Cow::from)) {
                     base.$key_name = s;
                 }
             } );
             ($key_name:ident = $json_name:expr) => ( {
                 let name = $json_name;
-                if let Some(s) = obj.remove_key(&name).and_then(|j| Json::as_string(&j).map(str::to_string).map(Cow::from)) {
+                if let Some(s) = obj.remove(name).and_then(|s| s.as_str().map(str::to_string).map(Cow::from)) {
                     base.$key_name = s;
                 }
             } );
             ($key_name:ident, bool) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(s) = obj.remove_key(&name).and_then(|j| Json::as_boolean(&j)) {
+                if let Some(s) = obj.remove(&name).and_then(|b| b.as_bool()) {
                     base.$key_name = s;
                 }
             } );
             ($key_name:ident, u64) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(s) = obj.remove_key(&name).and_then(|j| Json::as_u64(&j)) {
+                if let Some(s) = obj.remove(&name).and_then(|j| Json::as_u64(&j)) {
                     base.$key_name = s;
                 }
             } );
             ($key_name:ident, Option<u32>) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(s) = obj.remove_key(&name).and_then(|j| Json::as_u64(&j)) {
+                if let Some(s) = obj.remove(&name).and_then(|b| b.as_u64()) {
                     if s < 1 || s > 5 {
                         return Err("Not a valid DWARF version number".into());
                     }
@@ -1748,13 +1758,13 @@ impl Target {
             } );
             ($key_name:ident, Option<u64>) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(s) = obj.remove_key(&name).and_then(|j| Json::as_u64(&j)) {
+                if let Some(s) = obj.remove(&name).and_then(|b| b.as_u64()) {
                     base.$key_name = Some(s);
                 }
             } );
             ($key_name:ident, MergeFunctions) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
                     match s.parse::<MergeFunctions>() {
                         Ok(mergefunc) => base.$key_name = mergefunc,
                         _ => return Some(Err(format!("'{}' is not a valid value for \
@@ -1767,7 +1777,7 @@ impl Target {
             } );
             ($key_name:ident, RelocModel) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
                     match s.parse::<RelocModel>() {
                         Ok(relocation_model) => base.$key_name = relocation_model,
                         _ => return Some(Err(format!("'{}' is not a valid relocation model. \
@@ -1779,7 +1789,7 @@ impl Target {
             } );
             ($key_name:ident, CodeModel) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
                     match s.parse::<CodeModel>() {
                         Ok(code_model) => base.$key_name = Some(code_model),
                         _ => return Some(Err(format!("'{}' is not a valid code model. \
@@ -1791,7 +1801,7 @@ impl Target {
             } );
             ($key_name:ident, TlsModel) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
                     match s.parse::<TlsModel>() {
                         Ok(tls_model) => base.$key_name = tls_model,
                         _ => return Some(Err(format!("'{}' is not a valid TLS model. \
@@ -1803,7 +1813,7 @@ impl Target {
             } );
             ($key_name:ident, PanicStrategy) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
                     match s {
                         "unwind" => base.$key_name = PanicStrategy::Unwind,
                         "abort" => base.$key_name = PanicStrategy::Abort,
@@ -1816,7 +1826,7 @@ impl Target {
             } );
             ($key_name:ident, RelroLevel) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
                     match s.parse::<RelroLevel>() {
                         Ok(level) => base.$key_name = level,
                         _ => return Some(Err(format!("'{}' is not a valid value for \
@@ -1828,7 +1838,7 @@ impl Target {
             } );
             ($key_name:ident, SplitDebuginfo) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
                     match s.parse::<SplitDebuginfo>() {
                         Ok(level) => base.$key_name = level,
                         _ => return Some(Err(format!("'{}' is not a valid value for \
@@ -1840,10 +1850,10 @@ impl Target {
             } );
             ($key_name:ident, list) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(j) = obj.remove_key(&name){
-                    if let Some(v) = Json::as_array(&j) {
+                if let Some(j) = obj.remove(&name) {
+                    if let Some(v) = j.as_array() {
                         base.$key_name = v.iter()
-                            .map(|a| a.as_string().unwrap().to_string().into())
+                            .map(|a| a.as_str().unwrap().to_string().into())
                             .collect();
                     } else {
                         incorrect_type.push(name)
@@ -1852,10 +1862,10 @@ impl Target {
             } );
             ($key_name:ident, opt_list) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(j) = obj.remove_key(&name) {
-                    if let Some(v) = Json::as_array(&j) {
+                if let Some(j) = obj.remove(&name) {
+                    if let Some(v) = j.as_array() {
                         base.$key_name = Some(v.iter()
-                            .map(|a| a.as_string().unwrap().to_string().into())
+                            .map(|a| a.as_str().unwrap().to_string().into())
                             .collect());
                     } else {
                         incorrect_type.push(name)
@@ -1864,15 +1874,15 @@ impl Target {
             } );
             ($key_name:ident, optional) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(o) = obj.remove_key(&name[..]) {
+                if let Some(o) = obj.remove(&name) {
                     base.$key_name = o
-                        .as_string()
+                        .as_str()
                         .map(|s| s.to_string().into());
                 }
             } );
             ($key_name:ident, LldFlavor) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
                     if let Some(flavor) = LldFlavor::from_str(&s) {
                         base.$key_name = flavor;
                     } else {
@@ -1886,7 +1896,7 @@ impl Target {
             } );
             ($key_name:ident, LinkerFlavor) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
                     match LinkerFlavor::from_str(s) {
                         Some(linker_flavor) => base.$key_name = linker_flavor,
                         _ => return Some(Err(format!("'{}' is not a valid value for linker-flavor. \
@@ -1897,7 +1907,7 @@ impl Target {
             } );
             ($key_name:ident, StackProbeType) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| match StackProbeType::from_json(&o) {
+                obj.remove(&name).and_then(|o| match StackProbeType::from_json(&o) {
                     Ok(v) => {
                         base.$key_name = v;
                         Some(Ok(()))
@@ -1909,10 +1919,10 @@ impl Target {
             } );
             ($key_name:ident, SanitizerSet) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(o) = obj.remove_key(&name[..]) {
+                if let Some(o) = obj.remove(&name) {
                     if let Some(a) = o.as_array() {
                         for s in a {
-                            base.$key_name |= match s.as_string() {
+                            base.$key_name |= match s.as_str() {
                                 Some("address") => SanitizerSet::ADDRESS,
                                 Some("cfi") => SanitizerSet::CFI,
                                 Some("leak") => SanitizerSet::LEAK,
@@ -1933,7 +1943,7 @@ impl Target {
 
             ($key_name:ident, crt_objects_fallback) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
                     match s.parse::<CrtObjectsFallback>() {
                         Ok(fallback) => base.$key_name = Some(fallback),
                         _ => return Some(Err(format!("'{}' is not a valid CRT objects fallback. \
@@ -1944,7 +1954,7 @@ impl Target {
             } );
             ($key_name:ident, link_objects) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(val) = obj.remove_key(&name[..]) {
+                if let Some(val) = obj.remove(&name) {
                     let obj = val.as_object().ok_or_else(|| format!("{}: expected a \
                         JSON object with fields per CRT object kind.", name))?;
                     let mut args = CrtObjects::new();
@@ -1959,7 +1969,7 @@ impl Target {
                             format!("{}.{}: expected a JSON array", name, k)
                         )?.iter().enumerate()
                             .map(|(i,s)| {
-                                let s = s.as_string().ok_or_else(||
+                                let s = s.as_str().ok_or_else(||
                                     format!("{}.{}[{}]: expected a JSON string", name, k, i))?;
                                 Ok(s.to_string().into())
                             })
@@ -1972,7 +1982,7 @@ impl Target {
             } );
             ($key_name:ident, link_args) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(val) = obj.remove_key(&name[..]) {
+                if let Some(val) = obj.remove(&name) {
                     let obj = val.as_object().ok_or_else(|| format!("{}: expected a \
                         JSON object with fields per linker-flavor.", name))?;
                     let mut args = LinkArgs::new();
@@ -1986,7 +1996,7 @@ impl Target {
                             format!("{}.{}: expected a JSON array", name, k)
                         )?.iter().enumerate()
                             .map(|(i,s)| {
-                                let s = s.as_string().ok_or_else(||
+                                let s = s.as_str().ok_or_else(||
                                     format!("{}.{}[{}]: expected a JSON string", name, k, i))?;
                                 Ok(s.to_string().into())
                             })
@@ -1999,10 +2009,10 @@ impl Target {
             } );
             ($key_name:ident, env) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                if let Some(o) = obj.remove_key(&name[..]) {
+                if let Some(o) = obj.remove(&name) {
                     if let Some(a) = o.as_array() {
                         for o in a {
-                            if let Some(s) = o.as_string() {
+                            if let Some(s) = o.as_str() {
                                 let p = s.split('=').collect::<Vec<_>>();
                                 if p.len() == 2 {
                                     let k = p[0].to_string();
@@ -2018,7 +2028,7 @@ impl Target {
             } );
             ($key_name:ident, Option<Abi>) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove_key(&name[..]).and_then(|o| o.as_string().and_then(|s| {
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
                     match lookup_abi(s) {
                         Some(abi) => base.$key_name = Some(abi),
                         _ => return Some(Err(format!("'{}' is not a valid value for abi", s))),
@@ -2027,28 +2037,28 @@ impl Target {
                 })).unwrap_or(Ok(()))
             } );
             ($key_name:ident, TargetFamilies) => ( {
-                if let Some(value) = obj.remove_key("target-family") {
-                    if let Some(v) = Json::as_array(&value) {
+                if let Some(value) = obj.remove("target-family") {
+                    if let Some(v) = value.as_array() {
                         base.$key_name = v.iter()
-                            .map(|a| a.as_string().unwrap().to_string().into())
+                            .map(|a| a.as_str().unwrap().to_string().into())
                             .collect();
-                    } else if let Some(v) = Json::as_string(&value) {
+                    } else if let Some(v) = value.as_str() {
                         base.$key_name = vec![v.to_string().into()].into();
                     }
                 }
             } );
         }
 
-        if let Some(j) = obj.remove_key("target-endian") {
-            if let Some(s) = Json::as_string(&j) {
+        if let Some(j) = obj.remove("target-endian") {
+            if let Some(s) = j.as_str() {
                 base.endian = s.parse()?;
             } else {
                 incorrect_type.push("target-endian".into())
             }
         }
 
-        if let Some(fp) = obj.remove_key("frame-pointer") {
-            if let Some(s) = Json::as_string(&fp) {
+        if let Some(fp) = obj.remove("frame-pointer") {
+            if let Some(s) = fp.as_str() {
                 base.frame_pointer = s
                     .parse()
                     .map_err(|()| format!("'{}' is not a valid value for frame-pointer", s))?;
@@ -2101,8 +2111,6 @@ impl Target {
         key!(is_like_solaris, bool);
         key!(is_like_windows, bool);
         key!(is_like_msvc, bool);
-        key!(is_like_emscripten, bool);
-        key!(is_like_fuchsia, bool);
         key!(is_like_wasm, bool);
         key!(dwarf_version, Option<u32>);
         key!(linker_is_gnu, bool);
@@ -2160,8 +2168,8 @@ impl Target {
             // This can cause unfortunate ICEs later down the line.
             return Err("may not set is_builtin for targets not built-in".into());
         }
-        // Each field should have been read using `Json::remove_key` so any keys remaining are unused.
-        let remaining_keys = obj.as_object().ok_or("Expected JSON object for target")?.keys();
+        // Each field should have been read using `Json::remove` so any keys remaining are unused.
+        let remaining_keys = obj.keys();
         Ok((
             base,
             TargetWarnings { unused_fields: remaining_keys.cloned().collect(), incorrect_type },
@@ -2174,7 +2182,7 @@ impl Target {
             TargetTriple::TargetTriple(ref target_triple) => {
                 load_builtin(target_triple).expect("built-in target")
             }
-            TargetTriple::TargetPath(..) => {
+            TargetTriple::TargetJson { .. } => {
                 panic!("built-in targets doens't support target-paths")
             }
         }
@@ -2193,13 +2201,12 @@ impl Target {
         target_triple: &TargetTriple,
         sysroot: &Path,
     ) -> Result<(Target, TargetWarnings), String> {
-        use rustc_serialize::json;
         use std::env;
         use std::fs;
 
         fn load_file(path: &Path) -> Result<(Target, TargetWarnings), String> {
             let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
-            let obj = json::from_str(&contents).map_err(|e| e.to_string())?;
+            let obj = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
             Target::from_json(obj)
         }
 
@@ -2240,11 +2247,9 @@ impl Target {
 
                 Err(format!("Could not find specification for target {:?}", target_triple))
             }
-            TargetTriple::TargetPath(ref target_path) => {
-                if target_path.is_file() {
-                    return load_file(&target_path);
-                }
-                Err(format!("Target path {:?} is not a valid file", target_path))
+            TargetTriple::TargetJson { ref contents, .. } => {
+                let obj = serde_json::from_str(contents).map_err(|e| e.to_string())?;
+                Target::from_json(obj)
             }
         }
     }
@@ -2252,7 +2257,7 @@ impl Target {
 
 impl ToJson for Target {
     fn to_json(&self) -> Json {
-        let mut d = BTreeMap::new();
+        let mut d = serde_json::Map::new();
         let default: TargetOptions = Default::default();
 
         macro_rules! target_val {
@@ -2350,8 +2355,6 @@ impl ToJson for Target {
         target_option_val!(is_like_solaris);
         target_option_val!(is_like_windows);
         target_option_val!(is_like_msvc);
-        target_option_val!(is_like_emscripten);
-        target_option_val!(is_like_fuchsia);
         target_option_val!(is_like_wasm);
         target_option_val!(dwarf_version);
         target_option_val!(linker_is_gnu);
@@ -2413,10 +2416,77 @@ impl ToJson for Target {
 }
 
 /// Either a target triple string or a path to a JSON file.
-#[derive(PartialEq, Clone, Debug, Hash, Encodable, Decodable)]
+#[derive(Clone, Debug)]
 pub enum TargetTriple {
     TargetTriple(String),
-    TargetPath(PathBuf),
+    TargetJson {
+        /// Warning: This field may only be used by rustdoc. Using it anywhere else will lead to
+        /// inconsistencies as it is discarded during serialization.
+        path_for_rustdoc: PathBuf,
+        triple: String,
+        contents: String,
+    },
+}
+
+// Use a manual implementation to ignore the path field
+impl PartialEq for TargetTriple {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::TargetTriple(l0), Self::TargetTriple(r0)) => l0 == r0,
+            (
+                Self::TargetJson { path_for_rustdoc: _, triple: l_triple, contents: l_contents },
+                Self::TargetJson { path_for_rustdoc: _, triple: r_triple, contents: r_contents },
+            ) => l_triple == r_triple && l_contents == r_contents,
+            _ => false,
+        }
+    }
+}
+
+// Use a manual implementation to ignore the path field
+impl Hash for TargetTriple {
+    fn hash<H: Hasher>(&self, state: &mut H) -> () {
+        match self {
+            TargetTriple::TargetTriple(triple) => {
+                0u8.hash(state);
+                triple.hash(state)
+            }
+            TargetTriple::TargetJson { path_for_rustdoc: _, triple, contents } => {
+                1u8.hash(state);
+                triple.hash(state);
+                contents.hash(state)
+            }
+        }
+    }
+}
+
+// Use a manual implementation to prevent encoding the target json file path in the crate metadata
+impl<S: Encoder> Encodable<S> for TargetTriple {
+    fn encode(&self, s: &mut S) {
+        match self {
+            TargetTriple::TargetTriple(triple) => s.emit_enum_variant(0, |s| s.emit_str(triple)),
+            TargetTriple::TargetJson { path_for_rustdoc: _, triple, contents } => s
+                .emit_enum_variant(1, |s| {
+                    s.emit_str(triple);
+                    s.emit_str(contents)
+                }),
+        }
+    }
+}
+
+impl<D: Decoder> Decodable<D> for TargetTriple {
+    fn decode(d: &mut D) -> Self {
+        match d.read_usize() {
+            0 => TargetTriple::TargetTriple(d.read_str().to_owned()),
+            1 => TargetTriple::TargetJson {
+                path_for_rustdoc: PathBuf::new(),
+                triple: d.read_str().to_owned(),
+                contents: d.read_str().to_owned(),
+            },
+            _ => {
+                panic!("invalid enum variant tag while decoding `TargetTriple`, expected 0..2");
+            }
+        }
+    }
 }
 
 impl TargetTriple {
@@ -2428,7 +2498,19 @@ impl TargetTriple {
     /// Creates a target triple from the passed target path.
     pub fn from_path(path: &Path) -> Result<Self, io::Error> {
         let canonicalized_path = path.canonicalize()?;
-        Ok(TargetTriple::TargetPath(canonicalized_path))
+        let contents = std::fs::read_to_string(&canonicalized_path).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("target path {:?} is not a valid file: {}", canonicalized_path, err),
+            )
+        })?;
+        let triple = canonicalized_path
+            .file_stem()
+            .expect("target path must not be empty")
+            .to_str()
+            .expect("target path must be valid unicode")
+            .to_owned();
+        Ok(TargetTriple::TargetJson { path_for_rustdoc: canonicalized_path, triple, contents })
     }
 
     /// Returns a string triple for this target.
@@ -2436,12 +2518,8 @@ impl TargetTriple {
     /// If this target is a path, the file name (without extension) is returned.
     pub fn triple(&self) -> &str {
         match *self {
-            TargetTriple::TargetTriple(ref triple) => triple,
-            TargetTriple::TargetPath(ref path) => path
-                .file_stem()
-                .expect("target path must not be empty")
-                .to_str()
-                .expect("target path must be valid unicode"),
+            TargetTriple::TargetTriple(ref triple)
+            | TargetTriple::TargetJson { ref triple, .. } => triple,
         }
     }
 
@@ -2451,16 +2529,15 @@ impl TargetTriple {
     /// by `triple()`.
     pub fn debug_triple(&self) -> String {
         use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
 
-        let triple = self.triple();
-        if let TargetTriple::TargetPath(ref path) = *self {
-            let mut hasher = DefaultHasher::new();
-            path.hash(&mut hasher);
-            let hash = hasher.finish();
-            format!("{}-{}", triple, hash)
-        } else {
-            triple.into()
+        match self {
+            TargetTriple::TargetTriple(triple) => triple.to_owned(),
+            TargetTriple::TargetJson { path_for_rustdoc: _, triple, contents: content } => {
+                let mut hasher = DefaultHasher::new();
+                content.hash(&mut hasher);
+                let hash = hasher.finish();
+                format!("{}-{}", triple, hash)
+            }
         }
     }
 }

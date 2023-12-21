@@ -8,7 +8,7 @@ use rustc_hir::def_id::DefId;
 use rustc_hir::{is_range_literal, Expr, ExprKind, Node};
 use rustc_middle::ty::layout::{IntegerExt, LayoutOf, SizeSkeleton};
 use rustc_middle::ty::subst::SubstsRef;
-use rustc_middle::ty::{self, AdtKind, DefIdTree, Ty, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{self, AdtKind, DefIdTree, Ty, TyCtxt, TypeFoldable, TypeSuperFoldable};
 use rustc_span::source_map;
 use rustc_span::symbol::sym;
 use rustc_span::{Span, Symbol, DUMMY_SP};
@@ -651,7 +651,7 @@ declare_lint! {
 declare_lint_pass!(ImproperCTypesDefinitions => [IMPROPER_CTYPES_DEFINITIONS]);
 
 #[derive(Clone, Copy)]
-crate enum CItemKind {
+pub(crate) enum CItemKind {
     Declaration,
     Definition,
 }
@@ -667,7 +667,10 @@ enum FfiResult<'tcx> {
     FfiUnsafe { ty: Ty<'tcx>, reason: String, help: Option<String> },
 }
 
-crate fn nonnull_optimization_guaranteed<'tcx>(tcx: TyCtxt<'tcx>, def: ty::AdtDef<'tcx>) -> bool {
+pub(crate) fn nonnull_optimization_guaranteed<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def: ty::AdtDef<'tcx>,
+) -> bool {
     tcx.has_attr(def.did(), sym::rustc_nonnull_optimization_guaranteed)
 }
 
@@ -766,7 +769,7 @@ fn get_nullable_type<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'t
 /// Currently restricted to function pointers, boxes, references, `core::num::NonZero*`,
 /// `core::ptr::NonNull`, and `#[repr(transparent)]` newtypes.
 /// FIXME: This duplicates code in codegen.
-crate fn repr_nullable_ptr<'tcx>(
+pub(crate) fn repr_nullable_ptr<'tcx>(
     cx: &LateContext<'tcx>,
     ty: Ty<'tcx>,
     ckind: CItemKind,

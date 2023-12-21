@@ -197,9 +197,10 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         size: Size,
         align: Align,
         kind: MemoryKind<M::MemoryKind>,
-    ) -> InterpResult<'static, Pointer<M::PointerTag>> {
+    ) -> InterpResult<'tcx, Pointer<M::PointerTag>> {
         let alloc = Allocation::uninit(size, align, M::PANIC_ON_ALLOC_FAIL)?;
-        Ok(self.allocate_raw_ptr(alloc, kind))
+        // We can `unwrap` since `alloc` contains no pointers.
+        Ok(self.allocate_raw_ptr(alloc, kind).unwrap())
     }
 
     pub fn allocate_bytes_ptr(
@@ -210,23 +211,25 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         mutability: Mutability,
     ) -> Pointer<M::PointerTag> {
         let alloc = Allocation::from_bytes(bytes, align, mutability);
-        self.allocate_raw_ptr(alloc, kind)
+        // We can `unwrap` since `alloc` contains no pointers.
+        self.allocate_raw_ptr(alloc, kind).unwrap()
     }
 
+    /// This can fail only of `alloc` contains relocations.
     pub fn allocate_raw_ptr(
         &mut self,
         alloc: Allocation,
         kind: MemoryKind<M::MemoryKind>,
-    ) -> Pointer<M::PointerTag> {
+    ) -> InterpResult<'tcx, Pointer<M::PointerTag>> {
         let id = self.tcx.reserve_alloc_id();
         debug_assert_ne!(
             Some(kind),
             M::GLOBAL_KIND.map(MemoryKind::Machine),
             "dynamically allocating global memory"
         );
-        let alloc = M::init_allocation_extra(self, id, Cow::Owned(alloc), Some(kind));
+        let alloc = M::init_allocation_extra(self, id, Cow::Owned(alloc), Some(kind))?;
         self.memory.alloc_map.insert(id, (kind, alloc.into_owned()));
-        M::tag_alloc_base_pointer(self, Pointer::from(id))
+        Ok(M::tag_alloc_base_pointer(self, Pointer::from(id)))
     }
 
     pub fn reallocate_ptr(
@@ -402,7 +405,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         msg: CheckInAllocMsg,
         alloc_size: impl FnOnce(AllocId, Size, M::TagExtra) -> InterpResult<'tcx, (Size, Align, T)>,
     ) -> InterpResult<'tcx, Option<T>> {
-        fn check_offset_align(offset: u64, align: Align) -> InterpResult<'static> {
+        fn check_offset_align<'tcx>(offset: u64, align: Align) -> InterpResult<'tcx> {
             if offset % align.bytes() == 0 {
                 Ok(())
             } else {
@@ -440,6 +443,10 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                         ptr_size: size,
                         msg,
                     })
+                }
+                // Ensure we never consider the null pointer dereferencable.
+                if M::PointerTag::OFFSET_IS_ADDR {
+                    assert_ne!(ptr.addr(), Size::ZERO);
                 }
                 // Test align. Check this last; if both bounds and alignment are violated
                 // we want the error to be about the bounds.
@@ -500,18 +507,18 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     throw_unsup!(ReadExternStatic(def_id));
                 }
 
-                (self.tcx.eval_static_initializer(def_id)?, Some(def_id))
+                // Use a precise span for better cycle errors.
+                (self.tcx.at(self.cur_span()).eval_static_initializer(def_id)?, Some(def_id))
             }
         };
         M::before_access_global(*self.tcx, &self.machine, id, alloc, def_id, is_write)?;
         // We got tcx memory. Let the machine initialize its "extra" stuff.
-        let alloc = M::init_allocation_extra(
+        M::init_allocation_extra(
             self,
             id, // always use the ID we got as input, not the "hidden" one.
             Cow::Borrowed(alloc.inner()),
             M::GLOBAL_KIND.map(MemoryKind::Machine),
-        );
-        Ok(alloc)
+        )
     }
 
     /// Gives raw access to the `Allocation`, without bounds or alignment checks.
@@ -654,7 +661,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         &self,
         id: AllocId,
         liveness: AllocCheck,
-    ) -> InterpResult<'static, (Size, Align)> {
+    ) -> InterpResult<'tcx, (Size, Align)> {
         // # Regular allocations
         // Don't use `self.get_raw` here as that will
         // a) cause cycles in case `id` refers to a static
@@ -904,11 +911,15 @@ impl<'tcx, 'a, Tag: Provenance, Extra> AllocRefMut<'a, 'tcx, Tag, Extra> {
 }
 
 impl<'tcx, 'a, Tag: Provenance, Extra> AllocRef<'a, 'tcx, Tag, Extra> {
-    pub fn read_scalar(&self, range: AllocRange) -> InterpResult<'tcx, ScalarMaybeUninit<Tag>> {
+    pub fn read_scalar(
+        &self,
+        range: AllocRange,
+        read_provenance: bool,
+    ) -> InterpResult<'tcx, ScalarMaybeUninit<Tag>> {
         let range = self.range.subrange(range);
         let res = self
             .alloc
-            .read_scalar(&self.tcx, range)
+            .read_scalar(&self.tcx, range, read_provenance)
             .map_err(|e| e.to_interp_error(self.alloc_id))?;
         debug!(
             "read_scalar in {} at {:#x}, size {}: {:?}",
@@ -920,14 +931,30 @@ impl<'tcx, 'a, Tag: Provenance, Extra> AllocRef<'a, 'tcx, Tag, Extra> {
         Ok(res)
     }
 
-    pub fn read_ptr_sized(&self, offset: Size) -> InterpResult<'tcx, ScalarMaybeUninit<Tag>> {
-        self.read_scalar(alloc_range(offset, self.tcx.data_layout().pointer_size))
+    pub fn read_integer(
+        &self,
+        offset: Size,
+        size: Size,
+    ) -> InterpResult<'tcx, ScalarMaybeUninit<Tag>> {
+        self.read_scalar(alloc_range(offset, size), /*read_provenance*/ false)
     }
 
-    pub fn check_bytes(&self, range: AllocRange, allow_uninit_and_ptr: bool) -> InterpResult<'tcx> {
+    pub fn read_pointer(&self, offset: Size) -> InterpResult<'tcx, ScalarMaybeUninit<Tag>> {
+        self.read_scalar(
+            alloc_range(offset, self.tcx.data_layout().pointer_size),
+            /*read_provenance*/ true,
+        )
+    }
+
+    pub fn check_bytes(
+        &self,
+        range: AllocRange,
+        allow_uninit: bool,
+        allow_ptr: bool,
+    ) -> InterpResult<'tcx> {
         Ok(self
             .alloc
-            .check_bytes(&self.tcx, self.range.subrange(range), allow_uninit_and_ptr)
+            .check_bytes(&self.tcx, self.range.subrange(range), allow_uninit, allow_ptr)
             .map_err(|e| e.to_interp_error(self.alloc_id))?)
     }
 }
@@ -1144,11 +1171,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 Err(ptr) => ptr.into(),
                 Ok(bits) => {
                     let addr = u64::try_from(bits).unwrap();
-                    let ptr = M::ptr_from_addr_transmute(&self, addr);
-                    if addr == 0 {
-                        assert!(ptr.provenance.is_none(), "null pointer can never have an AllocId");
-                    }
-                    ptr
+                    M::ptr_from_addr_transmute(&self, addr)
                 }
             },
         )

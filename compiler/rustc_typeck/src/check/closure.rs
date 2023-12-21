@@ -10,6 +10,7 @@ use rustc_hir::lang_items::LangItem;
 use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_infer::infer::LateBoundRegionConversionTime;
 use rustc_infer::infer::{InferOk, InferResult};
+use rustc_infer::traits::ObligationCauseCode;
 use rustc_middle::ty::fold::TypeFoldable;
 use rustc_middle::ty::subst::InternalSubsts;
 use rustc_middle::ty::{self, Ty};
@@ -550,7 +551,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 expected_sigs.liberated_sig.inputs(), // `liberated_sig` is E'.
             ) {
                 // Instantiate (this part of..) S to S', i.e., with fresh variables.
-                let (supplied_ty, _) = self.infcx.replace_bound_vars_with_fresh_vars(
+                let supplied_ty = self.infcx.replace_bound_vars_with_fresh_vars(
                     hir_ty.span,
                     LateBoundRegionConversionTime::FnCall,
                     supplied_sig.inputs().rebind(supplied_ty),
@@ -563,7 +564,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 all_obligations.extend(obligations);
             }
 
-            let (supplied_output_ty, _) = self.infcx.replace_bound_vars_with_fresh_vars(
+            let supplied_output_ty = self.infcx.replace_bound_vars_with_fresh_vars(
                 decl.output.span(),
                 LateBoundRegionConversionTime::FnCall,
                 supplied_sig.output(),
@@ -645,8 +646,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     fn hide_parent_opaque_types(&self, ty: Ty<'tcx>, span: Span, body_id: hir::HirId) -> Ty<'tcx> {
-        let InferOk { value, obligations } =
-            self.replace_opaque_types_with_inference_vars(ty, body_id, span, self.param_env);
+        let InferOk { value, obligations } = self.replace_opaque_types_with_inference_vars(
+            ty,
+            body_id,
+            span,
+            ObligationCauseCode::MiscObligation,
+            self.param_env,
+        );
         self.register_predicates(obligations);
         value
     }

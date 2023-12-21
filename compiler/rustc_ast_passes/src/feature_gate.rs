@@ -113,6 +113,14 @@ impl<'a> PostExpansionVisitor<'a> {
                     "rust-call ABI is subject to change"
                 );
             }
+            "rust-cold" => {
+                gate_feature_post!(
+                    &self,
+                    rust_cold_cc,
+                    span,
+                    "rust-cold is experimental and subject to change"
+                );
+            }
             "ptx-kernel" => {
                 gate_feature_post!(
                     &self,
@@ -393,44 +401,17 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                     let msg = "`#[doc(keyword)]` is meant for internal use only";
                     gate_feature_post!(self, rustdoc_internals, attr.span, msg);
                 }
-            }
-        }
 
-        // Check for unstable modifiers on `#[link(..)]` attribute
-        if attr.has_name(sym::link) {
-            for nested_meta in attr.meta_item_list().unwrap_or_default() {
-                if nested_meta.has_name(sym::modifiers) {
-                    if let Some(modifiers) = nested_meta.value_str() {
-                        for modifier in modifiers.as_str().split(',') {
-                            if let Some(modifier) = modifier.strip_prefix(&['+', '-']) {
-                                macro_rules! gate_modifier { ($($name:literal => $feature:ident)*) => {
-                                    $(if modifier == $name {
-                                        let msg = concat!("`#[link(modifiers=\"", $name, "\")]` is unstable");
-                                        gate_feature_post!(
-                                            self,
-                                            $feature,
-                                            nested_meta.name_value_literal_span().unwrap(),
-                                            msg
-                                        );
-                                    })*
-                                }}
-
-                                gate_modifier!(
-                                    "bundle" => native_link_modifiers_bundle
-                                    "verbatim" => native_link_modifiers_verbatim
-                                    "as-needed" => native_link_modifiers_as_needed
-                                );
-                            }
-                        }
-                    }
+                if nested_meta.has_name(sym::tuple_variadic) {
+                    let msg = "`#[doc(tuple_variadic)]` is meant for internal use only";
+                    gate_feature_post!(self, rustdoc_internals, attr.span, msg);
                 }
             }
         }
 
         // Emit errors for non-staged-api crates.
         if !self.features.staged_api {
-            if attr.has_name(sym::rustc_deprecated)
-                || attr.has_name(sym::unstable)
+            if attr.has_name(sym::unstable)
                 || attr.has_name(sym::stable)
                 || attr.has_name(sym::rustc_const_unstable)
                 || attr.has_name(sym::rustc_const_stable)
@@ -728,18 +709,6 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
         }
         visit::walk_assoc_item(self, i, ctxt)
     }
-
-    fn visit_vis(&mut self, vis: &'a ast::Visibility) {
-        if let ast::VisibilityKind::Crate(ast::CrateSugar::JustCrate) = vis.kind {
-            gate_feature_post!(
-                &self,
-                crate_visibility_modifier,
-                vis.span,
-                "`crate` visibility modifier is experimental"
-            );
-        }
-        visit::walk_vis(self, vis)
-    }
 }
 
 pub fn check_crate(krate: &ast::Crate, sess: &Session) {
@@ -801,7 +770,6 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session) {
 
     gate_all!(trait_alias, "trait aliases are experimental");
     gate_all!(associated_type_bounds, "associated type bounds are unstable");
-    gate_all!(crate_visibility_modifier, "`crate` visibility modifier is experimental");
     gate_all!(decl_macro, "`macro` is experimental");
     gate_all!(box_patterns, "box pattern syntax is experimental");
     gate_all!(exclusive_range_pattern, "exclusive range pattern syntax is experimental");
@@ -859,7 +827,7 @@ fn maybe_stage_features(sess: &Session, krate: &ast::Crate) {
                 err.span_suggestion(
                     attr.span,
                     "remove the attribute",
-                    String::new(),
+                    "",
                     Applicability::MachineApplicable,
                 );
             }

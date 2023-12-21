@@ -31,14 +31,14 @@ use rustc_middle::ty::{self, Instance, ParamEnv, Ty, TypeFoldable};
 use rustc_session::config::{self, DebugInfo};
 use rustc_session::Session;
 use rustc_span::symbol::Symbol;
-use rustc_span::{self, BytePos, Pos, SourceFile, SourceFileAndLine, Span};
+use rustc_span::{self, BytePos, Pos, SourceFile, SourceFileAndLine, SourceFileHash, Span};
 use rustc_target::abi::Size;
 
 use libc::c_uint;
 use smallvec::SmallVec;
+use std::cell::OnceCell;
 use std::cell::RefCell;
 use std::iter;
-use std::lazy::OnceCell;
 use tracing::debug;
 
 mod create_scope_map;
@@ -61,7 +61,7 @@ pub struct CodegenUnitDebugContext<'ll, 'tcx> {
     llcontext: &'ll llvm::Context,
     llmod: &'ll llvm::Module,
     builder: &'ll mut DIBuilder<'ll>,
-    created_files: RefCell<FxHashMap<(Option<String>, Option<String>), &'ll DIFile>>,
+    created_files: RefCell<FxHashMap<Option<(u128, SourceFileHash)>, &'ll DIFile>>,
 
     type_map: metadata::TypeMap<'ll, 'tcx>,
     namespace_map: RefCell<DefIdMap<&'ll DIScope>>,

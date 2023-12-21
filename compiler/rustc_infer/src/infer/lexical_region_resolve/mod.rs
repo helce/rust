@@ -7,7 +7,6 @@ use crate::infer::region_constraints::VarInfos;
 use crate::infer::region_constraints::VerifyBound;
 use crate::infer::RegionRelations;
 use crate::infer::RegionVariableOrigin;
-use crate::infer::RegionckMode;
 use crate::infer::SubregionOrigin;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::graph::implementation::{
@@ -23,6 +22,8 @@ use rustc_middle::ty::{Region, RegionVid};
 use rustc_span::Span;
 use std::fmt;
 
+use super::outlives::test_type_match;
+
 /// This function performs lexical region resolution given a complete
 /// set of constraints and variable origins. It performs a fixed-point
 /// iteration to find region values which satisfy all constraints,
@@ -30,46 +31,27 @@ use std::fmt;
 /// all the variables as well as a set of errors that must be reported.
 #[instrument(level = "debug", skip(region_rels, var_infos, data))]
 pub(crate) fn resolve<'tcx>(
+    param_env: ty::ParamEnv<'tcx>,
     region_rels: &RegionRelations<'_, 'tcx>,
     var_infos: VarInfos,
     data: RegionConstraintData<'tcx>,
-    mode: RegionckMode,
 ) -> (LexicalRegionResolutions<'tcx>, Vec<RegionResolutionError<'tcx>>) {
     let mut errors = vec![];
-    let mut resolver = LexicalResolver { region_rels, var_infos, data };
-    match mode {
-        RegionckMode::Solve => {
-            let values = resolver.infer_variable_values(&mut errors);
-            (values, errors)
-        }
-        RegionckMode::Erase { suppress_errors: false } => {
-            // Do real inference to get errors, then erase the results.
-            let mut values = resolver.infer_variable_values(&mut errors);
-            let re_erased = region_rels.tcx.lifetimes.re_erased;
-
-            values.values.iter_mut().for_each(|v| match *v {
-                VarValue::Value(ref mut r) => *r = re_erased,
-                VarValue::ErrorValue => {}
-            });
-            (values, errors)
-        }
-        RegionckMode::Erase { suppress_errors: true } => {
-            // Skip region inference entirely.
-            (resolver.erased_data(region_rels.tcx), Vec::new())
-        }
-    }
+    let mut resolver = LexicalResolver { param_env, region_rels, var_infos, data };
+    let values = resolver.infer_variable_values(&mut errors);
+    (values, errors)
 }
 
 /// Contains the result of lexical region resolution. Offers methods
 /// to lookup up the final value of a region variable.
 #[derive(Clone)]
 pub struct LexicalRegionResolutions<'tcx> {
-    values: IndexVec<RegionVid, VarValue<'tcx>>,
-    error_region: ty::Region<'tcx>,
+    pub(crate) values: IndexVec<RegionVid, VarValue<'tcx>>,
+    pub(crate) error_region: ty::Region<'tcx>,
 }
 
 #[derive(Copy, Clone, Debug)]
-enum VarValue<'tcx> {
+pub(crate) enum VarValue<'tcx> {
     Value(Region<'tcx>),
     ErrorValue,
 }
@@ -121,6 +103,7 @@ struct RegionAndOrigin<'tcx> {
 type RegionGraph<'tcx> = Graph<(), Constraint<'tcx>>;
 
 struct LexicalResolver<'cx, 'tcx> {
+    param_env: ty::ParamEnv<'tcx>,
     region_rels: &'cx RegionRelations<'cx, 'tcx>,
     var_infos: VarInfos,
     data: RegionConstraintData<'tcx>,
@@ -168,19 +151,6 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                     let re_empty = tcx.mk_region(ty::ReEmpty(vid_universe));
                     VarValue::Value(re_empty)
                 },
-                self.num_vars(),
-            ),
-        }
-    }
-
-    /// An erased version of the lexical region resolutions. Used when we're
-    /// erasing regions and suppressing errors: in item bodies with
-    /// `-Zborrowck=mir`.
-    fn erased_data(&self, tcx: TyCtxt<'tcx>) -> LexicalRegionResolutions<'tcx> {
-        LexicalRegionResolutions {
-            error_region: tcx.lifetimes.re_static,
-            values: IndexVec::from_elem_n(
-                VarValue::Value(tcx.lifetimes.re_erased),
                 self.num_vars(),
             ),
         }
@@ -852,9 +822,20 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
         min: ty::Region<'tcx>,
     ) -> bool {
         match bound {
-            VerifyBound::IfEq(k, b) => {
-                (var_values.normalize(self.region_rels.tcx, *k) == generic_ty)
-                    && self.bound_is_met(b, var_values, generic_ty, min)
+            VerifyBound::IfEq(verify_if_eq_b) => {
+                let verify_if_eq_b = var_values.normalize(self.region_rels.tcx, *verify_if_eq_b);
+                match test_type_match::extract_verify_if_eq(
+                    self.tcx(),
+                    self.param_env,
+                    &verify_if_eq_b,
+                    generic_ty,
+                ) {
+                    Some(r) => {
+                        self.bound_is_met(&VerifyBound::OutlivedBy(r), var_values, generic_ty, min)
+                    }
+
+                    None => false,
+                }
             }
 
             VerifyBound::OutlivedBy(r) => {

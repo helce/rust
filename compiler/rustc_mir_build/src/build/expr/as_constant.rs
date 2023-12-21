@@ -1,11 +1,11 @@
 //! See docs in build/expr/mod.rs
 
-use crate::build::Builder;
-use crate::thir::constant::parse_float;
+use crate::build::{parse_float_into_constval, Builder};
 use rustc_ast as ast;
 use rustc_hir::def_id::DefId;
-use rustc_middle::mir::interpret::Allocation;
-use rustc_middle::mir::interpret::{ConstValue, LitToConstError, LitToConstInput, Scalar};
+use rustc_middle::mir::interpret::{
+    Allocation, ConstValue, LitToConstError, LitToConstInput, Scalar,
+};
 use rustc_middle::mir::*;
 use rustc_middle::thir::*;
 use rustc_middle::ty::subst::SubstsRef;
@@ -15,11 +15,11 @@ use rustc_target::abi::Size;
 impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// Compile `expr`, yielding a compile-time constant. Assumes that
     /// `expr` is a valid compile-time constant!
-    crate fn as_constant(&mut self, expr: &Expr<'tcx>) -> Constant<'tcx> {
+    pub(crate) fn as_constant(&mut self, expr: &Expr<'tcx>) -> Constant<'tcx> {
         let create_uneval_from_def_id =
             |tcx: TyCtxt<'tcx>, def_id: DefId, ty: Ty<'tcx>, substs: SubstsRef<'tcx>| {
                 let uneval = ty::Unevaluated::new(ty::WithOptConstParam::unknown(def_id), substs);
-                tcx.mk_const(ty::ConstS { val: ty::ConstKind::Unevaluated(uneval), ty })
+                tcx.mk_const(ty::ConstS { kind: ty::ConstKind::Unevaluated(uneval), ty })
             };
 
         let this = self;
@@ -68,7 +68,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
             ExprKind::ConstParam { param, def_id: _ } => {
                 let const_param =
-                    tcx.mk_const(ty::ConstS { val: ty::ConstKind::Param(param), ty: expr.ty });
+                    tcx.mk_const(ty::ConstS { kind: ty::ConstKind::Param(param), ty: expr.ty });
                 let literal = ConstantKind::Ty(const_param);
 
                 Constant { user_ty: None, span, literal }
@@ -90,7 +90,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 }
 
 #[instrument(skip(tcx, lit_input))]
-fn lit_to_mir_constant<'tcx>(
+pub(crate) fn lit_to_mir_constant<'tcx>(
     tcx: TyCtxt<'tcx>,
     lit_input: LitToConstInput<'tcx>,
 ) -> Result<ConstantKind<'tcx>, LitToConstError> {
@@ -129,7 +129,7 @@ fn lit_to_mir_constant<'tcx>(
             trunc(if neg { (*n as i128).overflowing_neg().0 as u128 } else { *n })?
         }
         (ast::LitKind::Float(n, _), ty::Float(fty)) => {
-            parse_float(*n, *fty, neg).ok_or(LitToConstError::Reported)?
+            parse_float_into_constval(*n, *fty, neg).ok_or(LitToConstError::Reported)?
         }
         (ast::LitKind::Bool(b), ty::Bool) => ConstValue::Scalar(Scalar::from_bool(*b)),
         (ast::LitKind::Char(c), ty::Char) => ConstValue::Scalar(Scalar::from_char(*c)),

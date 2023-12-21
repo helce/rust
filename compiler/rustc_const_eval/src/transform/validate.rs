@@ -4,6 +4,7 @@ use rustc_data_structures::fx::FxHashSet;
 use rustc_index::bit_set::BitSet;
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_middle::mir::interpret::Scalar;
+use rustc_middle::mir::visit::NonUseContext::VarDebugInfo;
 use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::mir::{
     traversal, AggregateKind, BasicBlock, BinOp, Body, BorrowKind, Local, Location, MirPass,
@@ -13,7 +14,7 @@ use rustc_middle::mir::{
 use rustc_middle::ty::fold::BottomUpFolder;
 use rustc_middle::ty::{self, InstanceDef, ParamEnv, Ty, TyCtxt, TypeFoldable};
 use rustc_mir_dataflow::impls::MaybeStorageLive;
-use rustc_mir_dataflow::storage::AlwaysLiveLocals;
+use rustc_mir_dataflow::storage::always_live_locals;
 use rustc_mir_dataflow::{Analysis, ResultsCursor};
 use rustc_target::abi::{Size, VariantIdx};
 
@@ -47,7 +48,7 @@ impl<'tcx> MirPass<'tcx> for Validator {
         let param_env = tcx.param_env(def_id);
         let mir_phase = self.mir_phase;
 
-        let always_live_locals = AlwaysLiveLocals::new(body);
+        let always_live_locals = always_live_locals(body);
         let storage_liveness = MaybeStorageLive::new(always_live_locals)
             .into_engine(tcx, body)
             .iterate_to_fixpoint()
@@ -239,72 +240,94 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
         context: PlaceContext,
         location: Location,
     ) {
-        if let ProjectionElem::Index(index) = elem {
-            let index_ty = self.body.local_decls[index].ty;
-            if index_ty != self.tcx.types.usize {
-                self.fail(location, format!("bad index ({:?} != usize)", index_ty))
+        match elem {
+            ProjectionElem::Index(index) => {
+                let index_ty = self.body.local_decls[index].ty;
+                if index_ty != self.tcx.types.usize {
+                    self.fail(location, format!("bad index ({:?} != usize)", index_ty))
+                }
             }
-        }
-        if let ProjectionElem::Field(f, ty) = elem {
-            let parent = Place { local, projection: self.tcx.intern_place_elems(proj_base) };
-            let parent_ty = parent.ty(&self.body.local_decls, self.tcx);
-            let fail_out_of_bounds = |this: &Self, location| {
-                this.fail(location, format!("Out of bounds field {:?} for {:?}", f, parent_ty));
-            };
-            let check_equal = |this: &Self, location, f_ty| {
-                if !this.mir_assign_valid_types(ty, f_ty) {
-                    this.fail(
+            ProjectionElem::Deref if self.mir_phase >= MirPhase::GeneratorsLowered => {
+                let base_ty = Place::ty_from(local, proj_base, &self.body.local_decls, self.tcx).ty;
+
+                if base_ty.is_box() {
+                    self.fail(
+                        location,
+                        format!("{:?} dereferenced after ElaborateBoxDerefs", base_ty),
+                    )
+                }
+            }
+            ProjectionElem::Field(f, ty) => {
+                let parent = Place { local, projection: self.tcx.intern_place_elems(proj_base) };
+                let parent_ty = parent.ty(&self.body.local_decls, self.tcx);
+                let fail_out_of_bounds = |this: &Self, location| {
+                    this.fail(location, format!("Out of bounds field {:?} for {:?}", f, parent_ty));
+                };
+                let check_equal = |this: &Self, location, f_ty| {
+                    if !this.mir_assign_valid_types(ty, f_ty) {
+                        this.fail(
                         location,
                         format!(
                             "Field projection `{:?}.{:?}` specified type `{:?}`, but actual type is {:?}",
                             parent, f, ty, f_ty
                         )
                     )
-                }
-            };
-            match parent_ty.ty.kind() {
-                ty::Tuple(fields) => {
-                    let Some(f_ty) = fields.get(f.as_usize()) else {
-                        fail_out_of_bounds(self, location);
-                        return;
-                    };
-                    check_equal(self, location, *f_ty);
-                }
-                ty::Adt(adt_def, substs) => {
-                    let var = parent_ty.variant_index.unwrap_or(VariantIdx::from_u32(0));
-                    let Some(field) = adt_def.variant(var).fields.get(f.as_usize()) else {
-                        fail_out_of_bounds(self, location);
-                        return;
-                    };
-                    check_equal(self, location, field.ty(self.tcx, substs));
-                }
-                ty::Closure(_, substs) => {
-                    let substs = substs.as_closure();
-                    let Some(f_ty) = substs.upvar_tys().nth(f.as_usize()) else {
-                        fail_out_of_bounds(self, location);
-                        return;
-                    };
-                    check_equal(self, location, f_ty);
-                }
-                ty::Generator(_, substs, _) => {
-                    let substs = substs.as_generator();
-                    let Some(f_ty) = substs.upvar_tys().nth(f.as_usize()) else {
-                        fail_out_of_bounds(self, location);
-                        return;
-                    };
-                    check_equal(self, location, f_ty);
-                }
-                _ => {
-                    self.fail(location, format!("{:?} does not have fields", parent_ty.ty));
+                    }
+                };
+
+                match parent_ty.ty.kind() {
+                    ty::Tuple(fields) => {
+                        let Some(f_ty) = fields.get(f.as_usize()) else {
+                            fail_out_of_bounds(self, location);
+                            return;
+                        };
+                        check_equal(self, location, *f_ty);
+                    }
+                    ty::Adt(adt_def, substs) => {
+                        let var = parent_ty.variant_index.unwrap_or(VariantIdx::from_u32(0));
+                        let Some(field) = adt_def.variant(var).fields.get(f.as_usize()) else {
+                            fail_out_of_bounds(self, location);
+                            return;
+                        };
+                        check_equal(self, location, field.ty(self.tcx, substs));
+                    }
+                    ty::Closure(_, substs) => {
+                        let substs = substs.as_closure();
+                        let Some(f_ty) = substs.upvar_tys().nth(f.as_usize()) else {
+                            fail_out_of_bounds(self, location);
+                            return;
+                        };
+                        check_equal(self, location, f_ty);
+                    }
+                    ty::Generator(_, substs, _) => {
+                        let substs = substs.as_generator();
+                        let Some(f_ty) = substs.upvar_tys().nth(f.as_usize()) else {
+                            fail_out_of_bounds(self, location);
+                            return;
+                        };
+                        check_equal(self, location, f_ty);
+                    }
+                    _ => {
+                        self.fail(location, format!("{:?} does not have fields", parent_ty.ty));
+                    }
                 }
             }
+            _ => {}
         }
         self.super_projection_elem(local, proj_base, elem, context, location);
     }
 
-    fn visit_place(&mut self, place: &Place<'tcx>, _: PlaceContext, _: Location) {
+    fn visit_place(&mut self, place: &Place<'tcx>, cntxt: PlaceContext, location: Location) {
         // Set off any `bug!`s in the type computation code
         let _ = place.ty(&self.body.local_decls, self.tcx);
+
+        if self.mir_phase >= MirPhase::Derefered
+            && place.projection.len() > 1
+            && cntxt != PlaceContext::NonUse(VarDebugInfo)
+            && place.projection[1..].contains(&ProjectionElem::Deref)
+        {
+            self.fail(location, format!("{:?}, has deref at the wrong place", place));
+        }
     }
 
     fn visit_rvalue(&mut self, rvalue: &Rvalue<'tcx>, location: Location) {
@@ -673,7 +696,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                     self.check_edge(location, *unwind, EdgeKind::Unwind);
                 }
             }
-            TerminatorKind::Call { func, args, destination, cleanup, .. } => {
+            TerminatorKind::Call { func, args, destination, target, cleanup, .. } => {
                 let func_ty = func.ty(&self.body.local_decls, self.tcx);
                 match func_ty.kind() {
                     ty::FnPtr(..) | ty::FnDef(..) => {}
@@ -682,7 +705,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                         format!("encountered non-callable type {} in `Call` terminator", func_ty),
                     ),
                 }
-                if let Some((_, target)) = destination {
+                if let Some(target) = target {
                     self.check_edge(location, *target, EdgeKind::Normal);
                 }
                 if let Some(cleanup) = cleanup {
@@ -693,9 +716,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                 // passed by a reference to the callee. Consequently they must be non-overlapping.
                 // Currently this simply checks for duplicate places.
                 self.place_cache.clear();
-                if let Some((destination, _)) = destination {
-                    self.place_cache.push(destination.as_ref());
-                }
+                self.place_cache.push(destination.as_ref());
                 for arg in args {
                     if let Operand::Move(place) = arg {
                         self.place_cache.push(place.as_ref());

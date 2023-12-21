@@ -1273,6 +1273,22 @@ impl Stdio {
     pub fn null() -> Stdio {
         Stdio(imp::Stdio::Null)
     }
+
+    /// Returns `true` if this requires [`Command`] to create a new pipe.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// #![feature(stdio_makes_pipe)]
+    /// use std::process::Stdio;
+    ///
+    /// let io = Stdio::piped();
+    /// assert_eq!(io.makes_pipe(), true);
+    /// ```
+    #[unstable(feature = "stdio_makes_pipe", issue = "98288")]
+    pub fn makes_pipe(&self) -> bool {
+        matches!(self.0, imp::Stdio::MakePipe)
+    }
 }
 
 impl FromInner<imp::Stdio> for Stdio {
@@ -1417,13 +1433,13 @@ impl From<fs::File> for Stdio {
 /// For proper error reporting of failed processes, print the value of `ExitStatus` or
 /// `ExitStatusError` using their implementations of [`Display`](crate::fmt::Display).
 ///
-/// # Differences from `ExitStatus`
+/// # Differences from `ExitCode`
 ///
-/// `ExitCode` is intended for terminating the currently running process, via
-/// the `Termination` trait, in contrast to [`ExitStatus`], which represents the
+/// [`ExitCode`] is intended for terminating the currently running process, via
+/// the `Termination` trait, in contrast to `ExitStatus`, which represents the
 /// termination of a child process. These APIs are separate due to platform
 /// compatibility differences and their expected usage; it is not generally
-/// possible to exactly reproduce an ExitStatus from a child for the current
+/// possible to exactly reproduce an `ExitStatus` from a child for the current
 /// process after the fact.
 ///
 /// [`status`]: Command::status
@@ -1684,7 +1700,7 @@ impl crate::error::Error for ExitStatusError {}
 /// the `Termination` trait, in contrast to [`ExitStatus`], which represents the
 /// termination of a child process. These APIs are separate due to platform
 /// compatibility differences and their expected usage; it is not generally
-/// possible to exactly reproduce an ExitStatus from a child for the current
+/// possible to exactly reproduce an `ExitStatus` from a child for the current
 /// process after the fact.
 ///
 /// # Examples
@@ -1764,7 +1780,7 @@ impl ExitCode {
     ///     code.exit_process()
     /// }
     /// ```
-    #[unstable(feature = "exitcode_exit_method", issue = "none")]
+    #[unstable(feature = "exitcode_exit_method", issue = "97100")]
     pub fn exit_process(self) -> ! {
         exit(self.to_i32())
     }
@@ -2108,7 +2124,7 @@ pub fn id() -> u32 {
 
 /// A trait for implementing arbitrary return types in the `main` function.
 ///
-/// The C-main function only supports to return integers as return type.
+/// The C-main function only supports returning integers.
 /// So, every type implementing the `Termination` trait has to be converted
 /// to an integer.
 ///
@@ -2136,17 +2152,7 @@ pub trait Termination {
 impl Termination for () {
     #[inline]
     fn report(self) -> ExitCode {
-        ExitCode::SUCCESS.report()
-    }
-}
-
-#[stable(feature = "termination_trait_lib", since = "1.61.0")]
-impl<E: fmt::Debug> Termination for Result<(), E> {
-    fn report(self) -> ExitCode {
-        match self {
-            Ok(()) => ().report(),
-            Err(err) => Err::<!, _>(err).report(),
-        }
+        ExitCode::SUCCESS
     }
 }
 
@@ -2158,19 +2164,9 @@ impl Termination for ! {
 }
 
 #[stable(feature = "termination_trait_lib", since = "1.61.0")]
-impl<E: fmt::Debug> Termination for Result<!, E> {
+impl Termination for Infallible {
     fn report(self) -> ExitCode {
-        let Err(err) = self;
-        eprintln!("Error: {err:?}");
-        ExitCode::FAILURE.report()
-    }
-}
-
-#[stable(feature = "termination_trait_lib", since = "1.61.0")]
-impl<E: fmt::Debug> Termination for Result<Infallible, E> {
-    fn report(self) -> ExitCode {
-        let Err(err) = self;
-        Err::<!, _>(err).report()
+        match self {}
     }
 }
 
@@ -2179,5 +2175,20 @@ impl Termination for ExitCode {
     #[inline]
     fn report(self) -> ExitCode {
         self
+    }
+}
+
+#[stable(feature = "termination_trait_lib", since = "1.61.0")]
+impl<T: Termination, E: fmt::Debug> Termination for Result<T, E> {
+    fn report(self) -> ExitCode {
+        match self {
+            Ok(val) => val.report(),
+            Err(err) => {
+                // Ignore error if the write fails, for example because stderr is
+                // already closed. There is not much point panicking at this point.
+                let _ = writeln!(io::stderr(), "Error: {err:?}");
+                ExitCode::FAILURE
+            }
+        }
     }
 }

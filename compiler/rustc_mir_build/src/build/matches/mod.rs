@@ -14,7 +14,6 @@ use rustc_data_structures::{
     fx::{FxHashSet, FxIndexMap, FxIndexSet},
     stack::ensure_sufficient_stack,
 };
-use rustc_hir::HirId;
 use rustc_index::bit_set::BitSet;
 use rustc_middle::middle::region;
 use rustc_middle::mir::*;
@@ -41,7 +40,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         expr: &Expr<'tcx>,
         temp_scope_override: Option<region::Scope>,
         break_scope: region::Scope,
-        variable_scope_span: Span,
+        variable_source_info: SourceInfo,
     ) -> BlockAnd<()> {
         let this = self;
         let expr_span = expr.span;
@@ -53,7 +52,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     &this.thir[lhs],
                     temp_scope_override,
                     break_scope,
-                    variable_scope_span,
+                    variable_source_info,
                 ));
 
                 let rhs_then_block = unpack!(this.then_else_break(
@@ -61,7 +60,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     &this.thir[rhs],
                     temp_scope_override,
                     break_scope,
-                    variable_scope_span,
+                    variable_source_info,
                 ));
 
                 rhs_then_block.unit()
@@ -74,13 +73,18 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         &this.thir[value],
                         temp_scope_override,
                         break_scope,
-                        variable_scope_span,
+                        variable_source_info,
                     )
                 })
             }
-            ExprKind::Let { expr, ref pat } => {
-                this.lower_let_expr(block, &this.thir[expr], pat, break_scope, variable_scope_span)
-            }
+            ExprKind::Let { expr, ref pat } => this.lower_let_expr(
+                block,
+                &this.thir[expr],
+                pat,
+                break_scope,
+                Some(variable_source_info.scope),
+                variable_source_info.span,
+            ),
             _ => {
                 let temp_scope = temp_scope_override.unwrap_or_else(|| this.local_scope());
                 let mutability = Mutability::Mut;
@@ -151,7 +155,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     ///
     /// * From each pre-binding block to the next pre-binding block.
     /// * From each otherwise block to the next pre-binding block.
-    crate fn match_expr(
+    #[tracing::instrument(level = "debug", skip(self, arms))]
+    pub(crate) fn match_expr(
         &mut self,
         destination: Place<'tcx>,
         span: Span,
@@ -408,7 +413,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         outer_source_info: SourceInfo,
         candidate: Candidate<'_, 'tcx>,
         guard: Option<&Guard<'tcx>>,
-        fake_borrow_temps: &Vec<(Place<'tcx>, Local)>,
+        fake_borrow_temps: &[(Place<'tcx>, Local)],
         scrutinee_span: Span,
         arm_span: Option<Span>,
         arm_scope: Option<region::Scope>,
@@ -523,8 +528,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                             },
                         ..
                     },
-                ascription:
-                    thir::Ascription { user_ty: pat_ascription_ty, variance: _, user_ty_span },
+                ascription: thir::Ascription { annotation, variance: _ },
             } => {
                 let place =
                     self.storage_live_binding(block, var, irrefutable_pat.span, OutsideGuard, true);
@@ -535,18 +539,15 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let cause_let = FakeReadCause::ForLet(None);
                 self.cfg.push_fake_read(block, pattern_source_info, cause_let, place);
 
-                let ty_source_info = self.source_info(user_ty_span);
-                let user_ty = pat_ascription_ty.user_ty(
-                    &mut self.canonical_user_type_annotations,
-                    place.ty(&self.local_decls, self.tcx).ty,
-                    ty_source_info.span,
-                );
+                let ty_source_info = self.source_info(annotation.span);
+
+                let base = self.canonical_user_type_annotations.push(annotation);
                 self.cfg.push(
                     block,
                     Statement {
                         source_info: ty_source_info,
                         kind: StatementKind::AscribeUserType(
-                            Box::new((place, user_ty)),
+                            Box::new((place, UserTypeProjection { base, projs: Vec::new() })),
                             // We always use invariant as the variance here. This is because the
                             // variance field from the ascription refers to the variance to use
                             // when applying the type to the value being matched, but this
@@ -577,7 +578,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         }
     }
 
-    crate fn place_into_pattern(
+    pub(crate) fn place_into_pattern(
         &mut self,
         block: BasicBlock,
         irrefutable_pat: Pat<'tcx>,
@@ -653,7 +654,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// scope for the bindings in these patterns, if such a scope had to be
     /// created. NOTE: Declaring the bindings should always be done in their
     /// drop scope.
-    crate fn declare_bindings(
+    pub(crate) fn declare_bindings(
         &mut self,
         mut visibility_scope: Option<SourceScope>,
         scope_span: Span,
@@ -690,10 +691,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         visibility_scope
     }
 
-    crate fn storage_live_binding(
+    pub(crate) fn storage_live_binding(
         &mut self,
         block: BasicBlock,
-        var: HirId,
+        var: LocalVarId,
         span: Span,
         for_guard: ForGuard,
         schedule_drop: bool,
@@ -703,15 +704,20 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         self.cfg.push(block, Statement { source_info, kind: StatementKind::StorageLive(local_id) });
         // Altough there is almost always scope for given variable in corner cases
         // like #92893 we might get variable with no scope.
-        if let Some(region_scope) = self.region_scope_tree.var_scope(var.local_id) && schedule_drop{
+        if let Some(region_scope) = self.region_scope_tree.var_scope(var.0.local_id) && schedule_drop{
             self.schedule_drop(span, region_scope, local_id, DropKind::Storage);
         }
         Place::from(local_id)
     }
 
-    crate fn schedule_drop_for_binding(&mut self, var: HirId, span: Span, for_guard: ForGuard) {
+    pub(crate) fn schedule_drop_for_binding(
+        &mut self,
+        var: LocalVarId,
+        span: Span,
+        for_guard: ForGuard,
+    ) {
         let local_id = self.var_local_id(var, for_guard);
-        if let Some(region_scope) = self.region_scope_tree.var_scope(var.local_id) {
+        if let Some(region_scope) = self.region_scope_tree.var_scope(var.0.local_id) {
             self.schedule_drop(span, region_scope, local_id, DropKind::Value);
         }
     }
@@ -728,7 +734,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             Mutability,
             Symbol,
             BindingMode,
-            HirId,
+            LocalVarId,
             Span,
             Ty<'tcx>,
             UserTypeProjections,
@@ -784,7 +790,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
             PatKind::AscribeUserType {
                 ref subpattern,
-                ascription: thir::Ascription { ref user_ty, user_ty_span, variance: _ },
+                ascription: thir::Ascription { ref annotation, variance: _ },
             } => {
                 // This corresponds to something like
                 //
@@ -794,16 +800,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 //
                 // Note that the variance doesn't apply here, as we are tracking the effect
                 // of `user_ty` on any bindings contained with subpattern.
-                let annotation = CanonicalUserTypeAnnotation {
-                    span: user_ty_span,
-                    user_ty: user_ty.user_ty,
-                    inferred_ty: subpattern.ty,
-                };
+
                 let projection = UserTypeProjection {
-                    base: self.canonical_user_type_annotations.push(annotation),
+                    base: self.canonical_user_type_annotations.push(annotation.clone()),
                     projs: Vec::new(),
                 };
-                let subpattern_user_ty = pattern_user_ty.push_projection(&projection, user_ty_span);
+                let subpattern_user_ty =
+                    pattern_user_ty.push_projection(&projection, annotation.span);
                 self.visit_primary_bindings(subpattern, subpattern_user_ty, f)
             }
 
@@ -918,7 +921,7 @@ fn traverse_candidate<'pat, 'tcx: 'pat, C, T, I>(
 struct Binding<'tcx> {
     span: Span,
     source: Place<'tcx>,
-    var_id: HirId,
+    var_id: LocalVarId,
     binding_mode: BindingMode,
 }
 
@@ -927,14 +930,13 @@ struct Binding<'tcx> {
 /// influence region inference.
 #[derive(Clone, Debug)]
 struct Ascription<'tcx> {
-    span: Span,
     source: Place<'tcx>,
-    user_ty: PatTyProj<'tcx>,
+    annotation: CanonicalUserTypeAnnotation<'tcx>,
     variance: ty::Variance,
 }
 
 #[derive(Clone, Debug)]
-crate struct MatchPair<'pat, 'tcx> {
+pub(crate) struct MatchPair<'pat, 'tcx> {
     // this place...
     place: PlaceBuilder<'tcx>,
 
@@ -966,13 +968,13 @@ enum TestKind<'tcx> {
         ///
         /// For `bool` we always generate two edges, one for `true` and one for
         /// `false`.
-        options: FxIndexMap<ty::Const<'tcx>, u128>,
+        options: FxIndexMap<ConstantKind<'tcx>, u128>,
     },
 
     /// Test for equality with value, possibly after an unsizing coercion to
     /// `ty`,
     Eq {
-        value: ty::Const<'tcx>,
+        value: ConstantKind<'tcx>,
         // Integer types are handled by `SwitchInt`, and constants with ADT
         // types are converted back into patterns, so this can only be `&str`,
         // `&[T]`, `f32` or `f64`.
@@ -991,7 +993,7 @@ enum TestKind<'tcx> {
 /// [`Test`] is just the test to perform; it does not include the value
 /// to be tested.
 #[derive(Debug)]
-crate struct Test<'tcx> {
+pub(crate) struct Test<'tcx> {
     span: Span,
     kind: TestKind<'tcx>,
 }
@@ -999,7 +1001,7 @@ crate struct Test<'tcx> {
 /// `ArmHasGuard` is a wrapper around a boolean flag. It indicates whether
 /// a match arm has a guard expression attached to it.
 #[derive(Copy, Clone, Debug)]
-crate struct ArmHasGuard(crate bool);
+pub(crate) struct ArmHasGuard(pub(crate) bool);
 
 ///////////////////////////////////////////////////////////////////////////
 // Main matching algorithm
@@ -1769,12 +1771,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 // Pat binding - used for `let` and function parameters as well.
 
 impl<'a, 'tcx> Builder<'a, 'tcx> {
-    crate fn lower_let_expr(
+    pub(crate) fn lower_let_expr(
         &mut self,
         mut block: BasicBlock,
         expr: &Expr<'tcx>,
         pat: &Pat<'tcx>,
         else_target: region::Scope,
+        source_scope: Option<SourceScope>,
         span: Span,
     ) -> BlockAnd<()> {
         let expr_span = expr.span;
@@ -1800,7 +1803,14 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         let otherwise_post_guard_block = otherwise_candidate.pre_binding_block.unwrap();
         self.break_for_else(otherwise_post_guard_block, else_target, self.source_info(expr_span));
 
-        self.declare_bindings(None, pat.span.to(span), pat, ArmHasGuard(false), opt_expr_place);
+        self.declare_bindings(
+            source_scope,
+            pat.span.to(span),
+            pat,
+            ArmHasGuard(false),
+            opt_expr_place,
+        );
+
         let post_guard_block = self.bind_pattern(
             self.source_info(pat.span),
             guard_candidate,
@@ -1828,7 +1838,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         candidate: Candidate<'pat, 'tcx>,
         parent_bindings: &[(Vec<Binding<'tcx>>, Vec<Ascription<'tcx>>)],
         guard: Option<&Guard<'tcx>>,
-        fake_borrows: &Vec<(Place<'tcx>, Local)>,
+        fake_borrows: &[(Place<'tcx>, Local)],
         scrutinee_span: Span,
         arm_span: Option<Span>,
         match_scope: Option<region::Scope>,
@@ -1858,7 +1868,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             parent_bindings
                 .iter()
                 .flat_map(|(_, ascriptions)| ascriptions)
-                .chain(&candidate.ascriptions),
+                .cloned()
+                .chain(candidate.ascriptions),
         );
 
         // rust-lang/rust#27282: The `autoref` business deserves some
@@ -1971,12 +1982,18 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     Guard::If(e) => {
                         let e = &this.thir[e];
                         guard_span = e.span;
-                        this.then_else_break(block, e, None, match_scope, arm_span)
+                        this.then_else_break(
+                            block,
+                            e,
+                            None,
+                            match_scope,
+                            this.source_info(arm_span),
+                        )
                     }
                     Guard::IfLet(ref pat, scrutinee) => {
                         let s = &this.thir[scrutinee];
                         guard_span = s.span;
-                        this.lower_let_expr(block, s, pat, match_scope, arm_span)
+                        this.lower_let_expr(block, s, pat, match_scope, None, arm_span)
                     }
                 });
 
@@ -2062,32 +2079,24 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
     /// Append `AscribeUserType` statements onto the end of `block`
     /// for each ascription
-    fn ascribe_types<'b>(
+    fn ascribe_types(
         &mut self,
         block: BasicBlock,
-        ascriptions: impl IntoIterator<Item = &'b Ascription<'tcx>>,
-    ) where
-        'tcx: 'b,
-    {
+        ascriptions: impl IntoIterator<Item = Ascription<'tcx>>,
+    ) {
         for ascription in ascriptions {
-            let source_info = self.source_info(ascription.span);
+            let source_info = self.source_info(ascription.annotation.span);
 
-            debug!(
-                "adding user ascription at span {:?} of place {:?} and {:?}",
-                source_info.span, ascription.source, ascription.user_ty,
-            );
-
-            let user_ty = ascription.user_ty.user_ty(
-                &mut self.canonical_user_type_annotations,
-                ascription.source.ty(&self.local_decls, self.tcx).ty,
-                source_info.span,
-            );
+            let base = self.canonical_user_type_annotations.push(ascription.annotation);
             self.cfg.push(
                 block,
                 Statement {
                     source_info,
                     kind: StatementKind::AscribeUserType(
-                        Box::new((ascription.source, user_ty)),
+                        Box::new((
+                            ascription.source,
+                            UserTypeProjection { base, projs: Vec::new() },
+                        )),
                         ascription.variance,
                     ),
                 },
@@ -2193,7 +2202,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         mutability: Mutability,
         name: Symbol,
         mode: BindingMode,
-        var_id: HirId,
+        var_id: LocalVarId,
         var_ty: Ty<'tcx>,
         user_ty: UserTypeProjections,
         has_guard: ArmHasGuard,

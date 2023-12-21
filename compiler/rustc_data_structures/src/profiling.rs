@@ -195,6 +195,7 @@ impl SelfProfilerRef {
         F: for<'a> FnOnce(&'a SelfProfiler) -> TimingGuard<'a>,
     {
         #[inline(never)]
+        #[cold]
         fn cold_call<F>(profiler_ref: &SelfProfilerRef, f: F) -> TimingGuard<'_>
         where
             F: for<'a> FnOnce(&'a SelfProfiler) -> TimingGuard<'a>,
@@ -203,7 +204,7 @@ impl SelfProfilerRef {
             f(&**profiler)
         }
 
-        if unlikely!(self.event_filter_mask.contains(event_filter)) {
+        if self.event_filter_mask.contains(event_filter) {
             cold_call(self, f)
         } else {
             TimingGuard::none()
@@ -550,14 +551,20 @@ impl SelfProfiler {
     pub fn new(
         output_directory: &Path,
         crate_name: Option<&str>,
-        event_filters: &Option<Vec<String>>,
+        event_filters: Option<&[String]>,
+        counter_name: &str,
     ) -> Result<SelfProfiler, Box<dyn Error + Send + Sync>> {
         fs::create_dir_all(output_directory)?;
 
         let crate_name = crate_name.unwrap_or("unknown-crate");
-        let filename = format!("{}-{}.rustc_profile", crate_name, process::id());
+        // HACK(eddyb) we need to pad the PID, strange as it may seem, as its
+        // length can behave as a source of entropy for heap addresses, when
+        // ASLR is disabled and the heap is otherwise determinic.
+        let pid: u32 = process::id();
+        let filename = format!("{}-{:07}.rustc_profile", crate_name, pid);
         let path = output_directory.join(&filename);
-        let profiler = Profiler::new(&path)?;
+        let profiler =
+            Profiler::with_counter(&path, measureme::counters::Counter::by_name(counter_name)?)?;
 
         let query_event_kind = profiler.alloc_string("Query");
         let generic_activity_event_kind = profiler.alloc_string("GenericActivity");
@@ -570,7 +577,7 @@ impl SelfProfiler {
 
         let mut event_filter_mask = EventFilter::empty();
 
-        if let Some(ref event_filters) = *event_filters {
+        if let Some(event_filters) = event_filters {
             let mut unknown_events = vec![];
             for item in event_filters {
                 if let Some(&(_, mask)) =

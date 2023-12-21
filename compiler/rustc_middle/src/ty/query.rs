@@ -6,15 +6,14 @@ use crate::middle::codegen_fn_attrs::CodegenFnAttrs;
 use crate::middle::exported_symbols::{ExportedSymbol, SymbolExportInfo};
 use crate::middle::lib_features::LibFeatures;
 use crate::middle::privacy::AccessLevels;
-use crate::middle::region;
-use crate::middle::resolve_lifetime::{
-    LifetimeScopeForPath, ObjectLifetimeDefault, Region, ResolveLifetimes,
-};
+use crate::middle::resolve_lifetime::{ObjectLifetimeDefault, Region, ResolveLifetimes};
 use crate::middle::stability::{self, DeprecationEntry};
 use crate::mir;
 use crate::mir::interpret::GlobalId;
-use crate::mir::interpret::{ConstAlloc, LitToConstError, LitToConstInput};
-use crate::mir::interpret::{ConstValue, EvalToAllocationRawResult, EvalToConstValueResult};
+use crate::mir::interpret::{
+    ConstValue, EvalToAllocationRawResult, EvalToConstValueResult, EvalToValTreeResult,
+};
+use crate::mir::interpret::{LitToConstError, LitToConstInput};
 use crate::mir::mono::CodegenUnit;
 use crate::thir;
 use crate::traits::query::{

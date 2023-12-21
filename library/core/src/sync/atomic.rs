@@ -4,6 +4,12 @@
 //! threads, and are the building blocks of other concurrent
 //! types.
 //!
+//! Rust atomics currently follow the same rules as [C++20 atomics][cpp], specifically `atomic_ref`.
+//! Basically, creating a *shared reference* to one of the Rust atomic types corresponds to creating
+//! an `atomic_ref` in C++; the `atomic_ref` is destroyed when the lifetime of the shared reference
+//! ends. (A Rust atomic type that is exclusively owned or behind a mutable reference does *not*
+//! correspond to an "atomic object" in C++, since it can be accessed via non-atomic operations.)
+//!
 //! This module defines atomic versions of a select number of primitive
 //! types, including [`AtomicBool`], [`AtomicIsize`], [`AtomicUsize`],
 //! [`AtomicI8`], [`AtomicU16`], etc.
@@ -14,6 +20,7 @@
 //! the memory barrier for that operation. These orderings are the
 //! same as the [C++20 atomic orderings][1]. For more information see the [nomicon][2].
 //!
+//! [cpp]: https://en.cppreference.com/w/cpp/atomic
 //! [1]: https://en.cppreference.com/w/cpp/atomic/memory_order
 //! [2]: ../../../nomicon/atomics.html
 //!
@@ -350,7 +357,7 @@ impl AtomicBool {
     /// # Examples
     ///
     /// ```
-    /// #![feature(atomic_from_mut, inline_const, scoped_threads)]
+    /// #![feature(atomic_from_mut, inline_const)]
     /// use std::sync::atomic::{AtomicBool, Ordering};
     ///
     /// let mut some_bools = [const { AtomicBool::new(false) }; 10];
@@ -381,7 +388,7 @@ impl AtomicBool {
     /// # Examples
     ///
     /// ```
-    /// #![feature(atomic_from_mut, scoped_threads)]
+    /// #![feature(atomic_from_mut)]
     /// use std::sync::atomic::{AtomicBool, Ordering};
     ///
     /// let mut some_bools = [false; 10];
@@ -1015,7 +1022,7 @@ impl<T> AtomicPtr<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(atomic_from_mut, inline_const, scoped_threads)]
+    /// #![feature(atomic_from_mut, inline_const)]
     /// use std::ptr::null_mut;
     /// use std::sync::atomic::{AtomicPtr, Ordering};
     ///
@@ -1052,7 +1059,7 @@ impl<T> AtomicPtr<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(atomic_from_mut, scoped_threads)]
+    /// #![feature(atomic_from_mut)]
     /// use std::ptr::null_mut;
     /// use std::sync::atomic::{AtomicPtr, Ordering};
     ///
@@ -1517,7 +1524,7 @@ macro_rules! atomic_int {
         #[$stable_debug]
         impl fmt::Debug for $atomic_type {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                fmt::Debug::fmt(&self.load(Ordering::SeqCst), f)
+                fmt::Debug::fmt(&self.load(Ordering::Relaxed), f)
             }
         }
 
@@ -1607,7 +1614,7 @@ macro_rules! atomic_int {
             /// # Examples
             ///
             /// ```
-            /// #![feature(atomic_from_mut, inline_const, scoped_threads)]
+            /// #![feature(atomic_from_mut, inline_const)]
             #[doc = concat!($extra_feature, "use std::sync::atomic::{", stringify!($atomic_type), ", Ordering};")]
             ///
             #[doc = concat!("let mut some_ints = [const { ", stringify!($atomic_type), "::new(0) }; 10];")]
@@ -1640,7 +1647,7 @@ macro_rules! atomic_int {
             /// # Examples
             ///
             /// ```
-            /// #![feature(atomic_from_mut, scoped_threads)]
+            /// #![feature(atomic_from_mut)]
             #[doc = concat!($extra_feature, "use std::sync::atomic::{", stringify!($atomic_type), ", Ordering};")]
             ///
             /// let mut some_ints = [0; 10];
@@ -2830,7 +2837,7 @@ unsafe fn atomic_umin<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 /// A fence 'A' which has (at least) [`Release`] ordering semantics, synchronizes
 /// with a fence 'B' with (at least) [`Acquire`] semantics, if and only if there
 /// exist operations X and Y, both operating on some atomic object 'M' such
-/// that A is sequenced before X, Y is synchronized before B and Y observes
+/// that A is sequenced before X, Y is sequenced before B and Y observes
 /// the change to M. This provides a happens-before dependence between A and B.
 ///
 /// ```text
@@ -2996,7 +3003,7 @@ pub fn compiler_fence(order: Ordering) {
 #[stable(feature = "atomic_debug", since = "1.3.0")]
 impl fmt::Debug for AtomicBool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.load(Ordering::SeqCst), f)
+        fmt::Debug::fmt(&self.load(Ordering::Relaxed), f)
     }
 }
 
@@ -3004,7 +3011,7 @@ impl fmt::Debug for AtomicBool {
 #[stable(feature = "atomic_debug", since = "1.3.0")]
 impl<T> fmt::Debug for AtomicPtr<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.load(Ordering::SeqCst), f)
+        fmt::Debug::fmt(&self.load(Ordering::Relaxed), f)
     }
 }
 

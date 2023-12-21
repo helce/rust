@@ -14,9 +14,9 @@ use super::util;
 use super::util::{closure_trait_ref_and_return_type, predicate_for_trait_def};
 use super::wf;
 use super::{
-    DerivedObligationCause, ErrorReporting, ImplDerivedObligation, ImplDerivedObligationCause,
-    Normalized, Obligation, ObligationCause, ObligationCauseCode, Overflow, PredicateObligation,
-    Selection, SelectionError, SelectionResult, TraitObligation, TraitQueryMode,
+    ErrorReporting, ImplDerivedObligation, ImplDerivedObligationCause, Normalized, Obligation,
+    ObligationCause, ObligationCauseCode, Overflow, PredicateObligation, Selection, SelectionError,
+    SelectionResult, TraitObligation, TraitQueryMode,
 };
 
 use crate::infer::{InferCtxt, InferOk, TypeFreshener};
@@ -33,11 +33,11 @@ use rustc_infer::infer::LateBoundRegionConversionTime;
 use rustc_middle::dep_graph::{DepKind, DepNodeIndex};
 use rustc_middle::mir::interpret::ErrorHandled;
 use rustc_middle::thir::abstract_const::NotConstEvaluatable;
-use rustc_middle::ty::fast_reject::{self, TreatParams};
+use rustc_middle::ty::fast_reject::{DeepRejectCtxt, TreatParams};
 use rustc_middle::ty::fold::BottomUpFolder;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::relate::TypeRelation;
-use rustc_middle::ty::subst::{GenericArgKind, Subst, SubstsRef};
+use rustc_middle::ty::subst::{Subst, SubstsRef};
 use rustc_middle::ty::{self, EarlyBinder, PolyProjectionPredicate, ToPolyTraitRef, ToPredicate};
 use rustc_middle::ty::{Ty, TyCtxt, TypeFoldable};
 use rustc_span::symbol::sym;
@@ -103,22 +103,31 @@ pub struct SelectionContext<'cx, 'tcx> {
     /// require themselves.
     freshener: TypeFreshener<'cx, 'tcx>,
 
-    /// If `true`, indicates that the evaluation should be conservative
-    /// and consider the possibility of types outside this crate.
+    /// During coherence we have to assume that other crates may add
+    /// additional impls which we currently don't know about.
+    ///
+    /// To deal with this evaluation should be conservative
+    /// and consider the possibility of impls from outside this crate.
     /// This comes up primarily when resolving ambiguity. Imagine
     /// there is some trait reference `$0: Bar` where `$0` is an
     /// inference variable. If `intercrate` is true, then we can never
     /// say for sure that this reference is not implemented, even if
     /// there are *no impls at all for `Bar`*, because `$0` could be
     /// bound to some type that in a downstream crate that implements
-    /// `Bar`. This is the suitable mode for coherence. Elsewhere,
-    /// though, we set this to false, because we are only interested
-    /// in types that the user could actually have written --- in
-    /// other words, we consider `$0: Bar` to be unimplemented if
+    /// `Bar`.
+    ///
+    /// Outside of coherence we set this to false because we are only
+    /// interested in types that the user could actually have written.
+    /// In other words, we consider `$0: Bar` to be unimplemented if
     /// there is no type that the user could *actually name* that
     /// would satisfy it. This avoids crippling inference, basically.
     intercrate: bool,
-
+    /// If `intercrate` is set, we remember predicates which were
+    /// considered ambiguous because of impls potentially added in other crates.
+    /// This is used in coherence to give improved diagnostics.
+    /// We don't do his until we detect a coherence error because it can
+    /// lead to false overflow results (#47139) and because always
+    /// computing it may negatively impact performance.
     intercrate_ambiguity_causes: Option<Vec<IntercrateAmbiguityCause>>,
 
     /// The mode that trait queries run in, which informs our error handling
@@ -240,11 +249,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         }
     }
 
-    /// Enables tracking of intercrate ambiguity causes. These are
-    /// used in coherence to give improved diagnostics. We don't do
-    /// this until we detect a coherence error because it can lead to
-    /// false overflow results (#47139) and because it costs
-    /// computation time.
+    /// Enables tracking of intercrate ambiguity causes. See
+    /// the documentation of [`Self::intercrate_ambiguity_causes`] for more.
     pub fn enable_tracking_intercrate_ambiguity_causes(&mut self) {
         assert!(self.intercrate);
         assert!(self.intercrate_ambiguity_causes.is_none());
@@ -326,7 +332,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         }
     }
 
-    crate fn select_from_obligation(
+    pub(crate) fn select_from_obligation(
         &mut self,
         obligation: &TraitObligation<'tcx>,
     ) -> SelectionResult<'tcx, SelectionCandidate<'tcx>> {
@@ -620,7 +626,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         //
                         // Let's just see where this breaks :shrug:
                         if let (ty::ConstKind::Unevaluated(a), ty::ConstKind::Unevaluated(b)) =
-                            (c1.val(), c2.val())
+                            (c1.kind(), c2.kind())
                         {
                             if self.infcx.try_unify_abstract_consts(
                                 a.shrink(),
@@ -633,14 +639,16 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     }
 
                     let evaluate = |c: ty::Const<'tcx>| {
-                        if let ty::ConstKind::Unevaluated(unevaluated) = c.val() {
-                            self.infcx
-                                .const_eval_resolve(
-                                    obligation.param_env,
-                                    unevaluated,
-                                    Some(obligation.cause.span),
-                                )
-                                .map(|val| ty::Const::from_value(self.tcx(), val, c.ty()))
+                        if let ty::ConstKind::Unevaluated(unevaluated) = c.kind() {
+                            match self.infcx.try_const_eval_resolve(
+                                obligation.param_env,
+                                unevaluated,
+                                c.ty(),
+                                Some(obligation.cause.span),
+                            ) {
+                                Ok(val) => Ok(val),
+                                Err(e) => Err(e),
+                            }
                         } else {
                             Ok(c)
                         }
@@ -1115,8 +1123,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             if obligation.is_const() {
                 match candidate {
                     // const impl
-                    ImplCandidate(def_id)
-                        if tcx.impl_constness(def_id) == hir::Constness::Const => {}
+                    ImplCandidate(def_id) if tcx.constness(def_id) == hir::Constness::Const => {}
                     // const param
                     ParamCandidate(trait_pred) if trait_pred.is_const_if_const() => {}
                     // auto trait impl
@@ -1451,7 +1458,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         potentially_unnormalized_candidates: bool,
     ) -> ProjectionMatchesProjection {
         let mut nested_obligations = Vec::new();
-        let (infer_predicate, _) = self.infcx.replace_bound_vars_with_fresh_vars(
+        let infer_predicate = self.infcx.replace_bound_vars_with_fresh_vars(
             obligation.cause.span,
             LateBoundRegionConversionTime::HigherRankedType,
             env_predicate,
@@ -2041,7 +2048,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         impl_def_id: DefId,
         obligation: &TraitObligation<'tcx>,
     ) -> Normalized<'tcx, SubstsRef<'tcx>> {
-        match self.match_impl(impl_def_id, obligation) {
+        let impl_trait_ref = self.tcx().bound_impl_trait_ref(impl_def_id).unwrap();
+        match self.match_impl(impl_def_id, impl_trait_ref, obligation) {
             Ok(substs) => substs,
             Err(()) => {
                 self.infcx.tcx.sess.delay_span_bug(
@@ -2068,17 +2076,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     fn match_impl(
         &mut self,
         impl_def_id: DefId,
+        impl_trait_ref: EarlyBinder<ty::TraitRef<'tcx>>,
         obligation: &TraitObligation<'tcx>,
     ) -> Result<Normalized<'tcx, SubstsRef<'tcx>>, ()> {
-        let impl_trait_ref = self.tcx().bound_impl_trait_ref(impl_def_id).unwrap();
-
-        // Before we create the substitutions and everything, first
-        // consider a "quick reject". This avoids creating more types
-        // and so forth that we need to.
-        if self.fast_reject_trait_refs(obligation, &impl_trait_ref.0) {
-            return Err(());
-        }
-
         let placeholder_obligation =
             self.infcx().replace_bound_vars_with_placeholders(obligation.predicate);
         let placeholder_obligation_trait_ref = placeholder_obligation.trait_ref;
@@ -2135,43 +2135,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         // We can avoid creating type variables and doing the full
         // substitution if we find that any of the input types, when
         // simplified, do not match.
-
-        iter::zip(obligation.predicate.skip_binder().trait_ref.substs, impl_trait_ref.substs).any(
-            |(obligation_arg, impl_arg)| {
-                match (obligation_arg.unpack(), impl_arg.unpack()) {
-                    (GenericArgKind::Type(obligation_ty), GenericArgKind::Type(impl_ty)) => {
-                        // Note, we simplify parameters for the obligation but not the
-                        // impl so that we do not reject a blanket impl but do reject
-                        // more concrete impls if we're searching for `T: Trait`.
-                        let simplified_obligation_ty = fast_reject::simplify_type(
-                            self.tcx(),
-                            obligation_ty,
-                            TreatParams::AsBoundTypes,
-                        );
-                        let simplified_impl_ty = fast_reject::simplify_type(
-                            self.tcx(),
-                            impl_ty,
-                            TreatParams::AsPlaceholders,
-                        );
-
-                        simplified_obligation_ty.is_some()
-                            && simplified_impl_ty.is_some()
-                            && simplified_obligation_ty != simplified_impl_ty
-                    }
-                    (GenericArgKind::Lifetime(_), GenericArgKind::Lifetime(_)) => {
-                        // Lifetimes can never cause a rejection.
-                        false
-                    }
-                    (GenericArgKind::Const(_), GenericArgKind::Const(_)) => {
-                        // Conservatively ignore consts (i.e. assume they might
-                        // unify later) until we have `fast_reject` support for
-                        // them (if we'll ever need it, even).
-                        false
-                    }
-                    _ => unreachable!(),
-                }
-            },
-        )
+        let drcx = DeepRejectCtxt { treat_obligation_params: TreatParams::AsPlaceholder };
+        iter::zip(obligation.predicate.skip_binder().trait_ref.substs, impl_trait_ref.substs)
+            .any(|(obl, imp)| !drcx.generic_args_may_unify(obl, imp))
     }
 
     /// Normalize `where_clause_trait_ref` and try to match it against
@@ -2318,17 +2284,15 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         debug!(?predicates);
         assert_eq!(predicates.parent, None);
         let mut obligations = Vec::with_capacity(predicates.predicates.len());
-        let parent_code = cause.clone_code();
         for (predicate, span) in predicates.predicates {
             let span = *span;
-            let derived =
-                DerivedObligationCause { parent_trait_pred, parent_code: parent_code.clone() };
-            let code = ImplDerivedObligation(Box::new(ImplDerivedObligationCause {
-                derived,
-                impl_def_id: def_id,
-                span,
-            }));
-            let cause = ObligationCause::new(cause.span, cause.body_id, code);
+            let cause = cause.clone().derived_cause(parent_trait_pred, |derived| {
+                ImplDerivedObligation(Box::new(ImplDerivedObligationCause {
+                    derived,
+                    impl_def_id: def_id,
+                    span,
+                }))
+            });
             let predicate = normalize_with_depth_to(
                 self,
                 param_env,
@@ -2341,42 +2305,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         }
 
         obligations
-    }
-}
-
-trait TraitObligationExt<'tcx> {
-    fn derived_cause(
-        &self,
-        variant: fn(DerivedObligationCause<'tcx>) -> ObligationCauseCode<'tcx>,
-    ) -> ObligationCause<'tcx>;
-}
-
-impl<'tcx> TraitObligationExt<'tcx> for TraitObligation<'tcx> {
-    fn derived_cause(
-        &self,
-        variant: fn(DerivedObligationCause<'tcx>) -> ObligationCauseCode<'tcx>,
-    ) -> ObligationCause<'tcx> {
-        /*!
-         * Creates a cause for obligations that are derived from
-         * `obligation` by a recursive search (e.g., for a builtin
-         * bound, or eventually a `auto trait Foo`). If `obligation`
-         * is itself a derived obligation, this is just a clone, but
-         * otherwise we create a "derived obligation" cause so as to
-         * keep track of the original root obligation for error
-         * reporting.
-         */
-
-        let obligation = self;
-
-        // NOTE(flaper87): As of now, it keeps track of the whole error
-        // chain. Ideally, we should have a way to configure this either
-        // by using -Z verbose or just a CLI argument.
-        let derived_cause = DerivedObligationCause {
-            parent_trait_pred: obligation.predicate,
-            parent_code: obligation.cause.clone_code(),
-        };
-        let derived_code = variant(derived_cause);
-        ObligationCause::new(obligation.cause.span, obligation.cause.body_id, derived_code)
     }
 }
 

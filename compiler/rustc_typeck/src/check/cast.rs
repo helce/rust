@@ -347,16 +347,22 @@ impl<'a, 'tcx> CastCheck<'tcx> {
                 );
                 err.span_label(self.span, "invalid cast");
                 if self.expr_ty.is_numeric() {
-                    err.span_help(
-                        self.span,
-                        if self.expr_ty == fcx.tcx.types.i8 {
-                            "try casting from `u8` instead"
-                        } else if self.expr_ty == fcx.tcx.types.u32 {
-                            "try `char::from_u32` instead"
-                        } else {
-                            "try `char::from_u32` instead (via a `u32`)"
-                        },
-                    );
+                    if self.expr_ty == fcx.tcx.types.u32 {
+                        match fcx.tcx.sess.source_map().span_to_snippet(self.expr.span) {
+                            Ok(snippet) => err.span_suggestion(
+                                self.span,
+                                "try `char::from_u32` instead",
+                                format!("char::from_u32({snippet})"),
+                                Applicability::MachineApplicable,
+                            ),
+
+                            Err(_) => err.span_help(self.span, "try `char::from_u32` instead"),
+                        };
+                    } else if self.expr_ty == fcx.tcx.types.i8 {
+                        err.span_help(self.span, "try casting from `u8` instead");
+                    } else {
+                        err.span_help(self.span, "try `char::from_u32` instead (via a `u32`)");
+                    };
                 }
                 err.emit();
             }
@@ -955,7 +961,7 @@ impl<'a, 'tcx> CastCheck<'tcx> {
         }
     }
 
-    fn try_coercion_cast(&self, fcx: &FnCtxt<'a, 'tcx>) -> Result<(), ty::error::TypeError<'_>> {
+    fn try_coercion_cast(&self, fcx: &FnCtxt<'a, 'tcx>) -> Result<(), ty::error::TypeError<'tcx>> {
         match fcx.try_coerce(self.expr, self.expr_ty, self.cast_ty, AllowTwoPhase::No, None) {
             Ok(_) => Ok(()),
             Err(err) => Err(err),

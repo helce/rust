@@ -10,8 +10,9 @@ use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder, ErrorGuaranteed
 use rustc_feature::BUILTIN_ATTRIBUTES;
 use rustc_hir::def::Namespace::{self, *};
 use rustc_hir::def::{self, CtorKind, CtorOf, DefKind, NonMacroAttrKind, PerNS};
-use rustc_hir::def_id::{DefId, CRATE_DEF_ID, LOCAL_CRATE};
+use rustc_hir::def_id::{DefId, LocalDefId, CRATE_DEF_ID, LOCAL_CRATE};
 use rustc_hir::PrimTy;
+use rustc_index::vec::IndexVec;
 use rustc_middle::bug;
 use rustc_middle::ty::DefIdTree;
 use rustc_session::lint::builtin::ABSOLUTE_PATHS_NOT_STARTING_WITH_CRATE;
@@ -41,36 +42,36 @@ mod tests;
 type Res = def::Res<ast::NodeId>;
 
 /// A vector of spans and replacements, a message and applicability.
-crate type Suggestion = (Vec<(Span, String)>, String, Applicability);
+pub(crate) type Suggestion = (Vec<(Span, String)>, String, Applicability);
 
 /// Potential candidate for an undeclared or out-of-scope label - contains the ident of a
 /// similarly named label and whether or not it is reachable.
-crate type LabelSuggestion = (Ident, bool);
+pub(crate) type LabelSuggestion = (Ident, bool);
 
-crate enum SuggestionTarget {
+pub(crate) enum SuggestionTarget {
     /// The target has a similar name as the name used by the programmer (probably a typo)
     SimilarlyNamed,
     /// The target is the only valid item that can be used in the corresponding context
     SingleItem,
 }
 
-crate struct TypoSuggestion {
+pub(crate) struct TypoSuggestion {
     pub candidate: Symbol,
     pub res: Res,
     pub target: SuggestionTarget,
 }
 
 impl TypoSuggestion {
-    crate fn typo_from_res(candidate: Symbol, res: Res) -> TypoSuggestion {
+    pub(crate) fn typo_from_res(candidate: Symbol, res: Res) -> TypoSuggestion {
         Self { candidate, res, target: SuggestionTarget::SimilarlyNamed }
     }
-    crate fn single_item_from_res(candidate: Symbol, res: Res) -> TypoSuggestion {
+    pub(crate) fn single_item_from_res(candidate: Symbol, res: Res) -> TypoSuggestion {
         Self { candidate, res, target: SuggestionTarget::SingleItem }
     }
 }
 
 /// A free importable items suggested in case of resolution failure.
-crate struct ImportSuggestion {
+pub(crate) struct ImportSuggestion {
     pub did: Option<DefId>,
     pub descr: &'static str,
     pub path: Path,
@@ -92,7 +93,7 @@ fn reduce_impl_span_to_impl_keyword(sm: &SourceMap, impl_span: Span) -> Span {
 }
 
 impl<'a> Resolver<'a> {
-    crate fn report_errors(&mut self, krate: &Crate) {
+    pub(crate) fn report_errors(&mut self, krate: &Crate) {
         self.report_with_use_injections(krate);
 
         for &(span_use, span_def) in &self.macro_expanded_macro_export_errors {
@@ -130,8 +131,8 @@ impl<'a> Resolver<'a> {
             };
             if !candidates.is_empty() {
                 show_candidates(
-                    &self.definitions,
-                    self.session,
+                    &self.session,
+                    &self.source_span,
                     &mut err,
                     span,
                     &candidates,
@@ -147,7 +148,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    crate fn report_conflict<'b>(
+    pub(crate) fn report_conflict<'b>(
         &mut self,
         parent: Module<'_>,
         ident: Ident,
@@ -271,7 +272,7 @@ impl<'a> Resolver<'a> {
                 err.tool_only_span_suggestion(
                     import.use_span_with_attributes,
                     "remove unnecessary import",
-                    String::new(),
+                    "",
                     Applicability::MaybeIncorrect,
                 );
             }
@@ -396,19 +397,14 @@ impl<'a> Resolver<'a> {
         // previous imports.
         if found_closing_brace {
             if let Some(span) = extend_span_to_previous_binding(self.session, span) {
-                err.tool_only_span_suggestion(
-                    span,
-                    message,
-                    String::new(),
-                    Applicability::MaybeIncorrect,
-                );
+                err.tool_only_span_suggestion(span, message, "", Applicability::MaybeIncorrect);
             } else {
                 // Remove the entire line if we cannot extend the span back, this indicates an
                 // `issue_52891::{self}` case.
                 err.span_suggestion(
                     import.use_span_with_attributes,
                     message,
-                    String::new(),
+                    "",
                     Applicability::MaybeIncorrect,
                 );
             }
@@ -416,10 +412,10 @@ impl<'a> Resolver<'a> {
             return;
         }
 
-        err.span_suggestion(span, message, String::new(), Applicability::MachineApplicable);
+        err.span_suggestion(span, message, "", Applicability::MachineApplicable);
     }
 
-    crate fn lint_if_path_starts_with_module(
+    pub(crate) fn lint_if_path_starts_with_module(
         &mut self,
         finalize: Option<Finalize>,
         path: &[Segment],
@@ -475,7 +471,7 @@ impl<'a> Resolver<'a> {
         );
     }
 
-    crate fn add_module_candidates(
+    pub(crate) fn add_module_candidates(
         &mut self,
         module: Module<'a>,
         names: &mut Vec<TypoSuggestion>,
@@ -495,11 +491,11 @@ impl<'a> Resolver<'a> {
     ///
     /// This takes the error provided, combines it with the span and any additional spans inside the
     /// error and emits it.
-    crate fn report_error(&mut self, span: Span, resolution_error: ResolutionError<'a>) {
+    pub(crate) fn report_error(&mut self, span: Span, resolution_error: ResolutionError<'a>) {
         self.into_struct_error(span, resolution_error).emit();
     }
 
-    crate fn into_struct_error(
+    pub(crate) fn into_struct_error(
         &mut self,
         span: Span,
         resolution_error: ResolutionError<'a>,
@@ -698,8 +694,8 @@ impl<'a> Resolver<'a> {
                         err.span_help(span, &help_msg);
                     }
                     show_candidates(
-                        &self.definitions,
-                        self.session,
+                        &self.session,
+                        &self.source_span,
                         &mut err,
                         Some(span),
                         &import_suggestions,
@@ -763,7 +759,7 @@ impl<'a> Resolver<'a> {
                         err.span_suggestion(
                             span,
                             "try using similarly named label",
-                            ident.name.to_string(),
+                            ident.name,
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -796,7 +792,7 @@ impl<'a> Resolver<'a> {
                     err.span_suggestion(
                         span,
                         "consider importing the module directly",
-                        "".to_string(),
+                        "",
                         Applicability::MachineApplicable,
                     );
 
@@ -1007,7 +1003,7 @@ impl<'a> Resolver<'a> {
                         err.span_suggestion(
                             span,
                             "try using similarly named label",
-                            ident.name.to_string(),
+                            ident.name,
                             Applicability::MaybeIncorrect,
                         );
                     }
@@ -1052,7 +1048,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    crate fn report_vis_error(
+    pub(crate) fn report_vis_error(
         &mut self,
         vis_resolution_error: VisResolutionError<'_>,
     ) -> ErrorGuaranteed {
@@ -1413,7 +1409,7 @@ impl<'a> Resolver<'a> {
     ///
     /// N.B., the method does not look into imports, but this is not a problem,
     /// since we report the definitions (thus, the de-aliased imports).
-    crate fn lookup_import_candidates<FilterFn>(
+    pub(crate) fn lookup_import_candidates<FilterFn>(
         &mut self,
         lookup_ident: Ident,
         namespace: Namespace,
@@ -1460,7 +1456,7 @@ impl<'a> Resolver<'a> {
         suggestions
     }
 
-    crate fn unresolved_macro_suggestions(
+    pub(crate) fn unresolved_macro_suggestions(
         &mut self,
         err: &mut Diagnostic,
         macro_kind: MacroKind,
@@ -1479,8 +1475,8 @@ impl<'a> Resolver<'a> {
         let import_suggestions =
             self.lookup_import_candidates(ident, Namespace::MacroNS, parent_scope, is_expected);
         show_candidates(
-            &self.definitions,
-            self.session,
+            &self.session,
+            &self.source_span,
             err,
             None,
             &import_suggestions,
@@ -1551,7 +1547,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    crate fn add_typo_suggestion(
+    pub(crate) fn add_typo_suggestion(
         &self,
         err: &mut Diagnostic,
         suggestion: Option<TypoSuggestion>,
@@ -1618,12 +1614,7 @@ impl<'a> Resolver<'a> {
                 format!("maybe you meant this {}", suggestion.res.descr())
             }
         };
-        err.span_suggestion(
-            span,
-            &msg,
-            suggestion.candidate.to_string(),
-            Applicability::MaybeIncorrect,
-        );
+        err.span_suggestion(span, &msg, suggestion.candidate, Applicability::MaybeIncorrect);
         true
     }
 
@@ -1780,7 +1771,7 @@ impl<'a> Resolver<'a> {
         err.emit();
     }
 
-    crate fn find_similarly_named_module_or_crate(
+    pub(crate) fn find_similarly_named_module_or_crate(
         &mut self,
         ident: Symbol,
         current_module: &Module<'a>,
@@ -1807,7 +1798,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    crate fn report_path_resolution_error(
+    pub(crate) fn report_path_resolution_error(
         &mut self,
         path: &[Segment],
         opt_ns: Option<Namespace>, // `None` indicates a module path in import
@@ -1839,9 +1830,18 @@ impl<'a> Resolver<'a> {
                     )),
                 )
             } else if self.session.edition() == Edition::Edition2015 {
-                (format!("maybe a missing crate `{}`?", ident), None)
+                (
+                    format!("maybe a missing crate `{ident}`?"),
+                    Some((
+                        vec![],
+                        format!(
+                            "consider adding `extern crate {ident}` to use the `{ident}` crate"
+                        ),
+                        Applicability::MaybeIncorrect,
+                    )),
+                )
             } else {
-                (format!("could not find `{}` in the crate root", ident), None)
+                (format!("could not find `{ident}` in the crate root"), None)
             }
         } else if i > 0 {
             let parent = path[i - 1].ident.name;
@@ -1852,7 +1852,7 @@ impl<'a> Resolver<'a> {
                     "the list of imported crates".to_owned()
                 }
                 kw::PathRoot | kw::Crate => "the crate root".to_owned(),
-                _ => format!("`{}`", parent),
+                _ => format!("`{parent}`"),
             };
 
             let mut msg = format!("could not find `{}` in {}", ident, parent);
@@ -1914,6 +1914,8 @@ impl<'a> Resolver<'a> {
                 };
             }
             (msg, None)
+        } else if ident.name == kw::SelfUpper {
+            ("`Self` is only available in impls, traits, and type definitions".to_string(), None)
         } else if ident.name.as_str().chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
             // Check whether the name refers to an item in the value namespace.
             let binding = if let Some(ribs) = ribs {
@@ -2445,8 +2447,8 @@ enum IsPattern {
 /// entities with that name in all crates. This method allows outputting the
 /// results of this search in a programmer-friendly way
 fn show_candidates(
-    definitions: &rustc_hir::definitions::Definitions,
     session: &Session,
+    source_span: &IndexVec<LocalDefId, Span>,
     err: &mut Diagnostic,
     // This is `None` if all placement locations are inside expansions
     use_placement_span: Option<Span>,
@@ -2526,7 +2528,7 @@ fn show_candidates(
                 err.span_suggestion_verbose(
                     first.ident.span.until(last.ident.span),
                     &format!("if you import `{}`, refer to it directly", last.ident),
-                    String::new(),
+                    "",
                     Applicability::Unspecified,
                 );
             }
@@ -2556,7 +2558,7 @@ fn show_candidates(
             );
 
             if let Some(local_def_id) = def_id.and_then(|did| did.as_local()) {
-                let span = definitions.def_span(local_def_id);
+                let span = source_span[local_def_id];
                 let span = session.source_map().guess_head_span(span);
                 let mut multi_span = MultiSpan::from_span(span);
                 multi_span.push_span_label(span, "not accessible".to_string());
@@ -2585,7 +2587,7 @@ fn show_candidates(
             let mut spans = Vec::new();
             for (name, _, def_id, _) in &inaccessible_path_strings {
                 if let Some(local_def_id) = def_id.and_then(|did| did.as_local()) {
-                    let span = definitions.def_span(local_def_id);
+                    let span = source_span[local_def_id];
                     let span = session.source_map().guess_head_span(span);
                     spans.push((name, span));
                 } else {
@@ -2680,7 +2682,7 @@ fn is_span_suitable_for_use_injection(s: Span) -> bool {
 }
 
 /// Convert the given number into the corresponding ordinal
-crate fn ordinalize(v: usize) -> String {
+pub(crate) fn ordinalize(v: usize) -> String {
     let suffix = match ((11..=13).contains(&(v % 100)), v % 10) {
         (false, 1) => "st",
         (false, 2) => "nd",

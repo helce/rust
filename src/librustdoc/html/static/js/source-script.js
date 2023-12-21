@@ -9,33 +9,19 @@
 
 (function() {
 
-function getCurrentFilePath() {
-    const parts = window.location.pathname.split("/");
-    const rootPathParts = window.rootPath.split("/");
+const rootPath = document.getElementById("rustdoc-vars").attributes["data-root-path"].value;
 
-    for (const rootPathPart of rootPathParts) {
-        if (rootPathPart === "..") {
-            parts.pop();
-        }
-    }
-    let file = window.location.pathname.substring(parts.join("/").length);
-    if (file.startsWith("/")) {
-        file = file.substring(1);
-    }
-    return file.substring(0, file.length - 5);
-}
-
-function createDirEntry(elem, parent, fullPath, currentFile, hasFoundFile) {
+function createDirEntry(elem, parent, fullPath, hasFoundFile) {
     const name = document.createElement("div");
     name.className = "name";
 
     fullPath += elem["name"] + "/";
 
-    name.onclick = () => {
-        if (hasClass(this, "expand")) {
-            removeClass(this, "expand");
+    name.onclick = ev => {
+        if (hasClass(ev.target, "expand")) {
+            removeClass(ev.target, "expand");
         } else {
-            addClass(this, "expand");
+            addClass(ev.target, "expand");
         }
     };
     name.innerText = elem["name"];
@@ -46,7 +32,7 @@ function createDirEntry(elem, parent, fullPath, currentFile, hasFoundFile) {
     folders.className = "folders";
     if (elem.dirs) {
         for (const dir of elem.dirs) {
-            if (createDirEntry(dir, folders, fullPath, currentFile, hasFoundFile)) {
+            if (createDirEntry(dir, folders, fullPath, hasFoundFile)) {
                 addClass(name, "expand");
                 hasFoundFile = true;
             }
@@ -60,8 +46,9 @@ function createDirEntry(elem, parent, fullPath, currentFile, hasFoundFile) {
         for (const file_text of elem.files) {
             const file = document.createElement("a");
             file.innerText = file_text;
-            file.href = window.rootPath + "src/" + fullPath + file_text + ".html";
-            if (!hasFoundFile && currentFile === fullPath + file_text) {
+            file.href = rootPath + "src/" + fullPath + file_text + ".html";
+            const w = window.location.href.split("#")[0];
+            if (!hasFoundFile && w === file.href) {
                 file.className = "selected";
                 addClass(name, "expand");
                 hasFoundFile = true;
@@ -72,18 +59,17 @@ function createDirEntry(elem, parent, fullPath, currentFile, hasFoundFile) {
     children.appendChild(files);
     parent.appendChild(name);
     parent.appendChild(children);
-    return hasFoundFile && currentFile.startsWith(fullPath);
+    return hasFoundFile;
 }
 
 function toggleSidebar() {
-    const sidebar = document.querySelector("nav.sidebar");
     const child = this.children[0];
     if (child.innerText === ">") {
-        sidebar.classList.add("expanded");
+        addClass(document.documentElement, "source-sidebar-expanded");
         child.innerText = "<";
         updateLocalStorage("source-sidebar-show", "true");
     } else {
-        sidebar.classList.remove("expanded");
+        removeClass(document.documentElement, "source-sidebar-expanded");
         child.innerText = ">";
         updateLocalStorage("source-sidebar-show", "false");
     }
@@ -109,9 +95,6 @@ function createSidebarToggle() {
 // This function is called from "source-files.js", generated in `html/render/mod.rs`.
 // eslint-disable-next-line no-unused-vars
 function createSourceSidebar() {
-    if (!window.rootPath.endsWith("/")) {
-        window.rootPath += "/";
-    }
     const container = document.querySelector("nav.sidebar");
 
     const sidebarToggle = createSidebarToggle();
@@ -119,13 +102,7 @@ function createSourceSidebar() {
 
     const sidebar = document.createElement("div");
     sidebar.id = "source-sidebar";
-    if (getCurrentValue("source-sidebar-show") !== "true") {
-        container.classList.remove("expanded");
-    } else {
-        container.classList.add("expanded");
-    }
 
-    const currentFile = getCurrentFilePath();
     let hasFoundFile = false;
 
     const title = document.createElement("div");
@@ -135,7 +112,7 @@ function createSourceSidebar() {
     Object.keys(sourcesIndex).forEach(key => {
         sourcesIndex[key].name = key;
         hasFoundFile = createDirEntry(sourcesIndex[key], sidebar, "",
-                                      currentFile, hasFoundFile);
+            hasFoundFile);
     });
 
     container.appendChild(sidebar);
@@ -187,7 +164,7 @@ function highlightSourceLines(match) {
     }
 }
 
-const handleSourceHighlight = (function () {
+const handleSourceHighlight = (function() {
     let prev_line_id = 0;
 
     const set_fragment = name => {
@@ -205,6 +182,10 @@ const handleSourceHighlight = (function () {
 
     return ev => {
         let cur_line_id = parseInt(ev.target.id, 10);
+        // It can happen when clicking not on a line number span.
+        if (isNaN(cur_line_id)) {
+            return;
+        }
         ev.preventDefault();
 
         if (ev.shiftKey && prev_line_id) {

@@ -14,13 +14,10 @@ use rustc_span::Span;
 use rustc_target::spec::abi::Abi;
 
 fn check_mod_naked_functions(tcx: TyCtxt<'_>, module_def_id: LocalDefId) {
-    tcx.hir().visit_item_likes_in_module(
-        module_def_id,
-        &mut CheckNakedFunctions { tcx }.as_deep_visitor(),
-    );
+    tcx.hir().deep_visit_item_likes_in_module(module_def_id, &mut CheckNakedFunctions { tcx });
 }
 
-crate fn provide(providers: &mut Providers) {
+pub(crate) fn provide(providers: &mut Providers) {
     *providers = Providers { check_mod_naked_functions, ..*providers };
 }
 
@@ -215,7 +212,7 @@ impl<'tcx> CheckInlineAssembly<'tcx> {
             | ExprKind::Loop(..)
             | ExprKind::Match(..)
             | ExprKind::If(..)
-            | ExprKind::Closure(..)
+            | ExprKind::Closure { .. }
             | ExprKind::Assign(..)
             | ExprKind::AssignOp(..)
             | ExprKind::Field(..)
@@ -311,7 +308,7 @@ impl<'tcx> CheckInlineAssembly<'tcx> {
                 last_span,
                 "consider specifying that the asm block is responsible \
                 for returning from the function",
-                String::from(", options(noreturn)"),
+                ", options(noreturn)",
                 Applicability::MachineApplicable,
             )
             .emit();

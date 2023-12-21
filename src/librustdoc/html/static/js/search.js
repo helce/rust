@@ -1,5 +1,5 @@
-/* global addClass, getNakedUrl, getSettingValue, hasOwnPropertyRustdoc, initSearch, onEach */
-/* global onEachLazy, removeClass, searchState, browserSupportsHistoryApi */
+/* global addClass, getNakedUrl, getSettingValue */
+/* global onEachLazy, removeClass, searchState, browserSupportsHistoryApi, exports */
 
 "use strict";
 
@@ -38,6 +38,11 @@ const itemTypes = [
 // used for special search precedence
 const TY_PRIMITIVE = itemTypes.indexOf("primitive");
 const TY_KEYWORD = itemTypes.indexOf("keyword");
+const ROOT_PATH = typeof window !== "undefined" ? window.rootPath : "../";
+
+function hasOwnPropertyRustdoc(obj, property) {
+    return Object.prototype.hasOwnProperty.call(obj, property);
+}
 
 // In the search display, allows to switch between tabs.
 function printTab(nb) {
@@ -65,7 +70,7 @@ function printTab(nb) {
     });
     if (foundCurrentTab && foundCurrentResultSet) {
         searchState.currentTab = nb;
-    } else if (nb != 0) {
+    } else if (nb !== 0) {
         printTab(0);
     }
 }
@@ -106,7 +111,7 @@ function levenshtein(s1, s2) {
     return s1_len + s2_len;
 }
 
-window.initSearch = rawSearchIndex => {
+function initSearch(rawSearchIndex) {
     const MAX_LEV_DISTANCE = 3;
     const MAX_RESULTS = 200;
     const GENERICS_DATA = 2;
@@ -120,15 +125,6 @@ window.initSearch = rawSearchIndex => {
     let searchIndex;
     let currentResults;
     const ALIASES = Object.create(null);
-    const params = searchState.getQueryStringParams();
-
-    // Populate search bar with query string search term when provided,
-    // but only if the input bar is empty. This avoid the obnoxious issue
-    // where you start trying to do a search, and the index loads, and
-    // suddenly your search is gone!
-    if (searchState.input.value === "") {
-        searchState.input.value = params.search || "";
-    }
 
     function isWhitespace(c) {
         return " \t\n\r".indexOf(c) !== -1;
@@ -204,7 +200,7 @@ window.initSearch = rawSearchIndex => {
      * @return {boolean}
      */
     function isPathStart(parserState) {
-        return parserState.userQuery.slice(parserState.pos, parserState.pos + 2) == "::";
+        return parserState.userQuery.slice(parserState.pos, parserState.pos + 2) === "::";
     }
 
     /**
@@ -215,7 +211,7 @@ window.initSearch = rawSearchIndex => {
      * @return {boolean}
      */
     function isReturnArrow(parserState) {
-        return parserState.userQuery.slice(parserState.pos, parserState.pos + 2) == "->";
+        return parserState.userQuery.slice(parserState.pos, parserState.pos + 2) === "->";
     }
 
     /**
@@ -320,8 +316,8 @@ window.initSearch = rawSearchIndex => {
                     if (foundExclamation) {
                         throw new Error("Cannot have more than one `!` in an ident");
                     } else if (parserState.pos + 1 < parserState.length &&
-                        isIdentCharacter(parserState.userQuery[parserState.pos + 1]))
-                    {
+                        isIdentCharacter(parserState.userQuery[parserState.pos + 1])
+                    ) {
                         throw new Error("`!` can only be at the end of an ident");
                     }
                     foundExclamation = true;
@@ -330,12 +326,10 @@ window.initSearch = rawSearchIndex => {
                 } else if (
                     isStopCharacter(c) ||
                     isSpecialStartCharacter(c) ||
-                    isSeparatorCharacter(c))
-                {
+                    isSeparatorCharacter(c)
+                ) {
                     break;
-                }
-                // If we allow paths ("str::string" for example).
-                else if (c === ":") {
+                } else if (c === ":") { // If we allow paths ("str::string" for example).
                     if (!isPathStart(parserState)) {
                         break;
                     }
@@ -372,8 +366,8 @@ window.initSearch = rawSearchIndex => {
             end = getIdentEndPosition(parserState);
         }
         if (parserState.pos < parserState.length &&
-            parserState.userQuery[parserState.pos] === "<")
-        {
+            parserState.userQuery[parserState.pos] === "<"
+        ) {
             if (isInGenerics) {
                 throw new Error("Unexpected `<` after `<`");
             } else if (start >= end) {
@@ -592,8 +586,8 @@ window.initSearch = rawSearchIndex => {
 
         if (elem &&
             elem.value !== "All crates" &&
-            hasOwnPropertyRustdoc(rawSearchIndex, elem.value))
-        {
+            hasOwnPropertyRustdoc(rawSearchIndex, elem.value)
+        ) {
             return elem.value;
         }
         return null;
@@ -728,10 +722,11 @@ window.initSearch = rawSearchIndex => {
      * @param  {ParsedQuery} parsedQuery - The parsed user query
      * @param  {Object} searchWords      - The list of search words to query against
      * @param  {Object} [filterCrates]   - Crate to search in if defined
+     * @param  {Object} [currentCrate]   - Current crate, to rank results from this crate higher
      *
      * @return {ResultsTable}
      */
-    function execQuery(parsedQuery, searchWords, filterCrates) {
+    function execQuery(parsedQuery, searchWords, filterCrates, currentCrate) {
         const results_others = {}, results_in_args = {}, results_returned = {};
 
         function transformResults(results) {
@@ -763,7 +758,7 @@ window.initSearch = rawSearchIndex => {
             return out;
         }
 
-        function sortResults(results, isType) {
+        function sortResults(results, isType, preferredCrate) {
             const userQuery = parsedQuery.userQuery;
             const ar = [];
             for (const entry in results) {
@@ -786,37 +781,51 @@ window.initSearch = rawSearchIndex => {
                 // sort by exact match with regard to the last word (mismatch goes later)
                 a = (aaa.word !== userQuery);
                 b = (bbb.word !== userQuery);
-                if (a !== b) { return a - b; }
+                if (a !== b) {
+                    return a - b;
+                }
 
                 // Sort by non levenshtein results and then levenshtein results by the distance
                 // (less changes required to match means higher rankings)
                 a = (aaa.lev);
                 b = (bbb.lev);
-                if (a !== b) { return a - b; }
+                if (a !== b) {
+                    return a - b;
+                }
 
-                // sort by crate (non-current crate goes later)
-                a = (aaa.item.crate !== window.currentCrate);
-                b = (bbb.item.crate !== window.currentCrate);
-                if (a !== b) { return a - b; }
+                // sort by crate (current crate comes first)
+                a = (aaa.item.crate !== preferredCrate);
+                b = (bbb.item.crate !== preferredCrate);
+                if (a !== b) {
+                    return a - b;
+                }
 
                 // sort by item name length (longer goes later)
                 a = aaa.word.length;
                 b = bbb.word.length;
-                if (a !== b) { return a - b; }
+                if (a !== b) {
+                    return a - b;
+                }
 
                 // sort by item name (lexicographically larger goes later)
                 a = aaa.word;
                 b = bbb.word;
-                if (a !== b) { return (a > b ? +1 : -1); }
+                if (a !== b) {
+                    return (a > b ? +1 : -1);
+                }
 
                 // sort by index of keyword in item name (no literal occurrence goes later)
                 a = (aaa.index < 0);
                 b = (bbb.index < 0);
-                if (a !== b) { return a - b; }
+                if (a !== b) {
+                    return a - b;
+                }
                 // (later literal occurrence, if any, goes later)
                 a = aaa.index;
                 b = bbb.index;
-                if (a !== b) { return a - b; }
+                if (a !== b) {
+                    return a - b;
+                }
 
                 // special precedence for primitive and keyword pages
                 if ((aaa.item.ty === TY_PRIMITIVE && bbb.item.ty !== TY_KEYWORD) ||
@@ -831,17 +840,23 @@ window.initSearch = rawSearchIndex => {
                 // sort by description (no description goes later)
                 a = (aaa.item.desc === "");
                 b = (bbb.item.desc === "");
-                if (a !== b) { return a - b; }
+                if (a !== b) {
+                    return a - b;
+                }
 
                 // sort by type (later occurrence in `itemTypes` goes later)
                 a = aaa.item.ty;
                 b = bbb.item.ty;
-                if (a !== b) { return a - b; }
+                if (a !== b) {
+                    return a - b;
+                }
 
                 // sort by path (lexicographically larger goes later)
                 a = aaa.item.path;
                 b = bbb.item.path;
-                if (a !== b) { return (a > b ? +1 : -1); }
+                if (a !== b) {
+                    return (a > b ? +1 : -1);
+                }
 
                 // que sera, sera
                 return 0;
@@ -1160,7 +1175,7 @@ window.initSearch = rawSearchIndex => {
             };
         }
 
-        function handleAliases(ret, query, filterCrates) {
+        function handleAliases(ret, query, filterCrates, currentCrate) {
             const lowerQuery = query.toLowerCase();
             // We separate aliases and crate aliases because we want to have current crate
             // aliases to be before the others in the displayed results.
@@ -1176,7 +1191,7 @@ window.initSearch = rawSearchIndex => {
             } else {
                 Object.keys(ALIASES).forEach(crate => {
                     if (ALIASES[crate][lowerQuery]) {
-                        const pushTo = crate === window.currentCrate ? crateAliases : aliases;
+                        const pushTo = crate === currentCrate ? crateAliases : aliases;
                         const query_aliases = ALIASES[crate][lowerQuery];
                         for (const alias of query_aliases) {
                             pushTo.push(createAliasFromItem(searchIndex[alias]));
@@ -1208,8 +1223,9 @@ window.initSearch = rawSearchIndex => {
                     ret.others.pop();
                 }
             };
-            onEach(aliases, pushFunc);
-            onEach(crateAliases, pushFunc);
+
+            aliases.forEach(pushFunc);
+            crateAliases.forEach(pushFunc);
         }
 
         /**
@@ -1315,16 +1331,12 @@ window.initSearch = rawSearchIndex => {
             }
 
             if (searchWord.indexOf(elem.pathLast) > -1 ||
-                row.normalizedName.indexOf(elem.pathLast) > -1)
-            {
-                // filter type: ... queries
-                if (!results_others[fullId] !== undefined) {
-                    index = row.normalizedName.indexOf(elem.pathLast);
-                }
+                row.normalizedName.indexOf(elem.pathLast) > -1
+            ) {
+                index = row.normalizedName.indexOf(elem.pathLast);
             }
             lev = levenshtein(searchWord, elem.pathLast);
-            if (lev > 0 && elem.pathLast.length > 2 && searchWord.indexOf(elem.pathLast) > -1)
-            {
+            if (lev > 0 && elem.pathLast.length > 2 && searchWord.indexOf(elem.pathLast) > -1) {
                 if (elem.pathLast.length < 6) {
                     lev = 1;
                 } else {
@@ -1427,11 +1439,11 @@ window.initSearch = rawSearchIndex => {
         }
 
         const ret = createQueryResults(
-            sortResults(results_in_args, true),
-            sortResults(results_returned, true),
-            sortResults(results_others, false),
+            sortResults(results_in_args, true, currentCrate),
+            sortResults(results_returned, true, currentCrate),
+            sortResults(results_others, false, currentCrate),
             parsedQuery);
-        handleAliases(ret, parsedQuery.original.replace(/"/g, ""), filterCrates);
+        handleAliases(ret, parsedQuery.original.replace(/"/g, ""), filterCrates, currentCrate);
         if (parsedQuery.error !== null && ret.others.length !== 0) {
             // It means some doc aliases were found so let's "remove" the error!
             ret.query.error = null;
@@ -1504,18 +1516,18 @@ window.initSearch = rawSearchIndex => {
 
         if (type === "mod") {
             displayPath = path + "::";
-            href = window.rootPath + path.replace(/::/g, "/") + "/" +
-                   name + "/index.html";
+            href = ROOT_PATH + path.replace(/::/g, "/") + "/" +
+                name + "/index.html";
         } else if (type === "import") {
             displayPath = item.path + "::";
-            href = window.rootPath + item.path.replace(/::/g, "/") + "/index.html#reexport." + name;
+            href = ROOT_PATH + item.path.replace(/::/g, "/") + "/index.html#reexport." + name;
         } else if (type === "primitive" || type === "keyword") {
             displayPath = "";
-            href = window.rootPath + path.replace(/::/g, "/") +
-                   "/" + type + "." + name + ".html";
+            href = ROOT_PATH + path.replace(/::/g, "/") +
+                "/" + type + "." + name + ".html";
         } else if (type === "externcrate") {
             displayPath = "";
-            href = window.rootPath + name + "/index.html";
+            href = ROOT_PATH + name + "/index.html";
         } else if (item.parent !== undefined) {
             const myparent = item.parent;
             let anchor = "#" + type + "." + name;
@@ -1538,14 +1550,14 @@ window.initSearch = rawSearchIndex => {
             } else {
                 displayPath = path + "::" + myparent.name + "::";
             }
-            href = window.rootPath + path.replace(/::/g, "/") +
-                   "/" + pageType +
-                   "." + pageName +
-                   ".html" + anchor;
+            href = ROOT_PATH + path.replace(/::/g, "/") +
+                "/" + pageType +
+                "." + pageName +
+                ".html" + anchor;
         } else {
             displayPath = item.path + "::";
-            href = window.rootPath + item.path.replace(/::/g, "/") +
-                   "/" + type + "." + name + ".html";
+            href = ROOT_PATH + item.path.replace(/::/g, "/") +
+                "/" + type + "." + name + ".html";
         }
         return [displayPath, href];
     }
@@ -1670,8 +1682,8 @@ window.initSearch = rawSearchIndex => {
             // By default, the search DOM element is "empty" (meaning it has no children not
             // text content). Once a search has been run, it won't be empty, even if you press
             // ESC or empty the search input (which also "cancels" the search).
-            && (!search.firstChild || search.firstChild.innerText !== searchState.loadingText)))
-        {
+            && (!search.firstChild || search.firstChild.innerText !== searchState.loadingText))
+        ) {
             const elem = document.createElement("a");
             elem.href = results.others[0].href;
             removeClass(elem, "active");
@@ -1707,11 +1719,12 @@ window.initSearch = rawSearchIndex => {
         }
 
         let crates = "";
-        if (window.ALL_CRATES.length > 1) {
+        const crates_list = Object.keys(rawSearchIndex);
+        if (crates_list.length > 1) {
             crates = " in <select id=\"crate-search\"><option value=\"All crates\">" +
                 "All crates</option>";
-            for (const c of window.ALL_CRATES) {
-                crates += `<option value="${c}" ${c == filterCrates && "selected"}>${c}</option>`;
+            for (const c of crates_list) {
+                crates += `<option value="${c}" ${c === filterCrates && "selected"}>${c}</option>`;
             }
             crates += "</select>";
         }
@@ -1723,7 +1736,7 @@ window.initSearch = rawSearchIndex => {
 
         let output = "<div id=\"search-settings\">" +
             `<h1 class="search-results-title">Results for ${escape(results.query.userQuery)}` +
-            `${typeFilter}</h1> in ${crates} </div>`;
+            `${typeFilter}</h1>${crates}</div>`;
         if (results.query.error !== null) {
             output += `<h3>Query parser error: "${results.query.error}".</h3>`;
             output += "<div id=\"titles\">" +
@@ -1766,7 +1779,7 @@ window.initSearch = rawSearchIndex => {
         let i = 0;
         for (const elem of elems) {
             const j = i;
-            elem.onclick = () => { printTab(j); };
+            elem.onclick = () => printTab(j);
             searchState.focusedByTab.push(null);
             i += 1;
         }
@@ -1818,7 +1831,7 @@ window.initSearch = rawSearchIndex => {
         }
 
         showResults(
-            execQuery(query, searchWords, filterCrates),
+            execQuery(query, searchWords, filterCrates, window.currentCrate),
             params.go_to_first,
             filterCrates);
     }
@@ -1998,6 +2011,16 @@ window.initSearch = rawSearchIndex => {
     }
 
     function registerSearchEvents() {
+        const params = searchState.getQueryStringParams();
+
+        // Populate search bar with query string search term when provided,
+        // but only if the input bar is empty. This avoid the obnoxious issue
+        // where you start trying to do a search, and the index loads, and
+        // suddenly your search is gone!
+        if (searchState.input.value === "") {
+            searchState.input.value = params.search || "";
+        }
+
         const searchAfter500ms = () => {
             searchState.clearInputTimeout();
             if (searchState.input.value.length === 0) {
@@ -2150,20 +2173,32 @@ window.initSearch = rawSearchIndex => {
      *  @type {Array<string>}
      */
     const searchWords = buildIndex(rawSearchIndex);
-    registerSearchEvents();
-
-    function runSearchIfNeeded() {
+    if (typeof window !== "undefined") {
+        registerSearchEvents();
         // If there's a search term in the URL, execute the search now.
-        if (searchState.getQueryStringParams().search) {
+        if (window.searchState.getQueryStringParams().search) {
             search();
         }
     }
 
-    runSearchIfNeeded();
-};
-
-if (window.searchIndex !== undefined) {
-    initSearch(window.searchIndex);
+    if (typeof exports !== "undefined") {
+        exports.initSearch = initSearch;
+        exports.execQuery = execQuery;
+        exports.parseQuery = parseQuery;
+    }
+    return searchWords;
 }
+
+if (typeof window !== "undefined") {
+    window.initSearch = initSearch;
+    if (window.searchIndex !== undefined) {
+        initSearch(window.searchIndex);
+    }
+} else {
+    // Running in Node, not a browser. Run initSearch just to produce the
+    // exports.
+    initSearch({});
+}
+
 
 })();

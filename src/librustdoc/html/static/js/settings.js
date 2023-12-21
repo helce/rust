@@ -1,11 +1,11 @@
 // Local js definitions:
 /* global getSettingValue, getVirtualKey, updateLocalStorage, updateSystemTheme */
-/* global addClass, removeClass, onEach, onEachLazy, NOT_DISPLAYED_ID */
-/* global MAIN_ID, getVar, getSettingsButton, switchDisplayedElement, getNotDisplayedElem */
+/* global addClass, removeClass, onEach, onEachLazy */
+/* global MAIN_ID, getVar, getSettingsButton */
 
 "use strict";
 
-(function () {
+(function() {
     const isSettingsPage = window.location.pathname.endsWith("/settings.html");
 
     function changeSetting(settingName, value) {
@@ -123,19 +123,18 @@
                     output += `<label for="${js_data_name}-${option}" class="choice">\
                            <input type="radio" name="${js_data_name}" \
                                 id="${js_data_name}-${option}" value="${option}"${checked}>\
-                           ${option}\
+                           <span>${option}</span>\
                          </label>`;
                 });
                 output += "</div></div>";
             } else {
                 // This is a toggle.
                 const checked = setting["default"] === true ? " checked" : "";
-                output += `
-                    <label class="toggle">
-                        <input type="checkbox" id="${js_data_name}"${checked}>
-                        <span class="slider"></span>
-                    </label>
-                    <div>${setting_name}</div>`;
+                output += `<label class="toggle">\
+                        <input type="checkbox" id="${js_data_name}"${checked}>\
+                        <span class="slider"></span>\
+                        <span class="label">${setting_name}</span>\
+                    </label>`;
             }
             output += "</div>";
         }
@@ -206,37 +205,45 @@
         ];
 
         // Then we build the DOM.
-        const el = document.createElement("section");
+        const elementKind = isSettingsPage ? "section" : "div";
+        const innerHTML = `<div class="settings">${buildSettingsPageSections(settings)}</div>`;
+        const el = document.createElement(elementKind);
         el.id = "settings";
-        let innerHTML = `
-            <div class="main-heading">
-                <h1 class="fqn">
-                    <span class="in-band">Rustdoc settings</span>
-                </h1>
-                <span class="out-of-band">`;
-
-        if (isSettingsPage) {
-            innerHTML +=
-                "<a id=\"back\" href=\"javascript:void(0)\" onclick=\"history.back();\">Back</a>";
-        } else {
-            innerHTML += "<a id=\"back\" href=\"javascript:void(0)\" " +
-                "onclick=\"switchDisplayedElement(null);\">Back</a>";
-        }
-        innerHTML += `</span>
-            </div>
-            <div class="settings">${buildSettingsPageSections(settings)}</div>`;
-
         el.innerHTML = innerHTML;
 
         if (isSettingsPage) {
             document.getElementById(MAIN_ID).appendChild(el);
         } else {
-            getNotDisplayedElem().appendChild(el);
+            el.setAttribute("tabindex", "-1");
+            getSettingsButton().appendChild(el);
         }
         return el;
     }
 
     const settingsMenu = buildSettingsPage();
+
+    function displaySettings() {
+        settingsMenu.style.display = "";
+    }
+
+    function elemIsInParent(elem, parent) {
+        while (elem && elem !== document.body) {
+            if (elem === parent) {
+                return true;
+            }
+            elem = elem.parentElement;
+        }
+        return false;
+    }
+
+    function blurHandler(event) {
+        const settingsButton = getSettingsButton();
+        if (!elemIsInParent(document.activeElement, settingsButton) &&
+            !elemIsInParent(event.relatedTarget, settingsButton)
+        ) {
+            window.hideSettings();
+        }
+    }
 
     if (isSettingsPage) {
         // We replace the existing "onclick" callback to do nothing if clicked.
@@ -246,17 +253,27 @@
     } else {
         // We replace the existing "onclick" callback.
         const settingsButton = getSettingsButton();
+        const settingsMenu = document.getElementById("settings");
+        window.hideSettings = function() {
+            settingsMenu.style.display = "none";
+        };
         settingsButton.onclick = function(event) {
+            if (elemIsInParent(event.target, settingsMenu)) {
+                return;
+            }
             event.preventDefault();
-            if (settingsMenu.parentElement.id === NOT_DISPLAYED_ID) {
-                switchDisplayedElement(settingsMenu);
-            } else {
+            if (settingsMenu.style.display !== "none") {
                 window.hideSettings();
+            } else {
+                displaySettings();
             }
         };
-        window.hideSettings = function() {
-            switchDisplayedElement(null);
-        };
+        settingsButton.onblur = blurHandler;
+        settingsButton.querySelector("a").onblur = blurHandler;
+        onEachLazy(settingsMenu.querySelectorAll("input"), el => {
+            el.onblur = blurHandler;
+        });
+        settingsMenu.onblur = blurHandler;
     }
 
     // We now wait a bit for the web browser to end re-computing the DOM...
@@ -264,7 +281,7 @@
         setEvents(settingsMenu);
         // The setting menu is already displayed if we're on the settings page.
         if (!isSettingsPage) {
-            switchDisplayedElement(settingsMenu);
+            displaySettings();
         }
         removeClass(getSettingsButton(), "rotate");
     }, 0);

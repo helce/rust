@@ -15,8 +15,9 @@ use rustc_attr as attr;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::profiling::{get_resident_set_size, print_time_passes_entry};
 
+use rustc_data_structures::sync::par_iter;
 #[cfg(parallel_compiler)]
-use rustc_data_structures::sync::{par_iter, ParallelIterator};
+use rustc_data_structures::sync::ParallelIterator;
 use rustc_hir as hir;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_hir::lang_items::LangItem;
@@ -30,11 +31,13 @@ use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf, TyAndLayout};
 use rustc_middle::ty::query::Providers;
 use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
 use rustc_session::cgu_reuse_tracker::CguReuse;
-use rustc_session::config::{self, EntryFnType, OutputType};
+use rustc_session::config::{self, CrateType, EntryFnType, OutputType};
 use rustc_session::Session;
 use rustc_span::symbol::sym;
+use rustc_span::{DebuggerVisualizerFile, DebuggerVisualizerType};
 use rustc_target::abi::{Align, VariantIdx};
 
+use std::collections::BTreeSet;
 use std::convert::TryFrom;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
@@ -213,11 +216,12 @@ pub fn unsize_ptr<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
             let mut result = None;
             for i in 0..src_layout.fields.count() {
                 let src_f = src_layout.field(bx.cx(), i);
-                assert_eq!(src_layout.fields.offset(i).bytes(), 0);
-                assert_eq!(dst_layout.fields.offset(i).bytes(), 0);
                 if src_f.is_zst() {
                     continue;
                 }
+
+                assert_eq!(src_layout.fields.offset(i).bytes(), 0);
+                assert_eq!(dst_layout.fields.offset(i).bytes(), 0);
                 assert_eq!(src_layout.size, src_f.size);
 
                 let dst_f = dst_layout.field(bx.cx(), i);
@@ -486,6 +490,29 @@ fn get_argc_argv<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     }
 }
 
+/// This function returns all of the debugger visualizers specified for the
+/// current crate as well as all upstream crates transitively that match the
+/// `visualizer_type` specified.
+pub fn collect_debugger_visualizers_transitive(
+    tcx: TyCtxt<'_>,
+    visualizer_type: DebuggerVisualizerType,
+) -> BTreeSet<DebuggerVisualizerFile> {
+    tcx.debugger_visualizers(LOCAL_CRATE)
+        .iter()
+        .chain(
+            tcx.crates(())
+                .iter()
+                .filter(|&cnum| {
+                    let used_crate_source = tcx.used_crate_source(*cnum);
+                    used_crate_source.rlib.is_some() || used_crate_source.rmeta.is_some()
+                })
+                .flat_map(|&cnum| tcx.debugger_visualizers(cnum)),
+        )
+        .filter(|visualizer| visualizer.visualizer_type == visualizer_type)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+}
+
 pub fn codegen_crate<B: ExtraBackendMethods>(
     backend: B,
     tcx: TyCtxt<'_>,
@@ -607,6 +634,14 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
         second_half.iter().rev().interleave(first_half).copied().collect()
     };
 
+    // Calculate the CGU reuse
+    let cgu_reuse = tcx.sess.time("find_cgu_reuse", || {
+        codegen_units.iter().map(|cgu| determine_cgu_reuse(tcx, &cgu)).collect::<Vec<_>>()
+    });
+
+    let mut total_codegen_time = Duration::new(0, 0);
+    let start_rss = tcx.sess.time_passes().then(|| get_resident_set_size());
+
     // The non-parallel compiler can only translate codegen units to LLVM IR
     // on a single thread, leading to a staircase effect where the N LLVM
     // threads have to wait on the single codegen threads to generate work
@@ -617,8 +652,7 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
     // This likely is a temporary measure. Once we don't have to support the
     // non-parallel compiler anymore, we can compile CGUs end-to-end in
     // parallel and get rid of the complicated scheduling logic.
-    #[cfg(parallel_compiler)]
-    let pre_compile_cgus = |cgu_reuse: &[CguReuse]| {
+    let mut pre_compiled_cgus = if cfg!(parallel_compiler) {
         tcx.sess.time("compile_first_CGU_batch", || {
             // Try to find one CGU to compile per thread.
             let cgus: Vec<_> = cgu_reuse
@@ -638,48 +672,31 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
                 })
                 .collect();
 
-            (pre_compiled_cgus, start_time.elapsed())
+            total_codegen_time += start_time.elapsed();
+
+            pre_compiled_cgus
         })
+    } else {
+        FxHashMap::default()
     };
-
-    #[cfg(not(parallel_compiler))]
-    let pre_compile_cgus = |_: &[CguReuse]| (FxHashMap::default(), Duration::new(0, 0));
-
-    let mut cgu_reuse = Vec::new();
-    let mut pre_compiled_cgus: Option<FxHashMap<usize, _>> = None;
-    let mut total_codegen_time = Duration::new(0, 0);
-    let start_rss = tcx.sess.time_passes().then(|| get_resident_set_size());
 
     for (i, cgu) in codegen_units.iter().enumerate() {
         ongoing_codegen.wait_for_signal_to_codegen_item();
         ongoing_codegen.check_for_errors(tcx.sess);
-
-        // Do some setup work in the first iteration
-        if pre_compiled_cgus.is_none() {
-            // Calculate the CGU reuse
-            cgu_reuse = tcx.sess.time("find_cgu_reuse", || {
-                codegen_units.iter().map(|cgu| determine_cgu_reuse(tcx, &cgu)).collect()
-            });
-            // Pre compile some CGUs
-            let (compiled_cgus, codegen_time) = pre_compile_cgus(&cgu_reuse);
-            pre_compiled_cgus = Some(compiled_cgus);
-            total_codegen_time += codegen_time;
-        }
 
         let cgu_reuse = cgu_reuse[i];
         tcx.sess.cgu_reuse_tracker.set_actual_reuse(cgu.name().as_str(), cgu_reuse);
 
         match cgu_reuse {
             CguReuse::No => {
-                let (module, cost) =
-                    if let Some(cgu) = pre_compiled_cgus.as_mut().unwrap().remove(&i) {
-                        cgu
-                    } else {
-                        let start_time = Instant::now();
-                        let module = backend.compile_codegen_unit(tcx, cgu.name());
-                        total_codegen_time += start_time.elapsed();
-                        module
-                    };
+                let (module, cost) = if let Some(cgu) = pre_compiled_cgus.remove(&i) {
+                    cgu
+                } else {
+                    let start_time = Instant::now();
+                    let module = backend.compile_codegen_unit(tcx, cgu.name());
+                    total_codegen_time += start_time.elapsed();
+                    module
+                };
                 // This will unwind if there are errors, which triggers our `AbortCodegenOnDrop`
                 // guard. Unfortunately, just skipping the `submit_codegened_module_to_llvm` makes
                 // compilation hang on post-monomorphization errors.
@@ -700,7 +717,7 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
                     &ongoing_codegen.coordinator_send,
                     CachedModuleCodegen {
                         name: cgu.name().to_string(),
-                        source: cgu.work_product(tcx),
+                        source: cgu.previous_work_product(tcx),
                     },
                 );
                 true
@@ -711,7 +728,7 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
                     &ongoing_codegen.coordinator_send,
                     CachedModuleCodegen {
                         name: cgu.name().to_string(),
-                        source: cgu.work_product(tcx),
+                        source: cgu.previous_work_product(tcx),
                     },
                 );
                 true
@@ -847,13 +864,8 @@ impl CrateInfo {
             missing_lang_items: Default::default(),
             dependency_formats: tcx.dependency_formats(()).clone(),
             windows_subsystem,
-            debugger_visualizers: Default::default(),
+            natvis_debugger_visualizers: Default::default(),
         };
-        let debugger_visualizers = tcx.debugger_visualizers(LOCAL_CRATE).clone();
-        if !debugger_visualizers.is_empty() {
-            info.debugger_visualizers.insert(LOCAL_CRATE, debugger_visualizers);
-        }
-
         let lang_items = tcx.lang_items();
 
         let crates = tcx.crates(());
@@ -891,14 +903,29 @@ impl CrateInfo {
             let missing =
                 missing.iter().cloned().filter(|&l| lang_items::required(tcx, l)).collect();
             info.missing_lang_items.insert(cnum, missing);
+        }
 
-            // Only include debugger visualizer files from crates that will be statically linked.
-            if used_crate_source.rlib.is_some() || used_crate_source.rmeta.is_some() {
-                let debugger_visualizers = tcx.debugger_visualizers(cnum).clone();
-                if !debugger_visualizers.is_empty() {
-                    info.debugger_visualizers.insert(cnum, debugger_visualizers);
-                }
+        let embed_visualizers = tcx.sess.crate_types().iter().any(|&crate_type| match crate_type {
+            CrateType::Executable | CrateType::Dylib | CrateType::Cdylib => {
+                // These are crate types for which we invoke the linker and can embed
+                // NatVis visualizers.
+                true
             }
+            CrateType::ProcMacro => {
+                // We could embed NatVis for proc macro crates too (to improve the debugging
+                // experience for them) but it does not seem like a good default, since
+                // this is a rare use case and we don't want to slow down the common case.
+                false
+            }
+            CrateType::Staticlib | CrateType::Rlib => {
+                // We don't invoke the linker for these, so we don't need to collect the NatVis for them.
+                false
+            }
+        });
+
+        if tcx.sess.target.is_like_msvc && embed_visualizers {
+            info.natvis_debugger_visualizers =
+                collect_debugger_visualizers_transitive(tcx, DebuggerVisualizerType::Natvis);
         }
 
         info

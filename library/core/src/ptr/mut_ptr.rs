@@ -184,7 +184,9 @@ impl<T: ?Sized> *mut T {
         T: Sized,
     {
         // FIXME(strict_provenance_magic): I am magic and should be a compiler intrinsic.
-        self as usize
+        // SAFETY: Pointer-to-integer transmutes are valid (if you are okay with losing the
+        // provenance).
+        unsafe { mem::transmute(self) }
     }
 
     /// Gets the "address" portion of the pointer, and 'exposes' the "provenance" part for future
@@ -467,6 +469,26 @@ impl<T: ?Sized> *mut T {
         unsafe { intrinsics::offset(self, count) as *mut T }
     }
 
+    /// Calculates the offset from a pointer in bytes.
+    ///
+    /// `count` is in units of **bytes**.
+    ///
+    /// This is purely a convenience for casting to a `u8` pointer and
+    /// using [offset][pointer::offset] on it. See that method for documentation
+    /// and safety requirements.
+    ///
+    /// For non-`Sized` pointees this operation changes only the data pointer,
+    /// leaving the metadata untouched.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
+    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    pub const unsafe fn byte_offset(self, count: isize) -> Self {
+        // SAFETY: the caller must uphold the safety contract for `offset`.
+        let this = unsafe { self.cast::<u8>().offset(count).cast::<()>() };
+        from_raw_parts_mut::<T>(this, metadata(self))
+    }
+
     /// Calculates the offset from a pointer using wrapping arithmetic.
     /// `count` is in units of T; e.g., a `count` of 3 represents a pointer
     /// offset of `3 * size_of::<T>()` bytes.
@@ -526,6 +548,27 @@ impl<T: ?Sized> *mut T {
     {
         // SAFETY: the `arith_offset` intrinsic has no prerequisites to be called.
         unsafe { intrinsics::arith_offset(self, count) as *mut T }
+    }
+
+    /// Calculates the offset from a pointer in bytes using wrapping arithmetic.
+    ///
+    /// `count` is in units of **bytes**.
+    ///
+    /// This is purely a convenience for casting to a `u8` pointer and
+    /// using [wrapping_offset][pointer::wrapping_offset] on it. See that method
+    /// for documentation.
+    ///
+    /// For non-`Sized` pointees this operation changes only the data pointer,
+    /// leaving the metadata untouched.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
+    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    pub const fn wrapping_byte_offset(self, count: isize) -> Self {
+        from_raw_parts_mut::<T>(
+            self.cast::<u8>().wrapping_offset(count).cast::<()>(),
+            metadata(self),
+        )
     }
 
     /// Returns `None` if the pointer is null, or else returns a unique reference to
@@ -787,6 +830,23 @@ impl<T: ?Sized> *mut T {
         unsafe { (self as *const T).offset_from(origin) }
     }
 
+    /// Calculates the distance between two pointers. The returned value is in
+    /// units of **bytes**.
+    ///
+    /// This is purely a convenience for casting to a `u8` pointer and
+    /// using [offset_from][pointer::offset_from] on it. See that method for
+    /// documentation and safety requirements.
+    ///
+    /// For non-`Sized` pointees this operation considers only the data pointers,
+    /// ignoring the metadata.
+    #[inline(always)]
+    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
+    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    pub const unsafe fn byte_offset_from(self, origin: *const T) -> isize {
+        // SAFETY: the caller must uphold the safety contract for `offset_from`.
+        unsafe { self.cast::<u8>().offset_from(origin.cast::<u8>()) }
+    }
+
     /// Calculates the distance between two pointers, *where it's known that
     /// `self` is equal to or greater than `origin`*. The returned value is in
     /// units of T: the distance in bytes is divided by `mem::size_of::<T>()`.
@@ -922,6 +982,26 @@ impl<T: ?Sized> *mut T {
         unsafe { self.offset(count as isize) }
     }
 
+    /// Calculates the offset from a pointer in bytes (convenience for `.byte_offset(count as isize)`).
+    ///
+    /// `count` is in units of bytes.
+    ///
+    /// This is purely a convenience for casting to a `u8` pointer and
+    /// using [add][pointer::add] on it. See that method for documentation
+    /// and safety requirements.
+    ///
+    /// For non-`Sized` pointees this operation changes only the data pointer,
+    /// leaving the metadata untouched.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
+    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    pub const unsafe fn byte_add(self, count: usize) -> Self {
+        // SAFETY: the caller must uphold the safety contract for `add`.
+        let this = unsafe { self.cast::<u8>().add(count).cast::<()>() };
+        from_raw_parts_mut::<T>(this, metadata(self))
+    }
+
     /// Calculates the offset from a pointer (convenience for
     /// `.offset((count as isize).wrapping_neg())`).
     ///
@@ -986,6 +1066,27 @@ impl<T: ?Sized> *mut T {
         unsafe { self.offset((count as isize).wrapping_neg()) }
     }
 
+    /// Calculates the offset from a pointer in bytes (convenience for
+    /// `.byte_offset((count as isize).wrapping_neg())`).
+    ///
+    /// `count` is in units of bytes.
+    ///
+    /// This is purely a convenience for casting to a `u8` pointer and
+    /// using [sub][pointer::sub] on it. See that method for documentation
+    /// and safety requirements.
+    ///
+    /// For non-`Sized` pointees this operation changes only the data pointer,
+    /// leaving the metadata untouched.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
+    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    pub const unsafe fn byte_sub(self, count: usize) -> Self {
+        // SAFETY: the caller must uphold the safety contract for `sub`.
+        let this = unsafe { self.cast::<u8>().sub(count).cast::<()>() };
+        from_raw_parts_mut::<T>(this, metadata(self))
+    }
+
     /// Calculates the offset from a pointer using wrapping arithmetic.
     /// (convenience for `.wrapping_offset(count as isize)`)
     ///
@@ -1048,6 +1149,24 @@ impl<T: ?Sized> *mut T {
         self.wrapping_offset(count as isize)
     }
 
+    /// Calculates the offset from a pointer in bytes using wrapping arithmetic.
+    /// (convenience for `.wrapping_byte_offset(count as isize)`)
+    ///
+    /// `count` is in units of bytes.
+    ///
+    /// This is purely a convenience for casting to a `u8` pointer and
+    /// using [wrapping_add][pointer::wrapping_add] on it. See that method for documentation.
+    ///
+    /// For non-`Sized` pointees this operation changes only the data pointer,
+    /// leaving the metadata untouched.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
+    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    pub const fn wrapping_byte_add(self, count: usize) -> Self {
+        from_raw_parts_mut::<T>(self.cast::<u8>().wrapping_add(count).cast::<()>(), metadata(self))
+    }
+
     /// Calculates the offset from a pointer using wrapping arithmetic.
     /// (convenience for `.wrapping_offset((count as isize).wrapping_neg())`)
     ///
@@ -1108,6 +1227,24 @@ impl<T: ?Sized> *mut T {
         T: Sized,
     {
         self.wrapping_offset((count as isize).wrapping_neg())
+    }
+
+    /// Calculates the offset from a pointer in bytes using wrapping arithmetic.
+    /// (convenience for `.wrapping_offset((count as isize).wrapping_neg())`)
+    ///
+    /// `count` is in units of bytes.
+    ///
+    /// This is purely a convenience for casting to a `u8` pointer and
+    /// using [wrapping_sub][pointer::wrapping_sub] on it. See that method for documentation.
+    ///
+    /// For non-`Sized` pointees this operation changes only the data pointer,
+    /// leaving the metadata untouched.
+    #[must_use]
+    #[inline(always)]
+    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
+    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    pub const fn wrapping_byte_sub(self, count: usize) -> Self {
+        from_raw_parts_mut::<T>(self.cast::<u8>().wrapping_sub(count).cast::<()>(), metadata(self))
     }
 
     /// Reads the value from `self` without moving it. This leaves the
@@ -1174,7 +1311,7 @@ impl<T: ?Sized> *mut T {
     /// See [`ptr::copy`] for safety concerns and examples.
     ///
     /// [`ptr::copy`]: crate::ptr::copy()
-    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.63.0")]
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[inline(always)]
     pub const unsafe fn copy_to(self, dest: *mut T, count: usize)
@@ -1193,7 +1330,7 @@ impl<T: ?Sized> *mut T {
     /// See [`ptr::copy_nonoverlapping`] for safety concerns and examples.
     ///
     /// [`ptr::copy_nonoverlapping`]: crate::ptr::copy_nonoverlapping()
-    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.63.0")]
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[inline(always)]
     pub const unsafe fn copy_to_nonoverlapping(self, dest: *mut T, count: usize)
@@ -1212,7 +1349,7 @@ impl<T: ?Sized> *mut T {
     /// See [`ptr::copy`] for safety concerns and examples.
     ///
     /// [`ptr::copy`]: crate::ptr::copy()
-    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.63.0")]
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[inline(always)]
     pub const unsafe fn copy_from(self, src: *const T, count: usize)
@@ -1231,7 +1368,7 @@ impl<T: ?Sized> *mut T {
     /// See [`ptr::copy_nonoverlapping`] for safety concerns and examples.
     ///
     /// [`ptr::copy_nonoverlapping`]: crate::ptr::copy_nonoverlapping()
-    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.63.0")]
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[inline(always)]
     pub const unsafe fn copy_from_nonoverlapping(self, src: *const T, count: usize)
@@ -1277,6 +1414,7 @@ impl<T: ?Sized> *mut T {
     /// See [`ptr::write_bytes`] for safety concerns and examples.
     ///
     /// [`ptr::write_bytes`]: crate::ptr::write_bytes()
+    #[doc(alias = "memset")]
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
     #[inline(always)]
@@ -1420,11 +1558,45 @@ impl<T: ?Sized> *mut T {
         }
 
         // SAFETY:
-        // It is permisseble for `align_offset` to always return `usize::MAX`,
+        // It is permissible for `align_offset` to always return `usize::MAX`,
         // algorithm correctness can not depend on `align_offset` returning non-max values.
         //
         // As such the behaviour can't change after replacing `align_offset` with `usize::MAX`, only performance can.
         unsafe { intrinsics::const_eval_select((self, align), ctfe_impl, rt_impl) }
+    }
+
+    /// Returns whether the pointer is properly aligned for `T`.
+    #[must_use]
+    #[inline]
+    #[unstable(feature = "pointer_is_aligned", issue = "96284")]
+    pub fn is_aligned(self) -> bool
+    where
+        T: Sized,
+    {
+        self.is_aligned_to(core::mem::align_of::<T>())
+    }
+
+    /// Returns whether the pointer is aligned to `align`.
+    ///
+    /// For non-`Sized` pointees this operation considers only the data pointer,
+    /// ignoring the metadata.
+    ///
+    /// # Panics
+    ///
+    /// The function panics if `align` is not a power-of-two (this includes 0).
+    #[must_use]
+    #[inline]
+    #[unstable(feature = "pointer_is_aligned", issue = "96284")]
+    pub fn is_aligned_to(self, align: usize) -> bool {
+        if !align.is_power_of_two() {
+            panic!("is_aligned_to: align is not a power-of-two");
+        }
+
+        // SAFETY: `is_power_of_two()` will return `false` for zero.
+        unsafe { core::intrinsics::assume(align != 0) };
+
+        // Cast is needed for `T: !Sized`
+        self.cast::<u8>().addr() % align == 0
     }
 }
 
@@ -1452,6 +1624,122 @@ impl<T> *mut [T] {
         metadata(self)
     }
 
+    /// Returns `true` if the raw slice has a length of 0.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(slice_ptr_len)]
+    ///
+    /// let mut a = [1, 2, 3];
+    /// let ptr = &mut a as *mut [_];
+    /// assert!(!ptr.is_empty());
+    /// ```
+    #[inline(always)]
+    #[unstable(feature = "slice_ptr_len", issue = "71146")]
+    #[rustc_const_unstable(feature = "const_slice_ptr_len", issue = "71146")]
+    pub const fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    /// Divides one mutable raw slice into two at an index.
+    ///
+    /// The first will contain all indices from `[0, mid)` (excluding
+    /// the index `mid` itself) and the second will contain all
+    /// indices from `[mid, len)` (excluding the index `len` itself).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `mid > len`.
+    ///
+    /// # Safety
+    ///
+    /// `mid` must be [in-bounds] of the underlying [allocated object].
+    /// Which means `self` must be dereferenceable and span a single allocation
+    /// that is at least `mid * size_of::<T>()` bytes long. Not upholding these
+    /// requirements is *[undefined behavior]* even if the resulting pointers are not used.
+    ///
+    /// Since `len` being in-bounds it is not a safety invariant of `*mut [T]` the
+    /// safety requirements of this method are the same as for [`split_at_mut_unchecked`].
+    /// The explicit bounds check is only as useful as `len` is correct.
+    ///
+    /// [`split_at_mut_unchecked`]: #method.split_at_mut_unchecked
+    /// [in-bounds]: #method.add
+    /// [allocated object]: crate::ptr#allocated-object
+    /// [undefined behavior]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(raw_slice_split)]
+    /// #![feature(slice_ptr_get)]
+    ///
+    /// let mut v = [1, 0, 3, 0, 5, 6];
+    /// let ptr = &mut v as *mut [_];
+    /// unsafe {
+    ///     let (left, right) = ptr.split_at_mut(2);
+    ///     assert_eq!(&*left, [1, 0]);
+    ///     assert_eq!(&*right, [3, 0, 5, 6]);
+    /// }
+    /// ```
+    #[inline(always)]
+    #[track_caller]
+    #[unstable(feature = "raw_slice_split", issue = "95595")]
+    pub unsafe fn split_at_mut(self, mid: usize) -> (*mut [T], *mut [T]) {
+        assert!(mid <= self.len());
+        // SAFETY: The assert above is only a safety-net as long as `self.len()` is correct
+        // The actual safety requirements of this function are the same as for `split_at_mut_unchecked`
+        unsafe { self.split_at_mut_unchecked(mid) }
+    }
+
+    /// Divides one mutable raw slice into two at an index, without doing bounds checking.
+    ///
+    /// The first will contain all indices from `[0, mid)` (excluding
+    /// the index `mid` itself) and the second will contain all
+    /// indices from `[mid, len)` (excluding the index `len` itself).
+    ///
+    /// # Safety
+    ///
+    /// `mid` must be [in-bounds] of the underlying [allocated object].
+    /// Which means `self` must be dereferenceable and span a single allocation
+    /// that is at least `mid * size_of::<T>()` bytes long. Not upholding these
+    /// requirements is *[undefined behavior]* even if the resulting pointers are not used.
+    ///
+    /// [in-bounds]: #method.add
+    /// [out-of-bounds index]: #method.add
+    /// [undefined behavior]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(raw_slice_split)]
+    ///
+    /// let mut v = [1, 0, 3, 0, 5, 6];
+    /// // scoped to restrict the lifetime of the borrows
+    /// unsafe {
+    ///     let ptr = &mut v as *mut [_];
+    ///     let (left, right) = ptr.split_at_mut_unchecked(2);
+    ///     assert_eq!(&*left, [1, 0]);
+    ///     assert_eq!(&*right, [3, 0, 5, 6]);
+    ///     (&mut *left)[1] = 2;
+    ///     (&mut *right)[1] = 4;
+    /// }
+    /// assert_eq!(v, [1, 2, 3, 4, 5, 6]);
+    /// ```
+    #[inline(always)]
+    #[unstable(feature = "raw_slice_split", issue = "95595")]
+    pub unsafe fn split_at_mut_unchecked(self, mid: usize) -> (*mut [T], *mut [T]) {
+        let len = self.len();
+        let ptr = self.as_mut_ptr();
+
+        // SAFETY: Caller must pass a valid pointer and an index that is in-bounds.
+        let tail = unsafe { ptr.add(mid) };
+        (
+            crate::ptr::slice_from_raw_parts_mut(ptr, mid),
+            crate::ptr::slice_from_raw_parts_mut(tail, len - mid),
+        )
+    }
+
     /// Returns a raw pointer to the slice's buffer.
     ///
     /// This is equivalent to casting `self` to `*mut T`, but more type-safe.
@@ -1475,9 +1763,10 @@ impl<T> *mut [T] {
     /// Returns a raw pointer to an element or subslice, without doing bounds
     /// checking.
     ///
-    /// Calling this method with an out-of-bounds index or when `self` is not dereferenceable
+    /// Calling this method with an [out-of-bounds index] or when `self` is not dereferenceable
     /// is *[undefined behavior]* even if the resulting pointer is not used.
     ///
+    /// [out-of-bounds index]: #method.add
     /// [undefined behavior]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
     ///
     /// # Examples

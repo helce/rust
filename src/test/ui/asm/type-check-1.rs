@@ -22,10 +22,13 @@ fn main() {
         let v: [u64; 3] = [0, 1, 2];
         asm!("{}", in(reg) v[..]);
         //~^ ERROR the size for values of type `[u64]` cannot be known at compilation time
+        //~| ERROR cannot use value of type `[u64]` for inline assembly
         asm!("{}", out(reg) v[..]);
         //~^ ERROR the size for values of type `[u64]` cannot be known at compilation time
+        //~| ERROR cannot use value of type `[u64]` for inline assembly
         asm!("{}", inout(reg) v[..]);
         //~^ ERROR the size for values of type `[u64]` cannot be known at compilation time
+        //~| ERROR cannot use value of type `[u64]` for inline assembly
 
         // Constants must be... constant
 
@@ -63,7 +66,6 @@ fn main() {
 
 unsafe fn generic<T>() {
     asm!("{}", sym generic::<T>);
-    //~^ generic parameters may not be used in const operations
 }
 
 // Const operands must be integers and must be constants.

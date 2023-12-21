@@ -14,13 +14,16 @@ use crate::html::markdown::{self, RustCodeBlock};
 use crate::passes::Pass;
 use crate::visit::DocVisitor;
 
-crate const CHECK_CODE_BLOCK_SYNTAX: Pass = Pass {
+pub(crate) const CHECK_CODE_BLOCK_SYNTAX: Pass = Pass {
     name: "check-code-block-syntax",
     run: check_code_block_syntax,
     description: "validates syntax inside Rust code blocks",
 };
 
-crate fn check_code_block_syntax(krate: clean::Crate, cx: &mut DocContext<'_>) -> clean::Crate {
+pub(crate) fn check_code_block_syntax(
+    krate: clean::Crate,
+    cx: &mut DocContext<'_>,
+) -> clean::Crate {
     SyntaxChecker { cx }.visit_crate(&krate);
     krate
 }
@@ -119,7 +122,7 @@ impl<'a, 'tcx> SyntaxChecker<'a, 'tcx> {
                     diag.span_suggestion(
                         sp.from_inner(InnerSpan::new(0, 3)).shrink_to_hi(),
                         explanation,
-                        String::from("text"),
+                        "text",
                         Applicability::MachineApplicable,
                     );
                 }
@@ -157,7 +160,7 @@ impl<'a, 'tcx> DocVisitor for SyntaxChecker<'a, 'tcx> {
                 sp,
             );
             for code_block in markdown::rust_code_blocks(dox, &extra) {
-                self.check_rust_syntax(&item, dox, code_block);
+                self.check_rust_syntax(item, dox, code_block);
             }
         }
 

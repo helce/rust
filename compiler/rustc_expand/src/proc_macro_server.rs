@@ -2,14 +2,13 @@ use crate::base::ExtCtxt;
 
 use rustc_ast as ast;
 use rustc_ast::token;
-use rustc_ast::tokenstream::{self, CanSynthesizeMissingTokens};
-use rustc_ast::tokenstream::{DelimSpan, Spacing::*, TokenStream, TreeAndSpacing};
+use rustc_ast::tokenstream::{self, DelimSpan, Spacing::*, TokenStream, TreeAndSpacing};
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sync::Lrc;
 use rustc_errors::{Diagnostic, MultiSpan, PResult};
 use rustc_parse::lexer::nfc_normalize;
-use rustc_parse::{nt_to_tokenstream, parse_stream_from_source_str};
+use rustc_parse::parse_stream_from_source_str;
 use rustc_session::parse::ParseSess;
 use rustc_span::def_id::CrateNum;
 use rustc_span::symbol::{self, kw, sym, Symbol};
@@ -179,10 +178,9 @@ impl FromInternal<(TreeAndSpacing, &'_ mut Vec<Self>, &mut Rustc<'_, '_>)>
                 TokenTree::Ident(Ident::new(rustc.sess(), ident.name, is_raw, ident.span))
             }
             Interpolated(nt) => {
-                let stream = nt_to_tokenstream(&nt, rustc.sess(), CanSynthesizeMissingTokens::No);
                 TokenTree::Group(Group {
                     delimiter: pm::Delimiter::None,
-                    stream,
+                    stream: TokenStream::from_nonterminal_ast(&nt),
                     span: DelimSpan::from_single(span),
                     flatten: crate::base::nt_pretty_printing_compatibility_hack(&nt, rustc.sess()),
                 })
@@ -269,7 +267,7 @@ impl ToInternal<rustc_errors::Level> for Level {
     fn to_internal(self) -> rustc_errors::Level {
         match self {
             Level::Error => rustc_errors::Level::Error { lint: false },
-            Level::Warning => rustc_errors::Level::Warning,
+            Level::Warning => rustc_errors::Level::Warning(None),
             Level::Note => rustc_errors::Level::Note,
             Level::Help => rustc_errors::Level::Help,
             _ => unreachable!("unknown proc_macro::Level variant: {:?}", self),
@@ -278,12 +276,6 @@ impl ToInternal<rustc_errors::Level> for Level {
 }
 
 pub struct FreeFunctions;
-
-#[derive(Clone)]
-pub struct TokenStreamIter {
-    cursor: tokenstream::Cursor,
-    stack: Vec<TokenTree<Group, Punct, Ident, Literal>>,
-}
 
 #[derive(Clone)]
 pub struct Group {
@@ -337,6 +329,7 @@ impl Ident {
         sess.symbol_gallery.insert(sym, span);
         Ident { sym, is_raw, span }
     }
+
     fn dollar_crate(span: Span) -> Ident {
         // `$crate` is accepted as an ident only if it comes from the compiler.
         Ident { sym: kw::DollarCrate, is_raw: false, span }
@@ -384,8 +377,6 @@ impl<'a, 'b> Rustc<'a, 'b> {
 impl server::Types for Rustc<'_, '_> {
     type FreeFunctions = FreeFunctions;
     type TokenStream = TokenStream;
-    type TokenStreamBuilder = tokenstream::TokenStreamBuilder;
-    type TokenStreamIter = TokenStreamIter;
     type Group = Group;
     type Punct = Punct;
     type Ident = Ident;
@@ -410,12 +401,10 @@ impl server::FreeFunctions for Rustc<'_, '_> {
 }
 
 impl server::TokenStream for Rustc<'_, '_> {
-    fn new(&mut self) -> Self::TokenStream {
-        TokenStream::default()
-    }
     fn is_empty(&mut self, stream: &Self::TokenStream) -> bool {
         stream.is_empty()
     }
+
     fn from_str(&mut self, src: &str) -> Self::TokenStream {
         parse_stream_from_source_str(
             FileName::proc_macro_source_code(src),
@@ -424,9 +413,11 @@ impl server::TokenStream for Rustc<'_, '_> {
             Some(self.call_site),
         )
     }
+
     fn to_string(&mut self, stream: &Self::TokenStream) -> String {
         pprust::tts_to_string(stream)
     }
+
     fn expand_expr(&mut self, stream: &Self::TokenStream) -> Result<Self::TokenStream, ()> {
         // Parse the expression from our tokenstream.
         let expr: PResult<'_, _> = try {
@@ -454,7 +445,7 @@ impl server::TokenStream for Rustc<'_, '_> {
 
         // NOTE: For now, limit `expand_expr` to exclusively expand to literals.
         // This may be relaxed in the future.
-        // We don't use `nt_to_tokenstream` as the tokenstream currently cannot
+        // We don't use `TokenStream::from_ast` as the tokenstream currently cannot
         // be recovered in the general case.
         match &expr.kind {
             ast::ExprKind::Lit(l) => {
@@ -477,78 +468,110 @@ impl server::TokenStream for Rustc<'_, '_> {
             _ => Err(()),
         }
     }
+
     fn from_token_tree(
         &mut self,
         tree: TokenTree<Self::Group, Self::Punct, Self::Ident, Self::Literal>,
     ) -> Self::TokenStream {
         tree.to_internal()
     }
-    fn into_iter(&mut self, stream: Self::TokenStream) -> Self::TokenStreamIter {
-        TokenStreamIter { cursor: stream.trees(), stack: vec![] }
-    }
-}
 
-impl server::TokenStreamBuilder for Rustc<'_, '_> {
-    fn new(&mut self) -> Self::TokenStreamBuilder {
-        tokenstream::TokenStreamBuilder::new()
-    }
-    fn push(&mut self, builder: &mut Self::TokenStreamBuilder, stream: Self::TokenStream) {
-        builder.push(stream);
-    }
-    fn build(&mut self, builder: Self::TokenStreamBuilder) -> Self::TokenStream {
+    fn concat_trees(
+        &mut self,
+        base: Option<Self::TokenStream>,
+        trees: Vec<TokenTree<Self::Group, Self::Punct, Self::Ident, Self::Literal>>,
+    ) -> Self::TokenStream {
+        let mut builder = tokenstream::TokenStreamBuilder::new();
+        if let Some(base) = base {
+            builder.push(base);
+        }
+        for tree in trees {
+            builder.push(tree.to_internal());
+        }
         builder.build()
     }
-}
 
-impl server::TokenStreamIter for Rustc<'_, '_> {
-    fn next(
+    fn concat_streams(
         &mut self,
-        iter: &mut Self::TokenStreamIter,
-    ) -> Option<TokenTree<Self::Group, Self::Punct, Self::Ident, Self::Literal>> {
+        base: Option<Self::TokenStream>,
+        streams: Vec<Self::TokenStream>,
+    ) -> Self::TokenStream {
+        let mut builder = tokenstream::TokenStreamBuilder::new();
+        if let Some(base) = base {
+            builder.push(base);
+        }
+        for stream in streams {
+            builder.push(stream);
+        }
+        builder.build()
+    }
+
+    fn into_trees(
+        &mut self,
+        stream: Self::TokenStream,
+    ) -> Vec<TokenTree<Self::Group, Self::Punct, Self::Ident, Self::Literal>> {
+        // FIXME: This is a raw port of the previous approach (which had a
+        // `TokenStreamIter` server-side object with a single `next` method),
+        // and can probably be optimized (for bulk conversion).
+        let mut cursor = stream.into_trees();
+        let mut stack = Vec::new();
+        let mut tts = Vec::new();
         loop {
-            let tree = iter.stack.pop().or_else(|| {
-                let next = iter.cursor.next_with_spacing()?;
-                Some(TokenTree::from_internal((next, &mut iter.stack, self)))
-            })?;
-            // A hack used to pass AST fragments to attribute and derive macros
-            // as a single nonterminal token instead of a token stream.
-            // Such token needs to be "unwrapped" and not represented as a delimited group.
-            // FIXME: It needs to be removed, but there are some compatibility issues (see #73345).
-            if let TokenTree::Group(ref group) = tree {
-                if group.flatten {
-                    iter.cursor.append(group.stream.clone());
-                    continue;
+            let next = stack.pop().or_else(|| {
+                let next = cursor.next_with_spacing()?;
+                Some(TokenTree::from_internal((next, &mut stack, self)))
+            });
+            match next {
+                Some(TokenTree::Group(group)) => {
+                    // A hack used to pass AST fragments to attribute and derive
+                    // macros as a single nonterminal token instead of a token
+                    // stream.  Such token needs to be "unwrapped" and not
+                    // represented as a delimited group.
+                    // FIXME: It needs to be removed, but there are some
+                    // compatibility issues (see #73345).
+                    if group.flatten {
+                        tts.append(&mut self.into_trees(group.stream));
+                    } else {
+                        tts.push(TokenTree::Group(group));
+                    }
                 }
+                Some(tt) => tts.push(tt),
+                None => return tts,
             }
-            return Some(tree);
         }
     }
 }
 
 impl server::Group for Rustc<'_, '_> {
-    fn new(&mut self, delimiter: Delimiter, stream: Self::TokenStream) -> Self::Group {
+    fn new(&mut self, delimiter: Delimiter, stream: Option<Self::TokenStream>) -> Self::Group {
         Group {
             delimiter,
-            stream,
+            stream: stream.unwrap_or_default(),
             span: DelimSpan::from_single(server::Span::call_site(self)),
             flatten: false,
         }
     }
+
     fn delimiter(&mut self, group: &Self::Group) -> Delimiter {
         group.delimiter
     }
+
     fn stream(&mut self, group: &Self::Group) -> Self::TokenStream {
         group.stream.clone()
     }
+
     fn span(&mut self, group: &Self::Group) -> Self::Span {
         group.span.entire()
     }
+
     fn span_open(&mut self, group: &Self::Group) -> Self::Span {
         group.span.open
     }
+
     fn span_close(&mut self, group: &Self::Group) -> Self::Span {
         group.span.close
     }
+
     fn set_span(&mut self, group: &mut Self::Group, span: Self::Span) {
         group.span = DelimSpan::from_single(span);
     }
@@ -558,15 +581,19 @@ impl server::Punct for Rustc<'_, '_> {
     fn new(&mut self, ch: char, spacing: Spacing) -> Self::Punct {
         Punct::new(ch, spacing == Spacing::Joint, server::Span::call_site(self))
     }
+
     fn as_char(&mut self, punct: Self::Punct) -> char {
         punct.ch
     }
+
     fn spacing(&mut self, punct: Self::Punct) -> Spacing {
         if punct.joint { Spacing::Joint } else { Spacing::Alone }
     }
+
     fn span(&mut self, punct: Self::Punct) -> Self::Span {
         punct.span
     }
+
     fn with_span(&mut self, punct: Self::Punct, span: Self::Span) -> Self::Punct {
         Punct { span, ..punct }
     }
@@ -576,9 +603,11 @@ impl server::Ident for Rustc<'_, '_> {
     fn new(&mut self, string: &str, span: Self::Span, is_raw: bool) -> Self::Ident {
         Ident::new(self.sess(), Symbol::intern(string), is_raw, span)
     }
+
     fn span(&mut self, ident: Self::Ident) -> Self::Span {
         ident.span
     }
+
     fn with_span(&mut self, ident: Self::Ident, span: Self::Span) -> Self::Ident {
         Ident { span, ..ident }
     }
@@ -630,45 +659,57 @@ impl server::Literal for Rustc<'_, '_> {
 
         Ok(Literal { lit, span: self.call_site })
     }
+
     fn to_string(&mut self, literal: &Self::Literal) -> String {
         literal.lit.to_string()
     }
+
     fn debug_kind(&mut self, literal: &Self::Literal) -> String {
         format!("{:?}", literal.lit.kind)
     }
+
     fn symbol(&mut self, literal: &Self::Literal) -> String {
         literal.lit.symbol.to_string()
     }
+
     fn suffix(&mut self, literal: &Self::Literal) -> Option<String> {
         literal.lit.suffix.as_ref().map(Symbol::to_string)
     }
+
     fn integer(&mut self, n: &str) -> Self::Literal {
         self.lit(token::Integer, Symbol::intern(n), None)
     }
+
     fn typed_integer(&mut self, n: &str, kind: &str) -> Self::Literal {
         self.lit(token::Integer, Symbol::intern(n), Some(Symbol::intern(kind)))
     }
+
     fn float(&mut self, n: &str) -> Self::Literal {
         self.lit(token::Float, Symbol::intern(n), None)
     }
+
     fn f32(&mut self, n: &str) -> Self::Literal {
         self.lit(token::Float, Symbol::intern(n), Some(sym::f32))
     }
+
     fn f64(&mut self, n: &str) -> Self::Literal {
         self.lit(token::Float, Symbol::intern(n), Some(sym::f64))
     }
+
     fn string(&mut self, string: &str) -> Self::Literal {
         let quoted = format!("{:?}", string);
         assert!(quoted.starts_with('"') && quoted.ends_with('"'));
         let symbol = &quoted[1..quoted.len() - 1];
         self.lit(token::Str, Symbol::intern(symbol), None)
     }
+
     fn character(&mut self, ch: char) -> Self::Literal {
         let quoted = format!("{:?}", ch);
         assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
         let symbol = &quoted[1..quoted.len() - 1];
         self.lit(token::Char, Symbol::intern(symbol), None)
     }
+
     fn byte_string(&mut self, bytes: &[u8]) -> Self::Literal {
         let string = bytes
             .iter()
@@ -678,12 +719,15 @@ impl server::Literal for Rustc<'_, '_> {
             .collect::<String>();
         self.lit(token::ByteStr, Symbol::intern(&string), None)
     }
+
     fn span(&mut self, literal: &Self::Literal) -> Self::Span {
         literal.span
     }
+
     fn set_span(&mut self, literal: &mut Self::Literal, span: Self::Span) {
         literal.span = span;
     }
+
     fn subspan(
         &mut self,
         literal: &Self::Literal,
@@ -726,6 +770,7 @@ impl server::SourceFile for Rustc<'_, '_> {
     fn eq(&mut self, file1: &Self::SourceFile, file2: &Self::SourceFile) -> bool {
         Lrc::ptr_eq(file1, file2)
     }
+
     fn path(&mut self, file: &Self::SourceFile) -> String {
         match file.name {
             FileName::Real(ref name) => name
@@ -737,6 +782,7 @@ impl server::SourceFile for Rustc<'_, '_> {
             _ => file.name.prefer_local().to_string(),
         }
     }
+
     fn is_real(&mut self, file: &Self::SourceFile) -> bool {
         file.is_real_file()
     }
@@ -746,6 +792,7 @@ impl server::MultiSpan for Rustc<'_, '_> {
     fn new(&mut self) -> Self::MultiSpan {
         vec![]
     }
+
     fn push(&mut self, spans: &mut Self::MultiSpan, span: Self::Span) {
         spans.push(span)
     }
@@ -757,6 +804,7 @@ impl server::Diagnostic for Rustc<'_, '_> {
         diag.set_span(MultiSpan::from_spans(spans));
         diag
     }
+
     fn sub(
         &mut self,
         diag: &mut Self::Diagnostic,
@@ -766,6 +814,7 @@ impl server::Diagnostic for Rustc<'_, '_> {
     ) {
         diag.sub(level.to_internal(), msg, MultiSpan::from_spans(spans), None);
     }
+
     fn emit(&mut self, mut diag: Self::Diagnostic) {
         self.sess().span_diagnostic.emit_diagnostic(&mut diag);
     }
@@ -779,38 +828,49 @@ impl server::Span for Rustc<'_, '_> {
             format!("{:?} bytes({}..{})", span.ctxt(), span.lo().0, span.hi().0)
         }
     }
+
     fn def_site(&mut self) -> Self::Span {
         self.def_site
     }
+
     fn call_site(&mut self) -> Self::Span {
         self.call_site
     }
+
     fn mixed_site(&mut self) -> Self::Span {
         self.mixed_site
     }
+
     fn source_file(&mut self, span: Self::Span) -> Self::SourceFile {
         self.sess().source_map().lookup_char_pos(span.lo()).file
     }
+
     fn parent(&mut self, span: Self::Span) -> Option<Self::Span> {
         span.parent_callsite()
     }
+
     fn source(&mut self, span: Self::Span) -> Self::Span {
         span.source_callsite()
     }
+
     fn start(&mut self, span: Self::Span) -> LineColumn {
         let loc = self.sess().source_map().lookup_char_pos(span.lo());
         LineColumn { line: loc.line, column: loc.col.to_usize() }
     }
+
     fn end(&mut self, span: Self::Span) -> LineColumn {
         let loc = self.sess().source_map().lookup_char_pos(span.hi());
         LineColumn { line: loc.line, column: loc.col.to_usize() }
     }
+
     fn before(&mut self, span: Self::Span) -> Self::Span {
         span.shrink_to_lo()
     }
+
     fn after(&mut self, span: Self::Span) -> Self::Span {
         span.shrink_to_hi()
     }
+
     fn join(&mut self, first: Self::Span, second: Self::Span) -> Option<Self::Span> {
         let self_loc = self.sess().source_map().lookup_char_pos(first.lo());
         let other_loc = self.sess().source_map().lookup_char_pos(second.lo());
@@ -821,9 +881,11 @@ impl server::Span for Rustc<'_, '_> {
 
         Some(first.to(second))
     }
+
     fn resolved_at(&mut self, span: Self::Span, at: Self::Span) -> Self::Span {
         span.with_ctxt(at.ctxt())
     }
+
     fn source_text(&mut self, span: Self::Span) -> Option<String> {
         self.sess().source_map().span_to_snippet(span).ok()
     }
@@ -854,6 +916,7 @@ impl server::Span for Rustc<'_, '_> {
     fn save_span(&mut self, span: Self::Span) -> usize {
         self.sess().save_proc_macro_span(span)
     }
+
     fn recover_proc_macro_span(&mut self, id: usize) -> Self::Span {
         let (resolver, krate, def_site) = (&*self.ecx.resolver, self.krate, self.def_site);
         *self.rebased_spans.entry(id).or_insert_with(|| {

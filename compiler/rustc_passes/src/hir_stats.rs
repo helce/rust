@@ -238,7 +238,7 @@ impl<'v> hir_visit::Visitor<'v> for StatCollector<'v> {
         hir_visit::walk_assoc_type_binding(self, type_binding)
     }
 
-    fn visit_attribute(&mut self, _: hir::HirId, attr: &'v ast::Attribute) {
+    fn visit_attribute(&mut self, attr: &'v ast::Attribute) {
         self.record("Attribute", Id::Attr(attr.id), attr);
     }
 }
@@ -318,7 +318,7 @@ impl<'v> ast_visit::Visitor<'v> for StatCollector<'v> {
         ast_visit::walk_variant(self, v)
     }
 
-    fn visit_lifetime(&mut self, lifetime: &'v ast::Lifetime) {
+    fn visit_lifetime(&mut self, lifetime: &'v ast::Lifetime, _: ast_visit::LifetimeCtxt) {
         self.record("Lifetime", Id::None, lifetime);
         ast_visit::walk_lifetime(self, lifetime)
     }

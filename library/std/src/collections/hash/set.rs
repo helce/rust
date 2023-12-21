@@ -33,13 +33,14 @@ use super::map::{map_try_reserve_error, RandomState};
 /// In other words, if two keys are equal, their hashes must be equal.
 ///
 ///
-/// It is a logic error for an item to be modified in such a way that the
-/// item's hash, as determined by the [`Hash`] trait, or its equality, as
-/// determined by the [`Eq`] trait, changes while it is in the set. This is
-/// normally only possible through [`Cell`], [`RefCell`], global state, I/O, or
-/// unsafe code. The behavior resulting from such a logic error is not
-/// specified (it could include panics, incorrect results, aborts, memory
-/// leaks, or non-termination) but will not be undefined behavior.
+/// It is a logic error for a key to be modified in such a way that the key's
+/// hash, as determined by the [`Hash`] trait, or its equality, as determined by
+/// the [`Eq`] trait, changes while it is in the map. This is normally only
+/// possible through [`Cell`], [`RefCell`], global state, I/O, or unsafe code.
+/// The behavior resulting from such a logic error is not specified, but will
+/// be encapsulated to the `HashSet` that observed the logic error and not
+/// result in undefined behavior. This could include panics, incorrect results,
+/// aborts, memory leaks, and non-termination.
 ///
 /// # Examples
 ///
@@ -132,10 +133,11 @@ impl<T> HashSet<T, RandomState> {
         Default::default()
     }
 
-    /// Creates an empty `HashSet` with the specified capacity.
+    /// Creates an empty `HashSet` with at least the specified capacity.
     ///
     /// The hash set will be able to hold at least `capacity` elements without
-    /// reallocating. If `capacity` is 0, the hash set will not allocate.
+    /// reallocating. This method is allowed to allocate for more elements than
+    /// `capacity`. If `capacity` is 0, the hash set will not allocate.
     ///
     /// # Examples
     ///
@@ -184,6 +186,11 @@ impl<T, S> HashSet<T, S> {
     ///     println!("{x}");
     /// }
     /// ```
+    ///
+    /// # Performance
+    ///
+    /// In the current implementation, iterating over set takes O(capacity) time
+    /// instead of O(len) because it internally visits empty buckets too.
     #[inline]
     #[rustc_lint_query_instability]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -312,6 +319,11 @@ impl<T, S> HashSet<T, S> {
     /// set.retain(|&k| k % 2 == 0);
     /// assert_eq!(set.len(), 3);
     /// ```
+    ///
+    /// # Performance
+    ///
+    /// In the current implementation, this operation takes O(capacity) time
+    /// instead of O(len) because it internally visits empty buckets too.
     #[rustc_lint_query_instability]
     #[stable(feature = "retain_hash_collection", since = "1.18.0")]
     pub fn retain<F>(&mut self, f: F)
@@ -368,11 +380,12 @@ impl<T, S> HashSet<T, S> {
         HashSet { base: base::HashSet::with_hasher(hasher) }
     }
 
-    /// Creates an empty `HashSet` with the specified capacity, using
+    /// Creates an empty `HashSet` with at least the specified capacity, using
     /// `hasher` to hash the keys.
     ///
     /// The hash set will be able to hold at least `capacity` elements without
-    /// reallocating. If `capacity` is 0, the hash set will not allocate.
+    /// reallocating. This method is allowed to allocate for more elements than
+    /// `capacity`. If `capacity` is 0, the hash set will not allocate.
     ///
     /// Warning: `hasher` is normally randomly generated, and
     /// is designed to allow `HashSet`s to be resistant to attacks that
@@ -423,8 +436,10 @@ where
     S: BuildHasher,
 {
     /// Reserves capacity for at least `additional` more elements to be inserted
-    /// in the `HashSet`. The collection may reserve more space to avoid
-    /// frequent reallocations.
+    /// in the `HashSet`. The collection may reserve more space to speculatively
+    /// avoid frequent reallocations. After calling `reserve`,
+    /// capacity will be greater than or equal to `self.len() + additional`.
+    /// Does nothing if capacity is already sufficient.
     ///
     /// # Panics
     ///
@@ -445,8 +460,11 @@ where
     }
 
     /// Tries to reserve capacity for at least `additional` more elements to be inserted
-    /// in the given `HashSet<K, V>`. The collection may reserve more space to avoid
-    /// frequent reallocations.
+    /// in the `HashSet`. The collection may reserve more space to speculatively
+    /// avoid frequent reallocations. After calling `reserve`,
+    /// capacity will be greater than or equal to `self.len() + additional` if
+    /// it returns `Ok(())`.
+    /// Does nothing if capacity is already sufficient.
     ///
     /// # Errors
     ///
@@ -458,7 +476,7 @@ where
     /// ```
     /// use std::collections::HashSet;
     /// let mut set: HashSet<i32> = HashSet::new();
-    /// set.try_reserve(10).expect("why is the test harness OOMing on 10 bytes?");
+    /// set.try_reserve(10).expect("why is the test harness OOMing on a handful of bytes?");
     /// ```
     #[inline]
     #[stable(feature = "try_reserve", since = "1.57.0")]
@@ -576,6 +594,12 @@ where
 
     /// Visits the values representing the intersection,
     /// i.e., the values that are both in `self` and `other`.
+    ///
+    /// When an equal element is present in `self` and `other`
+    /// then the resulting `Intersection` may yield references to
+    /// one or the other. This can be relevant if `T` contains fields which
+    /// are not compared by its `Eq` implementation, and may hold different
+    /// value between the two equal copies of `T` in the two sets.
     ///
     /// # Examples
     ///
@@ -847,9 +871,10 @@ where
 
     /// Adds a value to the set.
     ///
-    /// If the set did not have this value present, `true` is returned.
+    /// Returns whether the value was newly inserted. That is:
     ///
-    /// If the set did have this value present, `false` is returned.
+    /// - If the set did not previously contain this value, `true` is returned.
+    /// - If the set already contained this value, `false` is returned.
     ///
     /// # Examples
     ///

@@ -326,11 +326,20 @@ pub unsafe fn create_module<'ll>(
         )
     }
 
+    if sess.opts.debugging_opts.virtual_function_elimination {
+        llvm::LLVMRustAddModuleFlag(
+            llmod,
+            llvm::LLVMModFlagBehavior::Error,
+            "Virtual Function Elim\0".as_ptr().cast(),
+            1,
+        );
+    }
+
     llmod
 }
 
 impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
-    crate fn new(
+    pub(crate) fn new(
         tcx: TyCtxt<'tcx>,
         codegen_unit: &'tcx CodegenUnit<'tcx>,
         llvm_module: &'ll crate::ModuleLlvm,
@@ -447,7 +456,7 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
         }
     }
 
-    crate fn statics_to_rauw(&self) -> &RefCell<Vec<(&'ll Value, &'ll Value)>> {
+    pub(crate) fn statics_to_rauw(&self) -> &RefCell<Vec<(&'ll Value, &'ll Value)>> {
         &self.statics_to_rauw
     }
 
@@ -599,7 +608,7 @@ impl<'ll, 'tcx> MiscMethods<'tcx> for CodegenCx<'ll, 'tcx> {
 }
 
 impl<'ll> CodegenCx<'ll, '_> {
-    crate fn get_intrinsic(&self, key: &str) -> (&'ll Type, &'ll Value) {
+    pub(crate) fn get_intrinsic(&self, key: &str) -> (&'ll Type, &'ll Value) {
         if let Some(v) = self.intrinsics.borrow().get(key).cloned() {
             return v;
         }
@@ -656,6 +665,7 @@ impl<'ll> CodegenCx<'ll, '_> {
         let t_isize = self.type_isize();
         let t_f32 = self.type_f32();
         let t_f64 = self.type_f64();
+        let t_metadata = self.type_metadata();
 
         ifn!("llvm.wasm.trunc.unsigned.i32.f32", fn(t_f32) -> t_i32);
         ifn!("llvm.wasm.trunc.unsigned.i32.f64", fn(t_f64) -> t_i32);
@@ -881,21 +891,22 @@ impl<'ll> CodegenCx<'ll, '_> {
             ifn!("llvm.instrprof.increment", fn(i8p, t_i64, t_i32, t_i32) -> void);
         }
 
-        ifn!("llvm.type.test", fn(i8p, self.type_metadata()) -> i1);
+        ifn!("llvm.type.test", fn(i8p, t_metadata) -> i1);
+        ifn!("llvm.type.checked.load", fn(i8p, t_i32, t_metadata) -> mk_struct! {i8p, i1});
 
         if self.sess().opts.debuginfo != DebugInfo::None {
-            ifn!("llvm.dbg.declare", fn(self.type_metadata(), self.type_metadata()) -> void);
-            ifn!("llvm.dbg.value", fn(self.type_metadata(), t_i64, self.type_metadata()) -> void);
+            ifn!("llvm.dbg.declare", fn(t_metadata, t_metadata) -> void);
+            ifn!("llvm.dbg.value", fn(t_metadata, t_i64, t_metadata) -> void);
         }
         None
     }
 
-    crate fn eh_catch_typeinfo(&self) -> &'ll Value {
+    pub(crate) fn eh_catch_typeinfo(&self) -> &'ll Value {
         if let Some(eh_catch_typeinfo) = self.eh_catch_typeinfo.get() {
             return eh_catch_typeinfo;
         }
         let tcx = self.tcx;
-        assert!(self.sess().target.is_like_emscripten);
+        assert!(self.sess().target.os == "emscripten");
         let eh_catch_typeinfo = match tcx.lang_items().eh_catch_typeinfo() {
             Some(def_id) => self.get_static(def_id),
             _ => {

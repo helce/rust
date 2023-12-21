@@ -140,7 +140,7 @@ fn live_node_kind_to_string(lnk: LiveNodeKind, tcx: TyCtxt<'_>) -> String {
 }
 
 fn check_mod_liveness(tcx: TyCtxt<'_>, module_def_id: LocalDefId) {
-    tcx.hir().visit_item_likes_in_module(module_def_id, &mut IrMaps::new(tcx).as_deep_visitor());
+    tcx.hir().deep_visit_item_likes_in_module(module_def_id, &mut IrMaps::new(tcx));
 }
 
 pub fn provide(providers: &mut Providers) {
@@ -373,8 +373,8 @@ impl<'tcx> Visitor<'tcx> for IrMaps<'tcx> {
 
     fn visit_arm(&mut self, arm: &'tcx hir::Arm<'tcx>) {
         self.add_from_pat(&arm.pat);
-        if let Some(hir::Guard::IfLet(ref pat, _)) = arm.guard {
-            self.add_from_pat(pat);
+        if let Some(hir::Guard::IfLet(ref let_expr)) = arm.guard {
+            self.add_from_pat(let_expr.pat);
         }
         intravisit::walk_arm(self, arm);
     }
@@ -405,7 +405,7 @@ impl<'tcx> Visitor<'tcx> for IrMaps<'tcx> {
                 }
                 intravisit::walk_expr(self, expr);
             }
-            hir::ExprKind::Closure(..) => {
+            hir::ExprKind::Closure { .. } => {
                 // Interesting control flow (for loops can contain labeled
                 // breaks or continues)
                 self.add_live_node_for_node(expr.hir_id, ExprNode(expr.span, expr.hir_id));
@@ -833,7 +833,7 @@ impl<'a, 'tcx> Liveness<'a, 'tcx> {
 
             hir::ExprKind::Field(ref e, _) => self.propagate_through_expr(&e, succ),
 
-            hir::ExprKind::Closure(..) => {
+            hir::ExprKind::Closure { .. } => {
                 debug!("{:?} is an ExprKind::Closure", expr);
 
                 // the construction of a closure itself is not important,
@@ -914,9 +914,9 @@ impl<'a, 'tcx> Liveness<'a, 'tcx> {
 
                     let guard_succ = arm.guard.as_ref().map_or(body_succ, |g| match g {
                         hir::Guard::If(e) => self.propagate_through_expr(e, body_succ),
-                        hir::Guard::IfLet(pat, e) => {
-                            let let_bind = self.define_bindings_in_pat(pat, body_succ);
-                            self.propagate_through_expr(e, let_bind)
+                        hir::Guard::IfLet(let_expr) => {
+                            let let_bind = self.define_bindings_in_pat(let_expr.pat, body_succ);
+                            self.propagate_through_expr(let_expr.init, let_bind)
                         }
                     });
                     let arm_succ = self.define_bindings_in_pat(&arm.pat, guard_succ);
@@ -1387,7 +1387,7 @@ fn check_expr<'tcx>(this: &mut Liveness<'_, 'tcx>, expr: &'tcx Expr<'tcx>) {
         | hir::ExprKind::AddrOf(..)
         | hir::ExprKind::Struct(..)
         | hir::ExprKind::Repeat(..)
-        | hir::ExprKind::Closure(..)
+        | hir::ExprKind::Closure { .. }
         | hir::ExprKind::Path(_)
         | hir::ExprKind::Yield(..)
         | hir::ExprKind::Box(..)

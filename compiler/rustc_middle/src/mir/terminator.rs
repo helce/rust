@@ -1,3 +1,4 @@
+use crate::mir;
 use crate::mir::interpret::Scalar;
 use crate::ty::{self, Ty, TyCtxt};
 use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
@@ -250,8 +251,10 @@ pub enum TerminatorKind<'tcx> {
         /// This allows the memory occupied by "by-value" arguments to be
         /// reused across function calls without duplicating the contents.
         args: Vec<Operand<'tcx>>,
-        /// Destination for the return value. If none, the call necessarily diverges.
-        destination: Option<(Place<'tcx>, BasicBlock)>,
+        /// Where the returned value will be written
+        destination: Place<'tcx>,
+        /// Where to go after this call returns. If none, the call necessarily diverges.
+        target: Option<BasicBlock>,
         /// Cleanups to be done if the call unwinds.
         cleanup: Option<BasicBlock>,
         /// `true` if this is from a call in HIR rather than from an overloaded
@@ -415,33 +418,37 @@ impl<'tcx> TerminatorKind<'tcx> {
             | GeneratorDrop
             | Return
             | Unreachable
-            | Call { destination: None, cleanup: None, .. }
-            | InlineAsm { destination: None, cleanup: None, .. } => None.into_iter().chain(&[]),
-            Goto { target: ref t }
-            | Call { destination: None, cleanup: Some(ref t), .. }
-            | Call { destination: Some((_, ref t)), cleanup: None, .. }
-            | Yield { resume: ref t, drop: None, .. }
-            | DropAndReplace { target: ref t, unwind: None, .. }
-            | Drop { target: ref t, unwind: None, .. }
-            | Assert { target: ref t, cleanup: None, .. }
-            | FalseUnwind { real_target: ref t, unwind: None }
-            | InlineAsm { destination: Some(ref t), cleanup: None, .. }
-            | InlineAsm { destination: None, cleanup: Some(ref t), .. } => {
-                Some(t).into_iter().chain(&[])
+            | Call { target: None, cleanup: None, .. }
+            | InlineAsm { destination: None, cleanup: None, .. } => {
+                None.into_iter().chain((&[]).into_iter().copied())
             }
-            Call { destination: Some((_, ref t)), cleanup: Some(ref u), .. }
-            | Yield { resume: ref t, drop: Some(ref u), .. }
-            | DropAndReplace { target: ref t, unwind: Some(ref u), .. }
-            | Drop { target: ref t, unwind: Some(ref u), .. }
-            | Assert { target: ref t, cleanup: Some(ref u), .. }
-            | FalseUnwind { real_target: ref t, unwind: Some(ref u) }
-            | InlineAsm { destination: Some(ref t), cleanup: Some(ref u), .. } => {
-                Some(t).into_iter().chain(slice::from_ref(u))
+            Goto { target: t }
+            | Call { target: None, cleanup: Some(t), .. }
+            | Call { target: Some(t), cleanup: None, .. }
+            | Yield { resume: t, drop: None, .. }
+            | DropAndReplace { target: t, unwind: None, .. }
+            | Drop { target: t, unwind: None, .. }
+            | Assert { target: t, cleanup: None, .. }
+            | FalseUnwind { real_target: t, unwind: None }
+            | InlineAsm { destination: Some(t), cleanup: None, .. }
+            | InlineAsm { destination: None, cleanup: Some(t), .. } => {
+                Some(t).into_iter().chain((&[]).into_iter().copied())
             }
-            SwitchInt { ref targets, .. } => None.into_iter().chain(&targets.targets),
-            FalseEdge { ref real_target, ref imaginary_target } => {
-                Some(real_target).into_iter().chain(slice::from_ref(imaginary_target))
+            Call { target: Some(t), cleanup: Some(ref u), .. }
+            | Yield { resume: t, drop: Some(ref u), .. }
+            | DropAndReplace { target: t, unwind: Some(ref u), .. }
+            | Drop { target: t, unwind: Some(ref u), .. }
+            | Assert { target: t, cleanup: Some(ref u), .. }
+            | FalseUnwind { real_target: t, unwind: Some(ref u) }
+            | InlineAsm { destination: Some(t), cleanup: Some(ref u), .. } => {
+                Some(t).into_iter().chain(slice::from_ref(u).into_iter().copied())
             }
+            SwitchInt { ref targets, .. } => {
+                None.into_iter().chain(targets.targets.iter().copied())
+            }
+            FalseEdge { real_target, ref imaginary_target } => Some(real_target)
+                .into_iter()
+                .chain(slice::from_ref(imaginary_target).into_iter().copied()),
         }
     }
 
@@ -453,11 +460,11 @@ impl<'tcx> TerminatorKind<'tcx> {
             | GeneratorDrop
             | Return
             | Unreachable
-            | Call { destination: None, cleanup: None, .. }
+            | Call { target: None, cleanup: None, .. }
             | InlineAsm { destination: None, cleanup: None, .. } => None.into_iter().chain(&mut []),
             Goto { target: ref mut t }
-            | Call { destination: None, cleanup: Some(ref mut t), .. }
-            | Call { destination: Some((_, ref mut t)), cleanup: None, .. }
+            | Call { target: None, cleanup: Some(ref mut t), .. }
+            | Call { target: Some(ref mut t), cleanup: None, .. }
             | Yield { resume: ref mut t, drop: None, .. }
             | DropAndReplace { target: ref mut t, unwind: None, .. }
             | Drop { target: ref mut t, unwind: None, .. }
@@ -467,7 +474,7 @@ impl<'tcx> TerminatorKind<'tcx> {
             | InlineAsm { destination: None, cleanup: Some(ref mut t), .. } => {
                 Some(t).into_iter().chain(&mut [])
             }
-            Call { destination: Some((_, ref mut t)), cleanup: Some(ref mut u), .. }
+            Call { target: Some(ref mut t), cleanup: Some(ref mut u), .. }
             | Yield { resume: ref mut t, drop: Some(ref mut u), .. }
             | DropAndReplace { target: ref mut t, unwind: Some(ref mut u), .. }
             | Drop { target: ref mut t, unwind: Some(ref mut u), .. }
@@ -586,9 +593,7 @@ impl<'tcx> TerminatorKind<'tcx> {
                 write!(fmt, "replace({:?} <- {:?})", place, value)
             }
             Call { func, args, destination, .. } => {
-                if let Some((destination, _)) = destination {
-                    write!(fmt, "{:?} = ", destination)?;
-                }
+                write!(fmt, "{:?} = ", destination)?;
                 write!(fmt, "{:?}(", func)?;
                 for (index, arg) in args.iter().enumerate() {
                     if index > 0 {
@@ -672,19 +677,19 @@ impl<'tcx> TerminatorKind<'tcx> {
                     .values
                     .iter()
                     .map(|&u| {
-                        ty::Const::from_scalar(tcx, Scalar::from_uint(u, size), switch_ty)
+                        mir::ConstantKind::from_scalar(tcx, Scalar::from_uint(u, size), switch_ty)
                             .to_string()
                             .into()
                     })
                     .chain(iter::once("otherwise".into()))
                     .collect()
             }),
-            Call { destination: Some(_), cleanup: Some(_), .. } => {
+            Call { target: Some(_), cleanup: Some(_), .. } => {
                 vec!["return".into(), "unwind".into()]
             }
-            Call { destination: Some(_), cleanup: None, .. } => vec!["return".into()],
-            Call { destination: None, cleanup: Some(_), .. } => vec!["unwind".into()],
-            Call { destination: None, cleanup: None, .. } => vec![],
+            Call { target: Some(_), cleanup: None, .. } => vec!["return".into()],
+            Call { target: None, cleanup: Some(_), .. } => vec!["unwind".into()],
+            Call { target: None, cleanup: None, .. } => vec![],
             Yield { drop: Some(_), .. } => vec!["resume".into(), "drop".into()],
             Yield { drop: None, .. } => vec!["resume".into()],
             DropAndReplace { unwind: None, .. } | Drop { unwind: None, .. } => {

@@ -30,14 +30,12 @@
 #![feature(array_windows)]
 #![feature(box_patterns)]
 #![feature(control_flow_enum)]
-#![feature(crate_visibility_modifier)]
 #![feature(if_let_guard)]
 #![feature(iter_intersperse)]
 #![feature(iter_order_by)]
 #![feature(let_chains)]
 #![feature(let_else)]
 #![feature(never_type)]
-#![feature(nll)]
 #![recursion_limit = "256"]
 
 #[macro_use]
@@ -161,28 +159,16 @@ macro_rules! late_lint_passes {
         $macro!(
             $args,
             [
-                // FIXME: Look into regression when this is used as a module lint
-                // May Depend on constants elsewhere
-                UnusedBrokenConst: UnusedBrokenConst,
-                // Needs to run after UnusedAttributes as it marks all `feature` attributes as used.
-                UnstableFeatures: UnstableFeatures,
                 // Tracks state across modules
                 UnnameableTestItems: UnnameableTestItems::new(),
                 // Tracks attributes of parents
                 MissingDoc: MissingDoc::new(),
-                // Depends on access levels
+                // Builds a global list of all impls of `Debug`.
                 // FIXME: Turn the computation of types which implement Debug into a query
                 // and change this to a module lint pass
                 MissingDebugImplementations: MissingDebugImplementations::default(),
-                ArrayIntoIter: ArrayIntoIter::default(),
+                // Keeps a global list of foreign declarations.
                 ClashingExternDeclarations: ClashingExternDeclarations::new(),
-                DropTraitConstraints: DropTraitConstraints,
-                TemporaryCStringAsPtr: TemporaryCStringAsPtr,
-                NonPanicFmt: NonPanicFmt,
-                NoopMethodCall: NoopMethodCall,
-                EnumIntrinsicsNonEnums: EnumIntrinsicsNonEnums,
-                InvalidAtomicOrdering: InvalidAtomicOrdering,
-                NamedAsmLabels: NamedAsmLabels,
             ]
         );
     };
@@ -218,6 +204,17 @@ macro_rules! late_lint_mod_passes {
                 ExplicitOutlivesRequirements: ExplicitOutlivesRequirements,
                 InvalidValue: InvalidValue,
                 DerefNullPtr: DerefNullPtr,
+                // May Depend on constants elsewhere
+                UnusedBrokenConst: UnusedBrokenConst,
+                UnstableFeatures: UnstableFeatures,
+                ArrayIntoIter: ArrayIntoIter::default(),
+                DropTraitConstraints: DropTraitConstraints,
+                TemporaryCStringAsPtr: TemporaryCStringAsPtr,
+                NonPanicFmt: NonPanicFmt,
+                NoopMethodCall: NoopMethodCall,
+                EnumIntrinsicsNonEnums: EnumIntrinsicsNonEnums,
+                InvalidAtomicOrdering: InvalidAtomicOrdering,
+                NamedAsmLabels: NamedAsmLabels,
             ]
         );
     };
@@ -510,6 +507,8 @@ fn register_internals(store: &mut LintStore) {
     store.register_late_pass(|| Box::new(ExistingDocKeyword));
     store.register_lints(&TyTyKind::get_lints());
     store.register_late_pass(|| Box::new(TyTyKind));
+    store.register_lints(&Diagnostics::get_lints());
+    store.register_late_pass(|| Box::new(Diagnostics));
     store.register_lints(&PassByValue::get_lints());
     store.register_late_pass(|| Box::new(PassByValue));
     store.register_group(

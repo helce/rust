@@ -1,7 +1,5 @@
 #![allow(rustc::potential_query_instability)]
 #![feature(box_patterns)]
-#![feature(box_syntax)]
-#![feature(crate_visibility_modifier)]
 #![feature(let_chains)]
 #![feature(let_else)]
 #![feature(map_try_insert)]
@@ -11,6 +9,7 @@
 #![feature(option_get_or_insert_default)]
 #![feature(trusted_step)]
 #![feature(try_blocks)]
+#![feature(yeet_expr)]
 #![recursion_limit = "256"]
 
 #[macro_use]
@@ -51,12 +50,14 @@ mod const_goto;
 mod const_prop;
 mod const_prop_lint;
 mod coverage;
+mod dead_store_elimination;
 mod deaggregator;
 mod deduplicate_blocks;
 mod deref_separator;
 mod dest_prop;
 pub mod dump_mir;
 mod early_otherwise_branch;
+mod elaborate_box_derefs;
 mod elaborate_drops;
 mod function_item_references;
 mod generator;
@@ -170,7 +171,7 @@ fn mir_keys(tcx: TyCtxt<'_>, (): ()) -> FxIndexSet<LocalDefId> {
             intravisit::walk_struct_def(self, v)
         }
     }
-    tcx.hir().visit_all_item_likes(&mut GatherCtors { tcx, set: &mut set }.as_deep_visitor());
+    tcx.hir().deep_visit_all_item_likes(&mut GatherCtors { tcx, set: &mut set });
 
     set
 }
@@ -427,6 +428,7 @@ fn run_post_borrowck_cleanup_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tc
         // `AddRetag` needs to run after `ElaborateDrops`. Otherwise it should run fairly late,
         // but before optimizations begin.
         &deref_separator::Derefer,
+        &elaborate_box_derefs::ElaborateBoxDerefs,
         &add_retag::AddRetag,
         &lower_intrinsics::LowerIntrinsics,
         &simplify::SimplifyCfg::new("elaborate-drops"),
@@ -483,17 +485,18 @@ fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
             &const_prop::ConstProp,
             //
             // Const-prop runs unconditionally, but doesn't mutate the MIR at mir-opt-level=0.
+            &const_debuginfo::ConstDebugInfo,
             &o1(simplify_branches::SimplifyConstCondition::new("after-const-prop")),
             &early_otherwise_branch::EarlyOtherwiseBranch,
             &simplify_comparison_integral::SimplifyComparisonIntegral,
             &simplify_try::SimplifyArmIdentity,
             &simplify_try::SimplifyBranchSame,
+            &dead_store_elimination::DeadStoreElimination,
             &dest_prop::DestinationPropagation,
             &o1(simplify_branches::SimplifyConstCondition::new("final")),
             &o1(remove_noop_landing_pads::RemoveNoopLandingPads),
             &o1(simplify::SimplifyCfg::new("final")),
             &nrvo::RenameReturnPlace,
-            &const_debuginfo::ConstDebugInfo,
             &simplify::SimplifyLocals,
             &multiple_return_terminators::MultipleReturnTerminators,
             &deduplicate_blocks::DeduplicateBlocks,
@@ -530,8 +533,10 @@ fn inner_optimized_mir(tcx: TyCtxt<'_>, did: LocalDefId) -> Body<'_> {
         None => {}
         Some(other) => panic!("do not use `optimized_mir` for constants: {:?}", other),
     }
+    debug!("about to call mir_drops_elaborated...");
     let mut body =
         tcx.mir_drops_elaborated_and_const_checked(ty::WithOptConstParam::unknown(did)).steal();
+    debug!("body: {:#?}", body);
     run_optimization_passes(tcx, &mut body);
 
     debug_assert!(!body.has_free_regions(), "Free regions in optimized MIR");
