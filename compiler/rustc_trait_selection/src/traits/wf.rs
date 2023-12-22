@@ -574,7 +574,7 @@ impl<'a, 'tcx> WfPredicates<'a, 'tcx> {
                     // generators don't take arguments.
                 }
 
-                ty::Closure(_, substs) => {
+                ty::Closure(did, substs) => {
                     // Only check the upvar types for WF, not the rest
                     // of the types within. This is needed because we
                     // capture the signature and it may not be WF
@@ -613,10 +613,8 @@ impl<'a, 'tcx> WfPredicates<'a, 'tcx> {
                     // can cause compiler crashes when the user abuses unsafe
                     // code to procure such a closure.
                     // See src/test/ui/type-alias-impl-trait/wf_check_closures.rs
-                    // We should be checking the nominal_obligations here, but that caused
-                    // a regression in https://github.com/rust-lang/rust/issues/97607
-                    // The regression will be fixed on nightly, but the fix is too large
-                    // to be backported.
+                    let obligations = self.nominal_obligations(did, substs);
+                    self.out.extend(obligations);
                 }
 
                 ty::FnPtr(_) => {

@@ -14,15 +14,10 @@ fn main() {
   three_args(1, X {}); //~ ERROR this function takes
 
   // Missing and Extra
-  three_args(1, "", X {});
-  //~^ ERROR mismatched types
-  //~| ERROR mismatched types
+  three_args(1, "", X {}); //~ ERROR arguments to this function are incorrect
 
   // Swapped and Invalid
-  three_args("", X {}, 1);
-  //~^ ERROR mismatched types
-  //~| ERROR mismatched types
-  //~| ERROR mismatched types
+  three_args("", X {}, 1); //~ ERROR arguments to this function are incorrect
 
   // Swapped and missing
   three_args("", 1); //~ ERROR this function takes

@@ -1,9 +1,6 @@
 #![feature(type_alias_impl_trait)]
 #![allow(dead_code)]
 
-// check-pass
-// known-bug #53092 #90409
-
 type Bug<T, U> = impl Fn(T) -> U + Copy;
 
 union Moo {
@@ -14,7 +11,7 @@ union Moo {
 const CONST_BUG: Bug<u8, ()> = unsafe { Moo { y: () }.x };
 
 fn make_bug<T, U: From<T>>() -> Bug<T, U> {
-    |x| x.into()
+    |x| x.into() //~ ERROR the trait bound `U: From<T>` is not satisfied
 }
 
 fn main() {
