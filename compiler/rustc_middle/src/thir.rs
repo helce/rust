@@ -27,10 +27,10 @@ use rustc_span::{Span, Symbol, DUMMY_SP};
 use rustc_target::abi::VariantIdx;
 use rustc_target::asm::InlineAsmRegOrRegClass;
 
+use rustc_span::def_id::LocalDefId;
 use std::fmt;
 use std::ops::Index;
 
-pub mod abstract_const;
 pub mod visit;
 
 newtype_index! {
@@ -182,27 +182,16 @@ pub enum StmtKind<'tcx> {
         /// `let pat: ty = <INIT>`
         initializer: Option<ExprId>,
 
+        /// `let pat: ty = <INIT> else { <ELSE> }
+        else_block: Option<Block>,
+
         /// The lint level for this `let` statement.
         lint_level: LintLevel,
     },
 }
 
-// `Expr` is used a lot. Make sure it doesn't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-rustc_data_structures::static_assert_size!(Expr<'_>, 104);
-
-#[derive(
-    Clone,
-    Debug,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    HashStable,
-    TyEncodable,
-    TyDecodable,
-    TypeFoldable
-)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Hash, HashStable, TyEncodable, TyDecodable)]
+#[derive(TypeFoldable, TypeVisitable)]
 pub struct LocalVarId(pub hir::HirId);
 
 /// A THIR expression.
@@ -413,7 +402,7 @@ pub enum ExprKind<'tcx> {
     },
     /// A closure definition.
     Closure {
-        closure_id: DefId,
+        closure_id: LocalDefId,
         substs: UpvarSubsts<'tcx>,
         upvars: Box<[ExprId]>,
         movability: Option<hir::Movability>,
@@ -427,6 +416,10 @@ pub enum ExprKind<'tcx> {
     /// For literals that don't correspond to anything in the HIR
     NonHirLiteral {
         lit: ty::ScalarInt,
+        user_ty: Option<Canonical<'tcx, UserType<'tcx>>>,
+    },
+    /// A literal of a ZST type.
+    ZstLiteral {
         user_ty: Option<Canonical<'tcx, UserType<'tcx>>>,
     },
     /// Associated constants and named constants
@@ -462,12 +455,6 @@ pub enum ExprKind<'tcx> {
     Yield {
         value: ExprId,
     },
-}
-
-impl<'tcx> ExprKind<'tcx> {
-    pub fn zero_sized_literal(user_ty: Option<Canonical<'tcx, UserType<'tcx>>>) -> Self {
-        ExprKind::NonHirLiteral { lit: ty::ScalarInt::ZST, user_ty }
-    }
 }
 
 /// Represents the association of a field identifier and an expression.
@@ -820,4 +807,15 @@ impl<'tcx> fmt::Display for Pat<'tcx> {
             }
         }
     }
+}
+
+// Some nodes are used a lot. Make sure they don't unintentionally get bigger.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+mod size_asserts {
+    use super::*;
+    // These are in alphabetical order, which is easy to maintain.
+    rustc_data_structures::static_assert_size!(Block, 56);
+    rustc_data_structures::static_assert_size!(Expr<'_>, 104);
+    rustc_data_structures::static_assert_size!(Pat<'_>, 24);
+    rustc_data_structures::static_assert_size!(Stmt<'_>, 120);
 }

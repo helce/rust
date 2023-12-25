@@ -5,6 +5,7 @@
 //! This API is completely unstable and subject to change.
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![feature(hash_raw_entry)]
 #![feature(let_chains)]
 #![feature(let_else)]
 #![feature(extern_types)]
@@ -323,8 +324,8 @@ impl CodegenBackend for LlvmCodegenBackend {
         llvm_util::print_version();
     }
 
-    fn target_features(&self, sess: &Session) -> Vec<Symbol> {
-        target_features(sess)
+    fn target_features(&self, sess: &Session, allow_unstable: bool) -> Vec<Symbol> {
+        target_features(sess, allow_unstable)
     }
 
     fn codegen_crate<'tcx>(
@@ -354,7 +355,7 @@ impl CodegenBackend for LlvmCodegenBackend {
             .join(sess);
 
         sess.time("llvm_dump_timing_file", || {
-            if sess.opts.debugging_opts.llvm_time_trace {
+            if sess.opts.unstable_opts.llvm_time_trace {
                 let file_name = outputs.with_extension("llvm_timings.json");
                 llvm_util::time_trace_profiler_finish(&file_name);
             }
@@ -369,12 +370,12 @@ impl CodegenBackend for LlvmCodegenBackend {
         codegen_results: CodegenResults,
         outputs: &OutputFilenames,
     ) -> Result<(), ErrorGuaranteed> {
-        use crate::back::archive::LlvmArchiveBuilder;
+        use crate::back::archive::LlvmArchiveBuilderBuilder;
         use rustc_codegen_ssa::back::link::link_binary;
 
         // Run the linker on any artifacts that resulted from the LLVM run.
         // This should produce either a finished executable or library.
-        link_binary::<LlvmArchiveBuilder<'_>>(sess, &codegen_results, outputs)
+        link_binary(sess, &LlvmArchiveBuilderBuilder, &codegen_results, outputs)
     }
 }
 

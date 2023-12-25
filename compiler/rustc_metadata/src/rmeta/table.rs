@@ -4,8 +4,8 @@ use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_hir::def::{CtorKind, CtorOf};
 use rustc_index::vec::Idx;
 use rustc_middle::ty::ParameterizedOverTcx;
-use rustc_serialize::opaque::MemEncoder;
-use rustc_serialize::Encoder;
+use rustc_serialize::opaque::FileEncoder;
+use rustc_serialize::Encoder as _;
 use rustc_span::hygiene::MacroKind;
 use std::convert::TryInto;
 use std::marker::PhantomData;
@@ -141,7 +141,7 @@ fixed_size_enum! {
     }
 }
 
-// We directly encode `DefPathHash` because a `Lazy` would encur a 25% cost.
+// We directly encode `DefPathHash` because a `LazyValue` would incur a 25% cost.
 impl FixedSizeEncoding for Option<DefPathHash> {
     type ByteArray = [u8; 16];
 
@@ -159,7 +159,7 @@ impl FixedSizeEncoding for Option<DefPathHash> {
     }
 }
 
-// We directly encode RawDefId because using a `Lazy` would incur a 50% overhead in the worst case.
+// We directly encode RawDefId because using a `LazyValue` would incur a 50% overhead in the worst case.
 impl FixedSizeEncoding for Option<RawDefId> {
     type ByteArray = [u8; 8];
 
@@ -281,7 +281,7 @@ where
         Some(value).write_to_bytes(&mut self.blocks[i]);
     }
 
-    pub(crate) fn encode<const N: usize>(&self, buf: &mut MemEncoder) -> LazyTable<I, T>
+    pub(crate) fn encode<const N: usize>(&self, buf: &mut FileEncoder) -> LazyTable<I, T>
     where
         Option<T>: FixedSizeEncoding<ByteArray = [u8; N]>,
     {

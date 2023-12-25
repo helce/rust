@@ -11,7 +11,7 @@ use rustc_infer::infer;
 use rustc_infer::infer::outlives::env::OutlivesEnvironment;
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_middle::ty::adjustment::CoerceUnsizedInfo;
-use rustc_middle::ty::{self, suggest_constraining_type_params, Ty, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{self, suggest_constraining_type_params, Ty, TyCtxt, TypeVisitable};
 use rustc_trait_selection::traits::error_reporting::InferCtxtExt;
 use rustc_trait_selection::traits::misc::{can_type_implement_copy, CopyImplementationError};
 use rustc_trait_selection::traits::predicate_for_trait_def;
@@ -94,14 +94,6 @@ fn visit_implementation_of_copy(tcx: TyCtxt<'_>, impl_did: LocalDefId) {
 
             // We'll try to suggest constraining type parameters to fulfill the requirements of
             // their `Copy` implementation.
-            let mut generics = None;
-            if let ty::Adt(def, _substs) = self_type.kind() {
-                let self_def_id = def.did();
-                if let Some(local) = self_def_id.as_local() {
-                    let self_item = tcx.hir().expect_item(local);
-                    generics = self_item.kind.generics();
-                }
-            }
             let mut errors: BTreeMap<_, Vec<_>> = Default::default();
             let mut bounds = vec![];
 
@@ -116,8 +108,8 @@ fn visit_implementation_of_copy(tcx: TyCtxt<'_>, impl_did: LocalDefId) {
                 // why this field does not implement Copy. This is useful because sometimes
                 // it is not immediately clear why Copy is not implemented for a field, since
                 // all we point at is the field itself.
-                tcx.infer_ctxt().enter(|infcx| {
-                    let mut fulfill_cx = traits::FulfillmentContext::new_ignoring_regions();
+                tcx.infer_ctxt().ignoring_regions().enter(|infcx| {
+                    let mut fulfill_cx = <dyn TraitEngine<'_>>::new(tcx);
                     fulfill_cx.register_bound(
                         &infcx,
                         param_env,
@@ -163,16 +155,14 @@ fn visit_implementation_of_copy(tcx: TyCtxt<'_>, impl_did: LocalDefId) {
                     &format!("the `Copy` impl for `{}` requires that `{}`", ty, error_predicate),
                 );
             }
-            if let Some(generics) = generics {
-                suggest_constraining_type_params(
-                    tcx,
-                    generics,
-                    &mut err,
-                    bounds.iter().map(|(param, constraint, def_id)| {
-                        (param.as_str(), constraint.as_str(), *def_id)
-                    }),
-                );
-            }
+            suggest_constraining_type_params(
+                tcx,
+                tcx.hir().get_generics(impl_did).expect("impls always have generics"),
+                &mut err,
+                bounds.iter().map(|(param, constraint, def_id)| {
+                    (param.as_str(), constraint.as_str(), *def_id)
+                }),
+            );
             err.emit();
         }
         Err(CopyImplementationError::NotAnAdt) => {
@@ -349,7 +339,7 @@ fn visit_implementation_of_dispatch_from_dyn<'tcx>(tcx: TyCtxt<'tcx>, impl_did: 
 
                     // Finally, resolve all regions.
                     let outlives_env = OutlivesEnvironment::new(param_env);
-                    infcx.resolve_regions_and_report_errors(impl_did.to_def_id(), &outlives_env);
+                    infcx.check_region_obligations_and_report_errors(impl_did, &outlives_env);
                 }
             }
             _ => {
@@ -606,7 +596,7 @@ pub fn coerce_unsized_info<'tcx>(tcx: TyCtxt<'tcx>, impl_did: DefId) -> CoerceUn
 
         // Finally, resolve all regions.
         let outlives_env = OutlivesEnvironment::new(param_env);
-        infcx.resolve_regions_and_report_errors(impl_did.to_def_id(), &outlives_env);
+        infcx.check_region_obligations_and_report_errors(impl_did, &outlives_env);
 
         CoerceUnsizedInfo { custom_kind: kind }
     })

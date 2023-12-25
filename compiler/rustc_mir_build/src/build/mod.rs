@@ -20,7 +20,7 @@ use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::mir::*;
 use rustc_middle::thir::{BindingMode, Expr, ExprId, LintLevel, LocalVarId, PatKind, Thir};
 use rustc_middle::ty::subst::Subst;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable, TypeckResults};
+use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitable, TypeckResults};
 use rustc_span::symbol::sym;
 use rustc_span::Span;
 use rustc_span::Symbol;
@@ -68,9 +68,10 @@ fn mir_build(tcx: TyCtxt<'_>, def: ty::WithOptConstParam<LocalDefId>) -> Body<'_
 
     // Figure out what primary body this item has.
     let (body_id, return_ty_span, span_with_body) = match tcx.hir().get(id) {
-        Node::Expr(hir::Expr { kind: hir::ExprKind::Closure { fn_decl, body, .. }, .. }) => {
-            (*body, fn_decl.output.span(), None)
-        }
+        Node::Expr(hir::Expr {
+            kind: hir::ExprKind::Closure(hir::Closure { fn_decl, body, .. }),
+            ..
+        }) => (*body, fn_decl.output.span(), None),
         Node::Item(hir::Item {
             kind: hir::ItemKind::Fn(hir::FnSig { decl, .. }, _, body_id),
             span,
@@ -162,7 +163,11 @@ fn mir_build(tcx: TyCtxt<'_>, def: ty::WithOptConstParam<LocalDefId>) -> Body<'_
                 let opt_ty_info;
                 let self_arg;
                 if let Some(ref fn_decl) = tcx.hir().fn_decl_by_hir_id(owner_id) {
-                    opt_ty_info = fn_decl.inputs.get(index).map(|ty| ty.span);
+                    opt_ty_info = fn_decl
+                        .inputs
+                        .get(index)
+                        // Make sure that inferred closure args have no type span
+                        .and_then(|ty| if arg.pat.span != ty.span { Some(ty.span) } else { None });
                     self_arg = if index == 0 && fn_decl.implicit_self.has_implicit_self() {
                         match fn_decl.implicit_self {
                             hir::ImplicitSelfKind::Imm => Some(ImplicitSelfKind::Imm),
@@ -667,7 +672,7 @@ where
                 Some(builder.in_scope(arg_scope_s, LintLevel::Inherited, |builder| {
                     builder.args_and_body(
                         START_BLOCK,
-                        fn_def.did.to_def_id(),
+                        fn_def.did,
                         &arguments,
                         arg_scope,
                         &thir[expr],
@@ -890,7 +895,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     fn args_and_body(
         &mut self,
         mut block: BasicBlock,
-        fn_def_id: DefId,
+        fn_def_id: LocalDefId,
         arguments: &[ArgInfo<'tcx>],
         argument_scope: region::Scope,
         expr: &Expr<'tcx>,
@@ -993,7 +998,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 continue;
             };
             let pat = match tcx.hir().get(arg.pat.hir_id) {
-                Node::Pat(pat) | Node::Binding(pat) => pat,
+                Node::Pat(pat) => pat,
                 node => bug!("pattern became {:?}", node),
             };
             let pattern = pat_from_hir(tcx, self.param_env, self.typeck_results, pat);

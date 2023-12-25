@@ -36,6 +36,7 @@ test = false
 
 [dependencies]
 cmake = "0.1.38"
+fd-lock = "3.0.6"
 filetime = "0.2"
 num_cpus = "1.0"
 getopts = "0.2.19"
@@ -74,3 +75,11 @@ pretty_assertions = "0.7"
 
 [features]
 build-metrics = ["sysinfo"]
+
+# We care a lot about bootstrap's compile times, so don't include debuginfo for
+# dependencies, only bootstrap itself.
+[profile.dev]
+debug = 0
+[profile.dev.package]
+# Only use debuginfo=1 to further reduce compile times.
+bootstrap.debug = 1

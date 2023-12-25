@@ -10,10 +10,10 @@
 #![feature(box_patterns)]
 #![feature(drain_filter)]
 #![feature(if_let_guard)]
+#![feature(iter_intersperse)]
 #![feature(let_chains)]
 #![feature(let_else)]
 #![feature(never_type)]
-#![cfg_attr(bootstrap, feature(nll))]
 #![recursion_limit = "256"]
 #![allow(rustdoc::private_intra_doc_links)]
 #![allow(rustc::potential_query_instability)]
@@ -62,7 +62,7 @@ use tracing::debug;
 
 use diagnostics::{ImportSuggestion, LabelSuggestion, Suggestion};
 use imports::{Import, ImportKind, ImportResolver, NameResolution};
-use late::{HasGenericParams, PathSource};
+use late::{HasGenericParams, PathSource, PatternSource};
 use macros::{MacroRulesBinding, MacroRulesScope, MacroRulesScopeRef};
 
 use crate::access_levels::AccessLevelsVisitor;
@@ -231,11 +231,11 @@ enum ResolutionError<'a> {
     ),
     /// Error E0530: `X` bindings cannot shadow `Y`s.
     BindingShadowsSomethingUnacceptable {
-        shadowing_binding_descr: &'static str,
+        shadowing_binding: PatternSource,
         name: Symbol,
         participle: &'static str,
         article: &'static str,
-        shadowed_binding_descr: &'static str,
+        shadowed_binding: Res,
         shadowed_binding_span: Span,
     },
     /// Error E0128: generic parameters with a default cannot use forward-declared identifiers.
@@ -437,7 +437,7 @@ enum ModuleKind {
     ///     f(); // Resolves to (1)
     /// }
     /// ```
-    Block(NodeId),
+    Block,
     /// Any module with a name.
     ///
     /// This could be:
@@ -454,7 +454,7 @@ impl ModuleKind {
     /// Get name of the module.
     pub fn name(&self) -> Option<Symbol> {
         match self {
-            ModuleKind::Block(..) => None,
+            ModuleKind::Block => None,
             ModuleKind::Def(.., name) => Some(*name),
         }
     }
@@ -530,7 +530,7 @@ impl<'a> ModuleData<'a> {
     ) -> Self {
         let is_foreign = match kind {
             ModuleKind::Def(_, def_id, _) => !def_id.is_local(),
-            ModuleKind::Block(_) => false,
+            ModuleKind::Block => false,
         };
         ModuleData {
             parent,
@@ -913,6 +913,11 @@ pub struct Resolver<'a> {
     label_res_map: NodeMap<NodeId>,
     /// Resolutions for lifetimes.
     lifetimes_res_map: NodeMap<LifetimeRes>,
+    /// Mapping from generics `def_id`s to TAIT generics `def_id`s.
+    /// For each captured lifetime (e.g., 'a), we create a new lifetime parameter that is a generic
+    /// defined on the TAIT, so we have type Foo<'a1> = ... and we establish a mapping in this
+    /// field from the original parameter 'a to the new parameter 'a1.
+    generics_def_id_map: Vec<FxHashMap<LocalDefId, LocalDefId>>,
     /// Lifetime parameters that lowering will have to introduce.
     extra_lifetime_params_map: NodeMap<Vec<(Ident, NodeId, LifetimeRes)>>,
 
@@ -1277,6 +1282,7 @@ impl<'a> Resolver<'a> {
             import_res_map: Default::default(),
             label_res_map: Default::default(),
             lifetimes_res_map: Default::default(),
+            generics_def_id_map: Vec::new(),
             extra_lifetime_params_map: Default::default(),
             extern_crate_map: Default::default(),
             reexport_map: FxHashMap::default(),
@@ -1444,6 +1450,7 @@ impl<'a> Resolver<'a> {
             import_res_map: self.import_res_map,
             label_res_map: self.label_res_map,
             lifetimes_res_map: self.lifetimes_res_map,
+            generics_def_id_map: self.generics_def_id_map,
             extra_lifetime_params_map: self.extra_lifetime_params_map,
             next_node_id: self.next_node_id,
             node_id_to_def_id: self.node_id_to_def_id,
@@ -1488,6 +1495,7 @@ impl<'a> Resolver<'a> {
             import_res_map: self.import_res_map.clone(),
             label_res_map: self.label_res_map.clone(),
             lifetimes_res_map: self.lifetimes_res_map.clone(),
+            generics_def_id_map: self.generics_def_id_map.clone(),
             extra_lifetime_params_map: self.extra_lifetime_params_map.clone(),
             next_node_id: self.next_node_id.clone(),
             node_id_to_def_id: self.node_id_to_def_id.clone(),

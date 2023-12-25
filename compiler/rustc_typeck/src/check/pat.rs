@@ -13,7 +13,7 @@ use rustc_hir::{HirId, Pat, PatKind};
 use rustc_infer::infer;
 use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_middle::middle::stability::EvalResult;
-use rustc_middle::ty::{self, Adt, BindingMode, Ty, TypeFoldable};
+use rustc_middle::ty::{self, Adt, BindingMode, Ty, TypeVisitable};
 use rustc_session::lint::builtin::NON_EXHAUSTIVE_OMITTED_PATTERNS;
 use rustc_span::hygiene::DesugaringKind;
 use rustc_span::lev_distance::find_best_match_for_name;
@@ -72,22 +72,6 @@ struct TopInfo<'tcx> {
     ///              found type `std::result::Result<_, _>`
     /// ```
     span: Option<Span>,
-    /// This refers to the parent pattern. Used to provide extra diagnostic information on errors.
-    /// ```text
-    /// error[E0308]: mismatched types
-    ///   --> $DIR/const-in-struct-pat.rs:8:17
-    ///   |
-    /// L | struct f;
-    ///   | --------- unit struct defined here
-    /// ...
-    /// L |     let Thing { f } = t;
-    ///   |                 ^
-    ///   |                 |
-    ///   |                 expected struct `std::string::String`, found struct `f`
-    ///   |                 `f` is interpreted as a unit struct, not a new binding
-    ///   |                 help: bind the struct field to a different name instead: `f: other_f`
-    /// ```
-    parent_pat: Option<&'tcx Pat<'tcx>>,
 }
 
 impl<'tcx> FnCtxt<'_, 'tcx> {
@@ -147,7 +131,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         span: Option<Span>,
         origin_expr: bool,
     ) {
-        let info = TopInfo { expected, origin_expr, span, parent_pat: None };
+        let info = TopInfo { expected, origin_expr, span };
         self.check_pat(pat, expected, INITIAL_BM, info);
     }
 
@@ -183,14 +167,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             PatKind::TupleStruct(ref qpath, subpats, ddpos) => {
                 self.check_pat_tuple_struct(pat, qpath, subpats, ddpos, expected, def_bm, ti)
             }
-            PatKind::Path(_) => self.check_pat_path(pat, path_res.unwrap(), expected, ti),
+            PatKind::Path(ref qpath) => {
+                self.check_pat_path(pat, qpath, path_res.unwrap(), expected, ti)
+            }
             PatKind::Struct(ref qpath, fields, has_rest_pat) => {
                 self.check_pat_struct(pat, qpath, fields, has_rest_pat, expected, def_bm, ti)
             }
             PatKind::Or(pats) => {
-                let parent_pat = Some(pat);
                 for pat in pats {
-                    self.check_pat(pat, expected, def_bm, TopInfo { parent_pat, ..ti });
+                    self.check_pat(pat, expected, def_bm, ti);
                 }
                 expected
             }
@@ -619,7 +604,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
 
         if let Some(p) = sub {
-            self.check_pat(p, expected, def_bm, TopInfo { parent_pat: Some(pat), ..ti });
+            self.check_pat(p, expected, def_bm, ti);
         }
 
         local_ty
@@ -663,6 +648,46 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 ast::Mutability::Not => "",
             };
 
+            let mut_var_suggestion = 'block: {
+                if !matches!(mutbl, ast::Mutability::Mut) {
+                    break 'block None;
+                }
+
+                let ident_kind = match binding_parent {
+                    hir::Node::Param(_) => "parameter",
+                    hir::Node::Local(_) => "variable",
+                    hir::Node::Arm(_) => "binding",
+
+                    // Provide diagnostics only if the parent pattern is struct-like,
+                    // i.e. where `mut binding` makes sense
+                    hir::Node::Pat(Pat { kind, .. }) => match kind {
+                        PatKind::Struct(..)
+                        | PatKind::TupleStruct(..)
+                        | PatKind::Or(..)
+                        | PatKind::Tuple(..)
+                        | PatKind::Slice(..) => "binding",
+
+                        PatKind::Wild
+                        | PatKind::Binding(..)
+                        | PatKind::Path(..)
+                        | PatKind::Box(..)
+                        | PatKind::Ref(..)
+                        | PatKind::Lit(..)
+                        | PatKind::Range(..) => break 'block None,
+                    },
+
+                    // Don't provide suggestions in other cases
+                    _ => break 'block None,
+                };
+
+                Some((
+                    pat.span,
+                    format!("to declare a mutable {ident_kind} use"),
+                    format!("mut {binding}"),
+                ))
+
+            };
+
             match binding_parent {
                 // Check that there is explicit type (ie this is not a closure param with inferred type)
                 // so we don't suggest moving something to the type that does not exist
@@ -675,6 +700,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         ],
                         Applicability::MachineApplicable
                     );
+
+                    if let Some((sp, msg, sugg)) = mut_var_suggestion {
+                        err.span_note(sp, format!("{msg}: `{sugg}`"));
+                    }
                 }
                 hir::Node::Param(_) | hir::Node::Arm(_) | hir::Node::Pat(_) => {
                     // rely on match ergonomics or it might be nested `&&pat`
@@ -684,6 +713,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         "",
                         Applicability::MaybeIncorrect,
                     );
+
+                    if let Some((sp, msg, sugg)) = mut_var_suggestion {
+                        err.span_note(sp, format!("{msg}: `{sugg}`"));
+                    }
+                }
+                _ if let Some((sp, msg, sugg)) = mut_var_suggestion => {
+                    err.span_suggestion(sp, msg, sugg, Applicability::MachineApplicable);
                 }
                 _ => {} // don't provide suggestions in other cases #55175
             }
@@ -729,7 +765,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let Some((variant, pat_ty)) = self.check_struct_path(qpath, pat.hir_id) else {
             let err = self.tcx.ty_error();
             for field in fields {
-                let ti = TopInfo { parent_pat: Some(pat), ..ti };
+                let ti = ti;
                 self.check_pat(field.pat, err, def_bm, ti);
             }
             return err;
@@ -746,10 +782,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
     }
 
-    fn check_pat_path<'b>(
+    fn check_pat_path(
         &self,
-        pat: &Pat<'_>,
-        path_resolution: (Res, Option<Ty<'tcx>>, &'b [hir::PathSegment<'b>]),
+        pat: &Pat<'tcx>,
+        qpath: &hir::QPath<'_>,
+        path_resolution: (Res, Option<Ty<'tcx>>, &'tcx [hir::PathSegment<'tcx>]),
         expected: Ty<'tcx>,
         ti: TopInfo<'tcx>,
     ) -> Ty<'tcx> {
@@ -763,7 +800,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 return tcx.ty_error();
             }
             Res::Def(DefKind::AssocFn | DefKind::Ctor(_, CtorKind::Fictive | CtorKind::Fn), _) => {
-                report_unexpected_variant_res(tcx, res, pat.span);
+                report_unexpected_variant_res(tcx, res, qpath, pat.span);
                 return tcx.ty_error();
             }
             Res::SelfCtor(..)
@@ -783,7 +820,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if let Some(err) =
             self.demand_suptype_with_origin(&self.pattern_cause(ti, pat.span), expected, pat_ty)
         {
-            self.emit_bad_pat_path(err, pat.span, res, pat_res, pat_ty, segments, ti.parent_pat);
+            self.emit_bad_pat_path(err, pat, res, pat_res, pat_ty, segments);
         }
         pat_ty
     }
@@ -822,16 +859,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         false
     }
 
-    fn emit_bad_pat_path<'b>(
+    fn emit_bad_pat_path(
         &self,
         mut e: DiagnosticBuilder<'_, ErrorGuaranteed>,
-        pat_span: Span,
+        pat: &hir::Pat<'tcx>,
         res: Res,
         pat_res: Res,
         pat_ty: Ty<'tcx>,
-        segments: &'b [hir::PathSegment<'b>],
-        parent_pat: Option<&Pat<'_>>,
+        segments: &'tcx [hir::PathSegment<'tcx>],
     ) {
+        let pat_span = pat.span;
         if let Some(span) = self.tcx.hir().res_span(pat_res) {
             e.span_label(span, &format!("{} defined here", res.descr()));
             if let [hir::PathSegment { ident, .. }] = &*segments {
@@ -844,8 +881,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         res.descr(),
                     ),
                 );
-                match parent_pat {
-                    Some(Pat { kind: hir::PatKind::Struct(..), .. }) => {
+                match self.tcx.hir().get(self.tcx.hir().get_parent_node(pat.hir_id)) {
+                    hir::Node::Pat(Pat { kind: hir::PatKind::Struct(..), .. }) => {
                         e.span_suggestion_verbose(
                             ident.span.shrink_to_hi(),
                             "bind the struct field to a different name instead",
@@ -906,9 +943,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     ) -> Ty<'tcx> {
         let tcx = self.tcx;
         let on_error = || {
-            let parent_pat = Some(pat);
             for pat in subpats {
-                self.check_pat(pat, tcx.ty_error(), def_bm, TopInfo { parent_pat, ..ti });
+                self.check_pat(pat, tcx.ty_error(), def_bm, ti);
             }
         };
         let report_unexpected_res = |res: Res| {
@@ -992,7 +1028,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             };
             for (i, subpat) in subpats.iter().enumerate_and_adjust(variant.fields.len(), ddpos) {
                 let field_ty = self.field_ty(subpat.span, &variant.fields[i], substs);
-                self.check_pat(subpat, field_ty, def_bm, TopInfo { parent_pat: Some(pat), ..ti });
+                self.check_pat(subpat, field_ty, def_bm, ti);
 
                 self.tcx.check_stability(
                     variant.fields[i].did,
@@ -1270,7 +1306,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
             };
 
-            self.check_pat(field.pat, field_ty, def_bm, TopInfo { parent_pat: Some(pat), ..ti });
+            self.check_pat(field.pat, field_ty, def_bm, ti);
         }
 
         let mut unmentioned_fields = variant
@@ -1882,7 +1918,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let err = tcx.ty_error();
             (err, err)
         };
-        self.check_pat(inner, inner_ty, def_bm, TopInfo { parent_pat: Some(pat), ..ti });
+        self.check_pat(inner, inner_ty, def_bm, ti);
         rptr_ty
     }
 

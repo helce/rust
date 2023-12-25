@@ -12,7 +12,7 @@ use rustc_infer::traits::TraitEngine;
 use rustc_infer::traits::{Obligation, SelectionError, TraitObligation};
 use rustc_lint_defs::builtin::DEREF_INTO_DYN_SUPERTRAIT;
 use rustc_middle::ty::print::with_no_trimmed_paths;
-use rustc_middle::ty::{self, ToPredicate, Ty, TypeFoldable};
+use rustc_middle::ty::{self, ToPredicate, Ty, TypeVisitable};
 use rustc_target::spec::abi::Abi;
 
 use crate::traits;
@@ -108,7 +108,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                             IntercrateAmbiguityCause::DownstreamCrate { trait_desc, self_desc }
                         };
                         debug!(?cause, "evaluate_stack: pushing cause");
-                        self.intercrate_ambiguity_causes.as_mut().unwrap().push(cause);
+                        self.intercrate_ambiguity_causes.as_mut().unwrap().insert(cause);
                     }
                 }
             }
@@ -305,6 +305,10 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 self.assemble_candidates_for_unsizing(obligation, &mut candidates);
             } else if lang_items.destruct_trait() == Some(def_id) {
                 self.assemble_const_destruct_candidates(obligation, &mut candidates);
+            } else if lang_items.transmute_trait() == Some(def_id) {
+                // User-defined transmutability impls are permitted.
+                self.assemble_candidates_from_impls(obligation, &mut candidates);
+                self.assemble_candidates_for_transmutability(obligation, &mut candidates);
             } else {
                 if lang_items.clone_trait() == Some(def_id) {
                     // Same builtin conditions as `Copy`, i.e., every type which has builtin support
@@ -871,6 +875,24 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
             _ => {}
         };
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, obligation, candidates))]
+    fn assemble_candidates_for_transmutability(
+        &mut self,
+        obligation: &TraitObligation<'tcx>,
+        candidates: &mut SelectionCandidateSet<'tcx>,
+    ) {
+        if obligation.has_param_types_or_consts() {
+            return;
+        }
+
+        if obligation.has_infer_types_or_consts() {
+            candidates.ambiguous = true;
+            return;
+        }
+
+        candidates.vec.push(TransmutabilityCandidate);
     }
 
     #[tracing::instrument(level = "debug", skip(self, obligation, candidates))]

@@ -6,7 +6,7 @@ use rustc_ast::ast::{LitFloatType, LitKind};
 use rustc_ast::LitIntType;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir as hir;
-use rustc_hir::{ArrayLen, ExprKind, FnRetTy, HirId, Lit, PatKind, QPath, StmtKind, TyKind};
+use rustc_hir::{ArrayLen, Closure, ExprKind, FnRetTy, HirId, Lit, PatKind, QPath, StmtKind, TyKind};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::symbol::{Ident, Symbol};
@@ -138,7 +138,7 @@ impl<'tcx> LateLintPass<'tcx> for Author {
 
 fn check_item(cx: &LateContext<'_>, hir_id: HirId) {
     let hir = cx.tcx.hir();
-    if let Some(body_id) = hir.maybe_body_owned_by(hir_id) {
+    if let Some(body_id) = hir.maybe_body_owned_by(hir_id.expect_owner()) {
         check_node(cx, hir_id, |v| {
             v.expr(&v.bind("expr", &hir.body(body_id).value));
         });
@@ -466,13 +466,13 @@ impl<'a, 'tcx> PrintVisitor<'a, 'tcx> {
                 self.expr(scrutinee);
                 self.slice(arms, |arm| self.arm(arm));
             },
-            ExprKind::Closure {
+            ExprKind::Closure(&Closure {
                 capture_clause,
                 fn_decl,
                 body: body_id,
                 movability,
                 ..
-            } => {
+            }) => {
                 let movability = OptionPat::new(movability.map(|m| format!("Movability::{m:?}")));
 
                 let ret_ty = match fn_decl.output {

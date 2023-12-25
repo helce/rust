@@ -134,7 +134,7 @@ const UNWIND_DATA_REG: (i32, i32) = (64, 65);
 // https://github.com/gcc-mirror/gcc/blob/trunk/libgcc/unwind-c.c
 
 cfg_if::cfg_if! {
-    if #[cfg(all(target_arch = "arm", not(target_os = "ios"), not(target_os = "netbsd")))] {
+    if #[cfg(all(target_arch = "arm", not(target_os = "ios"), not(target_os = "watchos"), not(target_os = "netbsd")))] {
         // ARM EHABI personality routine.
         // https://infocenter.arm.com/help/topic/com.arm.doc.ihi0038b/IHI0038B_ehabi.pdf
         //
@@ -309,7 +309,9 @@ unsafe fn find_eh_action(context: *mut uw::_Unwind_Context) -> Result<EHAction, 
     let eh_context = EHContext {
         // The return address points 1 byte past the call instruction,
         // which could be in the next IP range in LSDA range table.
-        ip: if ip_before_instr != 0 { ip } else { ip - 1 },
+        //
+        // `ip = -1` has special meaning, so use wrapping sub to allow for that
+        ip: if ip_before_instr != 0 { ip } else { ip.wrapping_sub(1) },
         func_start: uw::_Unwind_GetRegionStart(context),
         get_text_start: &|| uw::_Unwind_GetTextRelBase(context),
         get_data_start: &|| uw::_Unwind_GetDataRelBase(context),

@@ -10,7 +10,7 @@ use rustc_middle::mir::*;
 use rustc_middle::ty::{self, subst::SubstsRef, AdtDef, Ty};
 use rustc_span::DUMMY_SP;
 use rustc_trait_selection::traits::{
-    self, FulfillmentContext, ImplSource, Obligation, ObligationCause, SelectionContext,
+    self, ImplSource, Obligation, ObligationCause, SelectionContext, TraitEngineExt,
 };
 
 use super::ConstCx;
@@ -96,13 +96,13 @@ impl Qualif for HasMutInterior {
     }
 
     fn in_adt_inherently<'tcx>(
-        cx: &ConstCx<'_, 'tcx>,
+        _cx: &ConstCx<'_, 'tcx>,
         adt: AdtDef<'tcx>,
         _: SubstsRef<'tcx>,
     ) -> bool {
         // Exactly one type, `UnsafeCell`, has the `HasMutInterior` qualif inherently.
         // It arises structurally for all other types.
-        Some(adt.did()) == cx.tcx.lang_items().unsafe_cell_type()
+        adt.is_unsafe_cell()
     }
 }
 
@@ -191,7 +191,7 @@ impl Qualif for NeedsNonConstDrop {
 
             // If we successfully found one, then select all of the predicates
             // implied by our const drop impl.
-            let mut fcx = FulfillmentContext::new();
+            let mut fcx = <dyn TraitEngine<'tcx>>::new(cx.tcx);
             for nested in impl_src.nested_obligations() {
                 fcx.register_predicate_obligation(&infcx, nested);
             }
@@ -259,6 +259,8 @@ where
         Rvalue::Discriminant(place) | Rvalue::Len(place) => {
             in_place::<Q, _>(cx, in_local, place.as_ref())
         }
+
+        Rvalue::CopyForDeref(place) => in_place::<Q, _>(cx, in_local, place.as_ref()),
 
         Rvalue::Use(operand)
         | Rvalue::Repeat(operand, _)

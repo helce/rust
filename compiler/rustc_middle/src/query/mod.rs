@@ -26,6 +26,12 @@ rustc_queries! {
         desc { "get the resolver outputs" }
     }
 
+    query resolver_for_lowering(_: ()) -> &'tcx Steal<ty::ResolverAstLowering> {
+        eval_always
+        no_hash
+        desc { "get the resolver for lowering" }
+    }
+
     /// Return the span for a definition.
     /// Contrary to `def_span` below, this query returns the full absolute span of the definition.
     /// This span is meant for dep-tracking rather than diagnostics. It should not be used outside
@@ -40,7 +46,8 @@ rustc_queries! {
     /// This is because the `hir_crate` query gives you access to all other items.
     /// To avoid this fate, do not call `tcx.hir().krate()`; instead,
     /// prefer wrappers like `tcx.visit_all_items_in_krate()`.
-    query hir_crate(key: ()) -> &'tcx Crate<'tcx> {
+    query hir_crate(key: ()) -> Crate<'tcx> {
+        storage(ArenaCacheSelector<'tcx>)
         eval_always
         desc { "get the crate HIR" }
     }
@@ -344,7 +351,7 @@ rustc_queries! {
     /// Try to build an abstract representation of the given constant.
     query thir_abstract_const(
         key: DefId
-    ) -> Result<Option<&'tcx [thir::abstract_const::Node<'tcx>]>, ErrorGuaranteed> {
+    ) -> Result<Option<&'tcx [ty::abstract_const::Node<'tcx>]>, ErrorGuaranteed> {
         desc {
             |tcx| "building an abstract representation for {}", tcx.def_path_str(key),
         }
@@ -353,7 +360,7 @@ rustc_queries! {
     /// Try to build an abstract representation of the given constant.
     query thir_abstract_const_of_const_arg(
         key: (LocalDefId, DefId)
-    ) -> Result<Option<&'tcx [thir::abstract_const::Node<'tcx>]>, ErrorGuaranteed> {
+    ) -> Result<Option<&'tcx [ty::abstract_const::Node<'tcx>]>, ErrorGuaranteed> {
         desc {
             |tcx|
             "building an abstract representation for the const argument {}",
@@ -406,12 +413,12 @@ rustc_queries! {
     }
 
     query symbols_for_closure_captures(
-        key: (LocalDefId, DefId)
+        key: (LocalDefId, LocalDefId)
     ) -> Vec<rustc_span::Symbol> {
         storage(ArenaCacheSelector<'tcx>)
         desc {
             |tcx| "symbols for captures of closure `{}` in `{}`",
-            tcx.def_path_str(key.1),
+            tcx.def_path_str(key.1.to_def_id()),
             tcx.def_path_str(key.0.to_def_id())
         }
     }
@@ -826,6 +833,10 @@ rustc_queries! {
         desc { |tcx| "checking that impls are well-formed in {}", describe_as_module(key, tcx) }
     }
 
+    query check_mod_type_wf(key: LocalDefId) -> () {
+        desc { |tcx| "checking that types are well-formed in {}", describe_as_module(key, tcx) }
+    }
+
     query collect_mod_item_types(key: LocalDefId) -> () {
         desc { |tcx| "collecting item types in {}", describe_as_module(key, tcx) }
     }
@@ -906,9 +917,10 @@ rustc_queries! {
 
     /// Checks whether all impls in the crate pass the overlap check, returning
     /// which impls fail it. If all impls are correct, the returned slice is empty.
-    query orphan_check_crate(_: ()) -> &'tcx [LocalDefId] {
-        desc {
-            "checking whether the immpl in the this crate follow the orphan rules",
+    query orphan_check_impl(key: LocalDefId) -> Result<(), ErrorGuaranteed> {
+        desc { |tcx|
+            "checking whether impl `{}` follows the orphan rules",
+            tcx.def_path_str(key.to_def_id()),
         }
     }
 
@@ -973,11 +985,9 @@ rustc_queries! {
         desc { "converting type-level constant value to mir constant value"}
     }
 
-    /// Destructure a constant ADT or array into its variant index and its
-    /// field values or return `None` if constant is invalid.
-    ///
-    /// Use infallible `TyCtxt::destructure_const` when you know that constant is valid.
-    query try_destructure_const(key: ty::Const<'tcx>) -> Option<ty::DestructuredConst<'tcx>> {
+    /// Destructures array, ADT or tuple constants into the constants
+    /// of their fields.
+    query destructure_const(key: ty::Const<'tcx>) -> ty::DestructuredConst<'tcx> {
         desc { "destructuring type level constant"}
     }
 
@@ -1134,14 +1144,6 @@ rustc_queries! {
     query impl_parent(def_id: DefId) -> Option<DefId> {
         desc { |tcx| "computing specialization parent impl of `{}`", tcx.def_path_str(def_id) }
         cache_on_disk_if { def_id.is_local() }
-        separate_provide_extern
-    }
-
-    /// Given an `associated_item`, find the trait it belongs to.
-    /// Return `None` if the `DefId` is not an associated item.
-    query trait_of_item(associated_item: DefId) -> Option<DefId> {
-        desc { |tcx| "finding trait defining `{}`", tcx.def_path_str(associated_item) }
-        cache_on_disk_if { associated_item.is_local() }
         separate_provide_extern
     }
 
@@ -1353,9 +1355,13 @@ rustc_queries! {
         desc { "query a crate is `#![profiler_runtime]`" }
         separate_provide_extern
     }
-    query panic_strategy(_: CrateNum) -> PanicStrategy {
+    query has_ffi_unwind_calls(key: LocalDefId) -> bool {
+        desc { |tcx| "check if `{}` contains FFI-unwind calls", tcx.def_path_str(key.to_def_id()) }
+        cache_on_disk_if { true }
+    }
+    query required_panic_strategy(_: CrateNum) -> Option<PanicStrategy> {
         fatal_cycle
-        desc { "query a crate's configured panic strategy" }
+        desc { "query a crate's required panic strategy" }
         separate_provide_extern
     }
     query panic_in_drop_strategy(_: CrateNum) -> PanicStrategy {
@@ -1398,13 +1404,7 @@ rustc_queries! {
         separate_provide_extern
     }
 
-    query check_item_well_formed(key: LocalDefId) -> () {
-        desc { |tcx| "checking that `{}` is well-formed", tcx.def_path_str(key.to_def_id()) }
-    }
-    query check_trait_item_well_formed(key: LocalDefId) -> () {
-        desc { |tcx| "checking that `{}` is well-formed", tcx.def_path_str(key.to_def_id()) }
-    }
-    query check_impl_item_well_formed(key: LocalDefId) -> () {
+    query check_well_formed(key: LocalDefId) -> () {
         desc { |tcx| "checking that `{}` is well-formed", tcx.def_path_str(key.to_def_id()) }
     }
 
@@ -1626,9 +1626,13 @@ rustc_queries! {
         storage(ArenaCacheSelector<'tcx>)
         desc { "calculating the lib features map" }
     }
-    query defined_lib_features(_: CrateNum)
-        -> &'tcx [(Symbol, Option<Symbol>)] {
+    query defined_lib_features(_: CrateNum) -> &'tcx [(Symbol, Option<Symbol>)] {
         desc { "calculating the lib features defined in a crate" }
+        separate_provide_extern
+    }
+    query stability_implications(_: CrateNum) -> FxHashMap<Symbol, Symbol> {
+        storage(ArenaCacheSelector<'tcx>)
+        desc { "calculating the implications between `#[unstable]` features defined in a crate" }
         separate_provide_extern
     }
     /// Whether the function is an intrinsic
@@ -1824,7 +1828,8 @@ rustc_queries! {
         remap_env_constness
     }
 
-    /// Do not call this query directly: invoke `infcx.at().dropck_outlives()` instead.
+    /// Do not call this query directly:
+    /// invoke `DropckOutlives::new(dropped_ty)).fully_perform(typeck.infcx)` instead.
     query dropck_outlives(
         goal: CanonicalTyGoal<'tcx>
     ) -> Result<
@@ -2043,5 +2048,13 @@ rustc_queries! {
         storage(ArenaCacheSelector<'tcx>)
         desc { |tcx| "looking up generator diagnostic data of `{}`", tcx.def_path_str(key) }
         separate_provide_extern
+    }
+
+    query permits_uninit_init(key: TyAndLayout<'tcx>) -> bool {
+        desc { "checking to see if {:?} permits being left uninit", key.ty }
+    }
+
+    query permits_zero_init(key: TyAndLayout<'tcx>) -> bool {
+        desc { "checking to see if {:?} permits being left zeroed", key.ty }
     }
 }

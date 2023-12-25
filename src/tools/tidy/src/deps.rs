@@ -20,6 +20,7 @@ const LICENSES: &[&str] = &[
     "Unlicense OR MIT",
     "0BSD OR MIT OR Apache-2.0", // adler license
     "Zlib OR Apache-2.0 OR MIT", // tinyvec
+    "MIT OR Zlib OR Apache-2.0", // miniz_oxide
 ];
 
 /// These are exceptions to Rust's permissive licensing policy, and
@@ -54,13 +55,18 @@ const EXCEPTIONS_CRANELIFT: &[(&str, &str)] = &[
     ("cranelift-codegen-shared", "Apache-2.0 WITH LLVM-exception"),
     ("cranelift-entity", "Apache-2.0 WITH LLVM-exception"),
     ("cranelift-frontend", "Apache-2.0 WITH LLVM-exception"),
+    ("cranelift-isle", "Apache-2.0 WITH LLVM-exception"),
     ("cranelift-jit", "Apache-2.0 WITH LLVM-exception"),
     ("cranelift-module", "Apache-2.0 WITH LLVM-exception"),
     ("cranelift-native", "Apache-2.0 WITH LLVM-exception"),
     ("cranelift-object", "Apache-2.0 WITH LLVM-exception"),
     ("mach", "BSD-2-Clause"),
-    ("regalloc", "Apache-2.0 WITH LLVM-exception"),
+    ("regalloc2", "Apache-2.0 WITH LLVM-exception"),
     ("target-lexicon", "Apache-2.0 WITH LLVM-exception"),
+];
+
+const EXCEPTIONS_BOOTSTRAP: &[(&str, &str)] = &[
+    ("ryu", "Apache-2.0 OR BSL-1.0"), // through serde
 ];
 
 /// These are the root crates that are part of the runtime. The licenses for
@@ -96,7 +102,6 @@ const PERMITTED_DEPENDENCIES: &[&str] = &[
     "chalk-ir",
     "chalk-solve",
     "chrono",
-    "cmake",
     "compiler_builtins",
     "cpufeatures",
     "crc32fast",
@@ -254,10 +259,12 @@ const PERMITTED_DEPENDENCIES: &[&str] = &[
 ];
 
 const PERMITTED_CRANELIFT_DEPENDENCIES: &[&str] = &[
+    "ahash",
     "anyhow",
     "ar",
     "autocfg",
     "bitflags",
+    "byteorder",
     "cfg-if",
     "cranelift-bforest",
     "cranelift-codegen",
@@ -265,11 +272,14 @@ const PERMITTED_CRANELIFT_DEPENDENCIES: &[&str] = &[
     "cranelift-codegen-shared",
     "cranelift-entity",
     "cranelift-frontend",
+    "cranelift-isle",
     "cranelift-jit",
     "cranelift-module",
     "cranelift-native",
     "cranelift-object",
     "crc32fast",
+    "fxhash",
+    "getrandom",
     "gimli",
     "hashbrown",
     "indexmap",
@@ -280,11 +290,13 @@ const PERMITTED_CRANELIFT_DEPENDENCIES: &[&str] = &[
     "memchr",
     "object",
     "once_cell",
-    "regalloc",
+    "regalloc2",
     "region",
-    "rustc-hash",
+    "slice-group-by",
     "smallvec",
     "target-lexicon",
+    "version_check",
+    "wasi",
     "winapi",
     "winapi-i686-pc-windows-gnu",
     "winapi-x86_64-pc-windows-gnu",
@@ -309,7 +321,13 @@ pub fn check(root: &Path, cargo: &Path, bad: &mut bool) {
     let metadata = t!(cmd.exec());
     let runtime_ids = compute_runtime_crates(&metadata);
     check_exceptions(&metadata, EXCEPTIONS, runtime_ids, bad);
-    check_dependencies(&metadata, PERMITTED_DEPENDENCIES, RESTRICTED_DEPENDENCY_CRATES, bad);
+    check_dependencies(
+        &metadata,
+        "main workspace",
+        PERMITTED_DEPENDENCIES,
+        RESTRICTED_DEPENDENCY_CRATES,
+        bad,
+    );
     check_crate_duplicate(&metadata, FORBIDDEN_TO_HAVE_DUPLICATES, bad);
     check_rustfix(&metadata, bad);
 
@@ -323,11 +341,20 @@ pub fn check(root: &Path, cargo: &Path, bad: &mut bool) {
     check_exceptions(&metadata, EXCEPTIONS_CRANELIFT, runtime_ids, bad);
     check_dependencies(
         &metadata,
+        "cranelift",
         PERMITTED_CRANELIFT_DEPENDENCIES,
         &["rustc_codegen_cranelift"],
         bad,
     );
     check_crate_duplicate(&metadata, &[], bad);
+
+    let mut cmd = cargo_metadata::MetadataCommand::new();
+    cmd.cargo_path(cargo)
+        .manifest_path(root.join("src/bootstrap/Cargo.toml"))
+        .features(cargo_metadata::CargoOpt::AllFeatures);
+    let metadata = t!(cmd.exec());
+    let runtime_ids = HashSet::new();
+    check_exceptions(&metadata, EXCEPTIONS_BOOTSTRAP, runtime_ids, bad);
 }
 
 /// Check that all licenses are in the valid list in `LICENSES`.
@@ -409,6 +436,7 @@ fn check_exceptions(
 /// Specifically, this checks that the dependencies are on the `PERMITTED_DEPENDENCIES`.
 fn check_dependencies(
     metadata: &Metadata,
+    descr: &str,
     permitted_dependencies: &[&'static str],
     restricted_dependency_crates: &[&'static str],
     bad: &mut bool,
@@ -438,7 +466,7 @@ fn check_dependencies(
     }
 
     if !unapproved.is_empty() {
-        tidy_error!(bad, "Dependencies not explicitly permitted:");
+        tidy_error!(bad, "Dependencies for {} not explicitly permitted:", descr);
         for dep in unapproved {
             println!("* {dep}");
         }

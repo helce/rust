@@ -1,8 +1,7 @@
 #![deny(unused_must_use)]
 
 use crate::diagnostics::error::{
-    span_err, throw_invalid_attr, throw_invalid_nested_attr, throw_span_err,
-    SessionDiagnosticDeriveError,
+    span_err, throw_invalid_attr, throw_invalid_nested_attr, throw_span_err, DiagnosticDeriveError,
 };
 use crate::diagnostics::utils::{
     report_error_if_not_applied_to_applicability, report_error_if_not_applied_to_span,
@@ -13,7 +12,7 @@ use quote::{format_ident, quote};
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use syn::{spanned::Spanned, Meta, MetaList, MetaNameValue};
+use syn::{parse_quote, spanned::Spanned, Meta, MetaList, MetaNameValue, NestedMeta, Path};
 use synstructure::{BindingInfo, Structure, VariantInfo};
 
 /// Which kind of suggestion is being created?
@@ -38,6 +37,8 @@ enum SubdiagnosticKind {
     Note,
     /// `#[help(...)]`
     Help,
+    /// `#[warn_(...)]`
+    Warn,
     /// `#[suggestion{,_short,_hidden,_verbose}]`
     Suggestion(SubdiagnosticSuggestionKind),
 }
@@ -50,6 +51,7 @@ impl FromStr for SubdiagnosticKind {
             "label" => Ok(SubdiagnosticKind::Label),
             "note" => Ok(SubdiagnosticKind::Note),
             "help" => Ok(SubdiagnosticKind::Help),
+            "warn_" => Ok(SubdiagnosticKind::Warn),
             "suggestion" => Ok(SubdiagnosticKind::Suggestion(SubdiagnosticSuggestionKind::Normal)),
             "suggestion_short" => {
                 Ok(SubdiagnosticKind::Suggestion(SubdiagnosticSuggestionKind::Short))
@@ -71,6 +73,7 @@ impl quote::IdentFragment for SubdiagnosticKind {
             SubdiagnosticKind::Label => write!(f, "label"),
             SubdiagnosticKind::Note => write!(f, "note"),
             SubdiagnosticKind::Help => write!(f, "help"),
+            SubdiagnosticKind::Warn => write!(f, "warn"),
             SubdiagnosticKind::Suggestion(SubdiagnosticSuggestionKind::Normal) => {
                 write!(f, "suggestion")
             }
@@ -194,8 +197,8 @@ struct SessionSubdiagnosticDeriveBuilder<'a> {
     kind: Option<(SubdiagnosticKind, proc_macro::Span)>,
 
     /// Slug of the subdiagnostic - corresponds to the Fluent identifier for the message - from the
-    /// `#[kind(slug = "...")]` attribute on the type or variant.
-    slug: Option<(String, proc_macro::Span)>,
+    /// `#[kind(slug)]` attribute on the type or variant.
+    slug: Option<(Path, proc_macro::Span)>,
     /// If a suggestion, the code to suggest as a replacement - from the `#[kind(code = "...")]`
     /// attribute on the type or variant.
     code: Option<(TokenStream, proc_macro::Span)>,
@@ -214,7 +217,7 @@ impl<'a> HasFieldMap for SessionSubdiagnosticDeriveBuilder<'a> {
 }
 
 impl<'a> SessionSubdiagnosticDeriveBuilder<'a> {
-    fn identify_kind(&mut self) -> Result<(), SessionDiagnosticDeriveError> {
+    fn identify_kind(&mut self) -> Result<(), DiagnosticDeriveError> {
         for attr in self.variant.ast().attrs {
             let span = attr.span().unwrap();
 
@@ -224,9 +227,34 @@ impl<'a> SessionSubdiagnosticDeriveBuilder<'a> {
             let meta = attr.parse_meta()?;
             let kind = match meta {
                 Meta::List(MetaList { ref nested, .. }) => {
-                    for nested_attr in nested {
+                    let mut nested_iter = nested.into_iter();
+                    if let Some(nested_attr) = nested_iter.next() {
+                        match nested_attr {
+                            NestedMeta::Meta(Meta::Path(path)) => {
+                                self.slug.set_once((path.clone(), span));
+                            }
+                            NestedMeta::Meta(meta @ Meta::NameValue(_))
+                                if matches!(
+                                    meta.path().segments.last().unwrap().ident.to_string().as_str(),
+                                    "code" | "applicability"
+                                ) =>
+                            {
+                                // don't error for valid follow-up attributes
+                            }
+                            nested_attr => {
+                                throw_invalid_nested_attr!(attr, &nested_attr, |diag| {
+                                    diag.help(
+                                        "first argument of the attribute should be the diagnostic \
+                                         slug",
+                                    )
+                                })
+                            }
+                        };
+                    }
+
+                    for nested_attr in nested_iter {
                         let meta = match nested_attr {
-                            syn::NestedMeta::Meta(ref meta) => meta,
+                            NestedMeta::Meta(ref meta) => meta,
                             _ => throw_invalid_nested_attr!(attr, &nested_attr),
                         };
 
@@ -241,7 +269,6 @@ impl<'a> SessionSubdiagnosticDeriveBuilder<'a> {
                                         let formatted_str = self.build_format(&s.value(), s.span());
                                         self.code.set_once((formatted_str, span));
                                     }
-                                    "slug" => self.slug.set_once((s.value(), span)),
                                     "applicability" => {
                                         let value = match Applicability::from_str(&s.value()) {
                                             Ok(v) => v,
@@ -253,11 +280,23 @@ impl<'a> SessionSubdiagnosticDeriveBuilder<'a> {
                                         self.applicability.set_once((quote! { #value }, span));
                                     }
                                     _ => throw_invalid_nested_attr!(attr, &nested_attr, |diag| {
-                                        diag.help("only `code`, `slug` and `applicability` are valid nested attributes")
+                                        diag.help(
+                                            "only `code` and `applicability` are valid nested \
+                                             attributes",
+                                        )
                                     }),
                                 }
                             }
-                            _ => throw_invalid_nested_attr!(attr, &nested_attr),
+                            _ => throw_invalid_nested_attr!(attr, &nested_attr, |diag| {
+                                if matches!(meta, Meta::Path(_)) {
+                                    diag.help(
+                                        "a diagnostic slug must be the first argument to the \
+                                         attribute",
+                                    )
+                                } else {
+                                    diag
+                                }
+                            }),
                         }
                     }
 
@@ -281,10 +320,27 @@ impl<'a> SessionSubdiagnosticDeriveBuilder<'a> {
                 );
             }
 
+            if matches!(
+                kind,
+                SubdiagnosticKind::Label | SubdiagnosticKind::Help | SubdiagnosticKind::Note
+            ) && self.applicability.is_some()
+            {
+                throw_span_err!(
+                    span,
+                    &format!(
+                        "`applicability` is not a valid nested attribute of a `{}` attribute",
+                        name
+                    )
+                );
+            }
+
             if self.slug.is_none() {
                 throw_span_err!(
                     span,
-                    &format!("`slug` must be set in a `#[{}(...)]` attribute", name)
+                    &format!(
+                        "diagnostic slug must be first argument of a `#[{}(...)]` attribute",
+                        name
+                    )
                 );
             }
 
@@ -298,7 +354,7 @@ impl<'a> SessionSubdiagnosticDeriveBuilder<'a> {
         &mut self,
         binding: &BindingInfo<'_>,
         is_suggestion: bool,
-    ) -> Result<TokenStream, SessionDiagnosticDeriveError> {
+    ) -> Result<TokenStream, DiagnosticDeriveError> {
         let ast = binding.ast();
 
         let inner_ty = FieldInnerTy::from_type(&ast.ty);
@@ -335,7 +391,10 @@ impl<'a> SessionSubdiagnosticDeriveBuilder<'a> {
                         return Ok(quote! {});
                     }
                     _ => throw_invalid_attr!(attr, &meta, |diag| {
-                        diag.help("only `primary_span`, `applicability` and `skip_arg` are valid field attributes")
+                        diag.help(
+                            "only `primary_span`, `applicability` and `skip_arg` are valid field \
+                             attributes",
+                        )
                     }),
                 },
                 _ => throw_invalid_attr!(attr, &meta),
@@ -355,7 +414,7 @@ impl<'a> SessionSubdiagnosticDeriveBuilder<'a> {
         Ok(inner_ty.with(binding, generated))
     }
 
-    fn into_tokens(&mut self) -> Result<TokenStream, SessionDiagnosticDeriveError> {
+    fn into_tokens(&mut self) -> Result<TokenStream, DiagnosticDeriveError> {
         self.identify_kind()?;
         let Some(kind) = self.kind.map(|(kind, _)| kind) else {
             throw_span_err!(
@@ -375,7 +434,11 @@ impl<'a> SessionSubdiagnosticDeriveBuilder<'a> {
         }
 
         // Missing slug errors will already have been reported.
-        let slug = self.slug.as_ref().map(|(slug, _)| &**slug).unwrap_or("missing-slug");
+        let slug = self
+            .slug
+            .as_ref()
+            .map(|(slug, _)| slug.clone())
+            .unwrap_or_else(|| parse_quote! { you::need::to::specify::a::slug });
         let code = match self.code.as_ref() {
             Some((code, _)) => Some(quote! { #code }),
             None if is_suggestion => {
@@ -397,7 +460,7 @@ impl<'a> SessionSubdiagnosticDeriveBuilder<'a> {
 
         let diag = &self.diag;
         let name = format_ident!("{}{}", if span_field.is_some() { "span_" } else { "" }, kind);
-        let message = quote! { rustc_errors::SubdiagnosticMessage::message(#slug) };
+        let message = quote! { rustc_errors::fluent::#slug };
         let call = if matches!(kind, SubdiagnosticKind::Suggestion(..)) {
             if let Some(span) = span_field {
                 quote! { #diag.#name(#span, #message, #code, #applicability); }

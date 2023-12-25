@@ -232,6 +232,13 @@ impl Level {
             Level::Deny | Level::Forbid => true,
         }
     }
+
+    pub fn get_expectation_id(&self) -> Option<LintExpectationId> {
+        match self {
+            Level::Expect(id) | Level::ForceWarn(Some(id)) => Some(*id),
+            _ => None,
+        }
+    }
 }
 
 /// Specification of a single lint.
@@ -459,6 +466,19 @@ pub enum BuiltinLintDiagnostics {
         /// Span of the single use, or None if the lifetime is never used.
         /// If true, the lifetime will be fully elided.
         use_span: Option<(Span, bool)>,
+    },
+    NamedArgumentUsedPositionally {
+        /// Span where the named argument is used by position and will be replaced with the named
+        /// argument name
+        position_sp_to_replace: Option<Span>,
+        /// Span where the named argument is used by position and is used for lint messages
+        position_sp_for_msg: Option<Span>,
+        /// Span where the named argument's name is (so we know where to put the warning message)
+        named_arg_sp: Span,
+        /// String containing the named arguments name
+        named_arg_name: String,
+        /// Indicates if the named argument is used as a width/precision for formatting
+        is_formatting_arg: bool,
     },
 }
 

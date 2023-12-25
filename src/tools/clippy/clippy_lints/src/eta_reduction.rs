@@ -7,12 +7,12 @@ use clippy_utils::{higher, is_adjusted, path_to_local, path_to_local_id};
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir::def_id::DefId;
-use rustc_hir::{Expr, ExprKind, Param, PatKind, Unsafety};
+use rustc_hir::{Closure, Expr, ExprKind, Param, PatKind, Unsafety};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow};
 use rustc_middle::ty::binding::BindingMode;
 use rustc_middle::ty::subst::Subst;
-use rustc_middle::ty::{self, ClosureKind, Ty, TypeFoldable};
+use rustc_middle::ty::{self, ClosureKind, Ty, TypeVisitable};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::symbol::sym;
 
@@ -78,7 +78,7 @@ impl<'tcx> LateLintPass<'tcx> for EtaReduction {
             return;
         }
         let body = match expr.kind {
-            ExprKind::Closure { body, .. } => cx.tcx.hir().body(body),
+            ExprKind::Closure(&Closure { body, .. }) => cx.tcx.hir().body(body),
             _ => return,
         };
         if body.value.span.from_expansion() {
@@ -220,9 +220,11 @@ fn check_sig<'tcx>(cx: &LateContext<'tcx>, closure_ty: Ty<'tcx>, call_ty: Ty<'tc
 }
 
 fn get_ufcs_type_name(cx: &LateContext<'_>, method_def_id: DefId) -> String {
-    match cx.tcx.associated_item(method_def_id).container {
-        ty::TraitContainer(def_id) => cx.tcx.def_path_str(def_id),
-        ty::ImplContainer(def_id) => {
+    let assoc_item = cx.tcx.associated_item(method_def_id);
+    let def_id = assoc_item.container_id(cx.tcx);
+    match assoc_item.container {
+        ty::TraitContainer => cx.tcx.def_path_str(def_id),
+        ty::ImplContainer => {
             let ty = cx.tcx.type_of(def_id);
             match ty.kind() {
                 ty::Adt(adt, _) => cx.tcx.def_path_str(adt.did()),

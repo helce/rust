@@ -51,7 +51,7 @@ pub fn inject(sess: &Session, resolver: &mut dyn ResolverExpand, krate: &mut ast
     let test_runner = get_test_runner(sess, span_diagnostic, &krate);
 
     if sess.opts.test {
-        let panic_strategy = match (panic_strategy, sess.opts.debugging_opts.panic_abort_tests) {
+        let panic_strategy = match (panic_strategy, sess.opts.unstable_opts.panic_abort_tests) {
             (PanicStrategy::Abort, true) => PanicStrategy::Abort,
             (PanicStrategy::Abort, false) => {
                 if panic_strategy == platform_panic_strategy {
@@ -352,7 +352,7 @@ fn mk_tests_slice(cx: &TestCtxt<'_>, sp: Span) -> P<ast::Expr> {
     debug!("building test vector from {} tests", cx.test_cases.len());
     let ecx = &cx.ext_cx;
 
-    ecx.expr_vec_slice(
+    ecx.expr_array_ref(
         sp,
         cx.test_cases
             .iter()

@@ -4,7 +4,10 @@
 
 use pulldown_cmark::LinkType;
 use rustc_ast::util::comments::may_have_doc_links;
-use rustc_data_structures::{fx::FxHashMap, intern::Interned, stable_set::FxHashSet};
+use rustc_data_structures::{
+    fx::{FxHashMap, FxHashSet},
+    intern::Interned,
+};
 use rustc_errors::{Applicability, Diagnostic};
 use rustc_hir::def::Namespace::*;
 use rustc_hir::def::{DefKind, Namespace, PerNS};
@@ -231,7 +234,7 @@ impl UrlFragment {
             &UrlFragment::Item(def_id) => {
                 let kind = match tcx.def_kind(def_id) {
                     DefKind::AssocFn => {
-                        if tcx.associated_item(def_id).defaultness.has_value() {
+                        if tcx.impl_defaultness(def_id).has_value() {
                             "method."
                         } else {
                             "tymethod."

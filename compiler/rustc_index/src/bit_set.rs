@@ -1061,12 +1061,8 @@ impl<T> Clone for BitSet<T> {
     }
 
     fn clone_from(&mut self, from: &Self) {
-        if self.domain_size != from.domain_size {
-            self.words.resize(from.domain_size, 0);
-            self.domain_size = from.domain_size;
-        }
-
-        self.words.copy_from_slice(&from.words);
+        self.domain_size = from.domain_size;
+        self.words.clone_from(&from.words);
     }
 }
 
@@ -1545,6 +1541,16 @@ impl<T: Idx> GrowableBitSet<T> {
     pub fn contains(&self, elem: T) -> bool {
         let (word_index, mask) = word_index_and_mask(elem);
         self.bit_set.words.get(word_index).map_or(false, |word| (word & mask) != 0)
+    }
+
+    #[inline]
+    pub fn iter(&self) -> BitIter<'_, T> {
+        self.bit_set.iter()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.bit_set.count()
     }
 }
 

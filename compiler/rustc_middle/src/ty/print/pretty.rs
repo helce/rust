@@ -2,7 +2,7 @@ use crate::mir::interpret::{AllocRange, GlobalAlloc, Pointer, Provenance, Scalar
 use crate::ty::subst::{GenericArg, GenericArgKind, Subst};
 use crate::ty::{
     self, ConstInt, DefIdTree, ParamConst, ScalarInt, Term, Ty, TyCtxt, TypeFoldable,
-    TypeSuperFoldable,
+    TypeSuperFoldable, TypeSuperVisitable, TypeVisitable,
 };
 use rustc_apfloat::ieee::{Double, Single};
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
@@ -226,7 +226,7 @@ pub trait PrettyPrinter<'tcx>:
         value.as_ref().skip_binder().print(self)
     }
 
-    fn wrap_binder<T, F: Fn(&T, Self) -> Result<Self, fmt::Error>>(
+    fn wrap_binder<T, F: FnOnce(&T, Self) -> Result<Self, fmt::Error>>(
         self,
         value: &ty::Binder<'tcx, T>,
         f: F,
@@ -297,7 +297,7 @@ pub trait PrettyPrinter<'tcx>:
         mut self,
         def_id: DefId,
     ) -> Result<(Self::Path, bool), Self::Error> {
-        if !self.tcx().sess.opts.debugging_opts.trim_diagnostic_paths
+        if !self.tcx().sess.opts.unstable_opts.trim_diagnostic_paths
             || matches!(self.tcx().sess.opts.trimmed_def_paths, TrimmedDefPaths::Never)
             || NO_TRIMMED_PATH.with(|flag| flag.get())
             || SHOULD_PREFIX_WITH_CRATE.with(|flag| flag.get())
@@ -712,7 +712,7 @@ pub trait PrettyPrinter<'tcx>:
                     p!(write("closure"));
                     // FIXME(eddyb) should use `def_span`.
                     if let Some(did) = did.as_local() {
-                        if self.tcx().sess.opts.debugging_opts.span_free_formats {
+                        if self.tcx().sess.opts.unstable_opts.span_free_formats {
                             p!("@", print_def_path(did.to_def_id(), substs));
                         } else {
                             let span = self.tcx().def_span(did);
@@ -773,18 +773,18 @@ pub trait PrettyPrinter<'tcx>:
         def_id: DefId,
         substs: &'tcx ty::List<ty::GenericArg<'tcx>>,
     ) -> Result<Self::Type, Self::Error> {
-        define_scoped_cx!(self);
+        let tcx = self.tcx();
 
         // Grab the "TraitA + TraitB" from `impl TraitA + TraitB`,
         // by looking up the projections associated with the def_id.
-        let bounds = self.tcx().bound_explicit_item_bounds(def_id);
+        let bounds = tcx.bound_explicit_item_bounds(def_id);
 
         let mut traits = FxIndexMap::default();
         let mut fn_traits = FxIndexMap::default();
         let mut is_sized = false;
 
         for predicate in bounds.transpose_iter().map(|e| e.map_bound(|(p, _)| *p)) {
-            let predicate = predicate.subst(self.tcx(), substs);
+            let predicate = predicate.subst(tcx, substs);
             let bound_predicate = predicate.kind();
 
             match bound_predicate.skip_binder() {
@@ -792,7 +792,7 @@ pub trait PrettyPrinter<'tcx>:
                     let trait_ref = bound_predicate.rebind(pred.trait_ref);
 
                     // Don't print + Sized, but rather + ?Sized if absent.
-                    if Some(trait_ref.def_id()) == self.tcx().lang_items().sized_trait() {
+                    if Some(trait_ref.def_id()) == tcx.lang_items().sized_trait() {
                         is_sized = true;
                         continue;
                     }
@@ -801,7 +801,7 @@ pub trait PrettyPrinter<'tcx>:
                 }
                 ty::PredicateKind::Projection(pred) => {
                     let proj_ref = bound_predicate.rebind(pred);
-                    let trait_ref = proj_ref.required_poly_trait_ref(self.tcx());
+                    let trait_ref = proj_ref.required_poly_trait_ref(tcx);
 
                     // Projection type entry -- the def-id for naming, and the ty.
                     let proj_ty = (proj_ref.projection_def_id(), proj_ref.term());
@@ -817,148 +817,155 @@ pub trait PrettyPrinter<'tcx>:
             }
         }
 
+        write!(self, "impl ")?;
+
         let mut first = true;
         // Insert parenthesis around (Fn(A, B) -> C) if the opaque ty has more than one other trait
         let paren_needed = fn_traits.len() > 1 || traits.len() > 0 || !is_sized;
 
-        p!("impl");
-
         for (fn_once_trait_ref, entry) in fn_traits {
-            // Get the (single) generic ty (the args) of this FnOnce trait ref.
-            let generics = self.tcx().generics_of(fn_once_trait_ref.def_id());
-            let args =
-                generics.own_substs_no_defaults(self.tcx(), fn_once_trait_ref.skip_binder().substs);
+            write!(self, "{}", if first { "" } else { " + " })?;
+            write!(self, "{}", if paren_needed { "(" } else { "" })?;
 
-            match (entry.return_ty, args[0].expect_ty()) {
-                // We can only print `impl Fn() -> ()` if we have a tuple of args and we recorded
-                // a return type.
-                (Some(return_ty), arg_tys) if matches!(arg_tys.kind(), ty::Tuple(_)) => {
-                    let name = if entry.fn_trait_ref.is_some() {
-                        "Fn"
-                    } else if entry.fn_mut_trait_ref.is_some() {
-                        "FnMut"
-                    } else {
-                        "FnOnce"
-                    };
+            self = self.wrap_binder(&fn_once_trait_ref, |trait_ref, mut cx| {
+                define_scoped_cx!(cx);
+                // Get the (single) generic ty (the args) of this FnOnce trait ref.
+                let generics = tcx.generics_of(trait_ref.def_id);
+                let args = generics.own_substs_no_defaults(tcx, trait_ref.substs);
 
-                    p!(
-                        write("{}", if first { " " } else { " + " }),
-                        write("{}{}(", if paren_needed { "(" } else { "" }, name)
-                    );
+                match (entry.return_ty, args[0].expect_ty()) {
+                    // We can only print `impl Fn() -> ()` if we have a tuple of args and we recorded
+                    // a return type.
+                    (Some(return_ty), arg_tys) if matches!(arg_tys.kind(), ty::Tuple(_)) => {
+                        let name = if entry.fn_trait_ref.is_some() {
+                            "Fn"
+                        } else if entry.fn_mut_trait_ref.is_some() {
+                            "FnMut"
+                        } else {
+                            "FnOnce"
+                        };
 
-                    for (idx, ty) in arg_tys.tuple_fields().iter().enumerate() {
-                        if idx > 0 {
+                        p!(write("{}(", name));
+
+                        for (idx, ty) in arg_tys.tuple_fields().iter().enumerate() {
+                            if idx > 0 {
+                                p!(", ");
+                            }
+                            p!(print(ty));
+                        }
+
+                        p!(")");
+                        if let Term::Ty(ty) = return_ty.skip_binder() {
+                            if !ty.is_unit() {
+                                p!(" -> ", print(return_ty));
+                            }
+                        }
+                        p!(write("{}", if paren_needed { ")" } else { "" }));
+
+                        first = false;
+                    }
+                    // If we got here, we can't print as a `impl Fn(A, B) -> C`. Just record the
+                    // trait_refs we collected in the OpaqueFnEntry as normal trait refs.
+                    _ => {
+                        if entry.has_fn_once {
+                            traits.entry(fn_once_trait_ref).or_default().extend(
+                                // Group the return ty with its def id, if we had one.
+                                entry
+                                    .return_ty
+                                    .map(|ty| (tcx.lang_items().fn_once_output().unwrap(), ty)),
+                            );
+                        }
+                        if let Some(trait_ref) = entry.fn_mut_trait_ref {
+                            traits.entry(trait_ref).or_default();
+                        }
+                        if let Some(trait_ref) = entry.fn_trait_ref {
+                            traits.entry(trait_ref).or_default();
+                        }
+                    }
+                }
+
+                Ok(cx)
+            })?;
+        }
+
+        // Print the rest of the trait types (that aren't Fn* family of traits)
+        for (trait_ref, assoc_items) in traits {
+            write!(self, "{}", if first { "" } else { " + " })?;
+
+            self = self.wrap_binder(&trait_ref, |trait_ref, mut cx| {
+                define_scoped_cx!(cx);
+                p!(print(trait_ref.print_only_trait_name()));
+
+                let generics = tcx.generics_of(trait_ref.def_id);
+                let args = generics.own_substs_no_defaults(tcx, trait_ref.substs);
+
+                if !args.is_empty() || !assoc_items.is_empty() {
+                    let mut first = true;
+
+                    for ty in args {
+                        if first {
+                            p!("<");
+                            first = false;
+                        } else {
                             p!(", ");
                         }
                         p!(print(ty));
                     }
 
-                    p!(")");
-                    if let Term::Ty(ty) = return_ty.skip_binder() {
-                        if !ty.is_unit() {
-                            p!(" -> ", print(return_ty));
-                        }
-                    }
-                    p!(write("{}", if paren_needed { ")" } else { "" }));
-
-                    first = false;
-                }
-                // If we got here, we can't print as a `impl Fn(A, B) -> C`. Just record the
-                // trait_refs we collected in the OpaqueFnEntry as normal trait refs.
-                _ => {
-                    if entry.has_fn_once {
-                        traits.entry(fn_once_trait_ref).or_default().extend(
-                            // Group the return ty with its def id, if we had one.
-                            entry
-                                .return_ty
-                                .map(|ty| (self.tcx().lang_items().fn_once_output().unwrap(), ty)),
-                        );
-                    }
-                    if let Some(trait_ref) = entry.fn_mut_trait_ref {
-                        traits.entry(trait_ref).or_default();
-                    }
-                    if let Some(trait_ref) = entry.fn_trait_ref {
-                        traits.entry(trait_ref).or_default();
-                    }
-                }
-            }
-        }
-
-        // Print the rest of the trait types (that aren't Fn* family of traits)
-        for (trait_ref, assoc_items) in traits {
-            p!(
-                write("{}", if first { " " } else { " + " }),
-                print(trait_ref.skip_binder().print_only_trait_name())
-            );
-
-            let generics = self.tcx().generics_of(trait_ref.def_id());
-            let args = generics.own_substs_no_defaults(self.tcx(), trait_ref.skip_binder().substs);
-
-            if !args.is_empty() || !assoc_items.is_empty() {
-                let mut first = true;
-
-                for ty in args {
-                    if first {
-                        p!("<");
-                        first = false;
-                    } else {
-                        p!(", ");
-                    }
-                    p!(print(trait_ref.rebind(*ty)));
-                }
-
-                for (assoc_item_def_id, term) in assoc_items {
-                    // Skip printing `<[generator@] as Generator<_>>::Return` from async blocks,
-                    // unless we can find out what generator return type it comes from.
-                    let term = if let Some(ty) = term.skip_binder().ty()
-                        && let ty::Projection(ty::ProjectionTy { item_def_id, substs }) = ty.kind()
-                        && Some(*item_def_id) == self.tcx().lang_items().generator_return()
-                    {
-                        if let ty::Generator(_, substs, _) = substs.type_at(0).kind() {
-                            let return_ty = substs.as_generator().return_ty();
-                            if !return_ty.is_ty_infer() {
-                                return_ty.into()
+                    for (assoc_item_def_id, term) in assoc_items {
+                        // Skip printing `<[generator@] as Generator<_>>::Return` from async blocks,
+                        // unless we can find out what generator return type it comes from.
+                        let term = if let Some(ty) = term.skip_binder().ty()
+                            && let ty::Projection(ty::ProjectionTy { item_def_id, substs }) = ty.kind()
+                            && Some(*item_def_id) == tcx.lang_items().generator_return()
+                        {
+                            if let ty::Generator(_, substs, _) = substs.type_at(0).kind() {
+                                let return_ty = substs.as_generator().return_ty();
+                                if !return_ty.is_ty_infer() {
+                                    return_ty.into()
+                                } else {
+                                    continue;
+                                }
                             } else {
                                 continue;
                             }
                         } else {
-                            continue;
-                        }
-                    } else {
-                        term.skip_binder()
-                    };
+                            term.skip_binder()
+                        };
 
-                    if first {
-                        p!("<");
-                        first = false;
-                    } else {
-                        p!(", ");
+                        if first {
+                            p!("<");
+                            first = false;
+                        } else {
+                            p!(", ");
+                        }
+
+                        p!(write("{} = ", tcx.associated_item(assoc_item_def_id).name));
+
+                        match term {
+                            Term::Ty(ty) => {
+                                p!(print(ty))
+                            }
+                            Term::Const(c) => {
+                                p!(print(c));
+                            }
+                        };
                     }
 
-                    p!(write("{} = ", self.tcx().associated_item(assoc_item_def_id).name));
-
-                    match term {
-                        Term::Ty(ty) => {
-                            p!(print(ty))
-                        }
-                        Term::Const(c) => {
-                            p!(print(c));
-                        }
-                    };
+                    if !first {
+                        p!(">");
+                    }
                 }
 
-                if !first {
-                    p!(">");
-                }
-            }
-
-            first = false;
+                first = false;
+                Ok(cx)
+            })?;
         }
 
         if !is_sized {
-            p!(write("{}?Sized", if first { " " } else { " + " }));
+            write!(self, "{}?Sized", if first { "" } else { " + " })?;
         } else if first {
-            p!(" Sized");
+            write!(self, "Sized")?;
         }
 
         Ok(self)
@@ -1023,11 +1030,11 @@ pub trait PrettyPrinter<'tcx>:
         }
     }
 
-    fn ty_infer_name(&self, _: ty::TyVid) -> Option<String> {
+    fn ty_infer_name(&self, _: ty::TyVid) -> Option<Symbol> {
         None
     }
 
-    fn const_infer_name(&self, _: ty::ConstVid<'tcx>) -> Option<String> {
+    fn const_infer_name(&self, _: ty::ConstVid<'tcx>) -> Option<Symbol> {
         None
     }
 
@@ -1262,7 +1269,7 @@ pub trait PrettyPrinter<'tcx>:
                 if let ty::Array(elem, len) = inner.kind() {
                     if let ty::Uint(ty::UintTy::U8) = elem.kind() {
                         if let ty::ConstKind::Value(ty::ValTree::Leaf(int)) = len.kind() {
-                            match self.tcx().get_global_alloc(alloc_id) {
+                            match self.tcx().try_get_global_alloc(alloc_id) {
                                 Some(GlobalAlloc::Memory(alloc)) => {
                                     let len = int.assert_bits(self.tcx().data_layout.pointer_size);
                                     let range =
@@ -1275,11 +1282,12 @@ pub trait PrettyPrinter<'tcx>:
                                         p!("<too short allocation>")
                                     }
                                 }
-                                // FIXME: for statics and functions, we could in principle print more detail.
+                                // FIXME: for statics, vtables, and functions, we could in principle print more detail.
                                 Some(GlobalAlloc::Static(def_id)) => {
                                     p!(write("<static({:?})>", def_id))
                                 }
                                 Some(GlobalAlloc::Function(_)) => p!("<function>"),
+                                Some(GlobalAlloc::VTable(..)) => p!("<vtable>"),
                                 None => p!("<dangling pointer>"),
                             }
                             return Ok(self);
@@ -1290,7 +1298,8 @@ pub trait PrettyPrinter<'tcx>:
             ty::FnPtr(_) => {
                 // FIXME: We should probably have a helper method to share code with the "Byte strings"
                 // printing above (which also has to handle pointers to all sorts of things).
-                if let Some(GlobalAlloc::Function(instance)) = self.tcx().get_global_alloc(alloc_id)
+                if let Some(GlobalAlloc::Function(instance)) =
+                    self.tcx().try_get_global_alloc(alloc_id)
                 {
                     self = self.typed_value(
                         |this| this.print_value_path(instance.def_id(), instance.substs),
@@ -1348,10 +1357,6 @@ pub trait PrettyPrinter<'tcx>:
                     " as ",
                 )?;
             }
-            // For function type zsts just printing the path is enough
-            ty::FnDef(d, s) if int == ScalarInt::ZST => {
-                p!(print_value_path(*d, s))
-            }
             // Nontrivial types with scalar bit representation
             _ => {
                 let print = |mut this: Self| {
@@ -1374,9 +1379,9 @@ pub trait PrettyPrinter<'tcx>:
 
     /// This is overridden for MIR printing because we only want to hide alloc ids from users, not
     /// from MIR where it is actually useful.
-    fn pretty_print_const_pointer<Tag: Provenance>(
+    fn pretty_print_const_pointer<Prov: Provenance>(
         mut self,
-        _: Pointer<Tag>,
+        _: Pointer<Prov>,
         ty: Ty<'tcx>,
         print_ty: bool,
     ) -> Result<Self::Const, Self::Error> {
@@ -1440,10 +1445,14 @@ pub trait PrettyPrinter<'tcx>:
                     p!(write("{:?}", String::from_utf8_lossy(bytes)));
                     return Ok(self);
                 }
-                _ => {}
+                _ => {
+                    p!("&");
+                    p!(pretty_print_const_valtree(valtree, *inner_ty, print_ty));
+                    return Ok(self);
+                }
             },
             (ty::ValTree::Branch(_), ty::Array(t, _)) if *t == u8_type => {
-                let bytes = valtree.try_to_raw_bytes(self.tcx(), *t).unwrap_or_else(|| {
+                let bytes = valtree.try_to_raw_bytes(self.tcx(), ty).unwrap_or_else(|| {
                     bug!("expected to convert valtree to raw bytes for type {:?}", t)
                 });
                 p!("*");
@@ -1452,16 +1461,8 @@ pub trait PrettyPrinter<'tcx>:
             }
             // Aggregates, printed as array/tuple/struct/variant construction syntax.
             (ty::ValTree::Branch(_), ty::Array(..) | ty::Tuple(..) | ty::Adt(..)) => {
-                let Some(contents) = self.tcx().try_destructure_const(
-                    ty::Const::from_value(self.tcx(), valtree, ty)
-                ) else {
-                    // Fall back to debug pretty printing for invalid constants.
-                    p!(write("{:?}", valtree));
-                    if print_ty {
-                        p!(": ", print(ty));
-                    }
-                    return Ok(self);
-                };
+                let contents =
+                    self.tcx().destructure_const(ty::Const::from_value(self.tcx(), valtree, ty));
                 let fields = contents.fields.iter().copied();
                 match *ty.kind() {
                     ty::Array(..) => {
@@ -1551,8 +1552,8 @@ pub struct FmtPrinterData<'a, 'tcx> {
 
     pub region_highlight_mode: RegionHighlightMode<'tcx>,
 
-    pub ty_infer_name_resolver: Option<Box<dyn Fn(ty::TyVid) -> Option<String> + 'a>>,
-    pub const_infer_name_resolver: Option<Box<dyn Fn(ty::ConstVid<'tcx>) -> Option<String> + 'a>>,
+    pub ty_infer_name_resolver: Option<Box<dyn Fn(ty::TyVid) -> Option<Symbol> + 'a>>,
+    pub const_infer_name_resolver: Option<Box<dyn Fn(ty::ConstVid<'tcx>) -> Option<Symbol> + 'a>>,
 }
 
 impl<'a, 'tcx> Deref for FmtPrinter<'a, 'tcx> {
@@ -1728,7 +1729,7 @@ impl<'tcx> Printer<'tcx> for FmtPrinter<'_, 'tcx> {
     }
 
     fn print_const(self, ct: ty::Const<'tcx>) -> Result<Self::Const, Self::Error> {
-        self.pretty_print_const(ct, true)
+        self.pretty_print_const(ct, false)
     }
 
     fn path_crate(mut self, cnum: CrateNum) -> Result<Self::Path, Self::Error> {
@@ -1842,11 +1843,11 @@ impl<'tcx> Printer<'tcx> for FmtPrinter<'_, 'tcx> {
 }
 
 impl<'tcx> PrettyPrinter<'tcx> for FmtPrinter<'_, 'tcx> {
-    fn ty_infer_name(&self, id: ty::TyVid) -> Option<String> {
+    fn ty_infer_name(&self, id: ty::TyVid) -> Option<Symbol> {
         self.0.ty_infer_name_resolver.as_ref().and_then(|func| func(id))
     }
 
-    fn const_infer_name(&self, id: ty::ConstVid<'tcx>) -> Option<String> {
+    fn const_infer_name(&self, id: ty::ConstVid<'tcx>) -> Option<Symbol> {
         self.0.const_infer_name_resolver.as_ref().and_then(|func| func(id))
     }
 
@@ -1869,7 +1870,7 @@ impl<'tcx> PrettyPrinter<'tcx> for FmtPrinter<'_, 'tcx> {
         self.pretty_in_binder(value)
     }
 
-    fn wrap_binder<T, C: Fn(&T, Self) -> Result<Self, Self::Error>>(
+    fn wrap_binder<T, C: FnOnce(&T, Self) -> Result<Self, Self::Error>>(
         self,
         value: &ty::Binder<'tcx, T>,
         f: C,
@@ -1920,7 +1921,7 @@ impl<'tcx> PrettyPrinter<'tcx> for FmtPrinter<'_, 'tcx> {
             return true;
         }
 
-        let identify_regions = self.tcx.sess.opts.debugging_opts.identify_regions;
+        let identify_regions = self.tcx.sess.opts.unstable_opts.identify_regions;
 
         match *region {
             ty::ReEarlyBound(ref data) => {
@@ -1953,9 +1954,9 @@ impl<'tcx> PrettyPrinter<'tcx> for FmtPrinter<'_, 'tcx> {
         }
     }
 
-    fn pretty_print_const_pointer<Tag: Provenance>(
+    fn pretty_print_const_pointer<Prov: Provenance>(
         self,
-        p: Pointer<Tag>,
+        p: Pointer<Prov>,
         ty: Ty<'tcx>,
         print_ty: bool,
     ) -> Result<Self::Const, Self::Error> {
@@ -1993,7 +1994,7 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
             return Ok(self);
         }
 
-        let identify_regions = self.tcx.sess.opts.debugging_opts.identify_regions;
+        let identify_regions = self.tcx.sess.opts.unstable_opts.identify_regions;
 
         // These printouts are concise.  They do not contain all the information
         // the user might want to diagnose an error, but there is basically no way
@@ -2256,7 +2257,7 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
         Ok(inner)
     }
 
-    pub fn pretty_wrap_binder<T, C: Fn(&T, Self) -> Result<Self, fmt::Error>>(
+    pub fn pretty_wrap_binder<T, C: FnOnce(&T, Self) -> Result<Self, fmt::Error>>(
         self,
         value: &ty::Binder<'tcx, T>,
         f: C,
@@ -2274,14 +2275,14 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
 
     fn prepare_late_bound_region_info<T>(&mut self, value: &ty::Binder<'tcx, T>)
     where
-        T: TypeFoldable<'tcx>,
+        T: TypeVisitable<'tcx>,
     {
         struct LateBoundRegionNameCollector<'a, 'tcx> {
             used_region_names: &'a mut FxHashSet<Symbol>,
             type_collector: SsoHashSet<Ty<'tcx>>,
         }
 
-        impl<'tcx> ty::fold::TypeVisitor<'tcx> for LateBoundRegionNameCollector<'_, 'tcx> {
+        impl<'tcx> ty::visit::TypeVisitor<'tcx> for LateBoundRegionNameCollector<'_, 'tcx> {
             type BreakTy = ();
 
             fn visit_region(&mut self, r: ty::Region<'tcx>) -> ControlFlow<Self::BreakTy> {
@@ -2385,7 +2386,7 @@ macro_rules! define_print_and_forward_display {
 /// Wrapper type for `ty::TraitRef` which opts-in to pretty printing only
 /// the trait path. That is, it will print `Trait<U>` instead of
 /// `<T as Trait<U>>`.
-#[derive(Copy, Clone, TypeFoldable, Lift)]
+#[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift)]
 pub struct TraitRefPrintOnlyTraitPath<'tcx>(ty::TraitRef<'tcx>);
 
 impl<'tcx> fmt::Debug for TraitRefPrintOnlyTraitPath<'tcx> {
@@ -2397,7 +2398,7 @@ impl<'tcx> fmt::Debug for TraitRefPrintOnlyTraitPath<'tcx> {
 /// Wrapper type for `ty::TraitRef` which opts-in to pretty printing only
 /// the trait name. That is, it will print `Trait` instead of
 /// `<T as Trait<U>>`.
-#[derive(Copy, Clone, TypeFoldable, Lift)]
+#[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift)]
 pub struct TraitRefPrintOnlyTraitName<'tcx>(ty::TraitRef<'tcx>);
 
 impl<'tcx> fmt::Debug for TraitRefPrintOnlyTraitName<'tcx> {
@@ -2422,7 +2423,7 @@ impl<'tcx> ty::Binder<'tcx, ty::TraitRef<'tcx>> {
     }
 }
 
-#[derive(Copy, Clone, TypeFoldable, Lift)]
+#[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift)]
 pub struct TraitPredPrintModifiersAndPath<'tcx>(ty::TraitPredicate<'tcx>);
 
 impl<'tcx> fmt::Debug for TraitPredPrintModifiersAndPath<'tcx> {
@@ -2555,7 +2556,7 @@ define_print_and_forward_display! {
 
     ty::TraitPredicate<'tcx> {
         p!(print(self.trait_ref.self_ty()), ": ");
-        if let ty::BoundConstness::ConstIfConst = self.constness {
+        if let ty::BoundConstness::ConstIfConst = self.constness && cx.tcx().features().const_trait_impl {
             p!("~const ");
         }
         p!(print(self.trait_ref.print_only_trait_path()))

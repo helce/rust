@@ -47,6 +47,7 @@ bitflags::bitflags! {
         const STMT_EXPR         = 1 << 0;
         const NO_STRUCT_LITERAL = 1 << 1;
         const CONST_EXPR        = 1 << 2;
+        const ALLOW_LET         = 1 << 3;
     }
 }
 
@@ -265,13 +266,13 @@ impl TokenCursor {
             // FIXME: we currently don't return `Delimiter` open/close delims. To fix #67062 we will
             // need to, whereupon the `delim != Delimiter::Invisible` conditions below can be
             // removed.
-            if let Some((tree, spacing)) = self.frame.tree_cursor.next_with_spacing_ref() {
+            if let Some(tree) = self.frame.tree_cursor.next_ref() {
                 match tree {
-                    &TokenTree::Token(ref token) => match (desugar_doc_comments, token) {
+                    &TokenTree::Token(ref token, spacing) => match (desugar_doc_comments, token) {
                         (true, &Token { kind: token::DocComment(_, attr_style, data), span }) => {
                             return self.desugar(attr_style, data, span);
                         }
-                        _ => return (token.clone(), *spacing),
+                        _ => return (token.clone(), spacing),
                     },
                     &TokenTree::Delimited(sp, delim, ref tts) => {
                         // Set `open_delim` to true here because we deal with it immediately.
@@ -315,12 +316,14 @@ impl TokenCursor {
             delim_span,
             Delimiter::Bracket,
             [
-                TokenTree::token(token::Ident(sym::doc, false), span),
-                TokenTree::token(token::Eq, span),
-                TokenTree::token(TokenKind::lit(token::StrRaw(num_of_hashes), data, None), span),
+                TokenTree::token_alone(token::Ident(sym::doc, false), span),
+                TokenTree::token_alone(token::Eq, span),
+                TokenTree::token_alone(
+                    TokenKind::lit(token::StrRaw(num_of_hashes), data, None),
+                    span,
+                ),
             ]
-            .iter()
-            .cloned()
+            .into_iter()
             .collect::<TokenStream>(),
         );
 
@@ -329,14 +332,16 @@ impl TokenCursor {
             TokenCursorFrame::new(
                 None,
                 if attr_style == AttrStyle::Inner {
-                    [TokenTree::token(token::Pound, span), TokenTree::token(token::Not, span), body]
-                        .iter()
-                        .cloned()
-                        .collect::<TokenStream>()
+                    [
+                        TokenTree::token_alone(token::Pound, span),
+                        TokenTree::token_alone(token::Not, span),
+                        body,
+                    ]
+                    .into_iter()
+                    .collect::<TokenStream>()
                 } else {
-                    [TokenTree::token(token::Pound, span), body]
-                        .iter()
-                        .cloned()
+                    [TokenTree::token_alone(token::Pound, span), body]
+                        .into_iter()
                         .collect::<TokenStream>()
                 },
             ),
@@ -887,22 +892,19 @@ impl<'a> Parser<'a> {
         let mut first_note = MultiSpan::from(vec![initial_semicolon]);
         first_note.push_span_label(
             initial_semicolon,
-            "this `;` turns the preceding closure into a statement".to_string(),
+            "this `;` turns the preceding closure into a statement",
         );
         first_note.push_span_label(
             closure_spans.body,
-            "this expression is a statement because of the trailing semicolon".to_string(),
+            "this expression is a statement because of the trailing semicolon",
         );
         expect_err.span_note(first_note, "statement found outside of a block");
 
         let mut second_note = MultiSpan::from(vec![closure_spans.whole_closure]);
-        second_note.push_span_label(
-            closure_spans.whole_closure,
-            "this is the parsed closure...".to_string(),
-        );
+        second_note.push_span_label(closure_spans.whole_closure, "this is the parsed closure...");
         second_note.push_span_label(
             following_token_span,
-            "...but likely you meant the closure to end here".to_string(),
+            "...but likely you meant the closure to end here",
         );
         expect_err.span_note(second_note, "the closure body may be incorrectly delimited");
 
@@ -1041,7 +1043,7 @@ impl<'a> Parser<'a> {
             if all_normal {
                 return match frame.tree_cursor.look_ahead(dist - 1) {
                     Some(tree) => match tree {
-                        TokenTree::Token(token) => looker(token),
+                        TokenTree::Token(token, _) => looker(token),
                         TokenTree::Delimited(dspan, delim, _) => {
                             looker(&Token::new(token::OpenDelim(*delim), dspan.open))
                         }
@@ -1225,7 +1227,7 @@ impl<'a> Parser<'a> {
             token::CloseDelim(_) | token::Eof => unreachable!(),
             _ => {
                 self.bump();
-                TokenTree::Token(self.prev_token.clone())
+                TokenTree::Token(self.prev_token.clone(), Spacing::Alone)
             }
         }
     }
@@ -1244,7 +1246,7 @@ impl<'a> Parser<'a> {
         loop {
             match self.token.kind {
                 token::Eof | token::CloseDelim(..) => break,
-                _ => result.push(self.parse_token_tree().into()),
+                _ => result.push(self.parse_token_tree()),
             }
         }
         TokenStream::new(result)
@@ -1352,7 +1354,16 @@ impl<'a> Parser<'a> {
 
     /// Parses `extern string_literal?`.
     fn parse_extern(&mut self) -> Extern {
-        if self.eat_keyword(kw::Extern) { Extern::from_abi(self.parse_abi()) } else { Extern::None }
+        if self.eat_keyword(kw::Extern) {
+            let mut extern_span = self.prev_token.span;
+            let abi = self.parse_abi();
+            if let Some(abi) = abi {
+                extern_span = extern_span.to(abi.span);
+            }
+            Extern::from_abi(abi, extern_span)
+        } else {
+            Extern::None
+        }
     }
 
     /// Parses a string literal as an ABI spec.

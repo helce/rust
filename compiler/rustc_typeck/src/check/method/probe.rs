@@ -21,7 +21,7 @@ use rustc_middle::middle::stability;
 use rustc_middle::ty::fast_reject::{simplify_type, TreatParams};
 use rustc_middle::ty::subst::{InternalSubsts, Subst, SubstsRef};
 use rustc_middle::ty::GenericParamDefKind;
-use rustc_middle::ty::{self, EarlyBinder, ParamEnvAnd, ToPredicate, Ty, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{self, ParamEnvAnd, ToPredicate, Ty, TyCtxt, TypeFoldable, TypeVisitable};
 use rustc_session::lint;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::lev_distance::{
@@ -343,7 +343,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         OP: FnOnce(ProbeContext<'a, 'tcx>) -> Result<R, MethodError<'tcx>>,
     {
         let mut orig_values = OriginalQueryValues::default();
-        let param_env_and_self_ty = self.infcx.canonicalize_query(
+        let param_env_and_self_ty = self.canonicalize_query(
             ParamEnvAnd { param_env: self.param_env, value: self_ty },
             &mut orig_values,
         );
@@ -351,7 +351,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let steps = if mode == Mode::MethodCall {
             self.tcx.method_autoderef_steps(param_env_and_self_ty)
         } else {
-            self.infcx.probe(|_| {
+            self.probe(|_| {
                 // Mode::Path - the deref steps is "trivial". This turns
                 // our CanonicalQuery into a "trivial" QueryResponse. This
                 // is a bit inefficient, but I don't think that writing
@@ -592,9 +592,11 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
     fn push_candidate(&mut self, candidate: Candidate<'tcx>, is_inherent: bool) {
         let is_accessible = if let Some(name) = self.method_name {
             let item = candidate.item;
-            let def_scope =
-                self.tcx.adjust_ident_and_get_scope(name, item.container.id(), self.body_id).1;
-            item.vis.is_accessible_from(def_scope, self.tcx)
+            let def_scope = self
+                .tcx
+                .adjust_ident_and_get_scope(name, item.container_id(self.tcx), self.body_id)
+                .1;
+            item.visibility(self.tcx).is_accessible_from(def_scope, self.tcx)
         } else {
             true
         };
@@ -711,7 +713,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             }
 
             let (impl_ty, impl_substs) = self.impl_ty_and_substs(impl_def_id);
-            let impl_ty = EarlyBinder(impl_ty).subst(self.tcx, impl_substs);
+            let impl_ty = impl_ty.subst(self.tcx, impl_substs);
 
             debug!("impl_ty: {:?}", impl_ty);
 
@@ -1025,7 +1027,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         self.assemble_extension_candidates_for_all_traits();
 
         let out_of_scope_traits = match self.pick_core() {
-            Some(Ok(p)) => vec![p.item.container.id()],
+            Some(Ok(p)) => vec![p.item.container_id(self.tcx)],
             //Some(Ok(p)) => p.iter().map(|p| p.item.container().id()).collect(),
             Some(Err(MethodError::Ambiguity(v))) => v
                 .into_iter()
@@ -1065,7 +1067,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         let pick = self.pick_all_method(Some(&mut unstable_candidates));
 
         // In this case unstable picking is done by `pick_method`.
-        if !self.tcx.sess.opts.debugging_opts.pick_stable_methods_before_any_unstable {
+        if !self.tcx.sess.opts.unstable_opts.pick_stable_methods_before_any_unstable {
             return pick;
         }
 
@@ -1269,7 +1271,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         self_ty: Ty<'tcx>,
         mut unstable_candidates: Option<&mut Vec<(Candidate<'tcx>, Symbol)>>,
     ) -> Option<PickResult<'tcx>> {
-        if !self.tcx.sess.opts.debugging_opts.pick_stable_methods_before_any_unstable {
+        if !self.tcx.sess.opts.unstable_opts.pick_stable_methods_before_any_unstable {
             return self.pick_method_with_unstable(self_ty);
         }
 
@@ -1387,7 +1389,8 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                             self.tcx.def_path_str(stable_pick.item.def_id),
                         ));
                     }
-                    (ty::AssocKind::Const, ty::AssocItemContainer::TraitContainer(def_id)) => {
+                    (ty::AssocKind::Const, ty::AssocItemContainer::TraitContainer) => {
+                        let def_id = stable_pick.item.container_id(self.tcx);
                         diag.span_suggestion(
                             self.span,
                             "use the fully qualified path to the associated const",
@@ -1429,9 +1432,11 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
 
     fn candidate_source(&self, candidate: &Candidate<'tcx>, self_ty: Ty<'tcx>) -> CandidateSource {
         match candidate.kind {
-            InherentImplCandidate(..) => CandidateSource::Impl(candidate.item.container.id()),
+            InherentImplCandidate(..) => {
+                CandidateSource::Impl(candidate.item.container_id(self.tcx))
+            }
             ObjectCandidate | WhereClauseCandidate(_) => {
-                CandidateSource::Trait(candidate.item.container.id())
+                CandidateSource::Trait(candidate.item.container_id(self.tcx))
             }
             TraitCandidate(trait_ref) => self.probe(|_| {
                 let _ = self
@@ -1444,7 +1449,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                         // to that impl.
                         CandidateSource::Impl(impl_data.impl_def_id)
                     }
-                    _ => CandidateSource::Trait(candidate.item.container.id()),
+                    _ => CandidateSource::Trait(candidate.item.container_id(self.tcx)),
                 }
             }),
         }
@@ -1502,7 +1507,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                     debug!("xform_ret_ty after normalization: {:?}", xform_ret_ty);
 
                     // Check whether the impl imposes obligations we have to worry about.
-                    let impl_def_id = probe.item.container.id();
+                    let impl_def_id = probe.item.container_id(self.tcx);
                     let impl_bounds = self.tcx.predicates_of(impl_def_id);
                     let impl_bounds = impl_bounds.instantiate(self.tcx, substs);
                     let traits::Normalized { value: impl_bounds, obligations: norm_obligations } =
@@ -1653,12 +1658,12 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         probes: &[(&Candidate<'tcx>, ProbeResult)],
     ) -> Option<Pick<'tcx>> {
         // Do all probes correspond to the same trait?
-        let container = probes[0].0.item.container;
-        if let ty::ImplContainer(_) = container {
-            return None;
-        }
-        if probes[1..].iter().any(|&(p, _)| p.item.container != container) {
-            return None;
+        let container = probes[0].0.item.trait_container(self.tcx)?;
+        for (p, _) in &probes[1..] {
+            let p_container = p.item.trait_container(self.tcx)?;
+            if p_container != container {
+                return None;
+            }
         }
 
         // FIXME: check the return type here somehow.
@@ -1809,9 +1814,12 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         self.erase_late_bound_regions(xform_fn_sig)
     }
 
-    /// Gets the type of an impl and generate substitutions with placeholders.
-    fn impl_ty_and_substs(&self, impl_def_id: DefId) -> (Ty<'tcx>, SubstsRef<'tcx>) {
-        (self.tcx.type_of(impl_def_id), self.fresh_item_substs(impl_def_id))
+    /// Gets the type of an impl and generate substitutions with inference vars.
+    fn impl_ty_and_substs(
+        &self,
+        impl_def_id: DefId,
+    ) -> (ty::EarlyBinder<Ty<'tcx>>, SubstsRef<'tcx>) {
+        (self.tcx.bound_type_of(impl_def_id), self.fresh_item_substs(impl_def_id))
     }
 
     fn fresh_item_substs(&self, def_id: DefId) -> SubstsRef<'tcx> {

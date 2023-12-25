@@ -7,6 +7,7 @@ use super::{
 };
 use crate::maybe_recover_from_interpolated_ty_qpath;
 
+use core::mem;
 use rustc_ast::ptr::P;
 use rustc_ast::token::{self, Delimiter, Token, TokenKind};
 use rustc_ast::tokenstream::Spacing;
@@ -14,10 +15,10 @@ use rustc_ast::util::classify;
 use rustc_ast::util::literal::LitError;
 use rustc_ast::util::parser::{prec_let_scrutinee_needs_par, AssocOp, Fixity};
 use rustc_ast::visit::Visitor;
-use rustc_ast::StmtKind;
 use rustc_ast::{self as ast, AttrStyle, AttrVec, CaptureBy, ExprField, Lit, UnOp, DUMMY_NODE_ID};
 use rustc_ast::{AnonConst, BinOp, BinOpKind, FnDecl, FnRetTy, MacCall, Param, Ty, TyKind};
 use rustc_ast::{Arm, Async, BlockCheckMode, Expr, ExprKind, Label, Movability, RangeLimits};
+use rustc_ast::{ClosureBinder, StmtKind};
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::thin_vec::ThinVec;
 use rustc_errors::{Applicability, Diagnostic, DiagnosticBuilder, ErrorGuaranteed, PResult};
@@ -26,7 +27,6 @@ use rustc_session::lint::BuiltinLintDiagnostics;
 use rustc_span::source_map::{self, Span, Spanned};
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::{BytePos, Pos};
-use std::mem;
 
 /// Possibly accepts an `token::Interpolated` expression (a pre-parsed expression
 /// dropped into the token stream, which happens while parsing the result of
@@ -827,11 +827,12 @@ impl<'a> Parser<'a> {
         cast_expr: P<Expr>,
     ) -> PResult<'a, P<Expr>> {
         let span = cast_expr.span;
-        let maybe_ascription_span = if let ExprKind::Type(ascripted_expr, _) = &cast_expr.kind {
-            Some(ascripted_expr.span.shrink_to_hi().with_hi(span.hi()))
-        } else {
-            None
-        };
+        let (cast_kind, maybe_ascription_span) =
+            if let ExprKind::Type(ascripted_expr, _) = &cast_expr.kind {
+                ("type ascription", Some(ascripted_expr.span.shrink_to_hi().with_hi(span.hi())))
+            } else {
+                ("cast", None)
+            };
 
         // Save the memory location of expr before parsing any following postfix operators.
         // This will be compared with the memory location of the output expression.
@@ -844,7 +845,7 @@ impl<'a> Parser<'a> {
         // If the resulting expression is not a cast, or has a different memory location, it is an illegal postfix operator.
         if !matches!(with_postfix.kind, ExprKind::Cast(_, _) | ExprKind::Type(_, _)) || changed {
             let msg = format!(
-                "casts cannot be followed by {}",
+                "{cast_kind} cannot be followed by {}",
                 match with_postfix.kind {
                     ExprKind::Index(_, _) => "indexing",
                     ExprKind::Try(_) => "`?`",
@@ -1343,11 +1344,7 @@ impl<'a> Parser<'a> {
             self.parse_if_expr(attrs)
         } else if self.check_keyword(kw::For) {
             if self.choose_generics_over_qpath(1) {
-                // NOTE(Centril, eddyb): DO NOT REMOVE! Beyond providing parser recovery,
-                // this is an insurance policy in case we allow qpaths in (tuple-)struct patterns.
-                // When `for <Foo as Bar>::Proj in $expr $block` is wanted,
-                // you can disambiguate in favor of a pattern with `(...)`.
-                self.recover_quantified_closure_expr(attrs)
+                self.parse_closure_expr(attrs)
             } else {
                 assert!(self.eat_keyword(kw::For));
                 self.parse_for_expr(None, self.prev_token.span, attrs)
@@ -1393,7 +1390,7 @@ impl<'a> Parser<'a> {
             self.parse_yield_expr(attrs)
         } else if self.is_do_yeet() {
             self.parse_yeet_expr(attrs)
-        } else if self.eat_keyword(kw::Let) {
+        } else if self.check_keyword(kw::Let) {
             self.parse_let_expr(attrs)
         } else if self.eat_keyword(kw::Underscore) {
             Ok(self.mk_expr(self.prev_token.span, ExprKind::Underscore, attrs))
@@ -2094,29 +2091,21 @@ impl<'a> Parser<'a> {
         Ok(self.mk_expr(blk.span, ExprKind::Block(blk, None), AttrVec::new()))
     }
 
-    /// Recover on an explicitly quantified closure expression, e.g., `for<'a> |x: &'a u8| *x + 1`.
-    fn recover_quantified_closure_expr(&mut self, attrs: AttrVec) -> PResult<'a, P<Expr>> {
-        let lo = self.token.span;
-        let _ = self.parse_late_bound_lifetime_defs()?;
-        let span_for = lo.to(self.prev_token.span);
-        let closure = self.parse_closure_expr(attrs)?;
-
-        self.struct_span_err(span_for, "cannot introduce explicit parameters for a closure")
-            .span_label(closure.span, "the parameters are attached to this closure")
-            .span_suggestion(
-                span_for,
-                "remove the parameters",
-                "",
-                Applicability::MachineApplicable,
-            )
-            .emit();
-
-        Ok(self.mk_expr_err(lo.to(closure.span)))
-    }
-
     /// Parses a closure expression (e.g., `move |args| expr`).
     fn parse_closure_expr(&mut self, attrs: AttrVec) -> PResult<'a, P<Expr>> {
         let lo = self.token.span;
+
+        let binder = if self.check_keyword(kw::For) {
+            let lo = self.token.span;
+            let lifetime_defs = self.parse_late_bound_lifetime_defs()?;
+            let span = lo.to(self.prev_token.span);
+
+            self.sess.gated_spans.gate(sym::closure_lifetime_binder, span);
+
+            ClosureBinder::For { span, generic_params: P::from_vec(lifetime_defs) }
+        } else {
+            ClosureBinder::NotPresent
+        };
 
         let movability =
             if self.eat_keyword(kw::Static) { Movability::Static } else { Movability::Movable };
@@ -2160,7 +2149,15 @@ impl<'a> Parser<'a> {
 
         let closure = self.mk_expr(
             lo.to(body.span),
-            ExprKind::Closure(capture_clause, asyncness, movability, decl, body, lo.to(decl_hi)),
+            ExprKind::Closure(
+                binder,
+                capture_clause,
+                asyncness,
+                movability,
+                decl,
+                body,
+                lo.to(decl_hi),
+            ),
             attrs,
         );
 
@@ -2343,7 +2340,7 @@ impl<'a> Parser<'a> {
 
     /// Parses the condition of a `if` or `while` expression.
     fn parse_cond_expr(&mut self) -> PResult<'a, P<Expr>> {
-        let cond = self.parse_expr_res(Restrictions::NO_STRUCT_LITERAL, None)?;
+        let cond = self.parse_expr_res(Restrictions::NO_STRUCT_LITERAL | Restrictions::ALLOW_LET, None)?;
 
         if let ExprKind::Let(..) = cond.kind {
             // Remove the last feature gating of a `let` expression since it's stable.
@@ -2354,8 +2351,20 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a `let $pat = $expr` pseudo-expression.
-    /// The `let` token has already been eaten.
     fn parse_let_expr(&mut self, attrs: AttrVec) -> PResult<'a, P<Expr>> {
+        // This is a *approximate* heuristic that detects if `let` chains are
+        // being parsed in the right position. It's approximate because it
+        // doesn't deny all invalid `let` expressions, just completely wrong usages.
+        let not_in_chain = !matches!(
+            self.prev_token.kind,
+            TokenKind::AndAnd | TokenKind::Ident(kw::If, _) | TokenKind::Ident(kw::While, _)
+        );
+        if !self.restrictions.contains(Restrictions::ALLOW_LET) || not_in_chain {
+            self.struct_span_err(self.token.span, "expected expression, found `let` statement")
+                .emit();
+        }
+
+        self.bump(); // Eat `let` token
         let lo = self.prev_token.span;
         let pat = self.parse_pat_allow_top_alt(
             None,
@@ -2672,9 +2681,11 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn parse_arm(&mut self) -> PResult<'a, Arm> {
+        // Used to check the `let_chains` and `if_let_guard` features mostly by scaning
+        // `&&` tokens.
         fn check_let_expr(expr: &Expr) -> (bool, bool) {
             match expr.kind {
-                ExprKind::Binary(_, ref lhs, ref rhs) => {
+                ExprKind::Binary(BinOp { node: BinOpKind::And, .. }, ref lhs, ref rhs) => {
                     let lhs_rslt = check_let_expr(lhs);
                     let rhs_rslt = check_let_expr(rhs);
                     (lhs_rslt.0 || rhs_rslt.0, false)
@@ -2694,7 +2705,7 @@ impl<'a> Parser<'a> {
             )?;
             let guard = if this.eat_keyword(kw::If) {
                 let if_span = this.prev_token.span;
-                let cond = this.parse_expr()?;
+                let cond = this.parse_expr_res(Restrictions::ALLOW_LET, None)?;
                 let (has_let_expr, does_not_have_bin_op) = check_let_expr(&cond);
                 if has_let_expr {
                     if does_not_have_bin_op {
@@ -3001,6 +3012,11 @@ impl<'a> Parser<'a> {
                 }
             };
 
+            let is_shorthand = parsed_field.as_ref().map_or(false, |f| f.is_shorthand);
+            // A shorthand field can be turned into a full field with `:`.
+            // We should point this out.
+            self.check_or_expected(!is_shorthand, TokenType::Token(token::Colon));
+
             match self.expect_one_of(&[token::Comma], &[token::CloseDelim(close_delim)]) {
                 Ok(_) => {
                     if let Some(f) = parsed_field.or(recovery_field) {
@@ -3020,6 +3036,19 @@ impl<'a> Parser<'a> {
                                 "try adding a comma",
                                 ",",
                                 Applicability::MachineApplicable,
+                            );
+                        } else if is_shorthand
+                            && (AssocOp::from_token(&self.token).is_some()
+                                || matches!(&self.token.kind, token::OpenDelim(_))
+                                || self.token.kind == token::Dot)
+                        {
+                            // Looks like they tried to write a shorthand, complex expression.
+                            let ident = parsed_field.expect("is_shorthand implies Some").ident;
+                            e.span_suggestion(
+                                ident.span.shrink_to_lo(),
+                                "try naming a field",
+                                &format!("{ident}: "),
+                                Applicability::HasPlaceholders,
                             );
                         }
                     }

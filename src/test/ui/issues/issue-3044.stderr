@@ -3,6 +3,7 @@ error[E0061]: this function takes 2 arguments but 1 argument was supplied
    |
 LL |       needlesArr.iter().fold(|x, y| {
    |  _______________________^^^^-
+LL | |
 LL | |     });
    | |______- an argument is missing
    |
@@ -14,6 +15,7 @@ LL |     fn fold<B, F>(mut self, init: B, mut f: F) -> B
 help: provide the argument
    |
 LL ~     needlesArr.iter().fold(|x, y| {
+LL +
 LL ~     }, /* value */);
    |
 

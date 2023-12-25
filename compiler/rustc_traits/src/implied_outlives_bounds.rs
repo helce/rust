@@ -9,13 +9,12 @@ use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
 use rustc_infer::traits::query::OutlivesBound;
 use rustc_infer::traits::TraitEngineExt as _;
 use rustc_middle::ty::query::Providers;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitable};
 use rustc_span::source_map::DUMMY_SP;
 use rustc_trait_selection::infer::InferCtxtBuilderExt;
 use rustc_trait_selection::traits::query::{CanonicalTyGoal, Fallible, NoSolution};
 use rustc_trait_selection::traits::wf;
-use rustc_trait_selection::traits::FulfillmentContext;
-use rustc_trait_selection::traits::TraitEngine;
+use rustc_trait_selection::traits::{TraitEngine, TraitEngineExt};
 use smallvec::{smallvec, SmallVec};
 
 pub(crate) fn provide(p: &mut Providers) {
@@ -44,16 +43,21 @@ fn compute_implied_outlives_bounds<'tcx>(
 
     // Sometimes when we ask what it takes for T: WF, we get back that
     // U: WF is required; in that case, we push U onto this stack and
-    // process it next. Currently (at least) these resulting
-    // predicates are always guaranteed to be a subset of the original
-    // type, so we need not fear non-termination.
+    // process it next. Because the resulting predicates aren't always
+    // guaranteed to be a subset of the original type, so we need to store the
+    // WF args we've computed in a set.
+    let mut checked_wf_args = rustc_data_structures::fx::FxHashSet::default();
     let mut wf_args = vec![ty.into()];
 
     let mut implied_bounds = vec![];
 
-    let mut fulfill_cx = FulfillmentContext::new();
+    let mut fulfill_cx = <dyn TraitEngine<'tcx>>::new(tcx);
 
     while let Some(arg) = wf_args.pop() {
+        if !checked_wf_args.insert(arg) {
+            continue;
+        }
+
         // Compute the obligations for `arg` to be well-formed. If `arg` is
         // an unresolved inference variable, just substituted an empty set
         // -- because the return type here is going to be things we *add*

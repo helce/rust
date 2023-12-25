@@ -125,6 +125,10 @@ pub trait MutVisitor: Sized {
         noop_visit_asyncness(a, self);
     }
 
+    fn visit_closure_binder(&mut self, b: &mut ClosureBinder) {
+        noop_visit_closure_binder(b, self);
+    }
+
     fn visit_block(&mut self, b: &mut P<Block>) {
         noop_visit_block(b, self);
     }
@@ -671,7 +675,7 @@ pub fn visit_attr_annotated_tt<T: MutVisitor>(tt: &mut AttrAnnotatedTokenTree, v
 // No `noop_` prefix because there isn't a corresponding method in `MutVisitor`.
 pub fn visit_tt<T: MutVisitor>(tt: &mut TokenTree, vis: &mut T) {
     match tt {
-        TokenTree::Token(token) => {
+        TokenTree::Token(token, _) => {
             visit_token(token, vis);
         }
         TokenTree::Delimited(DelimSpan { open, close }, _delim, tts) => {
@@ -686,7 +690,7 @@ pub fn visit_tt<T: MutVisitor>(tt: &mut TokenTree, vis: &mut T) {
 pub fn visit_tts<T: MutVisitor>(TokenStream(tts): &mut TokenStream, vis: &mut T) {
     if T::VISIT_TOKENS && !tts.is_empty() {
         let tts = Lrc::make_mut(tts);
-        visit_vec(tts, |(tree, _is_joint)| visit_tt(tree, vis));
+        visit_vec(tts, |tree| visit_tt(tree, vis));
     }
 }
 
@@ -822,6 +826,17 @@ pub fn visit_constness<T: MutVisitor>(constness: &mut Const, vis: &mut T) {
     match constness {
         Const::Yes(span) => vis.visit_span(span),
         Const::No => {}
+    }
+}
+
+pub fn noop_visit_closure_binder<T: MutVisitor>(binder: &mut ClosureBinder, vis: &mut T) {
+    match binder {
+        ClosureBinder::NotPresent => {}
+        ClosureBinder::For { span: _, generic_params } => {
+            let mut vec = std::mem::take(generic_params).into_vec();
+            vec.flat_map_in_place(|param| vis.flat_map_generic_param(param));
+            *generic_params = P::from_vec(vec);
+        }
     }
 }
 
@@ -1336,7 +1351,8 @@ pub fn noop_visit_expr<T: MutVisitor>(
             vis.visit_expr(expr);
             arms.flat_map_in_place(|arm| vis.flat_map_arm(arm));
         }
-        ExprKind::Closure(_capture_by, asyncness, _movability, decl, body, span) => {
+        ExprKind::Closure(binder, _capture_by, asyncness, _movability, decl, body, span) => {
+            vis.visit_closure_binder(binder);
             vis.visit_asyncness(asyncness);
             vis.visit_fn_decl(decl);
             vis.visit_expr(body);

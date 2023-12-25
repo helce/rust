@@ -107,14 +107,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{self, Command};
+use std::process::Command;
 use std::str;
-
-#[cfg(unix)]
-use std::os::unix::fs::symlink as symlink_file;
-#[cfg(windows)]
-use std::os::windows::fs::symlink_file;
 
 use filetime::FileTime;
 use once_cell::sync::OnceCell;
@@ -122,8 +118,7 @@ use once_cell::sync::OnceCell;
 use crate::builder::Kind;
 use crate::config::{LlvmLibunwind, TargetSelection};
 use crate::util::{
-    check_run, exe, libdir, mtime, output, run, run_suppressed, t, try_run, try_run_suppressed,
-    CiEnv,
+    check_run, exe, libdir, mtime, output, run, run_suppressed, try_run, try_run_suppressed, CiEnv,
 };
 
 mod builder;
@@ -401,13 +396,18 @@ impl Build {
         let src = config.src.clone();
         let out = config.out.clone();
 
+        #[cfg(unix)]
+        // keep this consistent with the equivalent check in x.py:
+        // https://github.com/rust-lang/rust/blob/a8a33cf27166d3eabaffc58ed3799e054af3b0c6/src/bootstrap/bootstrap.py#L796-L797
         let is_sudo = match env::var_os("SUDO_USER") {
-            Some(sudo_user) => match env::var_os("USER") {
-                Some(user) => user != sudo_user,
-                None => false,
-            },
+            Some(_sudo_user) => {
+                let uid = unsafe { libc::getuid() };
+                uid == 0
+            }
             None => false,
         };
+        #[cfg(not(unix))]
+        let is_sudo = false;
 
         let ignore_git = config.ignore_git;
         let rust_info = channel::GitInfo::new(ignore_git, &src);
@@ -537,6 +537,20 @@ impl Build {
             build.local_rebuild = true;
         }
 
+        // Make sure we update these before gathering metadata so we don't get an error about missing
+        // Cargo.toml files.
+        let rust_submodules = [
+            "src/tools/rust-installer",
+            "src/tools/cargo",
+            "src/tools/rls",
+            "src/tools/miri",
+            "library/backtrace",
+            "library/stdarch",
+        ];
+        for s in rust_submodules {
+            build.update_submodule(Path::new(s));
+        }
+
         build.verbose("learning about cargo");
         metadata::build(&mut build);
 
@@ -615,26 +629,13 @@ impl Build {
     /// If any submodule has been initialized already, sync it unconditionally.
     /// This avoids contributors checking in a submodule change by accident.
     pub fn maybe_update_submodules(&self) {
-        // WARNING: keep this in sync with the submodules hard-coded in bootstrap.py
-        let mut bootstrap_submodules: Vec<&str> = vec![
-            "src/tools/rust-installer",
-            "src/tools/cargo",
-            "src/tools/rls",
-            "src/tools/miri",
-            "library/backtrace",
-            "library/stdarch",
-        ];
-        // As in bootstrap.py, we include `rust-analyzer` if `build.vendor` was set in
-        // `config.toml`.
-        if self.config.vendor {
-            bootstrap_submodules.push("src/tools/rust-analyzer");
-        }
         // Avoid running git when there isn't a git checkout.
         if !self.config.submodules(&self.rust_info) {
             return;
         }
         let output = output(
-            Command::new("git")
+            self.config
+                .git()
                 .args(&["config", "--file"])
                 .arg(&self.config.src.join(".gitmodules"))
                 .args(&["--get-regexp", "path"]),
@@ -643,10 +644,8 @@ impl Build {
             // Look for `submodule.$name.path = $path`
             // Sample output: `submodule.src/rust-installer.path src/tools/rust-installer`
             let submodule = Path::new(line.splitn(2, ' ').nth(1).unwrap());
-            // avoid updating submodules twice
-            if !bootstrap_submodules.iter().any(|&p| Path::new(p) == submodule)
-                && channel::GitInfo::new(false, submodule).is_git()
-            {
+            // Don't update the submodule unless it's already been cloned.
+            if channel::GitInfo::new(false, submodule).is_git() {
                 self.update_submodule(submodule);
             }
         }
@@ -702,7 +701,7 @@ impl Build {
             for failure in failures.iter() {
                 eprintln!("  - {}\n", failure);
             }
-            process::exit(1);
+            detail_exit(1);
         }
 
         #[cfg(feature = "build-metrics")]
@@ -1270,14 +1269,11 @@ impl Build {
         // Figure out how many merge commits happened since we branched off master.
         // That's our beta number!
         // (Note that we use a `..` range, not the `...` symmetric difference.)
-        let count = output(
-            Command::new("git")
-                .arg("rev-list")
-                .arg("--count")
-                .arg("--merges")
-                .arg("refs/remotes/origin/master..HEAD")
-                .current_dir(&self.src),
-        );
+        let count =
+            output(self.config.git().arg("rev-list").arg("--count").arg("--merges").arg(format!(
+                "refs/remotes/origin/{}..HEAD",
+                self.config.stage0_metadata.config.nightly_branch
+            )));
         let n = count.trim().parse().unwrap();
         self.prerelease_version.set(Some(n));
         n
@@ -1446,7 +1442,7 @@ impl Build {
                 src = t!(fs::canonicalize(src));
             } else {
                 let link = t!(fs::read_link(src));
-                t!(symlink_file(link, dst));
+                t!(self.symlink_file(link, dst));
                 return;
             }
         }
@@ -1571,6 +1567,14 @@ impl Build {
         iter.map(|e| t!(e)).collect::<Vec<_>>().into_iter()
     }
 
+    fn symlink_file<P: AsRef<Path>, Q: AsRef<Path>>(&self, src: P, link: Q) -> io::Result<()> {
+        #[cfg(unix)]
+        use std::os::unix::fs::symlink as symlink_file;
+        #[cfg(windows)]
+        use std::os::windows::fs::symlink_file;
+        if !self.config.dry_run { symlink_file(src.as_ref(), link.as_ref()) } else { Ok(()) }
+    }
+
     fn remove(&self, f: &Path) {
         if self.config.dry_run {
             return;
@@ -1600,7 +1604,7 @@ Alternatively, set `download-ci-llvm = true` in that `[llvm]` section
 to download LLVM rather than building it.
 "
                 );
-                std::process::exit(1);
+                detail_exit(1);
             }
         }
 
@@ -1628,6 +1632,20 @@ fn chmod(path: &Path, perms: u32) {
 }
 #[cfg(windows)]
 fn chmod(_path: &Path, _perms: u32) {}
+
+/// If code is not 0 (successful exit status), exit status is 101 (rust's default error code.)
+/// If the test is running and code is an error code, it will cause a panic.
+fn detail_exit(code: i32) -> ! {
+    // Successful exit
+    if code == 0 {
+        std::process::exit(0);
+    }
+    if cfg!(test) {
+        panic!("status code: {}", code);
+    } else {
+        std::panic::resume_unwind(Box::new(code));
+    }
+}
 
 impl Compiler {
     pub fn with_stage(mut self, stage: u32) -> Compiler {

@@ -413,7 +413,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
             | clean::TyAssocTypeItem(..)
             | clean::AssocTypeItem(..)
             | clean::StrippedItem(..)
-            | clean::KeywordItem(..) => {
+            | clean::KeywordItem => {
                 // FIXME: Do these need handling?
                 // The person writing this comment doesn't know.
                 // So would rather leave them to an expert,
@@ -536,7 +536,7 @@ enum ParentStackItem {
 impl ParentStackItem {
     fn new(item: &clean::Item) -> Self {
         match &*item.kind {
-            clean::ItemKind::ImplItem(clean::Impl { for_, trait_, generics, kind, .. }) => {
+            clean::ItemKind::ImplItem(box clean::Impl { for_, trait_, generics, kind, .. }) => {
                 ParentStackItem::Impl {
                     for_: for_.clone(),
                     trait_: trait_.clone(),

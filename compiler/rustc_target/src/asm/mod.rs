@@ -248,18 +248,8 @@ impl FromStr for InlineAsmArch {
     }
 }
 
-#[derive(
-    Copy,
-    Clone,
-    Encodable,
-    Decodable,
-    Debug,
-    Eq,
-    PartialEq,
-    PartialOrd,
-    Hash,
-    HashStable_Generic
-)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Hash)]
+#[derive(HashStable_Generic, Encodable, Decodable)]
 pub enum InlineAsmReg {
     X86(X86InlineAsmReg),
     Arm(ArmInlineAsmReg),
@@ -412,18 +402,8 @@ impl InlineAsmReg {
     }
 }
 
-#[derive(
-    Copy,
-    Clone,
-    Encodable,
-    Decodable,
-    Debug,
-    Eq,
-    PartialEq,
-    PartialOrd,
-    Hash,
-    HashStable_Generic
-)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Hash)]
+#[derive(HashStable_Generic, Encodable, Decodable)]
 pub enum InlineAsmRegClass {
     X86(X86InlineAsmRegClass),
     Arm(ArmInlineAsmRegClass),
@@ -634,18 +614,8 @@ impl InlineAsmRegClass {
     }
 }
 
-#[derive(
-    Copy,
-    Clone,
-    Encodable,
-    Decodable,
-    Debug,
-    Eq,
-    PartialEq,
-    PartialOrd,
-    Hash,
-    HashStable_Generic
-)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Hash)]
+#[derive(HashStable_Generic, Encodable, Decodable)]
 pub enum InlineAsmRegOrRegClass {
     Reg(InlineAsmReg),
     RegClass(InlineAsmRegClass),
@@ -827,18 +797,8 @@ pub fn allocatable_registers(
     }
 }
 
-#[derive(
-    Copy,
-    Clone,
-    Encodable,
-    Decodable,
-    Debug,
-    Eq,
-    PartialEq,
-    PartialOrd,
-    Hash,
-    HashStable_Generic
-)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Hash)]
+#[derive(HashStable_Generic, Encodable, Decodable)]
 pub enum InlineAsmClobberAbi {
     X86,
     X86_64Win,

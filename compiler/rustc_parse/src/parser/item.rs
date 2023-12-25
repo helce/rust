@@ -271,8 +271,7 @@ impl<'a> Parser<'a> {
             // MACRO_RULES ITEM
             self.parse_item_macro_rules(vis, has_bang)?
         } else if self.isnt_macro_invocation()
-            && (self.token.is_ident_named(Symbol::intern("import"))
-                || self.token.is_ident_named(Symbol::intern("using")))
+            && (self.token.is_ident_named(sym::import) || self.token.is_ident_named(sym::using))
         {
             return self.recover_import_as_use();
         } else if self.isnt_macro_invocation() && vis.kind.is_pub() {
@@ -1217,6 +1216,25 @@ impl<'a> Parser<'a> {
 
     /// Parses an enum declaration.
     fn parse_item_enum(&mut self) -> PResult<'a, ItemInfo> {
+        if self.token.is_keyword(kw::Struct) {
+            let mut err = self.struct_span_err(
+                self.prev_token.span.to(self.token.span),
+                "`enum` and `struct` are mutually exclusive",
+            );
+            err.span_suggestion(
+                self.prev_token.span.to(self.token.span),
+                "replace `enum struct` with",
+                "enum",
+                Applicability::MachineApplicable,
+            );
+            if self.look_ahead(1, |t| t.is_ident()) {
+                self.bump();
+                err.emit();
+            } else {
+                return Err(err);
+            }
+        }
+
         let id = self.parse_ident()?;
         let mut generics = self.parse_generics()?;
         generics.where_clause = self.parse_where_clause()?;
@@ -1665,8 +1683,8 @@ impl<'a> Parser<'a> {
             let body = self.parse_token_tree(); // `MacBody`
             // Convert `MacParams MacBody` into `{ MacParams => MacBody }`.
             let bspan = body.span();
-            let arrow = TokenTree::token(token::FatArrow, pspan.between(bspan)); // `=>`
-            let tokens = TokenStream::new(vec![params.into(), arrow.into(), body.into()]);
+            let arrow = TokenTree::token_alone(token::FatArrow, pspan.between(bspan)); // `=>`
+            let tokens = TokenStream::new(vec![params, arrow, body]);
             let dspan = DelimSpan::from_pair(pspan.shrink_to_lo(), bspan.shrink_to_hi());
             P(MacArgs::Delimited(dspan, MacDelimiter::Brace, tokens))
         } else {
@@ -1678,7 +1696,6 @@ impl<'a> Parser<'a> {
     }
 
     /// Is this a possibly malformed start of a `macro_rules! foo` item definition?
-
     fn is_macro_rules_item(&mut self) -> IsMacroRulesItem {
         if self.check_keyword(kw::MacroRules) {
             let macro_rules_span = self.token.span;

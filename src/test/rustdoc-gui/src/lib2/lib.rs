@@ -2,6 +2,9 @@
 
 #![feature(doc_cfg)]
 
+pub mod another_folder;
+pub mod another_mod;
+
 pub mod module {
     pub mod sub_module {
         pub mod sub_sub_module {
@@ -27,10 +30,13 @@ impl Foo {
     pub fn a_method(&self) {}
 }
 
+#[doc(cfg(feature = "foo-method"))]
+#[deprecated = "Whatever [`Foo::a_method`](#method.a_method)"]
 pub trait Trait {
     type X;
     const Y: u32;
 
+    #[deprecated = "Whatever [`Foo`](#tadam)"]
     fn foo() {}
 }
 

@@ -1,4 +1,3 @@
-#![allow(rustc::potential_query_instability)]
 #![feature(array_windows)]
 #![feature(associated_type_bounds)]
 #![feature(associated_type_defaults)]
@@ -9,6 +8,7 @@
 #![feature(proc_macro_diagnostic)]
 #![feature(proc_macro_internals)]
 #![feature(proc_macro_span)]
+#![feature(rustc_attrs)]
 #![feature(try_blocks)]
 #![recursion_limit = "256"]
 

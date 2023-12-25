@@ -1,10 +1,9 @@
 use rustc_hir as hir;
 use rustc_middle::ty::{self, Ty};
-use rustc_span::source_map::Span;
 use rustc_trait_selection::infer::InferCtxt;
 use rustc_trait_selection::traits::query::type_op::{self, TypeOp, TypeOpOutput};
 use rustc_trait_selection::traits::query::NoSolution;
-use rustc_trait_selection::traits::{FulfillmentContext, ObligationCause, TraitEngine};
+use rustc_trait_selection::traits::{ObligationCause, TraitEngine, TraitEngineExt};
 
 pub use rustc_middle::traits::query::OutlivesBound;
 
@@ -14,7 +13,6 @@ pub trait InferCtxtExt<'tcx> {
         param_env: ty::ParamEnv<'tcx>,
         body_id: hir::HirId,
         ty: Ty<'tcx>,
-        span: Span,
     ) -> Vec<OutlivesBound<'tcx>>;
 }
 
@@ -38,16 +36,14 @@ impl<'cx, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'cx, 'tcx> {
     ///   Note that this may cause outlives obligations to be injected
     ///   into the inference context with this body-id.
     /// - `ty`, the type that we are supposed to assume is WF.
-    /// - `span`, a span to use when normalizing, hopefully not important,
-    ///   might be useful if a `bug!` occurs.
-    #[instrument(level = "debug", skip(self, param_env, body_id, span))]
+    #[instrument(level = "debug", skip(self, param_env, body_id))]
     fn implied_outlives_bounds(
         &self,
         param_env: ty::ParamEnv<'tcx>,
         body_id: hir::HirId,
         ty: Ty<'tcx>,
-        span: Span,
     ) -> Vec<OutlivesBound<'tcx>> {
+        let span = self.tcx.hir().span(body_id);
         let result = param_env
             .and(type_op::implied_outlives_bounds::ImpliedOutlivesBounds { ty })
             .fully_perform(self);
@@ -67,7 +63,7 @@ impl<'cx, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'cx, 'tcx> {
         if let Some(constraints) = constraints {
             // Instantiation may have produced new inference variables and constraints on those
             // variables. Process these constraints.
-            let mut fulfill_cx = FulfillmentContext::new();
+            let mut fulfill_cx = <dyn TraitEngine<'tcx>>::new(self.tcx);
             let cause = ObligationCause::misc(span, body_id);
             for &constraint in &constraints.outlives {
                 let obligation = self.query_outlives_constraint_to_obligation(

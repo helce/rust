@@ -28,7 +28,7 @@ use std::ffi::CStr;
 use std::iter;
 use std::ops::Deref;
 use std::ptr;
-use tracing::debug;
+use tracing::{debug, instrument};
 
 // All Builders must have an llfn associated with them
 #[must_use]
@@ -464,15 +464,15 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
     }
 
+    #[instrument(level = "trace", skip(self))]
     fn load_operand(&mut self, place: PlaceRef<'tcx, &'ll Value>) -> OperandRef<'tcx, &'ll Value> {
-        debug!("PlaceRef::load: {:?}", place);
-
         assert_eq!(place.llextra.is_some(), place.layout.is_unsized());
 
         if place.layout.is_zst() {
             return OperandRef::new_zst(self, place.layout);
         }
 
+        #[instrument(level = "trace", skip(bx))]
         fn scalar_load_metadata<'a, 'll, 'tcx>(
             bx: &mut Builder<'a, 'll, 'tcx>,
             load: &'ll Value,
@@ -623,32 +623,6 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 llvm::MD_nonnull as c_uint,
                 llvm::LLVMMDNodeInContext(self.cx.llcx, ptr::null(), 0),
             );
-        }
-    }
-
-    fn type_metadata(&mut self, function: &'ll Value, typeid: String) {
-        let typeid_metadata = self.typeid_metadata(typeid);
-        let v = [self.const_usize(0), typeid_metadata];
-        unsafe {
-            llvm::LLVMGlobalSetMetadata(
-                function,
-                llvm::MD_type as c_uint,
-                llvm::LLVMValueAsMetadata(llvm::LLVMMDNodeInContext(
-                    self.cx.llcx,
-                    v.as_ptr(),
-                    v.len() as c_uint,
-                )),
-            )
-        }
-    }
-
-    fn typeid_metadata(&mut self, typeid: String) -> Self::Value {
-        unsafe {
-            llvm::LLVMMDStringInContext(
-                self.cx.llcx,
-                typeid.as_ptr() as *const c_char,
-                typeid.as_bytes().len() as c_uint,
-            )
         }
     }
 
@@ -1064,11 +1038,25 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         dst: &'ll Value,
         cmp: &'ll Value,
         src: &'ll Value,
-        order: rustc_codegen_ssa::common::AtomicOrdering,
+        mut order: rustc_codegen_ssa::common::AtomicOrdering,
         failure_order: rustc_codegen_ssa::common::AtomicOrdering,
         weak: bool,
     ) -> &'ll Value {
         let weak = if weak { llvm::True } else { llvm::False };
+        if llvm_util::get_version() < (13, 0, 0) {
+            use rustc_codegen_ssa::common::AtomicOrdering::*;
+            // Older llvm has the pre-C++17 restriction on
+            // success and failure memory ordering,
+            // requiring the former to be at least as strong as the latter.
+            // So, for llvm 12, we upgrade the success ordering to a stronger
+            // one if necessary.
+            match (order, failure_order) {
+                (Relaxed, Acquire) => order = Acquire,
+                (Release, Acquire) => order = AcquireRelease,
+                (_, SequentiallyConsistent) => order = SequentiallyConsistent,
+                _ => {}
+            }
+        }
         unsafe {
             llvm::LLVMRustBuildAtomicCmpXchg(
                 self.llbuilder,

@@ -13,6 +13,7 @@ use crate::sys::handle::Handle;
 use crate::sys::time::SystemTime;
 use crate::sys::{c, cvt};
 use crate::sys_common::{AsInner, FromInner, IntoInner};
+use crate::thread;
 
 use super::path::maybe_verbatim;
 use super::to_u16s;
@@ -80,6 +81,12 @@ pub struct OpenOptions {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FilePermissions {
     attrs: c::DWORD,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+pub struct FileTimes {
+    accessed: Option<c::FILETIME>,
+    modified: Option<c::FILETIME>,
 }
 
 #[derive(Debug)]
@@ -154,22 +161,7 @@ impl DirEntry {
     }
 
     pub fn metadata(&self) -> io::Result<FileAttr> {
-        Ok(FileAttr {
-            attributes: self.data.dwFileAttributes,
-            creation_time: self.data.ftCreationTime,
-            last_access_time: self.data.ftLastAccessTime,
-            last_write_time: self.data.ftLastWriteTime,
-            file_size: ((self.data.nFileSizeHigh as u64) << 32) | (self.data.nFileSizeLow as u64),
-            reparse_tag: if self.data.dwFileAttributes & c::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                // reserved unless this is a reparse point
-                self.data.dwReserved0
-            } else {
-                0
-            },
-            volume_serial_number: None,
-            number_of_links: None,
-            file_index: None,
-        })
+        Ok(self.data.into())
     }
 }
 
@@ -550,6 +542,21 @@ impl File {
         })?;
         Ok(())
     }
+
+    pub fn set_times(&self, times: FileTimes) -> io::Result<()> {
+        let is_zero = |t: c::FILETIME| t.dwLowDateTime == 0 && t.dwHighDateTime == 0;
+        if times.accessed.map_or(false, is_zero) || times.modified.map_or(false, is_zero) {
+            return Err(io::const_io_error!(
+                io::ErrorKind::InvalidInput,
+                "Cannot set file timestamp to 0",
+            ));
+        }
+        cvt(unsafe {
+            c::SetFileTime(self.as_handle(), None, times.accessed.as_ref(), times.modified.as_ref())
+        })?;
+        Ok(())
+    }
+
     /// Get only basic file information such as attributes and file times.
     fn basic_info(&self) -> io::Result<c::FILE_BASIC_INFO> {
         unsafe {
@@ -679,7 +686,7 @@ impl<'a> DirBuffIter<'a> {
     }
 }
 impl<'a> Iterator for DirBuffIter<'a> {
-    type Item = &'a [u16];
+    type Item = (&'a [u16], bool);
     fn next(&mut self) -> Option<Self::Item> {
         use crate::mem::size_of;
         let buffer = &self.buffer?[self.cursor..];
@@ -688,14 +695,16 @@ impl<'a> Iterator for DirBuffIter<'a> {
         // SAFETY: The buffer contains a `FILE_ID_BOTH_DIR_INFO` struct but the
         // last field (the file name) is unsized. So an offset has to be
         // used to get the file name slice.
-        let (name, next_entry) = unsafe {
+        let (name, is_directory, next_entry) = unsafe {
             let info = buffer.as_ptr().cast::<c::FILE_ID_BOTH_DIR_INFO>();
             let next_entry = (*info).NextEntryOffset as usize;
             let name = crate::slice::from_raw_parts(
                 (*info).FileName.as_ptr().cast::<u16>(),
                 (*info).FileNameLength as usize / size_of::<u16>(),
             );
-            (name, next_entry)
+            let is_directory = ((*info).FileAttributes & c::FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+            (name, is_directory, next_entry)
         };
 
         if next_entry == 0 {
@@ -708,7 +717,7 @@ impl<'a> Iterator for DirBuffIter<'a> {
         const DOT: u16 = b'.' as u16;
         match name {
             [DOT] | [DOT, DOT] => self.next(),
-            _ => Some(name),
+            _ => Some((name, is_directory)),
         }
     }
 }
@@ -876,6 +885,26 @@ impl FileAttr {
         self.file_index
     }
 }
+impl From<c::WIN32_FIND_DATAW> for FileAttr {
+    fn from(wfd: c::WIN32_FIND_DATAW) -> Self {
+        FileAttr {
+            attributes: wfd.dwFileAttributes,
+            creation_time: wfd.ftCreationTime,
+            last_access_time: wfd.ftLastAccessTime,
+            last_write_time: wfd.ftLastWriteTime,
+            file_size: ((wfd.nFileSizeHigh as u64) << 32) | (wfd.nFileSizeLow as u64),
+            reparse_tag: if wfd.dwFileAttributes & c::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                // reserved unless this is a reparse point
+                wfd.dwReserved0
+            } else {
+                0
+            },
+            volume_serial_number: None,
+            number_of_links: None,
+            file_index: None,
+        }
+    }
+}
 
 fn to_u64(ft: &c::FILETIME) -> u64 {
     (ft.dwLowDateTime as u64) | ((ft.dwHighDateTime as u64) << 32)
@@ -892,6 +921,16 @@ impl FilePermissions {
         } else {
             self.attrs &= !c::FILE_ATTRIBUTE_READONLY;
         }
+    }
+}
+
+impl FileTimes {
+    pub fn set_accessed(&mut self, t: SystemTime) {
+        self.accessed = Some(t.into_inner());
+    }
+
+    pub fn set_modified(&mut self, t: SystemTime) {
+        self.modified = Some(t.into_inner());
     }
 }
 
@@ -993,89 +1032,94 @@ pub fn remove_dir_all(path: &Path) -> io::Result<()> {
     if (file.basic_info()?.FileAttributes & c::FILE_ATTRIBUTE_DIRECTORY) == 0 {
         return Err(io::Error::from_raw_os_error(c::ERROR_DIRECTORY as _));
     }
-    let mut delete: fn(&File) -> io::Result<()> = File::posix_delete;
-    let result = match delete(&file) {
-        Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {
-            match remove_dir_all_recursive(&file, delete) {
-                // Return unexpected errors.
-                Err(e) if e.kind() != io::ErrorKind::DirectoryNotEmpty => return Err(e),
-                result => result,
+
+    match remove_dir_all_iterative(&file, File::posix_delete) {
+        Err(e) => {
+            if let Some(code) = e.raw_os_error() {
+                match code as u32 {
+                    // If POSIX delete is not supported for this filesystem then fallback to win32 delete.
+                    c::ERROR_NOT_SUPPORTED
+                    | c::ERROR_INVALID_FUNCTION
+                    | c::ERROR_INVALID_PARAMETER => {
+                        remove_dir_all_iterative(&file, File::win32_delete)
+                    }
+                    _ => Err(e),
+                }
+            } else {
+                Err(e)
             }
         }
-        // If POSIX delete is not supported for this filesystem then fallback to win32 delete.
-        Err(e)
-            if e.raw_os_error() == Some(c::ERROR_NOT_SUPPORTED as i32)
-                || e.raw_os_error() == Some(c::ERROR_INVALID_PARAMETER as i32) =>
-        {
-            delete = File::win32_delete;
-            Err(e)
-        }
-        result => result,
-    };
-    if result.is_ok() {
-        Ok(())
-    } else {
-        // This is a fallback to make sure the directory is actually deleted.
-        // Otherwise this function is prone to failing with `DirectoryNotEmpty`
-        // due to possible delays between marking a file for deletion and the
-        // file actually being deleted from the filesystem.
-        //
-        // So we retry a few times before giving up.
-        for _ in 0..5 {
-            match remove_dir_all_recursive(&file, delete) {
-                Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {}
-                result => return result,
-            }
-        }
-        // Try one last time.
-        delete(&file)
+        ok => ok,
     }
 }
 
-fn remove_dir_all_recursive(f: &File, delete: fn(&File) -> io::Result<()>) -> io::Result<()> {
+fn remove_dir_all_iterative(f: &File, delete: fn(&File) -> io::Result<()>) -> io::Result<()> {
+    // When deleting files we may loop this many times when certain error conditions occur.
+    // This allows remove_dir_all to succeed when the error is temporary.
+    const MAX_RETRIES: u32 = 10;
+
     let mut buffer = DirBuff::new();
+    let mut dirlist = vec![f.duplicate()?];
+
+    // FIXME: This is a hack so we can push to the dirlist vec after borrowing from it.
+    fn copy_handle(f: &File) -> mem::ManuallyDrop<File> {
+        unsafe { mem::ManuallyDrop::new(File::from_raw_handle(f.as_raw_handle())) }
+    }
+
     let mut restart = true;
-    // Fill the buffer and iterate the entries.
-    while f.fill_dir_buff(&mut buffer, restart)? {
-        for name in buffer.iter() {
-            // Open the file without following symlinks and try deleting it.
-            // We try opening will all needed permissions and if that is denied
-            // fallback to opening without `FILE_LIST_DIRECTORY` permission.
-            // Note `SYNCHRONIZE` permission is needed for synchronous access.
-            let mut result =
-                open_link_no_reparse(&f, name, c::SYNCHRONIZE | c::DELETE | c::FILE_LIST_DIRECTORY);
-            if matches!(&result, Err(e) if e.kind() == io::ErrorKind::PermissionDenied) {
-                result = open_link_no_reparse(&f, name, c::SYNCHRONIZE | c::DELETE);
-            }
-            match result {
-                Ok(file) => match delete(&file) {
-                    Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {
-                        // Iterate the directory's files.
-                        // Ignore `DirectoryNotEmpty` errors here. They will be
-                        // caught when `remove_dir_all` tries to delete the top
-                        // level directory. It can then decide if to retry or not.
-                        match remove_dir_all_recursive(&file, delete) {
-                            Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {}
-                            result => result?,
-                        }
+    while let Some(dir) = dirlist.last() {
+        let dir = copy_handle(dir);
+
+        // Fill the buffer and iterate the entries.
+        let more_data = dir.fill_dir_buff(&mut buffer, restart)?;
+        restart = false;
+        for (name, is_directory) in buffer.iter() {
+            if is_directory {
+                let child_dir = open_link_no_reparse(
+                    &dir,
+                    name,
+                    c::SYNCHRONIZE | c::DELETE | c::FILE_LIST_DIRECTORY,
+                )?;
+                dirlist.push(child_dir);
+            } else {
+                for i in 1..=MAX_RETRIES {
+                    let result = open_link_no_reparse(&dir, name, c::SYNCHRONIZE | c::DELETE);
+                    match result {
+                        Ok(f) => delete(&f)?,
+                        // Already deleted, so skip.
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+                        // Retry a few times if the file is locked or a delete is already in progress.
+                        Err(e)
+                            if i < MAX_RETRIES
+                                && (e.raw_os_error() == Some(c::ERROR_DELETE_PENDING as _)
+                                    || e.raw_os_error()
+                                        == Some(c::ERROR_SHARING_VIOLATION as _)) => {}
+                        // Otherwise return the error.
+                        Err(e) => return Err(e),
                     }
-                    result => result?,
-                },
-                // Ignore error if a delete is already in progress or the file
-                // has already been deleted. It also ignores sharing violations
-                // (where a file is locked by another process) as these are
-                // usually temporary.
-                Err(e)
-                    if e.raw_os_error() == Some(c::ERROR_DELETE_PENDING as _)
-                        || e.kind() == io::ErrorKind::NotFound
-                        || e.raw_os_error() == Some(c::ERROR_SHARING_VIOLATION as _) => {}
-                Err(e) => return Err(e),
+                    thread::yield_now();
+                }
             }
         }
-        // Continue reading directory entries without restarting from the beginning,
-        restart = false;
+        // If there were no more files then delete the directory.
+        if !more_data {
+            if let Some(dir) = dirlist.pop() {
+                // Retry deleting a few times in case we need to wait for a file to be deleted.
+                for i in 1..=MAX_RETRIES {
+                    let result = delete(&dir);
+                    if let Err(e) = result {
+                        if i == MAX_RETRIES || e.kind() != io::ErrorKind::DirectoryNotEmpty {
+                            return Err(e);
+                        }
+                        thread::yield_now();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
     }
-    delete(&f)
+    Ok(())
 }
 
 pub fn readlink(path: &Path) -> io::Result<PathBuf> {
@@ -1139,22 +1183,73 @@ pub fn link(_original: &Path, _link: &Path) -> io::Result<()> {
 }
 
 pub fn stat(path: &Path) -> io::Result<FileAttr> {
-    let mut opts = OpenOptions::new();
-    // No read or write permissions are necessary
-    opts.access_mode(0);
-    // This flag is so we can open directories too
-    opts.custom_flags(c::FILE_FLAG_BACKUP_SEMANTICS);
-    let file = File::open(path, &opts)?;
-    file.file_attr()
+    metadata(path, ReparsePoint::Follow)
 }
 
 pub fn lstat(path: &Path) -> io::Result<FileAttr> {
+    metadata(path, ReparsePoint::Open)
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReparsePoint {
+    Follow = 0,
+    Open = c::FILE_FLAG_OPEN_REPARSE_POINT,
+}
+impl ReparsePoint {
+    fn as_flag(self) -> u32 {
+        self as u32
+    }
+}
+
+fn metadata(path: &Path, reparse: ReparsePoint) -> io::Result<FileAttr> {
     let mut opts = OpenOptions::new();
     // No read or write permissions are necessary
     opts.access_mode(0);
-    opts.custom_flags(c::FILE_FLAG_BACKUP_SEMANTICS | c::FILE_FLAG_OPEN_REPARSE_POINT);
-    let file = File::open(path, &opts)?;
-    file.file_attr()
+    opts.custom_flags(c::FILE_FLAG_BACKUP_SEMANTICS | reparse.as_flag());
+
+    // Attempt to open the file normally.
+    // If that fails with `ERROR_SHARING_VIOLATION` then retry using `FindFirstFileW`.
+    // If the fallback fails for any reason we return the original error.
+    match File::open(path, &opts) {
+        Ok(file) => file.file_attr(),
+        Err(e) if e.raw_os_error() == Some(c::ERROR_SHARING_VIOLATION as _) => {
+            // `ERROR_SHARING_VIOLATION` will almost never be returned.
+            // Usually if a file is locked you can still read some metadata.
+            // However, there are special system files, such as
+            // `C:\hiberfil.sys`, that are locked in a way that denies even that.
+            unsafe {
+                let path = maybe_verbatim(path)?;
+
+                // `FindFirstFileW` accepts wildcard file names.
+                // Fortunately wildcards are not valid file names and
+                // `ERROR_SHARING_VIOLATION` means the file exists (but is locked)
+                // therefore it's safe to assume the file name given does not
+                // include wildcards.
+                let mut wfd = mem::zeroed();
+                let handle = c::FindFirstFileW(path.as_ptr(), &mut wfd);
+
+                if handle == c::INVALID_HANDLE_VALUE {
+                    // This can fail if the user does not have read access to the
+                    // directory.
+                    Err(e)
+                } else {
+                    // We no longer need the find handle.
+                    c::FindClose(handle);
+
+                    // `FindFirstFileW` reads the cached file information from the
+                    // directory. The downside is that this metadata may be outdated.
+                    let attrs = FileAttr::from(wfd);
+                    if reparse == ReparsePoint::Follow && attrs.file_type().is_symlink() {
+                        Err(e)
+                    } else {
+                        Ok(attrs)
+                    }
+                }
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub fn set_perm(p: &Path, perm: FilePermissions) -> io::Result<()> {

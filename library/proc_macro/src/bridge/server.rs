@@ -2,20 +2,19 @@
 
 use super::*;
 
+use std::marker::PhantomData;
+
 // FIXME(eddyb) generate the definition of `HandleStore` in `server.rs`.
 use super::client::HandleStore;
 
 pub trait Types {
     type FreeFunctions: 'static;
     type TokenStream: 'static + Clone;
-    type Group: 'static + Clone;
-    type Punct: 'static + Copy + Eq + Hash;
-    type Ident: 'static + Copy + Eq + Hash;
-    type Literal: 'static + Clone;
     type SourceFile: 'static + Clone;
     type MultiSpan: 'static;
     type Diagnostic: 'static;
     type Span: 'static + Copy + Eq + Hash;
+    type Symbol: 'static;
 }
 
 /// Declare an associated fn of one of the traits below, adding necessary
@@ -38,13 +37,32 @@ macro_rules! declare_server_traits {
             $(associated_fn!(fn $method(&mut self, $($arg: $arg_ty),*) $(-> $ret_ty)?);)*
         })*
 
-        pub trait Server: Types $(+ $name)* {}
-        impl<S: Types $(+ $name)*> Server for S {}
+        pub trait Server: Types $(+ $name)* {
+            fn globals(&mut self) -> ExpnGlobals<Self::Span>;
+
+            /// Intern a symbol received from RPC
+            fn intern_symbol(ident: &str) -> Self::Symbol;
+
+            /// Recover the string value of a symbol, and invoke a callback with it.
+            fn with_symbol_string(symbol: &Self::Symbol, f: impl FnOnce(&str));
+        }
     }
 }
 with_api!(Self, self_, declare_server_traits);
 
 pub(super) struct MarkedTypes<S: Types>(S);
+
+impl<S: Server> Server for MarkedTypes<S> {
+    fn globals(&mut self) -> ExpnGlobals<Self::Span> {
+        <_>::mark(Server::globals(&mut self.0))
+    }
+    fn intern_symbol(ident: &str) -> Self::Symbol {
+        <_>::mark(S::intern_symbol(ident))
+    }
+    fn with_symbol_string(symbol: &Self::Symbol, f: impl FnOnce(&str)) {
+        S::with_symbol_string(symbol.unmark(), f)
+    }
+}
 
 macro_rules! define_mark_types_impls {
     ($($name:ident {
@@ -76,11 +94,13 @@ macro_rules! define_dispatcher_impl {
         pub trait DispatcherTrait {
             // HACK(eddyb) these are here to allow `Self::$name` to work below.
             $(type $name;)*
+
             fn dispatch(&mut self, buf: Buffer) -> Buffer;
         }
 
         impl<S: Server> DispatcherTrait for Dispatcher<MarkedTypes<S>> {
             $(type $name = <MarkedTypes<S> as Types>::$name;)*
+
             fn dispatch(&mut self, mut buf: Buffer) -> Buffer {
                 let Dispatcher { handle_store, server } = self;
 
@@ -120,9 +140,44 @@ pub trait ExecutionStrategy {
         &self,
         dispatcher: &mut impl DispatcherTrait,
         input: Buffer,
-        run_client: extern "C" fn(Bridge<'_>) -> Buffer,
+        run_client: extern "C" fn(BridgeConfig<'_>) -> Buffer,
         force_show_panics: bool,
     ) -> Buffer;
+}
+
+pub struct MaybeCrossThread<P> {
+    cross_thread: bool,
+    marker: PhantomData<P>,
+}
+
+impl<P> MaybeCrossThread<P> {
+    pub const fn new(cross_thread: bool) -> Self {
+        MaybeCrossThread { cross_thread, marker: PhantomData }
+    }
+}
+
+impl<P> ExecutionStrategy for MaybeCrossThread<P>
+where
+    P: MessagePipe<Buffer> + Send + 'static,
+{
+    fn run_bridge_and_client(
+        &self,
+        dispatcher: &mut impl DispatcherTrait,
+        input: Buffer,
+        run_client: extern "C" fn(BridgeConfig<'_>) -> Buffer,
+        force_show_panics: bool,
+    ) -> Buffer {
+        if self.cross_thread {
+            <CrossThread<P>>::new().run_bridge_and_client(
+                dispatcher,
+                input,
+                run_client,
+                force_show_panics,
+            )
+        } else {
+            SameThread.run_bridge_and_client(dispatcher, input, run_client, force_show_panics)
+        }
+    }
 }
 
 pub struct SameThread;
@@ -132,13 +187,13 @@ impl ExecutionStrategy for SameThread {
         &self,
         dispatcher: &mut impl DispatcherTrait,
         input: Buffer,
-        run_client: extern "C" fn(Bridge<'_>) -> Buffer,
+        run_client: extern "C" fn(BridgeConfig<'_>) -> Buffer,
         force_show_panics: bool,
     ) -> Buffer {
         let mut dispatch = |buf| dispatcher.dispatch(buf);
 
-        run_client(Bridge {
-            cached_buffer: input,
+        run_client(BridgeConfig {
+            input,
             dispatch: (&mut dispatch).into(),
             force_show_panics,
             _marker: marker::PhantomData,
@@ -146,107 +201,62 @@ impl ExecutionStrategy for SameThread {
     }
 }
 
-// NOTE(eddyb) Two implementations are provided, the second one is a bit
-// faster but neither is anywhere near as fast as same-thread execution.
+pub struct CrossThread<P>(PhantomData<P>);
 
-pub struct CrossThread1;
+impl<P> CrossThread<P> {
+    pub const fn new() -> Self {
+        CrossThread(PhantomData)
+    }
+}
 
-impl ExecutionStrategy for CrossThread1 {
+impl<P> ExecutionStrategy for CrossThread<P>
+where
+    P: MessagePipe<Buffer> + Send + 'static,
+{
     fn run_bridge_and_client(
         &self,
         dispatcher: &mut impl DispatcherTrait,
         input: Buffer,
-        run_client: extern "C" fn(Bridge<'_>) -> Buffer,
+        run_client: extern "C" fn(BridgeConfig<'_>) -> Buffer,
         force_show_panics: bool,
     ) -> Buffer {
-        use std::sync::mpsc::channel;
-
-        let (req_tx, req_rx) = channel();
-        let (res_tx, res_rx) = channel();
+        let (mut server, mut client) = P::new();
 
         let join_handle = thread::spawn(move || {
-            let mut dispatch = |buf| {
-                req_tx.send(buf).unwrap();
-                res_rx.recv().unwrap()
+            let mut dispatch = |b: Buffer| -> Buffer {
+                client.send(b);
+                client.recv().expect("server died while client waiting for reply")
             };
 
-            run_client(Bridge {
-                cached_buffer: input,
+            run_client(BridgeConfig {
+                input,
                 dispatch: (&mut dispatch).into(),
                 force_show_panics,
                 _marker: marker::PhantomData,
             })
         });
 
-        for b in req_rx {
-            res_tx.send(dispatcher.dispatch(b)).unwrap();
+        while let Some(b) = server.recv() {
+            server.send(dispatcher.dispatch(b));
         }
 
         join_handle.join().unwrap()
     }
 }
 
-pub struct CrossThread2;
+/// A message pipe used for communicating between server and client threads.
+pub trait MessagePipe<T>: Sized {
+    /// Create a new pair of endpoints for the message pipe.
+    fn new() -> (Self, Self);
 
-impl ExecutionStrategy for CrossThread2 {
-    fn run_bridge_and_client(
-        &self,
-        dispatcher: &mut impl DispatcherTrait,
-        input: Buffer,
-        run_client: extern "C" fn(Bridge<'_>) -> Buffer,
-        force_show_panics: bool,
-    ) -> Buffer {
-        use std::sync::{Arc, Mutex};
+    /// Send a message to the other endpoint of this pipe.
+    fn send(&mut self, value: T);
 
-        enum State<T> {
-            Req(T),
-            Res(T),
-        }
-
-        let mut state = Arc::new(Mutex::new(State::Res(Buffer::new())));
-
-        let server_thread = thread::current();
-        let state2 = state.clone();
-        let join_handle = thread::spawn(move || {
-            let mut dispatch = |b| {
-                *state2.lock().unwrap() = State::Req(b);
-                server_thread.unpark();
-                loop {
-                    thread::park();
-                    if let State::Res(b) = &mut *state2.lock().unwrap() {
-                        break b.take();
-                    }
-                }
-            };
-
-            let r = run_client(Bridge {
-                cached_buffer: input,
-                dispatch: (&mut dispatch).into(),
-                force_show_panics,
-                _marker: marker::PhantomData,
-            });
-
-            // Wake up the server so it can exit the dispatch loop.
-            drop(state2);
-            server_thread.unpark();
-
-            r
-        });
-
-        // Check whether `state2` was dropped, to know when to stop.
-        while Arc::get_mut(&mut state).is_none() {
-            thread::park();
-            let mut b = match &mut *state.lock().unwrap() {
-                State::Req(b) => b.take(),
-                _ => continue,
-            };
-            b = dispatcher.dispatch(b.take());
-            *state.lock().unwrap() = State::Res(b);
-            join_handle.thread().unpark();
-        }
-
-        join_handle.join().unwrap()
-    }
+    /// Receive a message from the other endpoint of this pipe.
+    ///
+    /// Returns `None` if the other end of the pipe has been destroyed, and no
+    /// message was received.
+    fn recv(&mut self) -> Option<T>;
 }
 
 fn run_server<
@@ -258,14 +268,16 @@ fn run_server<
     handle_counters: &'static client::HandleCounters,
     server: S,
     input: I,
-    run_client: extern "C" fn(Bridge<'_>) -> Buffer,
+    run_client: extern "C" fn(BridgeConfig<'_>) -> Buffer,
     force_show_panics: bool,
 ) -> Result<O, PanicMessage> {
     let mut dispatcher =
         Dispatcher { handle_store: HandleStore::new(handle_counters), server: MarkedTypes(server) };
 
+    let globals = dispatcher.server.globals();
+
     let mut buf = Buffer::new();
-    input.encode(&mut buf, &mut dispatcher.handle_store);
+    (globals, input).encode(&mut buf, &mut dispatcher.handle_store);
 
     buf = strategy.run_bridge_and_client(&mut dispatcher, buf, run_client, force_show_panics);
 

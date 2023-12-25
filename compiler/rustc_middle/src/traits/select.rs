@@ -103,12 +103,16 @@ pub type EvaluationCache<'tcx> = Cache<
 /// required for associated types to work in default impls, as the bounds
 /// are visible both as projection bounds and as where-clauses from the
 /// parameter environment.
-#[derive(PartialEq, Eq, Debug, Clone, TypeFoldable)]
+#[derive(PartialEq, Eq, Debug, Clone, TypeFoldable, TypeVisitable)]
 pub enum SelectionCandidate<'tcx> {
     BuiltinCandidate {
         /// `false` if there are no *further* obligations.
         has_nested: bool,
     },
+
+    /// Implementation of transmutability trait.
+    TransmutabilityCandidate,
+
     ParamCandidate(ty::PolyTraitPredicate<'tcx>),
     ImplCandidate(DefId),
     AutoImplCandidate(DefId),
@@ -293,7 +297,7 @@ impl From<ErrorGuaranteed> for OverflowError {
     }
 }
 
-TrivialTypeFoldableAndLiftImpls! {
+TrivialTypeTraversalAndLiftImpls! {
     OverflowError,
 }
 

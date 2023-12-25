@@ -64,7 +64,7 @@ impl fmt::Debug for Label {
 
 /// A "Lifetime" is an annotation of the scope in which variable
 /// can be used, e.g. `'a` in `&'a i32`.
-#[derive(Clone, Encodable, Decodable, Copy)]
+#[derive(Clone, Encodable, Decodable, Copy, PartialEq, Eq)]
 pub struct Lifetime {
     pub id: NodeId,
     pub ident: Ident,
@@ -1111,10 +1111,6 @@ pub struct Expr {
     pub tokens: Option<LazyTokenStream>,
 }
 
-// `Expr` is used a lot. Make sure it doesn't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-rustc_data_structures::static_assert_size!(Expr, 104);
-
 impl Expr {
     /// Returns `true` if this expression would be valid somewhere that expects a value;
     /// for example, an `if` condition.
@@ -1390,7 +1386,7 @@ pub enum ExprKind {
     /// A closure (e.g., `move |a, b, c| a + b + c`).
     ///
     /// The final span is the span of the argument block `|...|`.
-    Closure(CaptureBy, Async, Movability, P<FnDecl>, P<Expr>, Span),
+    Closure(ClosureBinder, CaptureBy, Async, Movability, P<FnDecl>, P<Expr>, Span),
     /// A block (`'label: { ... }`).
     Block(P<Block>, Option<Label>),
     /// An async block (`async move { ... }`).
@@ -1516,6 +1512,31 @@ pub enum Movability {
     Static,
     /// Must not contain self-references, `Unpin`.
     Movable,
+}
+
+/// Closure lifetime binder, `for<'a, 'b>` in `for<'a, 'b> |_: &'a (), _: &'b ()|`.
+#[derive(Clone, Encodable, Decodable, Debug)]
+pub enum ClosureBinder {
+    /// The binder is not present, all closure lifetimes are inferred.
+    NotPresent,
+    /// The binder is present.
+    For {
+        /// Span of the whole `for<>` clause
+        ///
+        /// ```text
+        /// for<'a, 'b> |_: &'a (), _: &'b ()| { ... }
+        /// ^^^^^^^^^^^ -- this
+        /// ```
+        span: Span,
+
+        /// Lifetimes in the `for<>` closure
+        ///
+        /// ```text
+        /// for<'a, 'b> |_: &'a (), _: &'b ()| { ... }
+        ///     ^^^^^^ -- this
+        /// ```
+        generic_params: P<[GenericParam]>,
+    },
 }
 
 /// Represents a macro invocation. The `path` indicates which macro
@@ -2035,6 +2056,14 @@ impl TyKind {
 
     pub fn is_unit(&self) -> bool {
         matches!(self, TyKind::Tup(tys) if tys.is_empty())
+    }
+
+    pub fn is_simple_path(&self) -> Option<Symbol> {
+        if let TyKind::Path(None, Path { segments, .. }) = &self && segments.len() == 1 {
+            Some(segments[0].ident.name)
+        } else {
+            None
+        }
     }
 }
 
@@ -2667,13 +2696,16 @@ impl Item {
 #[derive(Clone, Copy, Encodable, Decodable, Debug)]
 pub enum Extern {
     None,
-    Implicit,
-    Explicit(StrLit),
+    Implicit(Span),
+    Explicit(StrLit, Span),
 }
 
 impl Extern {
-    pub fn from_abi(abi: Option<StrLit>) -> Extern {
-        abi.map_or(Extern::Implicit, Extern::Explicit)
+    pub fn from_abi(abi: Option<StrLit>, span: Span) -> Extern {
+        match abi {
+            Some(name) => Extern::Explicit(name, span),
+            None => Extern::Implicit(span),
+        }
     }
 }
 
@@ -2847,9 +2879,6 @@ pub enum ItemKind {
     MacroDef(MacroDef),
 }
 
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-rustc_data_structures::static_assert_size!(ItemKind, 112);
-
 impl ItemKind {
     pub fn article(&self) -> &str {
         use ItemKind::*;
@@ -2921,9 +2950,6 @@ pub enum AssocItemKind {
     MacCall(MacCall),
 }
 
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-rustc_data_structures::static_assert_size!(AssocItemKind, 72);
-
 impl AssocItemKind {
     pub fn defaultness(&self) -> Defaultness {
         match *self {
@@ -2973,9 +2999,6 @@ pub enum ForeignItemKind {
     MacCall(MacCall),
 }
 
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-rustc_data_structures::static_assert_size!(ForeignItemKind, 72);
-
 impl From<ForeignItemKind> for ItemKind {
     fn from(foreign_item_kind: ForeignItemKind) -> ItemKind {
         match foreign_item_kind {
@@ -3002,3 +3025,27 @@ impl TryFrom<ItemKind> for ForeignItemKind {
 }
 
 pub type ForeignItem = Item<ForeignItemKind>;
+
+// Some nodes are used a lot. Make sure they don't unintentionally get bigger.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+mod size_asserts {
+    use super::*;
+    // These are in alphabetical order, which is easy to maintain.
+    rustc_data_structures::static_assert_size!(AssocItemKind, 72);
+    rustc_data_structures::static_assert_size!(Attribute, 152);
+    rustc_data_structures::static_assert_size!(Block, 48);
+    rustc_data_structures::static_assert_size!(Expr, 104);
+    rustc_data_structures::static_assert_size!(Fn, 192);
+    rustc_data_structures::static_assert_size!(ForeignItemKind, 72);
+    rustc_data_structures::static_assert_size!(GenericBound, 88);
+    rustc_data_structures::static_assert_size!(Generics, 72);
+    rustc_data_structures::static_assert_size!(Impl, 200);
+    rustc_data_structures::static_assert_size!(Item, 200);
+    rustc_data_structures::static_assert_size!(ItemKind, 112);
+    rustc_data_structures::static_assert_size!(Lit, 48);
+    rustc_data_structures::static_assert_size!(Pat, 120);
+    rustc_data_structures::static_assert_size!(Path, 40);
+    rustc_data_structures::static_assert_size!(PathSegment, 24);
+    rustc_data_structures::static_assert_size!(Stmt, 32);
+    rustc_data_structures::static_assert_size!(Ty, 96);
+}

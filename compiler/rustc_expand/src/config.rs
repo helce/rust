@@ -129,7 +129,7 @@ fn get_features(
                         .span_suggestion(
                             mi.span(),
                             "expected just one word",
-                            format!("{}", ident.name),
+                            ident.name,
                             Applicability::MaybeIncorrect,
                         )
                         .emit();
@@ -171,7 +171,7 @@ fn get_features(
                 continue;
             }
 
-            if let Some(allowed) = sess.opts.debugging_opts.allow_features.as_ref() {
+            if let Some(allowed) = sess.opts.unstable_opts.allow_features.as_ref() {
                 if allowed.iter().all(|f| name.as_str() != f) {
                     struct_span_err!(
                         span_handler,
@@ -401,7 +401,7 @@ impl<'a> StripUnconfigured<'a> {
         // Use the `#` in `#[cfg_attr(pred, attr)]` as the `#` token
         // for `attr` when we expand it to `#[attr]`
         let mut orig_trees = orig_tokens.into_trees();
-        let TokenTree::Token(pound_token @ Token { kind: TokenKind::Pound, .. }) = orig_trees.next().unwrap() else {
+        let TokenTree::Token(pound_token @ Token { kind: TokenKind::Pound, .. }, _) = orig_trees.next().unwrap() else {
             panic!("Bad tokens for attribute {:?}", attr);
         };
         let pound_span = pound_token.span;
@@ -409,7 +409,7 @@ impl<'a> StripUnconfigured<'a> {
         let mut trees = vec![(AttrAnnotatedTokenTree::Token(pound_token), Spacing::Alone)];
         if attr.style == AttrStyle::Inner {
             // For inner attributes, we do the same thing for the `!` in `#![some_attr]`
-            let TokenTree::Token(bang_token @ Token { kind: TokenKind::Not, .. }) = orig_trees.next().unwrap() else {
+            let TokenTree::Token(bang_token @ Token { kind: TokenKind::Not, .. }, _) = orig_trees.next().unwrap() else {
                 panic!("Bad tokens for attribute {:?}", attr);
             };
             trees.push((AttrAnnotatedTokenTree::Token(bang_token), Spacing::Alone));

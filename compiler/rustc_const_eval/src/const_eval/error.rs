@@ -9,7 +9,7 @@ use rustc_span::{Span, Symbol};
 
 use super::InterpCx;
 use crate::interpret::{
-    struct_error, ErrorHandled, FrameInfo, InterpError, InterpErrorInfo, Machine, MachineStopType,
+    struct_error, ErrorHandled, FrameInfo, InterpError, InterpErrorInfo, Machine, MachineStopType, UnsupportedOpInfo,
 };
 
 /// The CTFE machine has some custom error kinds.
@@ -82,12 +82,12 @@ impl<'tcx> ConstEvalErr<'tcx> {
         'tcx: 'mir,
     {
         error.print_backtrace();
-        let stacktrace = ecx.generate_stacktrace();
-        ConstEvalErr {
-            error: error.into_kind(),
-            stacktrace,
-            span: span.unwrap_or_else(|| ecx.cur_span()),
-        }
+        let mut stacktrace = ecx.generate_stacktrace();
+        // Filter out `requires_caller_location` frames.
+        stacktrace.retain(|frame| !frame.instance.def.requires_caller_location(*ecx.tcx));
+        // If `span` is missing, use topmost remaining frame, or else the "root" span from `ecx.tcx`.
+        let span = span.or_else(|| stacktrace.first().map(|f| f.span)).unwrap_or(ecx.tcx.span);
+        ConstEvalErr { error: error.into_kind(), stacktrace, span }
     }
 
     pub fn struct_error(
@@ -152,6 +152,17 @@ impl<'tcx> ConstEvalErr<'tcx> {
             trace!("reporting const eval failure at {:?}", self.span);
             if let Some(span_msg) = span_msg {
                 err.span_label(self.span, span_msg);
+            }
+            // Add some more context for select error types.
+            match self.error {
+                InterpError::Unsupported(
+                    UnsupportedOpInfo::ReadPointerAsBytes
+                    | UnsupportedOpInfo::PartialPointerOverwrite(_)
+                ) => {
+                    err.help("this code performed an operation that depends on the underlying bytes representing a pointer");
+                    err.help("the absolute address of a pointer is not known at compile-time, so such operations are not supported");
+                }
+                _ => {}
             }
             // Add spans for the stacktrace. Don't print a single-line backtrace though.
             if self.stacktrace.len() > 1 {

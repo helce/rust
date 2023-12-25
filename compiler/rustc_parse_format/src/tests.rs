@@ -58,15 +58,47 @@ fn invalid06() {
 
 #[test]
 fn format_nothing() {
-    same("{}", &[NextArgument(Argument { position: ArgumentImplicitlyIs(0), format: fmtdflt() })]);
+    same(
+        "{}",
+        &[NextArgument(Argument {
+            position: ArgumentImplicitlyIs(0),
+            position_span: InnerSpan { start: 2, end: 2 },
+            format: fmtdflt(),
+        })],
+    );
 }
 #[test]
 fn format_position() {
-    same("{3}", &[NextArgument(Argument { position: ArgumentIs(3), format: fmtdflt() })]);
+    same(
+        "{3}",
+        &[NextArgument(Argument {
+            position: ArgumentIs(3),
+            position_span: InnerSpan { start: 2, end: 3 },
+            format: fmtdflt(),
+        })],
+    );
 }
 #[test]
 fn format_position_nothing_else() {
-    same("{3:}", &[NextArgument(Argument { position: ArgumentIs(3), format: fmtdflt() })]);
+    same(
+        "{3:}",
+        &[NextArgument(Argument {
+            position: ArgumentIs(3),
+            position_span: InnerSpan { start: 2, end: 3 },
+            format: fmtdflt(),
+        })],
+    );
+}
+#[test]
+fn format_named() {
+    same(
+        "{name}",
+        &[NextArgument(Argument {
+            position: ArgumentNamed("name"),
+            position_span: InnerSpan { start: 2, end: 6 },
+            format: fmtdflt(),
+        })],
+    )
 }
 #[test]
 fn format_type() {
@@ -74,6 +106,7 @@ fn format_type() {
         "{3:x}",
         &[NextArgument(Argument {
             position: ArgumentIs(3),
+            position_span: InnerSpan { start: 2, end: 3 },
             format: FormatSpec {
                 fill: None,
                 align: AlignUnknown,
@@ -94,6 +127,7 @@ fn format_align_fill() {
         "{3:>}",
         &[NextArgument(Argument {
             position: ArgumentIs(3),
+            position_span: InnerSpan { start: 2, end: 3 },
             format: FormatSpec {
                 fill: None,
                 align: AlignRight,
@@ -111,6 +145,7 @@ fn format_align_fill() {
         "{3:0<}",
         &[NextArgument(Argument {
             position: ArgumentIs(3),
+            position_span: InnerSpan { start: 2, end: 3 },
             format: FormatSpec {
                 fill: Some('0'),
                 align: AlignLeft,
@@ -128,6 +163,7 @@ fn format_align_fill() {
         "{3:*<abcd}",
         &[NextArgument(Argument {
             position: ArgumentIs(3),
+            position_span: InnerSpan { start: 2, end: 3 },
             format: FormatSpec {
                 fill: Some('*'),
                 align: AlignLeft,
@@ -148,6 +184,7 @@ fn format_counts() {
         "{:10x}",
         &[NextArgument(Argument {
             position: ArgumentImplicitlyIs(0),
+            position_span: InnerSpan { start: 2, end: 2 },
             format: FormatSpec {
                 fill: None,
                 align: AlignUnknown,
@@ -165,6 +202,7 @@ fn format_counts() {
         "{:10$.10x}",
         &[NextArgument(Argument {
             position: ArgumentImplicitlyIs(0),
+            position_span: InnerSpan { start: 2, end: 2 },
             format: FormatSpec {
                 fill: None,
                 align: AlignUnknown,
@@ -179,9 +217,28 @@ fn format_counts() {
         })],
     );
     same(
+        "{1:0$.10x}",
+        &[NextArgument(Argument {
+            position: ArgumentIs(1),
+            position_span: InnerSpan { start: 2, end: 3 },
+            format: FormatSpec {
+                fill: None,
+                align: AlignUnknown,
+                flags: 0,
+                precision: CountIs(10),
+                width: CountIsParam(0),
+                precision_span: None,
+                width_span: Some(InnerSpan::new(4, 6)),
+                ty: "x",
+                ty_span: None,
+            },
+        })],
+    );
+    same(
         "{:.*x}",
         &[NextArgument(Argument {
             position: ArgumentImplicitlyIs(1),
+            position_span: InnerSpan { start: 2, end: 2 },
             format: FormatSpec {
                 fill: None,
                 align: AlignUnknown,
@@ -199,6 +256,7 @@ fn format_counts() {
         "{:.10$x}",
         &[NextArgument(Argument {
             position: ArgumentImplicitlyIs(0),
+            position_span: InnerSpan { start: 2, end: 2 },
             format: FormatSpec {
                 fill: None,
                 align: AlignUnknown,
@@ -216,6 +274,7 @@ fn format_counts() {
         "{:a$.b$?}",
         &[NextArgument(Argument {
             position: ArgumentImplicitlyIs(0),
+            position_span: InnerSpan { start: 2, end: 2 },
             format: FormatSpec {
                 fill: None,
                 align: AlignUnknown,
@@ -236,6 +295,7 @@ fn format_flags() {
         "{:-}",
         &[NextArgument(Argument {
             position: ArgumentImplicitlyIs(0),
+            position_span: InnerSpan { start: 2, end: 2 },
             format: FormatSpec {
                 fill: None,
                 align: AlignUnknown,
@@ -253,6 +313,7 @@ fn format_flags() {
         "{:+#}",
         &[NextArgument(Argument {
             position: ArgumentImplicitlyIs(0),
+            position_span: InnerSpan { start: 2, end: 2 },
             format: FormatSpec {
                 fill: None,
                 align: AlignUnknown,
@@ -275,6 +336,7 @@ fn format_mixture() {
             String("abcd "),
             NextArgument(Argument {
                 position: ArgumentIs(3),
+                position_span: InnerSpan { start: 7, end: 8 },
                 format: FormatSpec {
                     fill: None,
                     align: AlignUnknown,
@@ -289,5 +351,24 @@ fn format_mixture() {
             }),
             String(" efg"),
         ],
+    );
+}
+#[test]
+fn format_whitespace() {
+    same(
+        "{ }",
+        &[NextArgument(Argument {
+            position: ArgumentImplicitlyIs(0),
+            position_span: InnerSpan { start: 2, end: 3 },
+            format: fmtdflt(),
+        })],
+    );
+    same(
+        "{  }",
+        &[NextArgument(Argument {
+            position: ArgumentImplicitlyIs(0),
+            position_span: InnerSpan { start: 2, end: 4 },
+            format: fmtdflt(),
+        })],
     );
 }

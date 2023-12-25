@@ -232,15 +232,15 @@ fn exported_symbols_provider_local<'tcx>(
         }));
     }
 
-    if tcx.sess.opts.debugging_opts.sanitizer.contains(SanitizerSet::MEMORY) {
+    if tcx.sess.opts.unstable_opts.sanitizer.contains(SanitizerSet::MEMORY) {
         let mut msan_weak_symbols = Vec::new();
 
         // Similar to profiling, preserve weak msan symbol during LTO.
-        if tcx.sess.opts.debugging_opts.sanitizer_recover.contains(SanitizerSet::MEMORY) {
+        if tcx.sess.opts.unstable_opts.sanitizer_recover.contains(SanitizerSet::MEMORY) {
             msan_weak_symbols.push("__msan_keep_going");
         }
 
-        if tcx.sess.opts.debugging_opts.sanitizer_memory_track_origins != 0 {
+        if tcx.sess.opts.unstable_opts.sanitizer_memory_track_origins != 0 {
             msan_weak_symbols.push("__msan_track_origins");
         }
 
@@ -257,16 +257,18 @@ fn exported_symbols_provider_local<'tcx>(
         }));
     }
 
-    if tcx.sess.crate_types().contains(&CrateType::Dylib) {
+    if tcx.sess.crate_types().contains(&CrateType::Dylib)
+        || tcx.sess.crate_types().contains(&CrateType::ProcMacro)
+    {
         let symbol_name = metadata_symbol_name(tcx);
         let exported_symbol = ExportedSymbol::NoDefId(SymbolName::new(tcx, &symbol_name));
 
         symbols.push((
             exported_symbol,
             SymbolExportInfo {
-                level: SymbolExportLevel::Rust,
+                level: SymbolExportLevel::C,
                 kind: SymbolExportKind::Data,
-                used: false,
+                used: true,
             },
         ));
     }

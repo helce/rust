@@ -9,7 +9,6 @@ use hir::OpaqueTyOrigin;
 use rustc_data_structures::frozen::Frozen;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::vec_map::VecMap;
-use rustc_errors::struct_span_err;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalDefId;
@@ -28,8 +27,8 @@ use rustc_middle::mir::AssertKind;
 use rustc_middle::mir::*;
 use rustc_middle::ty::adjustment::PointerCast;
 use rustc_middle::ty::cast::CastTy;
-use rustc_middle::ty::fold::TypeFoldable;
 use rustc_middle::ty::subst::{GenericArgKind, SubstsRef, UserSubsts};
+use rustc_middle::ty::visit::TypeVisitable;
 use rustc_middle::ty::{
     self, CanonicalUserTypeAnnotation, CanonicalUserTypeAnnotations, OpaqueHiddenType,
     OpaqueTypeKey, RegionVid, ToPredicate, Ty, TyCtxt, UserType, UserTypeAnnotationIndex,
@@ -48,6 +47,7 @@ use rustc_mir_dataflow::impls::MaybeInitializedPlaces;
 use rustc_mir_dataflow::move_paths::MoveData;
 use rustc_mir_dataflow::ResultsCursor;
 
+use crate::session_diagnostics::MoveUnsized;
 use crate::{
     borrow_set::BorrowSet,
     constraints::{OutlivesConstraint, OutlivesConstraintSet},
@@ -157,7 +157,7 @@ pub(crate) fn type_check<'mir, 'tcx>(
     } = free_region_relations::create(
         infcx,
         param_env,
-        Some(implicit_region_bound),
+        implicit_region_bound,
         universal_regions,
         &mut constraints,
     );
@@ -333,9 +333,9 @@ struct TypeVerifier<'a, 'b, 'tcx> {
 }
 
 impl<'a, 'b, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'tcx> {
-    fn visit_span(&mut self, span: &Span) {
+    fn visit_span(&mut self, span: Span) {
         if !span.is_dummy() {
-            self.last_span = *span;
+            self.last_span = span;
         }
     }
 
@@ -1142,7 +1142,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             self.infcx,
             self.borrowck_context.universal_regions,
             self.region_bound_pairs,
-            Some(self.implicit_region_bound),
+            self.implicit_region_bound,
             self.param_env,
             locations,
             locations.span(self.body),
@@ -1780,19 +1780,10 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             // slot or local, so to find all unsized rvalues it is enough
             // to check all temps, return slots and locals.
             if self.reported_errors.replace((ty, span)).is_none() {
-                let mut diag = struct_span_err!(
-                    self.tcx().sess,
-                    span,
-                    E0161,
-                    "cannot move a value of type {0}: the size of {0} \
-                     cannot be statically determined",
-                    ty
-                );
-
                 // While this is located in `nll::typeck` this error is not
                 // an NLL error, it's a required check to prevent creation
                 // of unsized rvalues in a call expression.
-                diag.emit();
+                self.tcx().sess.emit_err(MoveUnsized { ty, span });
             }
         }
     }
@@ -1856,14 +1847,11 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     let tcx = self.tcx();
                     let def_id = uv.def.def_id_for_type_of();
                     if tcx.def_kind(def_id) == DefKind::InlineConst {
-                        let predicates = self.prove_closure_bounds(
-                            tcx,
-                            def_id.expect_local(),
-                            uv.substs,
-                            location,
-                        );
+                        let def_id = def_id.expect_local();
+                        let predicates =
+                            self.prove_closure_bounds(tcx, def_id, uv.substs, location);
                         self.normalize_and_prove_instantiated_predicates(
-                            def_id,
+                            def_id.to_def_id(),
                             predicates,
                             location.to_locations(),
                         );
@@ -2278,6 +2266,10 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             Rvalue::Use(operand) | Rvalue::UnaryOp(_, operand) => {
                 self.check_operand(operand, location);
             }
+            Rvalue::CopyForDeref(place) => {
+                let op = &Operand::Copy(*place);
+                self.check_operand(op, location);
+            }
 
             Rvalue::BinaryOp(_, box (left, right))
             | Rvalue::CheckedBinaryOp(_, box (left, right)) => {
@@ -2308,6 +2300,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             | Rvalue::BinaryOp(..)
             | Rvalue::CheckedBinaryOp(..)
             | Rvalue::NullaryOp(..)
+            | Rvalue::CopyForDeref(..)
             | Rvalue::UnaryOp(..)
             | Rvalue::Discriminant(..) => None,
 
@@ -2518,9 +2511,9 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             aggregate_kind, location
         );
 
-        let (def_id, instantiated_predicates) = match aggregate_kind {
+        let (def_id, instantiated_predicates) = match *aggregate_kind {
             AggregateKind::Adt(adt_did, _, substs, _, _) => {
-                (*adt_did, tcx.predicates_of(*adt_did).instantiate(tcx, substs))
+                (adt_did, tcx.predicates_of(adt_did).instantiate(tcx, substs))
             }
 
             // For closures, we have some **extra requirements** we
@@ -2545,7 +2538,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             // clauses on the struct.
             AggregateKind::Closure(def_id, substs)
             | AggregateKind::Generator(def_id, substs, _) => {
-                (*def_id, self.prove_closure_bounds(tcx, def_id.expect_local(), substs, location))
+                (def_id.to_def_id(), self.prove_closure_bounds(tcx, def_id, substs, location))
             }
 
             AggregateKind::Array(_) | AggregateKind::Tuple => {
@@ -2623,6 +2616,34 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 location.to_locations(),
                 ConstraintCategory::ClosureBounds,
                 &closure_constraints,
+            );
+        }
+
+        // Now equate closure substs to regions inherited from `typeck_root_def_id`. Fixes #98589.
+        let typeck_root_def_id = tcx.typeck_root_def_id(self.body.source.def_id());
+        let typeck_root_substs = ty::InternalSubsts::identity_for_item(tcx, typeck_root_def_id);
+
+        let parent_substs = match tcx.def_kind(def_id) {
+            DefKind::Closure => substs.as_closure().parent_substs(),
+            DefKind::Generator => substs.as_generator().parent_substs(),
+            DefKind::InlineConst => substs.as_inline_const().parent_substs(),
+            other => bug!("unexpected item {:?}", other),
+        };
+        let parent_substs = tcx.mk_substs(parent_substs.iter());
+
+        assert_eq!(typeck_root_substs.len(), parent_substs.len());
+        if let Err(_) = self.eq_substs(
+            typeck_root_substs,
+            parent_substs,
+            location.to_locations(),
+            ConstraintCategory::BoringNoLocation,
+        ) {
+            span_mirbug!(
+                self,
+                def_id,
+                "could not relate closure to parent {:?} != {:?}",
+                typeck_root_substs,
+                parent_substs
             );
         }
 

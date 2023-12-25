@@ -129,7 +129,7 @@ impl<'tcx> Visitor<'tcx> for UnsafetyChecker<'_, 'tcx> {
                 }
                 &AggregateKind::Closure(def_id, _) | &AggregateKind::Generator(def_id, _, _) => {
                     let UnsafetyCheckResult { violations, used_unsafe_blocks, .. } =
-                        self.tcx.unsafety_check_result(def_id.expect_local());
+                        self.tcx.unsafety_check_result(def_id);
                     self.register_violations(
                         violations,
                         used_unsafe_blocks.iter().map(|(&h, &d)| (h, d)),
@@ -219,22 +219,12 @@ impl<'tcx> Visitor<'tcx> for UnsafetyChecker<'_, 'tcx> {
                     // We have to check the actual type of the assignment, as that determines if the
                     // old value is being dropped.
                     let assigned_ty = place.ty(&self.body.local_decls, self.tcx).ty;
-                    // To avoid semver hazard, we only consider `Copy` and `ManuallyDrop` non-dropping.
-                    let manually_drop = assigned_ty
-                        .ty_adt_def()
-                        .map_or(false, |adt_def| adt_def.is_manually_drop());
-                    let nodrop = manually_drop
-                        || assigned_ty.is_copy_modulo_regions(
-                            self.tcx.at(self.source_info.span),
-                            self.param_env,
+                    if assigned_ty.needs_drop(self.tcx, self.param_env) {
+                        // This would be unsafe, but should be outright impossible since we reject such unions.
+                        self.tcx.sess.delay_span_bug(
+                            self.source_info.span,
+                            format!("union fields that need dropping should be impossible: {assigned_ty}")
                         );
-                    if !nodrop {
-                        self.require_unsafe(
-                            UnsafetyViolationKind::General,
-                            UnsafetyViolationDetails::AssignToDroppingUnionField,
-                        );
-                    } else {
-                        // write to non-drop union field, safe
                     }
                 } else {
                     self.require_unsafe(
@@ -474,15 +464,15 @@ fn check_unused_unsafe(
     def_id: LocalDefId,
     used_unsafe_blocks: &FxHashMap<HirId, UsedUnsafeBlockData>,
 ) -> Vec<(HirId, UnusedUnsafe)> {
-    let hir_id = tcx.hir().local_def_id_to_hir_id(def_id);
-    let body_id = tcx.hir().maybe_body_owned_by(hir_id);
+    let body_id = tcx.hir().maybe_body_owned_by(def_id);
 
     let Some(body_id) = body_id else {
         debug!("check_unused_unsafe({:?}) - no body found", def_id);
         return vec![];
     };
-    let body = tcx.hir().body(body_id);
 
+    let body = tcx.hir().body(body_id);
+    let hir_id = tcx.hir().local_def_id_to_hir_id(def_id);
     let context = match tcx.hir().fn_sig_by_hir_id(hir_id) {
         Some(sig) if sig.header.unsafety == hir::Unsafety::Unsafe => Context::UnsafeFn(hir_id),
         _ => Context::Safe,

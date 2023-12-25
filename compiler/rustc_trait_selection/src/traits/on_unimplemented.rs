@@ -300,7 +300,7 @@ impl<'tcx> OnUnimplementedFormatString {
             match token {
                 Piece::String(_) => (), // Normal string, no need to check it
                 Piece::NextArgument(a) => match a.position {
-                    Position::ArgumentNamed(s, _) => {
+                    Position::ArgumentNamed(s) => {
                         match Symbol::intern(s) {
                             // `{Self}` is allowed
                             kw::SelfUpper => (),
@@ -337,7 +337,7 @@ impl<'tcx> OnUnimplementedFormatString {
                         }
                     }
                     // `{:1}` and `{}` are not to be used
-                    Position::ArgumentIs(_) | Position::ArgumentImplicitlyIs(_) => {
+                    Position::ArgumentIs(..) | Position::ArgumentImplicitlyIs(_) => {
                         let reported = struct_span_err!(
                             tcx.sess,
                             span,
@@ -386,7 +386,7 @@ impl<'tcx> OnUnimplementedFormatString {
             .map(|p| match p {
                 Piece::String(s) => s,
                 Piece::NextArgument(a) => match a.position {
-                    Position::ArgumentNamed(s, _) => {
+                    Position::ArgumentNamed(s) => {
                         let s = Symbol::intern(s);
                         match generic_map.get(&s) {
                             Some(val) => val,

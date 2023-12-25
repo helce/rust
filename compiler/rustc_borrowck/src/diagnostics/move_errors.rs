@@ -4,9 +4,9 @@ use rustc_middle::ty;
 use rustc_mir_dataflow::move_paths::{
     IllegalMoveOrigin, IllegalMoveOriginKind, LookupResult, MoveError, MovePathIndex,
 };
-use rustc_span::{sym, Span};
+use rustc_span::Span;
 
-use crate::diagnostics::UseSpans;
+use crate::diagnostics::{DescribePlaceOpt, UseSpans};
 use crate::prefixes::PrefixSet;
 use crate::MirBorrowckCtxt;
 
@@ -218,29 +218,13 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
 
     fn report(&mut self, error: GroupedMoveError<'tcx>) {
         let (mut err, err_span) = {
-            let (span, use_spans, original_path, kind, has_complex_bindings): (
-                Span,
-                Option<UseSpans<'tcx>>,
-                Place<'tcx>,
-                &IllegalMoveOriginKind<'_>,
-                bool,
-            ) = match error {
-                GroupedMoveError::MovesFromPlace {
-                    span,
-                    original_path,
-                    ref kind,
-                    ref binds_to,
-                    ..
+            let (span, use_spans, original_path, kind) = match error {
+                GroupedMoveError::MovesFromPlace { span, original_path, ref kind, .. }
+                | GroupedMoveError::MovesFromValue { span, original_path, ref kind, .. } => {
+                    (span, None, original_path, kind)
                 }
-                | GroupedMoveError::MovesFromValue {
-                    span,
-                    original_path,
-                    ref kind,
-                    ref binds_to,
-                    ..
-                } => (span, None, original_path, kind, !binds_to.is_empty()),
                 GroupedMoveError::OtherIllegalMove { use_spans, original_path, ref kind } => {
-                    (use_spans.args_or_use(), Some(use_spans), original_path, kind, false)
+                    (use_spans.args_or_use(), Some(use_spans), original_path, kind)
                 }
             };
             debug!(
@@ -259,7 +243,6 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                             target_place,
                             span,
                             use_spans,
-                            has_complex_bindings,
                         ),
                     &IllegalMoveOriginKind::InteriorOfTypeWithDestructor { container_ty: ty } => {
                         self.cannot_move_out_of_interior_of_drop(span, ty)
@@ -302,7 +285,6 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
         deref_target_place: Place<'tcx>,
         span: Span,
         use_spans: Option<UseSpans<'tcx>>,
-        has_complex_bindings: bool,
     ) -> DiagnosticBuilder<'a, ErrorGuaranteed> {
         // Inspect the type of the content behind the
         // borrow to provide feedback about why this
@@ -386,41 +368,38 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             }
             _ => {
                 let source = self.borrowed_content_source(deref_base);
-                match (self.describe_place(move_place.as_ref()), source.describe_for_named_place())
-                {
-                    (Some(place_desc), Some(source_desc)) => self.cannot_move_out_of(
+                let move_place_ref = move_place.as_ref();
+                match (
+                    self.describe_place_with_options(
+                        move_place_ref,
+                        DescribePlaceOpt {
+                            including_downcast: false,
+                            including_tuple_field: false,
+                        },
+                    ),
+                    self.describe_name(move_place_ref),
+                    source.describe_for_named_place(),
+                ) {
+                    (Some(place_desc), Some(name), Some(source_desc)) => self.cannot_move_out_of(
+                        span,
+                        &format!("`{place_desc}` as enum variant `{name}` which is behind a {source_desc}"),
+                    ),
+                    (Some(place_desc), Some(name), None) => self.cannot_move_out_of(
+                        span,
+                        &format!("`{place_desc}` as enum variant `{name}`"),
+                    ),
+                    (Some(place_desc), _, Some(source_desc)) => self.cannot_move_out_of(
                         span,
                         &format!("`{place_desc}` which is behind a {source_desc}"),
                     ),
-                    (_, _) => self.cannot_move_out_of(
+                    (_, _, _) => self.cannot_move_out_of(
                         span,
                         &source.describe_for_unnamed_place(self.infcx.tcx),
                     ),
                 }
             }
         };
-        let ty = move_place.ty(self.body, self.infcx.tcx).ty;
-        let def_id = match *ty.kind() {
-            ty::Adt(self_def, _) => self_def.did(),
-            ty::Foreign(def_id)
-            | ty::FnDef(def_id, _)
-            | ty::Closure(def_id, _)
-            | ty::Generator(def_id, ..)
-            | ty::Opaque(def_id, _) => def_id,
-            _ => return err,
-        };
-        let diag_name = self.infcx.tcx.get_diagnostic_name(def_id);
-        if matches!(diag_name, Some(sym::Option | sym::Result))
-            && use_spans.map_or(true, |v| !v.for_closure())
-            && !has_complex_bindings
-        {
-            err.span_suggestion_verbose(
-                span.shrink_to_hi(),
-                &format!("consider borrowing the `{}`'s content", diag_name.unwrap()),
-                ".as_ref()",
-                Applicability::MaybeIncorrect,
-            );
-        } else if let Some(use_spans) = use_spans {
+        if let Some(use_spans) = use_spans {
             self.explain_captures(
                 &mut err, span, span, use_spans, move_place, None, "", "", "", false, true,
             );

@@ -156,7 +156,7 @@ use core::array;
 use core::convert::Infallible;
 
 use crate::alloc::{AllocError, LayoutError};
-use crate::any::TypeId;
+use crate::any::{Demand, Provider, TypeId};
 use crate::backtrace::Backtrace;
 use crate::borrow::Cow;
 use crate::cell;
@@ -260,20 +260,6 @@ pub trait Error: Debug + Display {
         TypeId::of::<Self>()
     }
 
-    /// Returns a stack backtrace, if available, of where this error occurred.
-    ///
-    /// This function allows inspecting the location, in code, of where an error
-    /// happened. The returned `Backtrace` contains information about the stack
-    /// trace of the OS thread of execution of where the error originated from.
-    ///
-    /// Note that not all errors contain a `Backtrace`. Also note that a
-    /// `Backtrace` may actually be empty. For more information consult the
-    /// `Backtrace` type itself.
-    #[unstable(feature = "backtrace", issue = "53487")]
-    fn backtrace(&self) -> Option<&Backtrace> {
-        None
-    }
-
     /// ```
     /// if let Err(e) = "xc".parse::<u32>() {
     ///     // Print `e` itself, no need for description().
@@ -294,6 +280,85 @@ pub trait Error: Debug + Display {
     #[allow(missing_docs)]
     fn cause(&self) -> Option<&dyn Error> {
         self.source()
+    }
+
+    /// Provides type based access to context intended for error reports.
+    ///
+    /// Used in conjunction with [`Demand::provide_value`] and [`Demand::provide_ref`] to extract
+    /// references to member variables from `dyn Error` trait objects.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// #![feature(provide_any)]
+    /// #![feature(error_generic_member_access)]
+    /// use core::fmt;
+    /// use core::any::Demand;
+    ///
+    /// #[derive(Debug)]
+    /// struct MyBacktrace {
+    ///     // ...
+    /// }
+    ///
+    /// impl MyBacktrace {
+    ///     fn new() -> MyBacktrace {
+    ///         // ...
+    ///         # MyBacktrace {}
+    ///     }
+    /// }
+    ///
+    /// #[derive(Debug)]
+    /// struct SourceError {
+    ///     // ...
+    /// }
+    ///
+    /// impl fmt::Display for SourceError {
+    ///     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    ///         write!(f, "Example Source Error")
+    ///     }
+    /// }
+    ///
+    /// impl std::error::Error for SourceError {}
+    ///
+    /// #[derive(Debug)]
+    /// struct Error {
+    ///     source: SourceError,
+    ///     backtrace: MyBacktrace,
+    /// }
+    ///
+    /// impl fmt::Display for Error {
+    ///     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    ///         write!(f, "Example Error")
+    ///     }
+    /// }
+    ///
+    /// impl std::error::Error for Error {
+    ///     fn provide<'a>(&'a self, req: &mut Demand<'a>) {
+    ///         req
+    ///             .provide_ref::<MyBacktrace>(&self.backtrace)
+    ///             .provide_ref::<dyn std::error::Error + 'static>(&self.source);
+    ///     }
+    /// }
+    ///
+    /// fn main() {
+    ///     let backtrace = MyBacktrace::new();
+    ///     let source = SourceError {};
+    ///     let error = Error { source, backtrace };
+    ///     let dyn_error = &error as &dyn std::error::Error;
+    ///     let backtrace_ref = dyn_error.request_ref::<MyBacktrace>().unwrap();
+    ///
+    ///     assert!(core::ptr::eq(&error.backtrace, backtrace_ref));
+    /// }
+    /// ```
+    #[unstable(feature = "error_generic_member_access", issue = "99301")]
+    #[allow(unused_variables)]
+    fn provide<'a>(&'a self, req: &mut Demand<'a>) {}
+}
+
+#[unstable(feature = "error_generic_member_access", issue = "99301")]
+impl<'b> Provider for dyn Error + 'b {
+    fn provide<'a>(&'a self, req: &mut Demand<'a>) {
+        self.provide(req)
     }
 }
 
@@ -678,8 +743,8 @@ impl<'a, T: Error + ?Sized> Error for &'a T {
         Error::source(&**self)
     }
 
-    fn backtrace(&self) -> Option<&Backtrace> {
-        Error::backtrace(&**self)
+    fn provide<'b>(&'b self, req: &mut Demand<'b>) {
+        Error::provide(&**self, req);
     }
 }
 
@@ -699,8 +764,8 @@ impl<T: Error + ?Sized> Error for Arc<T> {
         Error::source(&**self)
     }
 
-    fn backtrace(&self) -> Option<&Backtrace> {
-        Error::backtrace(&**self)
+    fn provide<'a>(&'a self, req: &mut Demand<'a>) {
+        Error::provide(&**self, req);
     }
 }
 
@@ -792,6 +857,20 @@ impl Error for alloc::ffi::IntoStringError {
     }
 }
 
+impl<'a> dyn Error + 'a {
+    /// Request a reference of type `T` as context about this error.
+    #[unstable(feature = "error_generic_member_access", issue = "99301")]
+    pub fn request_ref<T: ?Sized + 'static>(&'a self) -> Option<&'a T> {
+        core::any::request_ref(self)
+    }
+
+    /// Request a value of type `T` as context about this error.
+    #[unstable(feature = "error_generic_member_access", issue = "99301")]
+    pub fn request_value<T: 'static>(&'a self) -> Option<T> {
+        core::any::request_value(self)
+    }
+}
+
 // Copied from `any.rs`.
 impl dyn Error + 'static {
     /// Returns `true` if the inner type is the same as `T`.
@@ -854,6 +933,18 @@ impl dyn Error + 'static + Send {
     pub fn downcast_mut<T: Error + 'static>(&mut self) -> Option<&mut T> {
         <dyn Error + 'static>::downcast_mut::<T>(self)
     }
+
+    /// Request a reference of type `T` as context about this error.
+    #[unstable(feature = "error_generic_member_access", issue = "99301")]
+    pub fn request_ref<T: ?Sized + 'static>(&self) -> Option<&T> {
+        <dyn Error>::request_ref(self)
+    }
+
+    /// Request a value of type `T` as context about this error.
+    #[unstable(feature = "error_generic_member_access", issue = "99301")]
+    pub fn request_value<T: 'static>(&self) -> Option<T> {
+        <dyn Error>::request_value(self)
+    }
 }
 
 impl dyn Error + 'static + Send + Sync {
@@ -876,6 +967,18 @@ impl dyn Error + 'static + Send + Sync {
     #[inline]
     pub fn downcast_mut<T: Error + 'static>(&mut self) -> Option<&mut T> {
         <dyn Error + 'static>::downcast_mut::<T>(self)
+    }
+
+    /// Request a reference of type `T` as context about this error.
+    #[unstable(feature = "error_generic_member_access", issue = "99301")]
+    pub fn request_ref<T: ?Sized + 'static>(&self) -> Option<&T> {
+        <dyn Error>::request_ref(self)
+    }
+
+    /// Request a value of type `T` as context about this error.
+    #[unstable(feature = "error_generic_member_access", issue = "99301")]
+    pub fn request_value<T: 'static>(&self) -> Option<T> {
+        <dyn Error>::request_value(self)
     }
 }
 
@@ -1352,8 +1455,11 @@ impl<E> Report<E> {
     /// ```rust
     /// #![feature(error_reporter)]
     /// #![feature(backtrace)]
+    /// #![feature(provide_any)]
+    /// #![feature(error_generic_member_access)]
     /// # use std::error::Error;
     /// # use std::fmt;
+    /// use std::any::Demand;
     /// use std::error::Report;
     /// use std::backtrace::Backtrace;
     ///
@@ -1383,8 +1489,9 @@ impl<E> Report<E> {
     /// }
     ///
     /// impl Error for SuperErrorSideKick {
-    ///     fn backtrace(&self) -> Option<&Backtrace> {
-    ///         Some(&self.backtrace)
+    ///     fn provide<'a>(&'a self, req: &mut Demand<'a>) {
+    ///         req
+    ///             .provide_ref::<Backtrace>(&self.backtrace);
     ///     }
     /// }
     ///
@@ -1437,11 +1544,11 @@ where
     fn backtrace(&self) -> Option<&Backtrace> {
         // have to grab the backtrace on the first error directly since that error may not be
         // 'static
-        let backtrace = self.error.backtrace();
+        let backtrace = (&self.error as &dyn Error).request_ref();
         let backtrace = backtrace.or_else(|| {
             self.error
                 .source()
-                .map(|source| source.chain().find_map(|source| source.backtrace()))
+                .map(|source| source.chain().find_map(|source| source.request_ref()))
                 .flatten()
         });
         backtrace
@@ -1503,11 +1610,11 @@ impl Report<Box<dyn Error>> {
     fn backtrace(&self) -> Option<&Backtrace> {
         // have to grab the backtrace on the first error directly since that error may not be
         // 'static
-        let backtrace = self.error.backtrace();
+        let backtrace = self.error.request_ref();
         let backtrace = backtrace.or_else(|| {
             self.error
                 .source()
-                .map(|source| source.chain().find_map(|source| source.backtrace()))
+                .map(|source| source.chain().find_map(|source| source.request_ref()))
                 .flatten()
         });
         backtrace
