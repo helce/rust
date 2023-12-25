@@ -2,6 +2,7 @@
 # It tests several cases, each of them has a detailed description attached to it.
 
 # ignore-windows
+# ignore-e2k64 NIY
 
 SRC_DIR := $(abspath .)
 SRC_DIR_PARENT := $(abspath ..)

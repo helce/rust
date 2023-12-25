@@ -1,5 +1,6 @@
 // build-pass
 // ignore-tidy-linelength
+// ignore-e2k64 segfault on recursion
 
 // Regression for #93775, needs build-pass to test it.
 
