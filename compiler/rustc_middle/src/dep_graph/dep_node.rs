@@ -74,7 +74,7 @@ pub use rustc_query_system::dep_graph::{DepContext, DepNodeParams};
 /// Information is retrieved by indexing the `DEP_KINDS` array using the integer value
 /// of the `DepKind`. Overall, this allows to implement `DepContext` using this manual
 /// jump table instead of large matches.
-pub struct DepKindStruct {
+pub struct DepKindStruct<'tcx> {
     /// Anonymous queries cannot be replayed from one compiler invocation to the next.
     /// When their result is needed, it is recomputed. They are useful for fine-grained
     /// dependency tracking, and caching within one compiler invocation.
@@ -124,10 +124,10 @@ pub struct DepKindStruct {
     /// with kind `MirValidated`, we know that the GUID/fingerprint of the `DepNode`
     /// is actually a `DefPathHash`, and can therefore just look up the corresponding
     /// `DefId` in `tcx.def_path_hash_to_def_id`.
-    pub force_from_dep_node: Option<fn(tcx: TyCtxt<'_>, dep_node: DepNode) -> bool>,
+    pub force_from_dep_node: Option<fn(tcx: TyCtxt<'tcx>, dep_node: DepNode) -> bool>,
 
     /// Invoke a query to put the on-disk cached value in memory.
-    pub try_load_from_on_disk_cache: Option<fn(TyCtxt<'_>, DepNode)>,
+    pub try_load_from_on_disk_cache: Option<fn(TyCtxt<'tcx>, DepNode)>,
 }
 
 impl DepKind {
@@ -143,12 +143,10 @@ impl DepKind {
 }
 
 macro_rules! define_dep_nodes {
-    (<$tcx:tt>
-    $(
-        [$($attrs:tt)*]
-        $variant:ident $(( $tuple_arg_ty:ty $(,)? ))*
-      ,)*
-    ) => (
+    (
+     $($(#[$attr:meta])*
+        [$($modifiers:tt)*] fn $variant:ident($($K:tt)*) -> $V:ty,)*) => {
+
         #[macro_export]
         macro_rules! make_dep_kind_array {
             ($mod:ident) => {[ $($mod::$variant()),* ]};
@@ -158,7 +156,7 @@ macro_rules! define_dep_nodes {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Encodable, Decodable)]
         #[allow(non_camel_case_types)]
         pub enum DepKind {
-            $($variant),*
+            $( $( #[$attr] )* $variant),*
         }
 
         fn dep_kind_from_label_string(label: &str) -> Result<DepKind, ()> {
@@ -176,24 +174,17 @@ macro_rules! define_dep_nodes {
                 pub const $variant: &str = stringify!($variant);
             )*
         }
-    );
+    };
 }
 
-rustc_dep_node_append!([define_dep_nodes!][ <'tcx>
-    // We use this for most things when incr. comp. is turned off.
-    [] Null,
-
-    // We use this to create a forever-red node.
-    [] Red,
-
-    [anon] TraitSelect,
-
-    // WARNING: if `Symbol` is changed, make sure you update `make_compile_codegen_unit` below.
-    [] CompileCodegenUnit(Symbol),
-
-    // WARNING: if `MonoItem` is changed, make sure you update `make_compile_mono_item` below.
-    // Only used by rustc_codegen_cranelift
-    [] CompileMonoItem(MonoItem),
+rustc_query_append!(define_dep_nodes![
+    /// We use this for most things when incr. comp. is turned off.
+    [] fn Null() -> (),
+    /// We use this to create a forever-red node.
+    [] fn Red() -> (),
+    [] fn TraitSelect() -> (),
+    [] fn CompileCodegenUnit() -> (),
+    [] fn CompileMonoItem() -> (),
 ]);
 
 // WARNING: `construct` is generic and does not know that `CompileCodegenUnit` takes `Symbol`s as keys.

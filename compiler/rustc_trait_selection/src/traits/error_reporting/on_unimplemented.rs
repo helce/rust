@@ -143,7 +143,9 @@ impl<'a, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'a, 'tcx> {
         }
 
         if let ObligationCauseCode::ItemObligation(item)
-        | ObligationCauseCode::BindingObligation(item, _) = *obligation.cause.code()
+        | ObligationCauseCode::BindingObligation(item, _)
+        | ObligationCauseCode::ExprItemObligation(item, ..)
+        | ObligationCauseCode::ExprBindingObligation(item, ..) = *obligation.cause.code()
         {
             // FIXME: maybe also have some way of handling methods
             // from other traits? That would require name resolution,
@@ -254,7 +256,7 @@ impl<'a, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'a, 'tcx> {
                     }
                 }
             }
-            if let ty::Dynamic(traits, _) = self_ty.kind() {
+            if let ty::Dynamic(traits, _, _) = self_ty.kind() {
                 for t in traits.iter() {
                     if let ty::ExistentialPredicate::Trait(trait_ref) = t.skip_binder() {
                         flags.push((sym::_Self, Some(self.tcx.def_path_str(trait_ref.def_id))))

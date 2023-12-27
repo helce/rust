@@ -327,13 +327,7 @@ impl NonSnakeCase {
 }
 
 impl<'tcx> LateLintPass<'tcx> for NonSnakeCase {
-    fn check_mod(
-        &mut self,
-        cx: &LateContext<'_>,
-        _: &'tcx hir::Mod<'tcx>,
-        _: Span,
-        id: hir::HirId,
-    ) {
+    fn check_mod(&mut self, cx: &LateContext<'_>, _: &'tcx hir::Mod<'tcx>, id: hir::HirId) {
         if id != hir::CRATE_HIR_ID {
             return;
         }
@@ -437,19 +431,14 @@ impl<'tcx> LateLintPass<'tcx> for NonSnakeCase {
 
     fn check_pat(&mut self, cx: &LateContext<'_>, p: &hir::Pat<'_>) {
         if let PatKind::Binding(_, hid, ident, _) = p.kind {
-            if let hir::Node::Pat(parent_pat) = cx.tcx.hir().get(cx.tcx.hir().get_parent_node(hid))
+            if let hir::Node::PatField(field) = cx.tcx.hir().get(cx.tcx.hir().get_parent_node(hid))
             {
-                if let PatKind::Struct(_, field_pats, _) = &parent_pat.kind {
-                    if field_pats
-                        .iter()
-                        .any(|field| !field.is_shorthand && field.pat.hir_id == p.hir_id)
-                    {
-                        // Only check if a new name has been introduced, to avoid warning
-                        // on both the struct definition and this pattern.
-                        self.check_snake_case(cx, "variable", &ident);
-                    }
-                    return;
+                if !field.is_shorthand {
+                    // Only check if a new name has been introduced, to avoid warning
+                    // on both the struct definition and this pattern.
+                    self.check_snake_case(cx, "variable", &ident);
                 }
+                return;
             }
             self.check_snake_case(cx, "variable", &ident);
         }

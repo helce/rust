@@ -5,12 +5,11 @@
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir::LangItem;
 use rustc_infer::infer::TyCtxtInferExt;
-use rustc_infer::traits::TraitEngine;
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, subst::SubstsRef, AdtDef, Ty};
 use rustc_span::DUMMY_SP;
 use rustc_trait_selection::traits::{
-    self, ImplSource, Obligation, ObligationCause, SelectionContext, TraitEngineExt,
+    self, ImplSource, Obligation, ObligationCause, SelectionContext,
 };
 
 use super::ConstCx;
@@ -189,15 +188,8 @@ impl Qualif for NeedsNonConstDrop {
                 return false;
             }
 
-            // If we successfully found one, then select all of the predicates
-            // implied by our const drop impl.
-            let mut fcx = <dyn TraitEngine<'tcx>>::new(cx.tcx);
-            for nested in impl_src.nested_obligations() {
-                fcx.register_predicate_obligation(&infcx, nested);
-            }
-
             // If we had any errors, then it's bad
-            !fcx.select_all_or_error(&infcx).is_empty()
+            !traits::fully_solve_obligations(&infcx, impl_src.nested_obligations()).is_empty()
         })
     }
 
@@ -354,31 +346,43 @@ where
     };
 
     // Check the qualifs of the value of `const` items.
-    if let Some(ct) = constant.literal.const_for_ty() {
-        if let ty::ConstKind::Unevaluated(ty::Unevaluated { def, substs: _, promoted }) = ct.kind()
-        {
-            // Use qualifs of the type for the promoted. Promoteds in MIR body should be possible
-            // only for `NeedsNonConstDrop` with precise drop checking. This is the only const
-            // check performed after the promotion. Verify that with an assertion.
-            assert!(promoted.is_none() || Q::ALLOW_PROMOTED);
-            // Don't peek inside trait associated constants.
-            if promoted.is_none() && cx.tcx.trait_of_item(def.did).is_none() {
-                let qualifs = if let Some((did, param_did)) = def.as_const_arg() {
-                    cx.tcx.at(constant.span).mir_const_qualif_const_arg((did, param_did))
-                } else {
-                    cx.tcx.at(constant.span).mir_const_qualif(def.did)
-                };
+    // FIXME(valtrees): check whether const qualifs should behave the same
+    // way for type and mir constants.
+    let uneval = match constant.literal {
+        ConstantKind::Ty(ct) if matches!(ct.kind(), ty::ConstKind::Unevaluated(_)) => {
+            let ty::ConstKind::Unevaluated(uv) = ct.kind() else { unreachable!() };
 
-                if !Q::in_qualifs(&qualifs) {
-                    return false;
-                }
+            Some(uv.expand())
+        }
+        ConstantKind::Ty(_) => None,
+        ConstantKind::Unevaluated(uv, _) => Some(uv),
+        ConstantKind::Val(..) => None,
+    };
 
-                // Just in case the type is more specific than
-                // the definition, e.g., impl associated const
-                // with type parameters, take it into account.
+    if let Some(ty::Unevaluated { def, substs: _, promoted }) = uneval {
+        // Use qualifs of the type for the promoted. Promoteds in MIR body should be possible
+        // only for `NeedsNonConstDrop` with precise drop checking. This is the only const
+        // check performed after the promotion. Verify that with an assertion.
+        assert!(promoted.is_none() || Q::ALLOW_PROMOTED);
+
+        // Don't peek inside trait associated constants.
+        if promoted.is_none() && cx.tcx.trait_of_item(def.did).is_none() {
+            let qualifs = if let Some((did, param_did)) = def.as_const_arg() {
+                cx.tcx.at(constant.span).mir_const_qualif_const_arg((did, param_did))
+            } else {
+                cx.tcx.at(constant.span).mir_const_qualif(def.did)
+            };
+
+            if !Q::in_qualifs(&qualifs) {
+                return false;
             }
+
+            // Just in case the type is more specific than
+            // the definition, e.g., impl associated const
+            // with type parameters, take it into account.
         }
     }
+
     // Otherwise use the qualifs of the type.
     Q::in_any_value_of_ty(cx, constant.literal.ty())
 }

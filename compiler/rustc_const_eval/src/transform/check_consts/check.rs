@@ -135,7 +135,7 @@ impl<'mir, 'tcx> Qualifs<'mir, 'tcx> {
         // qualifs for the return type.
         let return_block = ccx
             .body
-            .basic_blocks()
+            .basic_blocks
             .iter_enumerated()
             .find(|(_, block)| matches!(block.terminator().kind, TerminatorKind::Return))
             .map(|(bb, _)| bb);
@@ -546,6 +546,10 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
                 // Since no pointer can ever get exposed (rejected above), this is easy to support.
             }
 
+            Rvalue::Cast(CastKind::DynStar, _, _) => {
+                unimplemented!()
+            }
+
             Rvalue::Cast(CastKind::Misc, _, _) => {}
 
             Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf, _) => {}
@@ -678,7 +682,7 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
             | StatementKind::Retag { .. }
             | StatementKind::AscribeUserType(..)
             | StatementKind::Coverage(..)
-            | StatementKind::CopyNonOverlapping(..)
+            | StatementKind::Intrinsic(..)
             | StatementKind::Nop => {}
         }
     }

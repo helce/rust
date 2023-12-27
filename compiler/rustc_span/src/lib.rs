@@ -15,11 +15,13 @@
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![feature(array_windows)]
-#![feature(let_else)]
+#![cfg_attr(bootstrap, feature(let_else))]
 #![feature(if_let_guard)]
 #![feature(negative_impls)]
 #![feature(min_specialization)]
 #![feature(rustc_attrs)]
+#![deny(rustc::untranslatable_diagnostic)]
+#![deny(rustc::diagnostic_outside_of_impl)]
 
 #[macro_use]
 extern crate rustc_macros;
@@ -73,8 +75,6 @@ use md5::Digest;
 use md5::Md5;
 use sha1::Sha1;
 use sha2::Sha256;
-
-use tracing::debug;
 
 #[cfg(test)]
 mod tests;
@@ -558,10 +558,23 @@ impl Span {
         self.data_untracked().is_dummy()
     }
 
-    /// Returns `true` if this span comes from a macro or desugaring.
+    /// Returns `true` if this span comes from any kind of macro, desugaring or inlining.
     #[inline]
     pub fn from_expansion(self) -> bool {
         self.ctxt() != SyntaxContext::root()
+    }
+
+    /// Returns `true` if `span` originates in a macro's expansion where debuginfo should be
+    /// collapsed.
+    pub fn in_macro_expansion_with_collapse_debuginfo(self) -> bool {
+        let outer_expn = self.ctxt().outer_expn_data();
+        matches!(outer_expn.kind, ExpnKind::Macro(..)) && outer_expn.collapse_debuginfo
+    }
+
+    /// Returns `true` if this span comes from MIR inlining.
+    pub fn is_inlined(self) -> bool {
+        let outer_expn = self.ctxt().outer_expn_data();
+        matches!(outer_expn.kind, ExpnKind::Inlined)
     }
 
     /// Returns `true` if `span` originates in a derive-macro's expansion.
@@ -657,6 +670,16 @@ impl Span {
     /// Walk down the expansion ancestors to find a span that's contained within `outer`.
     pub fn find_ancestor_inside(mut self, outer: Span) -> Option<Span> {
         while !outer.contains(self) {
+            self = self.parent_callsite()?;
+        }
+        Some(self)
+    }
+
+    /// Like `find_ancestor_inside`, but specifically for when spans might not
+    /// overlaps. Take care when using this, and prefer `find_ancestor_inside`
+    /// when you know that the spans are nested (modulo macro expansion).
+    pub fn find_ancestor_in_same_ctxt(mut self, other: Span) -> Option<Span> {
+        while !Span::eq_ctxt(self, other) {
             self = self.parent_callsite()?;
         }
         Some(self)
@@ -1094,10 +1117,8 @@ pub enum ExternalSource {
     Unneeded,
     Foreign {
         kind: ExternalSourceKind,
-        /// This SourceFile's byte-offset within the source_map of its original crate.
-        original_start_pos: BytePos,
-        /// The end of this SourceFile within the source_map of its original crate.
-        original_end_pos: BytePos,
+        /// Index of the file inside metadata.
+        metadata_index: u32,
     },
 }
 

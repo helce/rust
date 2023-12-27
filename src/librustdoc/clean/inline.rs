@@ -3,9 +3,10 @@
 use std::iter::once;
 use std::sync::Arc;
 
+use thin_vec::ThinVec;
+
 use rustc_ast as ast;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_data_structures::thin_vec::ThinVec;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
@@ -16,14 +17,13 @@ use rustc_span::hygiene::MacroKind;
 use rustc_span::symbol::{kw, sym, Symbol};
 
 use crate::clean::{
-    self, clean_fn_decl_from_did_and_sig, clean_middle_field, clean_middle_ty,
-    clean_trait_ref_with_bindings, clean_ty, clean_ty_generics, clean_variant_def,
-    clean_visibility, utils, Attributes, AttributesExt, Clean, ImplKind, ItemId, Type, Visibility,
+    self, clean_fn_decl_from_did_and_sig, clean_generics, clean_impl_item, clean_middle_assoc_item,
+    clean_middle_field, clean_middle_ty, clean_trait_ref_with_bindings, clean_ty,
+    clean_ty_generics, clean_variant_def, clean_visibility, utils, Attributes, AttributesExt,
+    ImplKind, ItemId, Type, Visibility,
 };
 use crate::core::DocContext;
 use crate::formats::item_type::ItemType;
-
-type Attrs<'hir> = &'hir [ast::Attribute];
 
 /// Attempt to inline a definition into this AST.
 ///
@@ -45,7 +45,7 @@ pub(crate) fn try_inline(
     import_def_id: Option<DefId>,
     res: Res,
     name: Symbol,
-    attrs: Option<Attrs<'_>>,
+    attrs: Option<&[ast::Attribute]>,
     visited: &mut FxHashSet<DefId>,
 ) -> Option<Vec<clean::Item>> {
     let did = res.opt_def_id()?;
@@ -61,7 +61,7 @@ pub(crate) fn try_inline(
         Res::Def(DefKind::Trait, did) => {
             record_extern_fqn(cx, did, ItemType::Trait);
             build_impls(cx, Some(parent_module), did, attrs, &mut ret);
-            clean::TraitItem(build_external_trait(cx, did))
+            clean::TraitItem(Box::new(build_external_trait(cx, did)))
         }
         Res::Def(DefKind::Fn, did) => {
             record_extern_fqn(cx, did, ItemType::Function);
@@ -171,7 +171,7 @@ pub(crate) fn try_inline_glob(
     }
 }
 
-pub(crate) fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> Attrs<'hir> {
+pub(crate) fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> &'hir [ast::Attribute] {
     cx.tcx.get_attrs_unchecked(did)
 }
 
@@ -217,7 +217,7 @@ pub(crate) fn build_external_trait(cx: &mut DocContext<'_>, did: DefId) -> clean
             // which causes methods to have a `pub` prefix, which is invalid since items in traits
             // can not have a visibility prefix. Thus we override the visibility here manually.
             // See https://github.com/rust-lang/rust/issues/81274
-            clean::Item { visibility: Visibility::Inherited, ..item.clean(cx) }
+            clean::Item { visibility: Visibility::Inherited, ..clean_middle_assoc_item(item, cx) }
         })
         .collect();
 
@@ -286,7 +286,7 @@ pub(crate) fn build_impls(
     cx: &mut DocContext<'_>,
     parent_module: Option<DefId>,
     did: DefId,
-    attrs: Option<Attrs<'_>>,
+    attrs: Option<&[ast::Attribute]>,
     ret: &mut Vec<clean::Item>,
 ) {
     let _prof_timer = cx.tcx.sess.prof.generic_activity("build_inherent_impls");
@@ -296,14 +296,29 @@ pub(crate) fn build_impls(
     for &did in tcx.inherent_impls(did).iter() {
         build_impl(cx, parent_module, did, attrs, ret);
     }
+
+    // This pretty much exists expressly for `dyn Error` traits that exist in the `alloc` crate.
+    // See also:
+    //
+    // * https://github.com/rust-lang/rust/issues/103170 — where it didn't used to get documented
+    // * https://github.com/rust-lang/rust/pull/99917 — where the feature got used
+    // * https://github.com/rust-lang/rust/issues/53487 — overall tracking issue for Error
+    if tcx.has_attr(did, sym::rustc_has_incoherent_inherent_impls) {
+        use rustc_middle::ty::fast_reject::SimplifiedTypeGen::*;
+        let type_ =
+            if tcx.is_trait(did) { TraitSimplifiedType(did) } else { AdtSimplifiedType(did) };
+        for &did in tcx.incoherent_impls(type_) {
+            build_impl(cx, parent_module, did, attrs, ret);
+        }
+    }
 }
 
 /// `parent_module` refers to the parent of the re-export, not the original item
-fn merge_attrs(
+pub(crate) fn merge_attrs(
     cx: &mut DocContext<'_>,
     parent_module: Option<DefId>,
-    old_attrs: Attrs<'_>,
-    new_attrs: Option<Attrs<'_>>,
+    old_attrs: &[ast::Attribute],
+    new_attrs: Option<&[ast::Attribute]>,
 ) -> (clean::Attributes, Option<Arc<clean::cfg::Cfg>>) {
     // NOTE: If we have additional attributes (from a re-export),
     // always insert them first. This ensure that re-export
@@ -330,7 +345,7 @@ pub(crate) fn build_impl(
     cx: &mut DocContext<'_>,
     parent_module: Option<DefId>,
     did: DefId,
-    attrs: Option<Attrs<'_>>,
+    attrs: Option<&[ast::Attribute]>,
     ret: &mut Vec<clean::Item>,
 ) {
     if !cx.inlined.insert(did.into()) {
@@ -426,9 +441,9 @@ pub(crate) fn build_impl(
                         true
                     }
                 })
-                .map(|item| item.clean(cx))
+                .map(|item| clean_impl_item(item, cx))
                 .collect::<Vec<_>>(),
-            impl_.generics.clean(cx),
+            clean_generics(impl_.generics, cx),
         ),
         None => (
             tcx.associated_items(did)
@@ -452,7 +467,7 @@ pub(crate) fn build_impl(
                         item.visibility(tcx).is_public()
                     }
                 })
-                .map(|item| item.clean(cx))
+                .map(|item| clean_middle_assoc_item(item, cx))
                 .collect::<Vec<_>>(),
             clean::enter_impl_trait(cx, |cx| {
                 clean_ty_generics(cx, tcx.generics_of(did), predicates)
@@ -460,7 +475,7 @@ pub(crate) fn build_impl(
         ),
     };
     let polarity = tcx.impl_polarity(did);
-    let trait_ = associated_trait.map(|t| clean_trait_ref_with_bindings(cx, t, &[]));
+    let trait_ = associated_trait.map(|t| clean_trait_ref_with_bindings(cx, t, ThinVec::new()));
     if trait_.as_ref().map(|t| t.def_id()) == tcx.lang_items().deref_trait() {
         super::build_deref_target_impls(cx, &trait_items, ret);
     }
@@ -671,7 +686,7 @@ fn filter_non_trait_generics(trait_did: DefId, mut g: clean::Generics) -> clean:
 
     g.where_predicates.retain(|pred| match pred {
         clean::WherePredicate::BoundPredicate {
-            ty: clean::QPath { self_type: box clean::Generic(ref s), trait_, .. },
+            ty: clean::QPath(box clean::QPathData { self_type: clean::Generic(ref s), trait_, .. }),
             bounds,
             ..
         } => !(bounds.is_empty() || *s == kw::SelfUpper && trait_.def_id() == trait_did),

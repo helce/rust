@@ -294,6 +294,22 @@ fn test_retain() {
 }
 
 #[test]
+fn test_retain_predicate_order() {
+    for to_keep in [true, false] {
+        let mut number_of_executions = 0;
+        let mut vec = vec![1, 2, 3, 4];
+        let mut next_expected = 1;
+        vec.retain(|&x| {
+            assert_eq!(next_expected, x);
+            next_expected += 1;
+            number_of_executions += 1;
+            to_keep
+        });
+        assert_eq!(number_of_executions, 4);
+    }
+}
+
+#[test]
 fn test_retain_pred_panic_with_hole() {
     let v = (0..5).map(Rc::new).collect::<Vec<_>>();
     catch_unwind(AssertUnwindSafe(|| {
@@ -352,6 +368,35 @@ fn test_retain_drop_panic() {
     // Other elements are dropped when `drop` of one element panicked.
     // The panicked wrapper also has its Rc dropped.
     assert!(v.iter().all(|r| Rc::strong_count(r) == 1));
+}
+
+#[test]
+fn test_retain_maybeuninits() {
+    // This test aimed to be run under miri.
+    use core::mem::MaybeUninit;
+    let mut vec: Vec<_> = [1i32, 2, 3, 4].map(|v| MaybeUninit::new(vec![v])).into();
+    vec.retain(|x| {
+        // SAFETY: Retain must visit every element of Vec in original order and exactly once.
+        // Our values is initialized at creation of Vec.
+        let v = unsafe { x.assume_init_ref()[0] };
+        if v & 1 == 0 {
+            return true;
+        }
+        // SAFETY: Value is initialized.
+        // Value wouldn't be dropped by `Vec::retain`
+        // because `MaybeUninit` doesn't drop content.
+        drop(unsafe { x.assume_init_read() });
+        false
+    });
+    let vec: Vec<i32> = vec
+        .into_iter()
+        .map(|x| unsafe {
+            // SAFETY: All values dropped in retain predicate must be removed by `Vec::retain`.
+            // Remaining values are initialized.
+            x.assume_init()[0]
+        })
+        .collect();
+    assert_eq!(vec, [2, 4]);
 }
 
 #[test]
@@ -795,6 +840,36 @@ fn test_drain_leak() {
 }
 
 #[test]
+fn test_drain_keep_rest() {
+    let mut v = vec![0, 1, 2, 3, 4, 5, 6];
+    let mut drain = v.drain(1..6);
+    assert_eq!(drain.next(), Some(1));
+    assert_eq!(drain.next_back(), Some(5));
+    assert_eq!(drain.next(), Some(2));
+
+    drain.keep_rest();
+    assert_eq!(v, &[0, 3, 4, 6]);
+}
+
+#[test]
+fn test_drain_keep_rest_all() {
+    let mut v = vec![0, 1, 2, 3, 4, 5, 6];
+    v.drain(1..6).keep_rest();
+    assert_eq!(v, &[0, 1, 2, 3, 4, 5, 6]);
+}
+
+#[test]
+fn test_drain_keep_rest_none() {
+    let mut v = vec![0, 1, 2, 3, 4, 5, 6];
+    let mut drain = v.drain(1..6);
+
+    drain.by_ref().for_each(drop);
+
+    drain.keep_rest();
+    assert_eq!(v, &[0, 6]);
+}
+
+#[test]
 fn test_splice() {
     let mut v = vec![1, 2, 3, 4, 5];
     let a = [10, 11, 12];
@@ -1027,6 +1102,12 @@ fn test_into_iter_drop_allocator() {
     let allocator = ReferenceCountedAllocator(DropCounter { count: &mut drop_count });
     let _ = Vec::<u32, _>::new_in(allocator).into_iter();
     assert_eq!(drop_count, 2);
+}
+
+#[test]
+fn test_into_iter_zst() {
+    for _ in vec![[0u64; 0]].into_iter() {}
+    for _ in vec![[0u64; 0]; 5].into_iter().rev() {}
 }
 
 #[test]
@@ -1489,6 +1570,35 @@ fn drain_filter_unconsumed() {
 }
 
 #[test]
+fn test_drain_filter_keep_rest() {
+    let mut v = vec![0, 1, 2, 3, 4, 5, 6];
+    let mut drain = v.drain_filter(|&mut x| x % 2 == 0);
+    assert_eq!(drain.next(), Some(0));
+    assert_eq!(drain.next(), Some(2));
+
+    drain.keep_rest();
+    assert_eq!(v, &[1, 3, 4, 5, 6]);
+}
+
+#[test]
+fn test_drain_filter_keep_rest_all() {
+    let mut v = vec![0, 1, 2, 3, 4, 5, 6];
+    v.drain_filter(|_| true).keep_rest();
+    assert_eq!(v, &[0, 1, 2, 3, 4, 5, 6]);
+}
+
+#[test]
+fn test_drain_filter_keep_rest_none() {
+    let mut v = vec![0, 1, 2, 3, 4, 5, 6];
+    let mut drain = v.drain_filter(|_| true);
+
+    drain.by_ref().for_each(drop);
+
+    drain.keep_rest();
+    assert_eq!(v, &[]);
+}
+
+#[test]
 fn test_reserve_exact() {
     // This is all the same as test_reserve
 
@@ -1527,12 +1637,6 @@ fn test_try_reserve() {
     const MAX_CAP: usize = isize::MAX as usize;
     const MAX_USIZE: usize = usize::MAX;
 
-    // On 16/32-bit, we check that allocations don't exceed isize::MAX,
-    // on 64-bit, we assume the OS will give an OOM for such a ridiculous size.
-    // Any platform that succeeds for these requests is technically broken with
-    // ptr::offset because LLVM is the worst.
-    let guards_against_isize = usize::BITS < 64;
-
     {
         // Note: basic stuff is checked by test_reserve
         let mut empty_bytes: Vec<u8> = Vec::new();
@@ -1546,35 +1650,19 @@ fn test_try_reserve() {
             panic!("isize::MAX shouldn't trigger an overflow!");
         }
 
-        if guards_against_isize {
-            // Check isize::MAX + 1 does count as overflow
-            assert_matches!(
-                empty_bytes.try_reserve(MAX_CAP + 1).map_err(|e| e.kind()),
-                Err(CapacityOverflow),
-                "isize::MAX + 1 should trigger an overflow!"
-            );
+        // Check isize::MAX + 1 does count as overflow
+        assert_matches!(
+            empty_bytes.try_reserve(MAX_CAP + 1).map_err(|e| e.kind()),
+            Err(CapacityOverflow),
+            "isize::MAX + 1 should trigger an overflow!"
+        );
 
-            // Check usize::MAX does count as overflow
-            assert_matches!(
-                empty_bytes.try_reserve(MAX_USIZE).map_err(|e| e.kind()),
-                Err(CapacityOverflow),
-                "usize::MAX should trigger an overflow!"
-            );
-        } else {
-            // Check isize::MAX + 1 is an OOM
-            assert_matches!(
-                empty_bytes.try_reserve(MAX_CAP + 1).map_err(|e| e.kind()),
-                Err(AllocError { .. }),
-                "isize::MAX + 1 should trigger an OOM!"
-            );
-
-            // Check usize::MAX is an OOM
-            assert_matches!(
-                empty_bytes.try_reserve(MAX_USIZE).map_err(|e| e.kind()),
-                Err(AllocError { .. }),
-                "usize::MAX should trigger an OOM!"
-            );
-        }
+        // Check usize::MAX does count as overflow
+        assert_matches!(
+            empty_bytes.try_reserve(MAX_USIZE).map_err(|e| e.kind()),
+            Err(CapacityOverflow),
+            "usize::MAX should trigger an overflow!"
+        );
     }
 
     {
@@ -1587,19 +1675,13 @@ fn test_try_reserve() {
         if let Err(CapacityOverflow) = ten_bytes.try_reserve(MAX_CAP - 10).map_err(|e| e.kind()) {
             panic!("isize::MAX shouldn't trigger an overflow!");
         }
-        if guards_against_isize {
-            assert_matches!(
-                ten_bytes.try_reserve(MAX_CAP - 9).map_err(|e| e.kind()),
-                Err(CapacityOverflow),
-                "isize::MAX + 1 should trigger an overflow!"
-            );
-        } else {
-            assert_matches!(
-                ten_bytes.try_reserve(MAX_CAP - 9).map_err(|e| e.kind()),
-                Err(AllocError { .. }),
-                "isize::MAX + 1 should trigger an OOM!"
-            );
-        }
+
+        assert_matches!(
+            ten_bytes.try_reserve(MAX_CAP - 9).map_err(|e| e.kind()),
+            Err(CapacityOverflow),
+            "isize::MAX + 1 should trigger an overflow!"
+        );
+
         // Should always overflow in the add-to-len
         assert_matches!(
             ten_bytes.try_reserve(MAX_USIZE).map_err(|e| e.kind()),
@@ -1620,19 +1702,13 @@ fn test_try_reserve() {
         {
             panic!("isize::MAX shouldn't trigger an overflow!");
         }
-        if guards_against_isize {
-            assert_matches!(
-                ten_u32s.try_reserve(MAX_CAP / 4 - 9).map_err(|e| e.kind()),
-                Err(CapacityOverflow),
-                "isize::MAX + 1 should trigger an overflow!"
-            );
-        } else {
-            assert_matches!(
-                ten_u32s.try_reserve(MAX_CAP / 4 - 9).map_err(|e| e.kind()),
-                Err(AllocError { .. }),
-                "isize::MAX + 1 should trigger an OOM!"
-            );
-        }
+
+        assert_matches!(
+            ten_u32s.try_reserve(MAX_CAP / 4 - 9).map_err(|e| e.kind()),
+            Err(CapacityOverflow),
+            "isize::MAX + 1 should trigger an overflow!"
+        );
+
         // Should fail in the mul-by-size
         assert_matches!(
             ten_u32s.try_reserve(MAX_USIZE - 20).map_err(|e| e.kind()),
@@ -1652,8 +1728,6 @@ fn test_try_reserve_exact() {
     const MAX_CAP: usize = isize::MAX as usize;
     const MAX_USIZE: usize = usize::MAX;
 
-    let guards_against_isize = size_of::<usize>() < 8;
-
     {
         let mut empty_bytes: Vec<u8> = Vec::new();
 
@@ -1666,31 +1740,17 @@ fn test_try_reserve_exact() {
             panic!("isize::MAX shouldn't trigger an overflow!");
         }
 
-        if guards_against_isize {
-            assert_matches!(
-                empty_bytes.try_reserve_exact(MAX_CAP + 1).map_err(|e| e.kind()),
-                Err(CapacityOverflow),
-                "isize::MAX + 1 should trigger an overflow!"
-            );
+        assert_matches!(
+            empty_bytes.try_reserve_exact(MAX_CAP + 1).map_err(|e| e.kind()),
+            Err(CapacityOverflow),
+            "isize::MAX + 1 should trigger an overflow!"
+        );
 
-            assert_matches!(
-                empty_bytes.try_reserve_exact(MAX_USIZE).map_err(|e| e.kind()),
-                Err(CapacityOverflow),
-                "usize::MAX should trigger an overflow!"
-            );
-        } else {
-            assert_matches!(
-                empty_bytes.try_reserve_exact(MAX_CAP + 1).map_err(|e| e.kind()),
-                Err(AllocError { .. }),
-                "isize::MAX + 1 should trigger an OOM!"
-            );
-
-            assert_matches!(
-                empty_bytes.try_reserve_exact(MAX_USIZE).map_err(|e| e.kind()),
-                Err(AllocError { .. }),
-                "usize::MAX should trigger an OOM!"
-            );
-        }
+        assert_matches!(
+            empty_bytes.try_reserve_exact(MAX_USIZE).map_err(|e| e.kind()),
+            Err(CapacityOverflow),
+            "usize::MAX should trigger an overflow!"
+        );
     }
 
     {
@@ -1706,19 +1766,13 @@ fn test_try_reserve_exact() {
         {
             panic!("isize::MAX shouldn't trigger an overflow!");
         }
-        if guards_against_isize {
-            assert_matches!(
-                ten_bytes.try_reserve_exact(MAX_CAP - 9).map_err(|e| e.kind()),
-                Err(CapacityOverflow),
-                "isize::MAX + 1 should trigger an overflow!"
-            );
-        } else {
-            assert_matches!(
-                ten_bytes.try_reserve_exact(MAX_CAP - 9).map_err(|e| e.kind()),
-                Err(AllocError { .. }),
-                "isize::MAX + 1 should trigger an OOM!"
-            );
-        }
+
+        assert_matches!(
+            ten_bytes.try_reserve_exact(MAX_CAP - 9).map_err(|e| e.kind()),
+            Err(CapacityOverflow),
+            "isize::MAX + 1 should trigger an overflow!"
+        );
+
         assert_matches!(
             ten_bytes.try_reserve_exact(MAX_USIZE).map_err(|e| e.kind()),
             Err(CapacityOverflow),
@@ -1739,19 +1793,13 @@ fn test_try_reserve_exact() {
         {
             panic!("isize::MAX shouldn't trigger an overflow!");
         }
-        if guards_against_isize {
-            assert_matches!(
-                ten_u32s.try_reserve_exact(MAX_CAP / 4 - 9).map_err(|e| e.kind()),
-                Err(CapacityOverflow),
-                "isize::MAX + 1 should trigger an overflow!"
-            );
-        } else {
-            assert_matches!(
-                ten_u32s.try_reserve_exact(MAX_CAP / 4 - 9).map_err(|e| e.kind()),
-                Err(AllocError { .. }),
-                "isize::MAX + 1 should trigger an OOM!"
-            );
-        }
+
+        assert_matches!(
+            ten_u32s.try_reserve_exact(MAX_CAP / 4 - 9).map_err(|e| e.kind()),
+            Err(CapacityOverflow),
+            "isize::MAX + 1 should trigger an overflow!"
+        );
+
         assert_matches!(
             ten_u32s.try_reserve_exact(MAX_USIZE - 20).map_err(|e| e.kind()),
             Err(CapacityOverflow),

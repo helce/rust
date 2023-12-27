@@ -15,7 +15,6 @@ use rustc_span::symbol::Symbol;
 use rustc_target::spec::{MergeFunctions, PanicStrategy};
 use smallvec::{smallvec, SmallVec};
 use std::ffi::{CStr, CString};
-use tracing::debug;
 
 use std::mem;
 use std::path::Path;
@@ -92,16 +91,6 @@ unsafe fn configure_llvm(sess: &Session) {
             add("-generate-arange-section", false);
         }
 
-        // Disable the machine outliner by default in LLVM versions 11 and LLVM
-        // version 12, where it leads to miscompilation.
-        //
-        // Ref:
-        // - https://github.com/rust-lang/rust/issues/85351
-        // - https://reviews.llvm.org/D103167
-        if llvm_util::get_version() < (13, 0, 0) {
-            add("-enable-machine-outliner=never", false);
-        }
-
         match sess.opts.unstable_opts.merge_functions.unwrap_or(sess.target.merge_functions) {
             MergeFunctions::Disabled | MergeFunctions::Trampolines => {}
             MergeFunctions::Aliases => {
@@ -165,6 +154,10 @@ pub fn time_trace_profiler_finish(file_name: &Path) {
 //
 // To find a list of LLVM's names, check llvm-project/llvm/include/llvm/Support/*TargetParser.def
 // where the * matches the architecture's name
+//
+// For targets not present in the above location, see llvm-project/llvm/lib/Target/{ARCH}/*.td
+// where `{ARCH}` is the architecture name. Look for instances of `SubtargetFeature`.
+//
 // Beware to not use the llvm github project for this, but check the git submodule
 // found in src/llvm-project
 // Though note that Rust can also be build with an external precompiled version of LLVM
@@ -440,6 +433,8 @@ pub(crate) fn global_llvm_features(sess: &Session, diagnostics: bool) -> Vec<Str
             .features
             .split(',')
             .filter(|v| !v.is_empty() && backend_feature_name(v).is_some())
+            // Drop +atomics-32 feature introduced in LLVM 15.
+            .filter(|v| *v != "+atomics-32" || get_version() >= (15, 0, 0))
             .map(String::from),
     );
 

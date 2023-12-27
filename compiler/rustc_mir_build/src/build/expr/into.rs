@@ -46,7 +46,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     })
                 })
             }
-            ExprKind::Block { body: ref ast_block } => {
+            ExprKind::Block { block: ast_block } => {
                 this.ast_block(destination, block, ast_block, source_info)
             }
             ExprKind::Match { scrutinee, ref arms } => {
@@ -75,7 +75,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                                 this.source_info(then_expr.span)
                             };
                             let (then_block, else_block) =
-                                this.in_if_then_scope(condition_scope, |this| {
+                                this.in_if_then_scope(condition_scope, then_expr.span, |this| {
                                     let then_blk = unpack!(this.then_else_break(
                                         block,
                                         &this.thir[cond],
@@ -108,7 +108,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
             ExprKind::Let { expr, ref pat } => {
                 let scope = this.local_scope();
-                let (true_block, false_block) = this.in_if_then_scope(scope, |this| {
+                let (true_block, false_block) = this.in_if_then_scope(scope, expr_span, |this| {
                     this.lower_let_expr(block, &this.thir[expr], pat, scope, None, expr_span)
                 });
 
@@ -314,11 +314,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 this.cfg.push_assign(block, source_info, destination, address_of);
                 block.unit()
             }
-            ExprKind::Adt(box Adt {
+            ExprKind::Adt(box AdtExpr {
                 adt_def,
                 variant_index,
                 substs,
-                user_ty,
+                ref user_ty,
                 ref fields,
                 ref base,
             }) => {
@@ -366,9 +366,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                             None => {
                                 let place_builder = place_builder.clone();
                                 this.consume_by_copy_or_move(
-                                    place_builder
-                                        .field(n, *ty)
-                                        .into_place(this.tcx, this.typeck_results),
+                                    place_builder.field(n, *ty).into_place(this.tcx, &this.upvars),
                                 )
                             }
                         })
@@ -378,10 +376,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 };
 
                 let inferred_ty = expr.ty;
-                let user_ty = user_ty.map(|ty| {
+                let user_ty = user_ty.as_ref().map(|user_ty| {
                     this.canonical_user_type_annotations.push(CanonicalUserTypeAnnotation {
                         span: source_info.span,
-                        user_ty: ty,
+                        user_ty: user_ty.clone(),
                         inferred_ty,
                     })
                 });
@@ -400,7 +398,12 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 );
                 block.unit()
             }
-            ExprKind::InlineAsm { template, ref operands, options, line_spans } => {
+            ExprKind::InlineAsm(box InlineAsmExpr {
+                template,
+                ref operands,
+                options,
+                line_spans,
+            }) => {
                 use rustc_middle::{mir, thir};
                 let operands = operands
                     .into_iter()

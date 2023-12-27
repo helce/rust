@@ -20,6 +20,9 @@ pub struct HirId {
 }
 
 impl HirId {
+    /// Signal local id which should never be used.
+    pub const INVALID: HirId = HirId { owner: CRATE_DEF_ID, local_id: ItemLocalId::INVALID };
+
     #[inline]
     pub fn expect_owner(self) -> LocalDefId {
         assert_eq!(self.local_id.index(), 0);
@@ -64,8 +67,13 @@ impl PartialOrd for HirId {
     }
 }
 
-rustc_data_structures::define_id_collections!(HirIdMap, HirIdSet, HirId);
-rustc_data_structures::define_id_collections!(ItemLocalMap, ItemLocalSet, ItemLocalId);
+rustc_data_structures::define_stable_id_collections!(HirIdMap, HirIdSet, HirIdMapEntry, HirId);
+rustc_data_structures::define_id_collections!(
+    ItemLocalMap,
+    ItemLocalSet,
+    ItemLocalMapEntry,
+    ItemLocalId
+);
 
 rustc_index::newtype_index! {
     /// An `ItemLocalId` uniquely identifies something within a given "item-like";

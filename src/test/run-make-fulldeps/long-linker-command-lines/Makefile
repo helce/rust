@@ -1,4 +1,4 @@
--include ../tools.mk
+include ../tools.mk
 
 # ignore-e2k64 incorrect env while running compiler
 

@@ -8,10 +8,11 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::str;
 
+use crate::common;
 use crate::llvm::archive_ro::{ArchiveRO, Child};
 use crate::llvm::{self, ArchiveKind, LLVMMachineType, LLVMRustCOFFShortExport};
 use rustc_codegen_ssa::back::archive::{ArchiveBuilder, ArchiveBuilderBuilder};
-use rustc_session::cstore::{DllCallingConvention, DllImport};
+use rustc_session::cstore::DllImport;
 use rustc_session::Session;
 
 /// Helper for adding many files to an archive.
@@ -103,29 +104,28 @@ impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
         lib_name: &str,
         dll_imports: &[DllImport],
         tmpdir: &Path,
+        is_direct_dependency: bool,
     ) -> PathBuf {
+        let name_suffix = if is_direct_dependency { "_imports" } else { "_imports_indirect" };
         let output_path = {
             let mut output_path: PathBuf = tmpdir.to_path_buf();
-            output_path.push(format!("{}_imports", lib_name));
+            output_path.push(format!("{}{}", lib_name, name_suffix));
             output_path.with_extension("lib")
         };
 
         let target = &sess.target;
-        let mingw_gnu_toolchain = target.vendor == "pc"
-            && target.os == "windows"
-            && target.env == "gnu"
-            && target.abi.is_empty();
+        let mingw_gnu_toolchain = common::is_mingw_gnu_toolchain(target);
 
         let import_name_and_ordinal_vector: Vec<(String, Option<u16>)> = dll_imports
             .iter()
             .map(|import: &DllImport| {
                 if sess.target.arch == "x86" {
                     (
-                        LlvmArchiveBuilder::i686_decorated_name(import, mingw_gnu_toolchain),
-                        import.ordinal,
+                        common::i686_decorated_name(import, mingw_gnu_toolchain, false),
+                        import.ordinal(),
                     )
                 } else {
-                    (import.name.to_string(), import.ordinal)
+                    (import.name.to_string(), import.ordinal())
                 }
             })
             .collect();
@@ -136,7 +136,8 @@ impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
             // that loaded but crashed with an AV upon calling one of the imported
             // functions.  Therefore, use binutils to create the import library instead,
             // by writing a .DEF file to the temp dir and calling binutils's dlltool.
-            let def_file_path = tmpdir.join(format!("{}_imports", lib_name)).with_extension("def");
+            let def_file_path =
+                tmpdir.join(format!("{}{}", lib_name, name_suffix)).with_extension("def");
 
             let def_file_content = format!(
                 "EXPORTS\n{}",
@@ -159,6 +160,9 @@ impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
                 }
             };
 
+            // --no-leading-underscore: For the `import_name_type` feature to work, we need to be
+            // able to control the *exact* spelling of each of the symbols that are being imported:
+            // hence we don't want `dlltool` adding leading underscores automatically.
             let dlltool = find_binutils_dlltool(sess);
             let result = std::process::Command::new(dlltool)
                 .args([
@@ -168,6 +172,7 @@ impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
                     lib_name,
                     "-l",
                     output_path.to_str().unwrap(),
+                    "--no-leading-underscore",
                 ])
                 .output();
 
@@ -188,10 +193,10 @@ impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
 
             let output_path_z = rustc_fs_util::path_to_c_string(&output_path);
 
-            tracing::trace!("invoking LLVMRustWriteImportLibrary");
-            tracing::trace!("  dll_name {:#?}", dll_name_z);
-            tracing::trace!("  output_path {}", output_path.display());
-            tracing::trace!(
+            trace!("invoking LLVMRustWriteImportLibrary");
+            trace!("  dll_name {:#?}", dll_name_z);
+            trace!("  output_path {}", output_path.display());
+            trace!(
                 "  import names: {}",
                 dll_imports
                     .iter()
@@ -320,22 +325,6 @@ impl<'a> LlvmArchiveBuilder<'a> {
                 llvm::LLVMRustArchiveMemberFree(member);
             }
             ret
-        }
-    }
-
-    fn i686_decorated_name(import: &DllImport, mingw: bool) -> String {
-        let name = import.name;
-        let prefix = if mingw { "" } else { "_" };
-
-        match import.calling_convention {
-            DllCallingConvention::C => format!("{}{}", prefix, name),
-            DllCallingConvention::Stdcall(arg_list_size) => {
-                format!("{}{}@{}", prefix, name, arg_list_size)
-            }
-            DllCallingConvention::Fastcall(arg_list_size) => format!("@{}@{}", name, arg_list_size),
-            DllCallingConvention::Vectorcall(arg_list_size) => {
-                format!("{}@@{}", name, arg_list_size)
-            }
         }
     }
 }

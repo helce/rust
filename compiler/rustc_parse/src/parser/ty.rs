@@ -567,7 +567,8 @@ impl<'a> Parser<'a> {
         self.check_keyword(kw::Dyn)
             && (!self.token.uninterpolated_span().rust_2015()
                 || self.look_ahead(1, |t| {
-                    t.can_begin_bound() && !can_continue_type_after_non_fn_ident(t)
+                    (t.can_begin_bound() || t.kind == TokenKind::BinOp(token::Star))
+                        && !can_continue_type_after_non_fn_ident(t)
                 }))
     }
 
@@ -576,10 +577,18 @@ impl<'a> Parser<'a> {
     /// Note that this does *not* parse bare trait objects.
     fn parse_dyn_ty(&mut self, impl_dyn_multi: &mut bool) -> PResult<'a, TyKind> {
         self.bump(); // `dyn`
+
+        // parse dyn* types
+        let syntax = if self.eat(&TokenKind::BinOp(token::Star)) {
+            TraitObjectSyntax::DynStar
+        } else {
+            TraitObjectSyntax::Dyn
+        };
+
         // Always parse bounds greedily for better error recovery.
         let bounds = self.parse_generic_bounds(None)?;
         *impl_dyn_multi = bounds.len() > 1 || self.prev_token.kind == TokenKind::BinOp(token::Plus);
-        Ok(TyKind::TraitObject(bounds, TraitObjectSyntax::Dyn))
+        Ok(TyKind::TraitObject(bounds, syntax))
     }
 
     /// Parses a type starting with a path.
@@ -598,11 +607,11 @@ impl<'a> Parser<'a> {
         let path = self.parse_path_inner(PathStyle::Type, ty_generics)?;
         if self.eat(&token::Not) {
             // Macro invocation in type position
-            Ok(TyKind::MacCall(MacCall {
+            Ok(TyKind::MacCall(P(MacCall {
                 path,
                 args: self.parse_mac_args()?,
                 prior_type_ascription: self.last_type_ascription,
-            }))
+            })))
         } else if allow_plus == AllowPlus::Yes && self.check_plus() {
             // `Trait1 + Trait2 + 'a`
             self.parse_remaining_bounds_path(Vec::new(), path, lo, true)
@@ -640,7 +649,13 @@ impl<'a> Parser<'a> {
         let mut bounds = Vec::new();
         let mut negative_bounds = Vec::new();
 
-        while self.can_begin_bound() || self.token.is_keyword(kw::Dyn) {
+        while self.can_begin_bound()
+            // Continue even if we find a keyword.
+            // This is necessary for error recover on, for example, `impl fn()`.
+            //
+            // The only keyword that can go after generic bounds is `where`, so stop if it's it.
+            || (self.token.is_reserved_ident() && !self.token.is_keyword(kw::Where))
+        {
             if self.token.is_keyword(kw::Dyn) {
                 // Account for `&dyn Trait + dyn Other`.
                 self.struct_span_err(self.token.span, "invalid `dyn` keyword")
@@ -803,6 +818,20 @@ impl<'a> Parser<'a> {
             self.expect_keyword(kw::Const)?;
             let span = tilde.to(self.prev_token.span);
             self.sess.gated_spans.gate(sym::const_trait_impl, span);
+            Some(span)
+        } else if self.eat_keyword(kw::Const) {
+            let span = self.prev_token.span;
+            self.sess.gated_spans.gate(sym::const_trait_impl, span);
+
+            self.struct_span_err(span, "const bounds must start with `~`")
+                .span_suggestion(
+                    span.shrink_to_lo(),
+                    "add `~`",
+                    "~",
+                    Applicability::MachineApplicable,
+                )
+                .emit();
+
             Some(span)
         } else {
             None

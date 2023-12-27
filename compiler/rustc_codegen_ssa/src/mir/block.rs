@@ -13,15 +13,14 @@ use rustc_ast as ast;
 use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
 use rustc_hir::lang_items::LangItem;
 use rustc_index::vec::Idx;
-use rustc_middle::mir::AssertKind;
-use rustc_middle::mir::{self, SwitchTargets};
+use rustc_middle::mir::{self, AssertKind, SwitchTargets};
 use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf};
 use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
 use rustc_middle::ty::{self, Instance, Ty, TypeVisitable};
 use rustc_span::source_map::Span;
 use rustc_span::{sym, Symbol};
 use rustc_symbol_mangling::typeid::typeid_for_fnabi;
-use rustc_target::abi::call::{ArgAbi, FnAbi, PassMode};
+use rustc_target::abi::call::{ArgAbi, FnAbi, PassMode, Reg};
 use rustc_target::abi::{self, HasDataLayout, WrappingRange};
 use rustc_target::spec::abi::Abi;
 
@@ -324,7 +323,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             bx.unreachable();
             return;
         }
-        let llval = match self.fn_abi.ret.mode {
+        let llval = match &self.fn_abi.ret.mode {
             PassMode::Ignore | PassMode::Indirect { .. } => {
                 bx.ret_void();
                 return;
@@ -339,7 +338,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 }
             }
 
-            PassMode::Cast(cast_ty) => {
+            PassMode::Cast(cast_ty, _) => {
                 let op = match self.locals[mir::RETURN_PLACE] {
                     LocalRef::Operand(Some(op)) => op,
                     LocalRef::Operand(None) => bug!("use of return before def"),
@@ -360,7 +359,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         llval
                     }
                 };
-                let ty = bx.cast_backend_type(&cast_ty);
+                let ty = bx.cast_backend_type(cast_ty);
                 let addr = bx.pointercast(llslot, bx.type_ptr_to(ty));
                 bx.load(ty, addr, self.fn_abi.ret.layout.align.abi)
             }
@@ -368,6 +367,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         bx.ret(llval);
     }
 
+    #[tracing::instrument(level = "trace", skip(self, helper, bx))]
     fn codegen_drop_terminator(
         &mut self,
         helper: TerminatorCodegenHelper<'tcx>,
@@ -398,14 +398,75 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let (drop_fn, fn_abi) = match ty.kind() {
             // FIXME(eddyb) perhaps move some of this logic into
             // `Instance::resolve_drop_in_place`?
-            ty::Dynamic(..) => {
+            ty::Dynamic(_, _, ty::Dyn) => {
+                // IN THIS ARM, WE HAVE:
+                // ty = *mut (dyn Trait)
+                // which is: exists<T> ( *mut T,    Vtable<T: Trait> )
+                //                       args[0]    args[1]
+                //
+                // args = ( Data, Vtable )
+                //                  |
+                //                  v
+                //                /-------\
+                //                | ...   |
+                //                \-------/
+                //
                 let virtual_drop = Instance {
                     def: ty::InstanceDef::Virtual(drop_fn.def_id(), 0),
                     substs: drop_fn.substs,
                 };
+                debug!("ty = {:?}", ty);
+                debug!("drop_fn = {:?}", drop_fn);
+                debug!("args = {:?}", args);
                 let fn_abi = bx.fn_abi_of_instance(virtual_drop, ty::List::empty());
                 let vtable = args[1];
+                // Truncate vtable off of args list
                 args = &args[..1];
+                (
+                    meth::VirtualIndex::from_index(ty::COMMON_VTABLE_ENTRIES_DROPINPLACE)
+                        .get_fn(&mut bx, vtable, ty, &fn_abi),
+                    fn_abi,
+                )
+            }
+            ty::Dynamic(_, _, ty::DynStar) => {
+                // IN THIS ARM, WE HAVE:
+                // ty = *mut (dyn* Trait)
+                // which is: *mut exists<T: sizeof(T) == sizeof(usize)> (T, Vtable<T: Trait>)
+                //
+                // args = [ * ]
+                //          |
+                //          v
+                //      ( Data, Vtable )
+                //                |
+                //                v
+                //              /-------\
+                //              | ...   |
+                //              \-------/
+                //
+                //
+                // WE CAN CONVERT THIS INTO THE ABOVE LOGIC BY DOING
+                //
+                // data = &(*args[0]).0    // gives a pointer to Data above (really the same pointer)
+                // vtable = (*args[0]).1   // loads the vtable out
+                // (data, vtable)          // an equivalent Rust `*mut dyn Trait`
+                //
+                // SO THEN WE CAN USE THE ABOVE CODE.
+                let virtual_drop = Instance {
+                    def: ty::InstanceDef::Virtual(drop_fn.def_id(), 0),
+                    substs: drop_fn.substs,
+                };
+                debug!("ty = {:?}", ty);
+                debug!("drop_fn = {:?}", drop_fn);
+                debug!("args = {:?}", args);
+                let fn_abi = bx.fn_abi_of_instance(virtual_drop, ty::List::empty());
+                let data = args[0];
+                let data_ty = bx.cx().backend_type(place.layout);
+                let vtable_ptr =
+                    bx.gep(data_ty, data, &[bx.cx().const_i32(0), bx.cx().const_i32(1)]);
+                let vtable = bx.load(bx.type_i8p(), vtable_ptr, abi::Align::ONE);
+                // Truncate vtable off of args list
+                args = &args[..1];
+                debug!("args' = {:?}", args);
                 (
                     meth::VirtualIndex::from_index(ty::COMMON_VTABLE_ENTRIES_DROPINPLACE)
                         .get_fn(&mut bx, vtable, ty, &fn_abi),
@@ -798,58 +859,78 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             let mut op = self.codegen_operand(&mut bx, arg);
 
             if let (0, Some(ty::InstanceDef::Virtual(_, idx))) = (i, def) {
-                if let Pair(..) = op.val {
-                    // In the case of Rc<Self>, we need to explicitly pass a
-                    // *mut RcBox<Self> with a Scalar (not ScalarPair) ABI. This is a hack
-                    // that is understood elsewhere in the compiler as a method on
-                    // `dyn Trait`.
-                    // To get a `*mut RcBox<Self>`, we just keep unwrapping newtypes until
-                    // we get a value of a built-in pointer type
-                    'descend_newtypes: while !op.layout.ty.is_unsafe_ptr()
-                        && !op.layout.ty.is_region_ptr()
-                    {
-                        for i in 0..op.layout.fields.count() {
-                            let field = op.extract_field(&mut bx, i);
-                            if !field.layout.is_zst() {
-                                // we found the one non-zero-sized field that is allowed
-                                // now find *its* non-zero-sized field, or stop if it's a
-                                // pointer
-                                op = field;
-                                continue 'descend_newtypes;
+                match op.val {
+                    Pair(data_ptr, meta) => {
+                        // In the case of Rc<Self>, we need to explicitly pass a
+                        // *mut RcBox<Self> with a Scalar (not ScalarPair) ABI. This is a hack
+                        // that is understood elsewhere in the compiler as a method on
+                        // `dyn Trait`.
+                        // To get a `*mut RcBox<Self>`, we just keep unwrapping newtypes until
+                        // we get a value of a built-in pointer type
+                        'descend_newtypes: while !op.layout.ty.is_unsafe_ptr()
+                            && !op.layout.ty.is_region_ptr()
+                        {
+                            for i in 0..op.layout.fields.count() {
+                                let field = op.extract_field(&mut bx, i);
+                                if !field.layout.is_zst() {
+                                    // we found the one non-zero-sized field that is allowed
+                                    // now find *its* non-zero-sized field, or stop if it's a
+                                    // pointer
+                                    op = field;
+                                    continue 'descend_newtypes;
+                                }
                             }
+
+                            span_bug!(span, "receiver has no non-zero-sized fields {:?}", op);
                         }
 
-                        span_bug!(span, "receiver has no non-zero-sized fields {:?}", op);
+                        // now that we have `*dyn Trait` or `&dyn Trait`, split it up into its
+                        // data pointer and vtable. Look up the method in the vtable, and pass
+                        // the data pointer as the first argument
+                        llfn = Some(meth::VirtualIndex::from_index(idx).get_fn(
+                            &mut bx,
+                            meta,
+                            op.layout.ty,
+                            &fn_abi,
+                        ));
+                        llargs.push(data_ptr);
+                        continue 'make_args;
                     }
-
-                    // now that we have `*dyn Trait` or `&dyn Trait`, split it up into its
-                    // data pointer and vtable. Look up the method in the vtable, and pass
-                    // the data pointer as the first argument
-                    match op.val {
-                        Pair(data_ptr, meta) => {
-                            llfn = Some(meth::VirtualIndex::from_index(idx).get_fn(
-                                &mut bx,
-                                meta,
-                                op.layout.ty,
-                                &fn_abi,
-                            ));
-                            llargs.push(data_ptr);
-                            continue 'make_args;
+                    Ref(data_ptr, Some(meta), _) => {
+                        // by-value dynamic dispatch
+                        llfn = Some(meth::VirtualIndex::from_index(idx).get_fn(
+                            &mut bx,
+                            meta,
+                            op.layout.ty,
+                            &fn_abi,
+                        ));
+                        llargs.push(data_ptr);
+                        continue;
+                    }
+                    Immediate(_) => {
+                        let ty::Ref(_, ty, _) = op.layout.ty.kind() else {
+                            span_bug!(span, "can't codegen a virtual call on {:#?}", op);
+                        };
+                        if !ty.is_dyn_star() {
+                            span_bug!(span, "can't codegen a virtual call on {:#?}", op);
                         }
-                        other => bug!("expected a Pair, got {:?}", other),
+                        // FIXME(dyn-star): Make sure this is done on a &dyn* receiver
+                        let place = op.deref(bx.cx());
+                        let data_ptr = place.project_field(&mut bx, 0);
+                        let meta_ptr = place.project_field(&mut bx, 1);
+                        let meta = bx.load_operand(meta_ptr);
+                        llfn = Some(meth::VirtualIndex::from_index(idx).get_fn(
+                            &mut bx,
+                            meta.immediate(),
+                            op.layout.ty,
+                            &fn_abi,
+                        ));
+                        llargs.push(data_ptr.llval);
+                        continue;
                     }
-                } else if let Ref(data_ptr, Some(meta), _) = op.val {
-                    // by-value dynamic dispatch
-                    llfn = Some(meth::VirtualIndex::from_index(idx).get_fn(
-                        &mut bx,
-                        meta,
-                        op.layout.ty,
-                        &fn_abi,
-                    ));
-                    llargs.push(data_ptr);
-                    continue;
-                } else {
-                    span_bug!(span, "can't codegen a virtual call on {:?}", op);
+                    _ => {
+                        span_bug!(span, "can't codegen a virtual call on {:#?}", op);
+                    }
                 }
             }
 
@@ -1161,39 +1242,35 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         llargs: &mut Vec<Bx::Value>,
         arg: &ArgAbi<'tcx, Ty<'tcx>>,
     ) {
-        // Fill padding with undef value, where applicable.
-        if let Some(ty) = arg.pad {
-            llargs.push(bx.const_undef(bx.reg_backend_type(&ty)))
-        }
-
-        if arg.is_ignore() {
-            return;
-        }
-
-        if let PassMode::Pair(..) = arg.mode {
-            match op.val {
+        match arg.mode {
+            PassMode::Ignore => return,
+            PassMode::Cast(_, true) => {
+                // Fill padding with undef value, where applicable.
+                llargs.push(bx.const_undef(bx.reg_backend_type(&Reg::i32())));
+            }
+            PassMode::Pair(..) => match op.val {
                 Pair(a, b) => {
                     llargs.push(a);
                     llargs.push(b);
                     return;
                 }
                 _ => bug!("codegen_argument: {:?} invalid for pair argument", op),
-            }
-        } else if arg.is_unsized_indirect() {
-            match op.val {
+            },
+            PassMode::Indirect { attrs: _, extra_attrs: Some(_), on_stack: _ } => match op.val {
                 Ref(a, Some(b), _) => {
                     llargs.push(a);
                     llargs.push(b);
                     return;
                 }
                 _ => bug!("codegen_argument: {:?} invalid for unsized indirect argument", op),
-            }
+            },
+            _ => {}
         }
 
         // Force by-ref if we have to load through a cast pointer.
         let (mut llval, align, by_ref) = match op.val {
             Immediate(_) | Pair(..) => match arg.mode {
-                PassMode::Indirect { .. } | PassMode::Cast(_) => {
+                PassMode::Indirect { .. } | PassMode::Cast(..) => {
                     let scratch = PlaceRef::alloca(bx, arg.layout);
                     op.val.store(bx, scratch);
                     (scratch.llval, scratch.align, true)
@@ -1225,8 +1302,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
         if by_ref && !arg.is_indirect() {
             // Have to load the argument, maybe while casting it.
-            if let PassMode::Cast(ty) = arg.mode {
-                let llty = bx.cast_backend_type(&ty);
+            if let PassMode::Cast(ty, _) = &arg.mode {
+                let llty = bx.cast_backend_type(ty);
                 let addr = bx.pointercast(llval, bx.type_ptr_to(llty));
                 llval = bx.load(llty, addr, align.min(arg.layout.align.abi));
             } else {
@@ -1625,7 +1702,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             }
             DirectOperand(index) => {
                 // If there is a cast, we have to store and reload.
-                let op = if let PassMode::Cast(_) = ret_abi.mode {
+                let op = if let PassMode::Cast(..) = ret_abi.mode {
                     let tmp = PlaceRef::alloca(bx, ret_abi.layout);
                     tmp.storage_live(bx);
                     bx.store_arg(&ret_abi, llval, tmp);

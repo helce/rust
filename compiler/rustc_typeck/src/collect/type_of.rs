@@ -1,6 +1,5 @@
 use rustc_errors::{Applicability, StashKey};
 use rustc_hir as hir;
-use rustc_hir::def::Res;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit;
 use rustc_hir::intravisit::Visitor;
@@ -19,7 +18,6 @@ use crate::errors::UnconstrainedOpaqueType;
 /// Computes the relevant generic parameter for a potential generic const argument.
 ///
 /// This should be called using the query `tcx.opt_const_param_of`.
-#[instrument(level = "debug", skip(tcx))]
 pub(super) fn opt_const_param_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<DefId> {
     use hir::*;
     let hir_id = tcx.hir().local_def_id_to_hir_id(def_id);
@@ -67,8 +65,8 @@ pub(super) fn opt_const_param_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<
             let ty = item_ctxt.ast_ty_to_ty(hir_ty);
 
             // Iterate through the generics of the projection to find the one that corresponds to
-            // the def_id that this query was called with. We filter to only const args here as a
-            // precaution for if it's ever allowed to elide lifetimes in GAT's. It currently isn't
+            // the def_id that this query was called with. We filter to only type and const args here
+            // as a precaution for if it's ever allowed to elide lifetimes in GAT's. It currently isn't
             // but it can't hurt to be safe ^^
             if let ty::Projection(projection) = ty.kind() {
                 let generics = tcx.generics_of(projection.item_def_id);
@@ -79,7 +77,7 @@ pub(super) fn opt_const_param_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<
                         args.args
                             .iter()
                             .filter(|arg| arg.is_ty_or_const())
-                            .position(|arg| arg.id() == hir_id)
+                            .position(|arg| arg.hir_id() == hir_id)
                     })
                     .unwrap_or_else(|| {
                         bug!("no arg matching AnonConst in segment");
@@ -112,7 +110,7 @@ pub(super) fn opt_const_param_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<
                     args.args
                         .iter()
                         .filter(|arg| arg.is_ty_or_const())
-                        .position(|arg| arg.id() == hir_id)
+                        .position(|arg| arg.hir_id() == hir_id)
                 })
                 .unwrap_or_else(|| {
                     bug!("no arg matching AnonConst in segment");
@@ -166,7 +164,7 @@ pub(super) fn opt_const_param_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<
                 args.args
                 .iter()
                 .filter(|arg| arg.is_ty_or_const())
-                .position(|arg| arg.id() == hir_id)
+                .position(|arg| arg.hir_id() == hir_id)
                 .map(|index| (index, seg)).or_else(|| args.bindings
                     .iter()
                     .filter_map(TypeBinding::opt_const)
@@ -180,15 +178,12 @@ pub(super) fn opt_const_param_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<
                 return None;
             };
 
-            // Try to use the segment resolution if it is valid, otherwise we
-            // default to the path resolution.
-            let res = segment.res.filter(|&r| r != Res::Err).unwrap_or(path.res);
-            let generics = match tcx.res_generics_def_id(res) {
+            let generics = match tcx.res_generics_def_id(segment.res) {
                 Some(def_id) => tcx.generics_of(def_id),
                 None => {
                     tcx.sess.delay_span_bug(
                         tcx.def_span(def_id),
-                        &format!("unexpected anon const res {:?} in path: {:?}", res, path),
+                        &format!("unexpected anon const res {:?} in path: {:?}", segment.res, path),
                     );
                     return None;
                 }
@@ -229,7 +224,7 @@ fn get_path_containing_arg_in_pat<'hir>(
             .iter()
             .filter_map(|seg| seg.args)
             .flat_map(|args| args.args)
-            .any(|arg| arg.id() == arg_id)
+            .any(|arg| arg.hir_id() == arg_id)
     };
     let mut arg_path = None;
     pat.walk(|pat| match pat.kind {
@@ -338,8 +333,17 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                     find_opaque_ty_constraints_for_tait(tcx, def_id)
                 }
                 // Opaque types desugared from `impl Trait`.
-                ItemKind::OpaqueTy(OpaqueTy { origin: hir::OpaqueTyOrigin::FnReturn(owner) | hir::OpaqueTyOrigin::AsyncFn(owner), .. }) => {
-                    find_opaque_ty_constraints_for_rpit(tcx, def_id, owner)
+                ItemKind::OpaqueTy(OpaqueTy {
+                    origin:
+                        hir::OpaqueTyOrigin::FnReturn(owner) | hir::OpaqueTyOrigin::AsyncFn(owner),
+                    in_trait,
+                    ..
+                }) => {
+                    if in_trait {
+                        span_bug!(item.span, "impl-trait in trait has no default")
+                    } else {
+                        find_opaque_ty_constraints_for_rpit(tcx, def_id, owner)
+                    }
                 }
                 ItemKind::Trait(..)
                 | ItemKind::TraitAlias(..)
@@ -379,7 +383,9 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
 
         Node::Field(field) => icx.to_ty(field.ty),
 
-        Node::Expr(&Expr { kind: ExprKind::Closure{..}, .. }) => tcx.typeck(def_id).node_type(hir_id),
+        Node::Expr(&Expr { kind: ExprKind::Closure { .. }, .. }) => {
+            tcx.typeck(def_id).node_type(hir_id)
+        }
 
         Node::AnonConst(_) if let Some(param) = tcx.opt_const_param_of(def_id) => {
             // We defer to `type_of` of the corresponding parameter
@@ -411,40 +417,91 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                 | Node::Item(&Item { kind: ItemKind::GlobalAsm(asm), .. })
                     if asm.operands.iter().any(|(op, _op_sp)| match op {
                         hir::InlineAsmOperand::Const { anon_const }
-                        | hir::InlineAsmOperand::SymFn { anon_const } => anon_const.hir_id == hir_id,
+                        | hir::InlineAsmOperand::SymFn { anon_const } => {
+                            anon_const.hir_id == hir_id
+                        }
                         _ => false,
                     }) =>
                 {
                     tcx.typeck(def_id).node_type(hir_id)
                 }
 
-                Node::Variant(Variant { disr_expr: Some(ref e), .. }) if e.hir_id == hir_id => tcx
-                    .adt_def(tcx.hir().get_parent_item(hir_id))
-                    .repr()
-                    .discr_type()
-                    .to_ty(tcx),
+                Node::Variant(Variant { disr_expr: Some(ref e), .. }) if e.hir_id == hir_id => {
+                    tcx.adt_def(tcx.hir().get_parent_item(hir_id)).repr().discr_type().to_ty(tcx)
+                }
 
-                Node::TypeBinding(binding @ &TypeBinding { hir_id: binding_id, ..  })
-                    if let Node::TraitRef(trait_ref) = tcx.hir().get(
-                        tcx.hir().get_parent_node(binding_id)
-                    ) =>
+                Node::TypeBinding(
+                    binding @ &TypeBinding {
+                        hir_id: binding_id,
+                        kind: TypeBindingKind::Equality { term: Term::Const(ref e) },
+                        ..
+                    },
+                ) if let Node::TraitRef(trait_ref) =
+                    tcx.hir().get(tcx.hir().get_parent_node(binding_id))
+                    && e.hir_id == hir_id =>
                 {
-                  let Some(trait_def_id) = trait_ref.trait_def_id() else {
-                    return tcx.ty_error_with_message(DUMMY_SP, "Could not find trait");
-                  };
-                  let assoc_items = tcx.associated_items(trait_def_id);
-                  let assoc_item = assoc_items.find_by_name_and_kind(
-                    tcx, binding.ident, ty::AssocKind::Const, def_id.to_def_id(),
-                  );
-                  if let Some(assoc_item) = assoc_item {
-                    tcx.type_of(assoc_item.def_id)
-                  } else {
-                      // FIXME(associated_const_equality): add a useful error message here.
-                      tcx.ty_error_with_message(
-                        DUMMY_SP,
-                        "Could not find associated const on trait",
-                    )
-                  }
+                    let Some(trait_def_id) = trait_ref.trait_def_id() else {
+                        return tcx.ty_error_with_message(DUMMY_SP, "Could not find trait");
+                    };
+                    let assoc_items = tcx.associated_items(trait_def_id);
+                    let assoc_item = assoc_items.find_by_name_and_kind(
+                        tcx,
+                        binding.ident,
+                        ty::AssocKind::Const,
+                        def_id.to_def_id(),
+                    );
+                    if let Some(assoc_item) = assoc_item {
+                        tcx.type_of(assoc_item.def_id)
+                    } else {
+                        // FIXME(associated_const_equality): add a useful error message here.
+                        tcx.ty_error_with_message(
+                            DUMMY_SP,
+                            "Could not find associated const on trait",
+                        )
+                    }
+                }
+
+                Node::TypeBinding(
+                    binding @ &TypeBinding { hir_id: binding_id, gen_args, ref kind, .. },
+                ) if let Node::TraitRef(trait_ref) =
+                    tcx.hir().get(tcx.hir().get_parent_node(binding_id))
+                    && let Some((idx, _)) =
+                        gen_args.args.iter().enumerate().find(|(_, arg)| {
+                            if let GenericArg::Const(ct) = arg {
+                                ct.value.hir_id == hir_id
+                            } else {
+                                false
+                            }
+                        }) =>
+                {
+                    let Some(trait_def_id) = trait_ref.trait_def_id() else {
+                        return tcx.ty_error_with_message(DUMMY_SP, "Could not find trait");
+                    };
+                    let assoc_items = tcx.associated_items(trait_def_id);
+                    let assoc_item = assoc_items.find_by_name_and_kind(
+                        tcx,
+                        binding.ident,
+                        match kind {
+                            // I think `<A: T>` type bindings requires that `A` is a type
+                            TypeBindingKind::Constraint { .. }
+                            | TypeBindingKind::Equality { term: Term::Ty(..) } => {
+                                ty::AssocKind::Type
+                            }
+                            TypeBindingKind::Equality { term: Term::Const(..) } => {
+                                ty::AssocKind::Const
+                            }
+                        },
+                        def_id.to_def_id(),
+                    );
+                    if let Some(assoc_item) = assoc_item {
+                        tcx.type_of(tcx.generics_of(assoc_item.def_id).params[idx].def_id)
+                    } else {
+                        // FIXME(associated_const_equality): add a useful error message here.
+                        tcx.ty_error_with_message(
+                            DUMMY_SP,
+                            "Could not find associated const on trait",
+                        )
+                    }
                 }
 
                 Node::GenericParam(&GenericParam {
@@ -453,8 +510,7 @@ pub(super) fn type_of(tcx: TyCtxt<'_>, def_id: DefId) -> Ty<'_> {
                     ..
                 }) if ct.hir_id == hir_id => tcx.type_of(tcx.hir().local_def_id(param_hir_id)),
 
-                x =>
-                  tcx.ty_error_with_message(
+                x => tcx.ty_error_with_message(
                     DUMMY_SP,
                     &format!("unexpected const parent in type_of(): {x:?}"),
                 ),
@@ -801,6 +857,9 @@ fn infer_placeholder_type<'a>(
     match tcx.sess.diagnostic().steal_diagnostic(span, StashKey::ItemNoType) {
         Some(mut err) => {
             if !ty.references_error() {
+                // Only suggest adding `:` if it was missing (and suggested by parsing diagnostic)
+                let colon = if span == item_ident.span.shrink_to_hi() { ":" } else { "" };
+
                 // The parser provided a sub-optimal `HasPlaceholders` suggestion for the type.
                 // We are typeck and have the real type, so remove that and suggest the actual type.
                 // FIXME(eddyb) this looks like it should be functionality on `Diagnostic`.
@@ -816,7 +875,7 @@ fn infer_placeholder_type<'a>(
                     err.span_suggestion(
                         span,
                         &format!("provide a type for the {item}", item = kind),
-                        format!("{}: {}", item_ident, sugg_ty),
+                        format!("{colon} {sugg_ty}"),
                         Applicability::MachineApplicable,
                     );
                 } else {

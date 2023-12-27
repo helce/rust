@@ -1,3 +1,4 @@
+use crate::errors::OpaqueHiddenTypeDiag;
 use crate::infer::{DefiningAnchor, InferCtxt, InferOk};
 use crate::traits;
 use hir::def_id::{DefId, LocalDefId};
@@ -72,7 +73,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     // for opaque types, and then use that kind to fix the spans for type errors
                     // that we see later on.
                     let ty_var = self.next_ty_var(TypeVariableOrigin {
-                        kind: TypeVariableOriginKind::TypeInference,
+                        kind: TypeVariableOriginKind::OpaqueTypeInference(def_id),
                         span,
                     });
                     obligations.extend(
@@ -153,22 +154,11 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
                     if let Some(OpaqueTyOrigin::TyAlias) =
                         did2.as_local().and_then(|did2| self.opaque_type_origin(did2, cause.span))
                     {
-                        self.tcx
-                                .sess
-                                .struct_span_err(
-                                    cause.span,
-                                    "opaque type's hidden type cannot be another opaque type from the same scope",
-                                )
-                                .span_label(cause.span, "one of the two opaque types used here has to be outside its defining scope")
-                                .span_note(
-                                    self.tcx.def_span(def_id),
-                                    "opaque type whose hidden type is being assigned",
-                                )
-                                .span_note(
-                                    self.tcx.def_span(did2),
-                                    "opaque type being used as hidden type",
-                                )
-                                .emit();
+                        self.tcx.sess.emit_err(OpaqueHiddenTypeDiag {
+                            span: cause.span,
+                            hidden_type: self.tcx.def_span(did2),
+                            opaque_type: self.tcx.def_span(def_id),
+                        });
                     }
                 }
                 Some(self.register_hidden_type(
@@ -400,7 +390,7 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         });
     }
 
-    #[instrument(skip(self), level = "trace")]
+    #[instrument(skip(self), level = "trace", ret)]
     pub fn opaque_type_origin(&self, def_id: LocalDefId, span: Span) -> Option<OpaqueTyOrigin> {
         let opaque_hir_id = self.tcx.hir().local_def_id_to_hir_id(def_id);
         let parent_def_id = match self.defining_use_anchor {
@@ -431,16 +421,14 @@ impl<'a, 'tcx> InferCtxt<'a, 'tcx> {
         in_definition_scope.then_some(*origin)
     }
 
-    #[instrument(skip(self), level = "trace")]
+    #[instrument(skip(self), level = "trace", ret)]
     fn opaque_ty_origin_unchecked(&self, def_id: LocalDefId, span: Span) -> OpaqueTyOrigin {
-        let origin = match self.tcx.hir().expect_item(def_id).kind {
+        match self.tcx.hir().expect_item(def_id).kind {
             hir::ItemKind::OpaqueTy(hir::OpaqueTy { origin, .. }) => origin,
             ref itemkind => {
                 span_bug!(span, "weird opaque type: {:?}, {:#?}", def_id, itemkind)
             }
-        };
-        trace!(?origin);
-        origin
+        }
     }
 }
 

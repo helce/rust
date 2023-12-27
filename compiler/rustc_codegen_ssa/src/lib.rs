@@ -1,7 +1,7 @@
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![feature(box_patterns)]
 #![feature(try_blocks)]
-#![feature(let_else)]
+#![cfg_attr(bootstrap, feature(let_else))]
 #![feature(once_cell)]
 #![feature(associated_type_bounds)]
 #![feature(strict_provenance)]
@@ -25,7 +25,6 @@ use rustc_ast as ast;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::sync::Lrc;
 use rustc_hir::def_id::CrateNum;
-use rustc_hir::LangItem;
 use rustc_middle::dep_graph::WorkProduct;
 use rustc_middle::middle::dependency_format::Dependencies;
 use rustc_middle::middle::exported_symbols::SymbolExportKind;
@@ -113,6 +112,7 @@ bitflags::bitflags! {
 pub struct NativeLib {
     pub kind: NativeLibKind,
     pub name: Option<Symbol>,
+    pub filename: Option<Symbol>,
     pub cfg: Option<ast::MetaItem>,
     pub verbatim: Option<bool>,
     pub dll_imports: Vec<cstore::DllImport>,
@@ -122,6 +122,7 @@ impl From<&cstore::NativeLib> for NativeLib {
     fn from(lib: &cstore::NativeLib) -> Self {
         NativeLib {
             kind: lib.kind,
+            filename: lib.filename,
             name: lib.name,
             cfg: lib.cfg.clone(),
             verbatim: lib.verbatim,
@@ -152,8 +153,6 @@ pub struct CrateInfo {
     pub used_libraries: Vec<NativeLib>,
     pub used_crate_source: FxHashMap<CrateNum, Lrc<CrateSource>>,
     pub used_crates: Vec<CrateNum>,
-    pub lang_item_to_crate: FxHashMap<LangItem, CrateNum>,
-    pub missing_lang_items: FxHashMap<CrateNum, Vec<LangItem>>,
     pub dependency_formats: Lrc<Dependencies>,
     pub windows_subsystem: Option<String>,
     pub natvis_debugger_visualizers: BTreeSet<DebuggerVisualizerFile>,
@@ -166,6 +165,13 @@ pub struct CodegenResults {
     pub metadata_module: Option<CompiledModule>,
     pub metadata: rustc_metadata::EncodedMetadata,
     pub crate_info: CrateInfo,
+}
+
+pub enum CodegenErrors<'a> {
+    WrongFileType,
+    EmptyVersionNumber,
+    EncodingVersionMismatch { version_array: String, rlink_version: u32 },
+    RustcVersionMismatch { rustc_version: String, current_version: &'a str },
 }
 
 pub fn provide(providers: &mut Providers) {
@@ -212,30 +218,34 @@ impl CodegenResults {
         encoder.finish()
     }
 
-    pub fn deserialize_rlink(data: Vec<u8>) -> Result<Self, String> {
+    pub fn deserialize_rlink<'a>(data: Vec<u8>) -> Result<Self, CodegenErrors<'a>> {
         // The Decodable machinery is not used here because it panics if the input data is invalid
         // and because its internal representation may change.
         if !data.starts_with(RLINK_MAGIC) {
-            return Err("The input does not look like a .rlink file".to_string());
+            return Err(CodegenErrors::WrongFileType);
         }
         let data = &data[RLINK_MAGIC.len()..];
         if data.len() < 4 {
-            return Err("The input does not contain version number".to_string());
+            return Err(CodegenErrors::EmptyVersionNumber);
         }
 
         let mut version_array: [u8; 4] = Default::default();
         version_array.copy_from_slice(&data[..4]);
         if u32::from_be_bytes(version_array) != RLINK_VERSION {
-            return Err(".rlink file was produced with encoding version {version_array}, but the current version is {RLINK_VERSION}".to_string());
+            return Err(CodegenErrors::EncodingVersionMismatch {
+                version_array: String::from_utf8_lossy(&version_array).to_string(),
+                rlink_version: RLINK_VERSION,
+            });
         }
 
         let mut decoder = MemDecoder::new(&data[4..], 0);
         let rustc_version = decoder.read_str();
         let current_version = RUSTC_VERSION.unwrap();
         if rustc_version != current_version {
-            return Err(format!(
-                ".rlink file was produced by rustc version {rustc_version}, but the current version is {current_version}."
-            ));
+            return Err(CodegenErrors::RustcVersionMismatch {
+                rustc_version: rustc_version.to_string(),
+                current_version,
+            });
         }
 
         let codegen_results = CodegenResults::decode(&mut decoder);

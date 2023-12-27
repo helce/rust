@@ -41,7 +41,7 @@ pub struct PromoteTemps<'tcx> {
 
 impl<'tcx> MirPass<'tcx> for PromoteTemps<'tcx> {
     fn phase_change(&self) -> Option<MirPhase> {
-        Some(MirPhase::ConstsPromoted)
+        Some(MirPhase::Analysis(AnalysisPhase::Initial))
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
@@ -710,7 +710,7 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
     }
 
     fn assign(&mut self, dest: Local, rvalue: Rvalue<'tcx>, span: Span) {
-        let last = self.promoted.basic_blocks().last().unwrap();
+        let last = self.promoted.basic_blocks.last().unwrap();
         let data = &mut self.promoted[last];
         data.statements.push(Statement {
             source_info: SourceInfo::outermost(span),
@@ -803,7 +803,7 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
                         self.visit_operand(arg, loc);
                     }
 
-                    let last = self.promoted.basic_blocks().last().unwrap();
+                    let last = self.promoted.basic_blocks.last().unwrap();
                     let new_target = self.new_block();
 
                     *self.promoted[last].terminator_mut() = Terminator {
@@ -839,27 +839,16 @@ impl<'a, 'tcx> Promoter<'a, 'tcx> {
             let mut promoted_operand = |ty, span| {
                 promoted.span = span;
                 promoted.local_decls[RETURN_PLACE] = LocalDecl::new(ty, span);
-                let _const = tcx.mk_const(ty::ConstS {
-                    ty,
-                    kind: ty::ConstKind::Unevaluated(ty::Unevaluated {
-                        def,
-                        substs: InternalSubsts::for_item(tcx, def.did, |param, _| {
-                            if let ty::GenericParamDefKind::Lifetime = param.kind {
-                                tcx.lifetimes.re_erased.into()
-                            } else {
-                                tcx.mk_param_from_def(param)
-                            }
-                        }),
-                        promoted: Some(promoted_id),
-                    }),
-                });
+                let substs = tcx.erase_regions(InternalSubsts::identity_for_item(tcx, def.did));
+                let uneval = ty::Unevaluated { def, substs, promoted: Some(promoted_id) };
 
                 Operand::Constant(Box::new(Constant {
                     span,
                     user_ty: None,
-                    literal: ConstantKind::from_const(_const, tcx),
+                    literal: ConstantKind::Unevaluated(uneval, ty),
                 }))
             };
+
             let blocks = self.source.basic_blocks.as_mut();
             let local_decls = &mut self.source.local_decls;
             let loc = candidate.location;
@@ -969,7 +958,7 @@ pub fn promote_candidates<'tcx>(
         let mut scope = body.source_scopes[body.source_info(candidate.location).scope].clone();
         scope.parent_scope = None;
 
-        let promoted = Body::new(
+        let mut promoted = Body::new(
             body.source, // `promoted` gets filled in below
             IndexVec::new(),
             IndexVec::from_elem_n(scope, 1),
@@ -981,6 +970,7 @@ pub fn promote_candidates<'tcx>(
             body.generator_kind(),
             body.tainted_by_errors,
         );
+        promoted.phase = MirPhase::Analysis(AnalysisPhase::Initial);
 
         let promoter = Promoter {
             promoted,
@@ -1046,7 +1036,7 @@ pub fn is_const_fn_in_array_repeat_expression<'tcx>(
         _ => {}
     }
 
-    for block in body.basic_blocks() {
+    for block in body.basic_blocks.iter() {
         if let Some(Terminator { kind: TerminatorKind::Call { func, destination, .. }, .. }) =
             &block.terminator
         {

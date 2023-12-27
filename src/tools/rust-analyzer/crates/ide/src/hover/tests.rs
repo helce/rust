@@ -8,7 +8,11 @@ fn check_hover_no_result(ra_fixture: &str) {
     let (analysis, position) = fixture::position(ra_fixture);
     let hover = analysis
         .hover(
-            &HoverConfig { links_in_hover: true, documentation: Some(HoverDocFormat::Markdown) },
+            &HoverConfig {
+                links_in_hover: true,
+                documentation: Some(HoverDocFormat::Markdown),
+                keywords: true,
+            },
             FileRange { file_id: position.file_id, range: TextRange::empty(position.offset) },
         )
         .unwrap();
@@ -20,7 +24,11 @@ fn check(ra_fixture: &str, expect: Expect) {
     let (analysis, position) = fixture::position(ra_fixture);
     let hover = analysis
         .hover(
-            &HoverConfig { links_in_hover: true, documentation: Some(HoverDocFormat::Markdown) },
+            &HoverConfig {
+                links_in_hover: true,
+                documentation: Some(HoverDocFormat::Markdown),
+                keywords: true,
+            },
             FileRange { file_id: position.file_id, range: TextRange::empty(position.offset) },
         )
         .unwrap()
@@ -37,7 +45,11 @@ fn check_hover_no_links(ra_fixture: &str, expect: Expect) {
     let (analysis, position) = fixture::position(ra_fixture);
     let hover = analysis
         .hover(
-            &HoverConfig { links_in_hover: false, documentation: Some(HoverDocFormat::Markdown) },
+            &HoverConfig {
+                links_in_hover: false,
+                documentation: Some(HoverDocFormat::Markdown),
+                keywords: true,
+            },
             FileRange { file_id: position.file_id, range: TextRange::empty(position.offset) },
         )
         .unwrap()
@@ -54,7 +66,11 @@ fn check_hover_no_markdown(ra_fixture: &str, expect: Expect) {
     let (analysis, position) = fixture::position(ra_fixture);
     let hover = analysis
         .hover(
-            &HoverConfig { links_in_hover: true, documentation: Some(HoverDocFormat::PlainText) },
+            &HoverConfig {
+                links_in_hover: true,
+                documentation: Some(HoverDocFormat::PlainText),
+                keywords: true,
+            },
             FileRange { file_id: position.file_id, range: TextRange::empty(position.offset) },
         )
         .unwrap()
@@ -71,7 +87,11 @@ fn check_actions(ra_fixture: &str, expect: Expect) {
     let (analysis, file_id, position) = fixture::range_or_position(ra_fixture);
     let hover = analysis
         .hover(
-            &HoverConfig { links_in_hover: true, documentation: Some(HoverDocFormat::Markdown) },
+            &HoverConfig {
+                links_in_hover: true,
+                documentation: Some(HoverDocFormat::Markdown),
+                keywords: true,
+            },
             FileRange { file_id, range: position.range_or_empty() },
         )
         .unwrap()
@@ -83,7 +103,11 @@ fn check_hover_range(ra_fixture: &str, expect: Expect) {
     let (analysis, range) = fixture::range(ra_fixture);
     let hover = analysis
         .hover(
-            &HoverConfig { links_in_hover: false, documentation: Some(HoverDocFormat::Markdown) },
+            &HoverConfig {
+                links_in_hover: false,
+                documentation: Some(HoverDocFormat::Markdown),
+                keywords: true,
+            },
             range,
         )
         .unwrap()
@@ -95,7 +119,11 @@ fn check_hover_range_no_results(ra_fixture: &str) {
     let (analysis, range) = fixture::range(ra_fixture);
     let hover = analysis
         .hover(
-            &HoverConfig { links_in_hover: false, documentation: Some(HoverDocFormat::Markdown) },
+            &HoverConfig {
+                links_in_hover: false,
+                documentation: Some(HoverDocFormat::Markdown),
+                keywords: true,
+            },
             range,
         )
         .unwrap();
@@ -5049,5 +5077,97 @@ fn f() {
             ```rust
             Struct
             ```"#]],
+    );
+}
+
+#[test]
+fn hover_deref() {
+    check(
+        r#"
+//- minicore: deref
+
+struct Struct(usize);
+
+impl core::ops::Deref for Struct {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+fn f() {
+    $0*Struct(0);
+}
+"#,
+        expect![[r#"
+            ***
+
+            ```rust
+            test::Struct
+            ```
+
+            ```rust
+            fn deref(&self) -> &Self::Target
+            ```
+        "#]],
+    );
+}
+
+#[test]
+fn static_const_macro_expanded_body() {
+    check(
+        r#"
+macro_rules! m {
+    () => {
+        pub const V: i8 = {
+            let e = 123;
+            f(e) // Prevent const eval from evaluating this constant, we want to print the body's code.
+        };
+    };
+}
+m!();
+fn main() { $0V; }
+"#,
+        expect![[r#"
+            *V*
+
+            ```rust
+            test
+            ```
+
+            ```rust
+            pub const V: i8 = {
+              let e = 123;
+              f(e)
+            }
+            ```
+        "#]],
+    );
+    check(
+        r#"
+macro_rules! m {
+    () => {
+        pub static V: i8 = {
+            let e = 123;
+        };
+    };
+}
+m!();
+fn main() { $0V; }
+"#,
+        expect![[r#"
+            *V*
+
+            ```rust
+            test
+            ```
+
+            ```rust
+            pub static V: i8 = {
+              let e = 123;
+            }
+            ```
+        "#]],
     );
 }

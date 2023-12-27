@@ -26,6 +26,17 @@ use rustc_trait_selection::traits::{ObligationCause, ObligationCauseCode};
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 
+/// The `FnCtxt` stores type-checking context needed to type-check bodies of
+/// functions, closures, and `const`s, including performing type inference
+/// with [`InferCtxt`].
+///
+/// This is in contrast to [`ItemCtxt`], which is used to type-check item *signatures*
+/// and thus does not perform type inference.
+///
+/// See [`ItemCtxt`]'s docs for more.
+///
+/// [`ItemCtxt`]: crate::collect::ItemCtxt
+/// [`InferCtxt`]: infer::InferCtxt
 pub struct FnCtxt<'a, 'tcx> {
     pub(super) body_id: hir::HirId,
 
@@ -56,8 +67,6 @@ pub struct FnCtxt<'a, 'tcx> {
     /// like `expected_ty` to access the declared return type (if
     /// any).
     pub(super) ret_coercion: Option<RefCell<DynamicCoerceMany<'tcx>>>,
-
-    pub(super) ret_type_span: Option<Span>,
 
     /// Used exclusively to reduce cost of advanced evaluation used for
     /// more helpful diagnostics.
@@ -131,7 +140,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             param_env,
             err_count_on_creation: inh.tcx.sess.err_count(),
             ret_coercion: None,
-            ret_type_span: None,
             in_tail_expr: false,
             ret_coercion_span: Cell::new(None),
             resume_yield_tys: None,

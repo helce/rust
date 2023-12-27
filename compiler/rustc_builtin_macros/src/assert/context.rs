@@ -13,6 +13,7 @@ use rustc_span::{
     symbol::{sym, Ident, Symbol},
     Span,
 };
+use thin_vec::thin_vec;
 
 pub(super) struct Context<'cx, 'a> {
     // An optimization.
@@ -116,7 +117,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
             self.cx.item(
                 self.span,
                 Ident::empty(),
-                vec![self.cx.attribute(attr::mk_list_item(
+                thin_vec![self.cx.attribute(attr::mk_list_item(
                     Ident::new(sym::allow, self.span),
                     vec![attr::mk_nested_word_item(Ident::new(sym::unused_imports, self.span))],
                 ))],
@@ -177,7 +178,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
         });
         self.cx.expr(
             self.span,
-            ExprKind::MacCall(MacCall {
+            ExprKind::MacCall(P(MacCall {
                 path: panic_path,
                 args: P(MacArgs::Delimited(
                     DelimSpan::from_single(self.span),
@@ -185,7 +186,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
                     initial.into_iter().chain(captures).collect::<TokenStream>(),
                 )),
                 prior_type_ascription: None,
-            }),
+            })),
         )
     }
 

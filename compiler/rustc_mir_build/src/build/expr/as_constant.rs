@@ -2,26 +2,18 @@
 
 use crate::build::{parse_float_into_constval, Builder};
 use rustc_ast as ast;
-use rustc_hir::def_id::DefId;
 use rustc_middle::mir::interpret::{
     Allocation, ConstValue, LitToConstError, LitToConstInput, Scalar,
 };
 use rustc_middle::mir::*;
 use rustc_middle::thir::*;
-use rustc_middle::ty::subst::SubstsRef;
-use rustc_middle::ty::{self, CanonicalUserTypeAnnotation, Ty, TyCtxt};
+use rustc_middle::ty::{self, CanonicalUserTypeAnnotation, TyCtxt};
 use rustc_target::abi::Size;
 
 impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// Compile `expr`, yielding a compile-time constant. Assumes that
     /// `expr` is a valid compile-time constant!
     pub(crate) fn as_constant(&mut self, expr: &Expr<'tcx>) -> Constant<'tcx> {
-        let create_uneval_from_def_id =
-            |tcx: TyCtxt<'tcx>, def_id: DefId, ty: Ty<'tcx>, substs: SubstsRef<'tcx>| {
-                let uneval = ty::Unevaluated::new(ty::WithOptConstParam::unknown(def_id), substs);
-                tcx.mk_const(ty::ConstS { kind: ty::ConstKind::Unevaluated(uneval), ty })
-            };
-
         let this = self;
         let tcx = this.tcx;
         let Expr { ty, temp_lifetime: _, span, ref kind } = *expr;
@@ -41,11 +33,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
                 Constant { span, user_ty: None, literal }
             }
-            ExprKind::NonHirLiteral { lit, user_ty } => {
-                let user_ty = user_ty.map(|user_ty| {
+            ExprKind::NonHirLiteral { lit, ref user_ty } => {
+                let user_ty = user_ty.as_ref().map(|user_ty| {
                     this.canonical_user_type_annotations.push(CanonicalUserTypeAnnotation {
                         span,
-                        user_ty,
+                        user_ty: user_ty.clone(),
                         inferred_ty: ty,
                     })
                 });
@@ -53,11 +45,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
                 Constant { span, user_ty: user_ty, literal }
             }
-            ExprKind::ZstLiteral { user_ty } => {
-                let user_ty = user_ty.map(|user_ty| {
+            ExprKind::ZstLiteral { ref user_ty } => {
+                let user_ty = user_ty.as_ref().map(|user_ty| {
                     this.canonical_user_type_annotations.push(CanonicalUserTypeAnnotation {
                         span,
-                        user_ty,
+                        user_ty: user_ty.clone(),
                         inferred_ty: ty,
                     })
                 });
@@ -65,15 +57,17 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
                 Constant { span, user_ty: user_ty, literal }
             }
-            ExprKind::NamedConst { def_id, substs, user_ty } => {
-                let user_ty = user_ty.map(|user_ty| {
+            ExprKind::NamedConst { def_id, substs, ref user_ty } => {
+                let user_ty = user_ty.as_ref().map(|user_ty| {
                     this.canonical_user_type_annotations.push(CanonicalUserTypeAnnotation {
                         span,
-                        user_ty,
+                        user_ty: user_ty.clone(),
                         inferred_ty: ty,
                     })
                 });
-                let literal = ConstantKind::Ty(create_uneval_from_def_id(tcx, def_id, ty, substs));
+
+                let uneval = ty::Unevaluated::new(ty::WithOptConstParam::unknown(def_id), substs);
+                let literal = ConstantKind::Unevaluated(uneval, ty);
 
                 Constant { user_ty, span, literal }
             }
@@ -85,7 +79,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Constant { user_ty: None, span, literal }
             }
             ExprKind::ConstBlock { did: def_id, substs } => {
-                let literal = ConstantKind::Ty(create_uneval_from_def_id(tcx, def_id, ty, substs));
+                let uneval = ty::Unevaluated::new(ty::WithOptConstParam::unknown(def_id), substs);
+                let literal = ConstantKind::Unevaluated(uneval, ty);
 
                 Constant { user_ty: None, span, literal }
             }
@@ -144,7 +139,7 @@ pub(crate) fn lit_to_mir_constant<'tcx>(
         }
         (ast::LitKind::Bool(b), ty::Bool) => ConstValue::Scalar(Scalar::from_bool(*b)),
         (ast::LitKind::Char(c), ty::Char) => ConstValue::Scalar(Scalar::from_char(*c)),
-        (ast::LitKind::Err(_), _) => return Err(LitToConstError::Reported),
+        (ast::LitKind::Err, _) => return Err(LitToConstError::Reported),
         _ => return Err(LitToConstError::TypeError),
     };
 

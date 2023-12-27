@@ -13,7 +13,6 @@ use crate::errors::{self, Error, ErrorKind};
 use crate::header::TestProps;
 use crate::json;
 use crate::read2::read2_abbreviated;
-use crate::util::get_pointer_width;
 use crate::util::{logv, PathBufExt};
 use crate::ColorConfig;
 use regex::{Captures, Regex};
@@ -1106,6 +1105,7 @@ impl<'test> TestCx<'test> {
             "^(core::([a-z_]+::)+)Ref<.+>$",
             "^(core::([a-z_]+::)+)RefMut<.+>$",
             "^(core::([a-z_]+::)+)RefCell<.+>$",
+            "^core::num::([a-z_]+::)*NonZero.+$",
         ];
 
         script_str
@@ -1705,7 +1705,7 @@ impl<'test> TestCx<'test> {
 
     fn compose_and_run_compiler(&self, mut rustc: Command, input: Option<String>) -> ProcRes {
         let aux_dir = self.build_all_auxiliary(&mut rustc);
-        self.props.unset_rustc_env.clone().iter().fold(&mut rustc, |rustc, v| rustc.env_remove(v));
+        self.props.unset_rustc_env.iter().fold(&mut rustc, Command::env_remove);
         rustc.envs(self.props.rustc_env.clone());
         self.compose_and_run(
             rustc,
@@ -2018,11 +2018,14 @@ impl<'test> TestCx<'test> {
             Some(CompareMode::Chalk) => {
                 rustc.args(&["-Zchalk"]);
             }
-            Some(CompareMode::SplitDwarf) => {
+            Some(CompareMode::SplitDwarf) if self.config.target.contains("windows") => {
                 rustc.args(&["-Csplit-debuginfo=unpacked", "-Zunstable-options"]);
             }
+            Some(CompareMode::SplitDwarf) => {
+                rustc.args(&["-Csplit-debuginfo=unpacked"]);
+            }
             Some(CompareMode::SplitDwarfSingle) => {
-                rustc.args(&["-Csplit-debuginfo=packed", "-Zunstable-options"]);
+                rustc.args(&["-Csplit-debuginfo=packed"]);
             }
             None => {}
         }
@@ -2562,14 +2565,13 @@ impl<'test> TestCx<'test> {
 
         let mut json_out = out_dir.join(self.testpaths.file.file_stem().unwrap());
         json_out.set_extension("json");
+
         let res = self.cmd2procres(
-            Command::new(&self.config.python)
-                .arg(root.join("src/etc/check_missing_items.py"))
-                .arg(&json_out),
+            Command::new(self.config.jsondoclint_path.as_ref().unwrap()).arg(&json_out),
         );
 
         if !res.status.success() {
-            self.fatal_proc_rec("check_missing_items failed!", &res);
+            self.fatal_proc_rec("jsondoclint failed!", &res);
         }
     }
 
@@ -2593,7 +2595,7 @@ impl<'test> TestCx<'test> {
                     }
                     None
                 } else {
-                    let sline = line.split("///").last().unwrap_or("");
+                    let sline = line.rsplit("///").next().unwrap();
                     let line = sline.trim_start();
                     if line.starts_with("```") {
                         if ignore {
@@ -3133,7 +3135,7 @@ impl<'test> TestCx<'test> {
         output_kind: TestOutput,
         explicit_format: bool,
     ) -> usize {
-        let stderr_bits = format!("{}.stderr", get_pointer_width(&self.config.target));
+        let stderr_bits = format!("{}bit.stderr", self.config.get_pointer_width());
         let (stderr_kind, stdout_kind) = match output_kind {
             TestOutput::Compile => (
                 {
@@ -3408,7 +3410,7 @@ impl<'test> TestCx<'test> {
 
         let mut bit_width = String::new();
         if test_file_contents.lines().any(|l| l == "// EMIT_MIR_FOR_EACH_BIT_WIDTH") {
-            bit_width = format!(".{}", get_pointer_width(&self.config.target));
+            bit_width = format!(".{}bit", self.config.get_pointer_width());
         }
 
         if self.config.bless {
@@ -3768,7 +3770,7 @@ impl<'test> TestCx<'test> {
 
     fn delete_file(&self, file: &PathBuf) {
         if !file.exists() {
-            // Deleting a nonexistant file would error.
+            // Deleting a nonexistent file would error.
             return;
         }
         if let Err(e) = fs::remove_file(file) {

@@ -1,5 +1,5 @@
 // run-pass
-#![feature(let_else)]
+// compile-flags: -Zvalidate-mir
 
 use std::fmt::Display;
 use std::rc::Rc;
@@ -73,6 +73,17 @@ fn main() {
                 continue
             };
         }
+    }
+    {
+        fn must_pass() {
+            let rc = Rc::new(());
+            let &None = &Some(Rc::clone(&rc)) else {
+                Rc::try_unwrap(rc).unwrap();
+                return;
+            };
+            unreachable!();
+        }
+        must_pass();
     }
     {
         // test let-else drops temps before else block

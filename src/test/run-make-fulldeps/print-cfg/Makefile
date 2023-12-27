@@ -1,6 +1,6 @@
 # needs-llvm-components: x86 arm
 
--include ../tools.mk
+include ../tools.mk
 
 # ignore-e2k64
 

@@ -41,7 +41,7 @@ pub struct ConstS<'tcx> {
 }
 
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-static_assert_size!(ConstS<'_>, 48);
+static_assert_size!(ConstS<'_>, 40);
 
 impl<'tcx> Const<'tcx> {
     #[inline]
@@ -65,8 +65,6 @@ impl<'tcx> Const<'tcx> {
         tcx: TyCtxt<'tcx>,
         def: ty::WithOptConstParam<LocalDefId>,
     ) -> Self {
-        debug!("Const::from_anon_const(def={:?})", def);
-
         let body_id = match tcx.hir().get_by_def_id(def.did) {
             hir::Node::AnonConst(ac) => ac.body,
             _ => span_bug!(
@@ -86,7 +84,7 @@ impl<'tcx> Const<'tcx> {
                 kind: ty::ConstKind::Unevaluated(ty::Unevaluated {
                     def: def.to_global(),
                     substs: InternalSubsts::identity_for_item(tcx, def.did.to_def_id()),
-                    promoted: None,
+                    promoted: (),
                 }),
                 ty,
             }),
@@ -183,7 +181,7 @@ impl<'tcx> Const<'tcx> {
                     kind: ty::ConstKind::Unevaluated(ty::Unevaluated {
                         def: ty::WithOptConstParam::unknown(def_id).to_global(),
                         substs,
-                        promoted: None,
+                        promoted: (),
                     }),
                     ty,
                 })

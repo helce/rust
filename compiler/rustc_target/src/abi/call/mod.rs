@@ -15,7 +15,6 @@ mod m68k;
 mod mips;
 mod mips64;
 mod msp430;
-mod nvptx;
 mod nvptx64;
 mod powerpc;
 mod powerpc64;
@@ -28,7 +27,7 @@ mod x86;
 mod x86_64;
 mod x86_win64;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, HashStable_Generic)]
+#[derive(PartialEq, Eq, Hash, Debug, HashStable_Generic)]
 pub enum PassMode {
     /// Ignore the argument.
     ///
@@ -42,9 +41,10 @@ pub enum PassMode {
     ///
     /// The argument has a layout abi of `ScalarPair`.
     Pair(ArgAttributes, ArgAttributes),
-    /// Pass the argument after casting it, to either
-    /// a single uniform or a pair of registers.
-    Cast(CastTarget),
+    /// Pass the argument after casting it, to either a single uniform or a
+    /// pair of registers. The bool indicates if a `Reg::i32()` dummy argument
+    /// is emitted before the real argument.
+    Cast(Box<CastTarget>, bool),
     /// Pass the argument indirectly via a hidden pointer.
     /// The `extra_attrs` value, if any, is for the extra data (vtable or length)
     /// which indicates that it refers to an unsized rvalue.
@@ -465,10 +465,6 @@ impl<'a, Ty> TyAndLayout<'a, Ty> {
 #[derive(PartialEq, Eq, Hash, Debug, HashStable_Generic)]
 pub struct ArgAbi<'a, Ty> {
     pub layout: TyAndLayout<'a, Ty>,
-
-    /// Dummy argument, which is emitted before the real argument.
-    pub pad: Option<Reg>,
-
     pub mode: PassMode,
 }
 
@@ -488,7 +484,7 @@ impl<'a, Ty> ArgAbi<'a, Ty> {
             Abi::Vector { .. } => PassMode::Direct(ArgAttributes::new()),
             Abi::Aggregate { .. } => PassMode::Direct(ArgAttributes::new()),
         };
-        ArgAbi { layout, pad: None, mode }
+        ArgAbi { layout, mode }
     }
 
     fn indirect_pass_mode(layout: &TyAndLayout<'a, Ty>) -> PassMode {
@@ -550,11 +546,11 @@ impl<'a, Ty> ArgAbi<'a, Ty> {
     }
 
     pub fn cast_to<T: Into<CastTarget>>(&mut self, target: T) {
-        self.mode = PassMode::Cast(target.into());
+        self.mode = PassMode::Cast(Box::new(target.into()), false);
     }
 
-    pub fn pad_with(&mut self, reg: Reg) {
-        self.pad = Some(reg);
+    pub fn cast_to_and_pad_i32<T: Into<CastTarget>>(&mut self, target: T, pad_i32: bool) {
+        self.mode = PassMode::Cast(Box::new(target.into()), pad_i32);
     }
 
     pub fn is_indirect(&self) -> bool {
@@ -616,7 +612,7 @@ pub enum Conv {
 #[derive(PartialEq, Eq, Hash, Debug, HashStable_Generic)]
 pub struct FnAbi<'a, Ty> {
     /// The LLVM types of each argument.
-    pub args: Vec<ArgAbi<'a, Ty>>,
+    pub args: Box<[ArgAbi<'a, Ty>]>,
 
     /// LLVM return type.
     pub ret: ArgAbi<'a, Ty>,
@@ -627,7 +623,7 @@ pub struct FnAbi<'a, Ty> {
     ///
     /// Should only be different from args.len() when c_variadic is true.
     /// This can be used to know whether an argument is variadic or not.
-    pub fixed_count: usize,
+    pub fixed_count: u32,
 
     pub conv: Conv,
 
@@ -690,7 +686,14 @@ impl<'a, Ty> FnAbi<'a, Ty> {
                     }
                 }
             },
-            "aarch64" => aarch64::compute_abi_info(cx, self),
+            "aarch64" => {
+                let param_policy = if cx.target_spec().is_like_osx {
+                    aarch64::ParamExtension::ExtendTo32Bits
+                } else {
+                    aarch64::ParamExtension::NoExtension
+                };
+                aarch64::compute_abi_info(cx, self, param_policy)
+            }
             "amdgpu" => amdgpu::compute_abi_info(cx, self),
             "arm" => arm::compute_abi_info(cx, self),
             "avr" => avr::compute_abi_info(self),
@@ -703,7 +706,6 @@ impl<'a, Ty> FnAbi<'a, Ty> {
             "msp430" => msp430::compute_abi_info(self),
             "sparc" => sparc::compute_abi_info(cx, self),
             "sparc64" => sparc64::compute_abi_info(cx, self),
-            "nvptx" => nvptx::compute_abi_info(self),
             "nvptx64" => {
                 if cx.target_spec().adjust_abi(abi) == spec::abi::Abi::PtxKernel {
                     nvptx64::compute_ptx_kernel_abi_info(cx, self)
@@ -733,4 +735,14 @@ impl<'a, Ty> FnAbi<'a, Ty> {
 
         Ok(())
     }
+}
+
+// Some types are used a lot. Make sure they don't unintentionally get bigger.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+mod size_asserts {
+    use super::*;
+    use rustc_data_structures::static_assert_size;
+    // These are in alphabetical order, which is easy to maintain.
+    static_assert_size!(ArgAbi<'_, usize>, 56);
+    static_assert_size!(FnAbi<'_, usize>, 80);
 }

@@ -36,6 +36,7 @@ impl<'tcx> TyCtxt<'tcx> {
     ///
     /// This should only be used outside of type inference. For example,
     /// it assumes that normalization will succeed.
+    #[tracing::instrument(level = "debug", skip(self, param_env))]
     pub fn normalize_erasing_regions<T>(self, param_env: ty::ParamEnv<'tcx>, value: T) -> T
     where
         T: TypeFoldable<'tcx>,
@@ -100,6 +101,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// N.B., currently, higher-ranked type bounds inhibit
     /// normalization. Therefore, each time we erase them in
     /// codegen, we need to normalize the contents.
+    #[tracing::instrument(level = "debug", skip(self, param_env))]
     pub fn normalize_erasing_late_bound_regions<T>(
         self,
         param_env: ty::ParamEnv<'tcx>,
@@ -188,13 +190,11 @@ struct NormalizeAfterErasingRegionsFolder<'tcx> {
 }
 
 impl<'tcx> NormalizeAfterErasingRegionsFolder<'tcx> {
-    #[instrument(skip(self), level = "debug")]
     fn normalize_generic_arg_after_erasing_regions(
         &self,
         arg: ty::GenericArg<'tcx>,
     ) -> ty::GenericArg<'tcx> {
         let arg = self.param_env.and(arg);
-        debug!(?arg);
 
         self.tcx.try_normalize_generic_arg_after_erasing_regions(arg).unwrap_or_else(|_| bug!(
                 "Failed to normalize {:?}, maybe try to call `try_normalize_erasing_regions` instead",

@@ -124,11 +124,11 @@ pub use self::error::{
     UninitBytesAccess, UnsupportedOpInfo,
 };
 
-pub use self::value::{get_slice_bytes, ConstAlloc, ConstValue, Scalar, ScalarMaybeUninit};
+pub use self::value::{get_slice_bytes, ConstAlloc, ConstValue, Scalar};
 
 pub use self::allocation::{
     alloc_range, AllocRange, Allocation, ConstAllocation, InitChunk, InitChunkIter, InitMask,
-    Relocations,
+    ProvenanceMap,
 };
 
 pub use self::pointer::{Pointer, PointerArithmetic, Provenance};
@@ -137,7 +137,7 @@ pub use self::pointer::{Pointer, PointerArithmetic, Provenance};
 /// - A constant
 /// - A static
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, TyEncodable, TyDecodable)]
-#[derive(HashStable, Lift)]
+#[derive(HashStable, Lift, TypeFoldable, TypeVisitable)]
 pub struct GlobalId<'tcx> {
     /// For a constant or static, the `Instance` of the item itself.
     /// For a promoted global, the `Instance` of the function they belong to.

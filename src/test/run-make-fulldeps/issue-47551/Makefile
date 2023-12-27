@@ -2,7 +2,7 @@
 # ignore-32bit
 # ignore-e2k64 too long
 
--include ../tools.mk
+include ../tools.mk
 
 all:
 	$(RUSTC) eh_frame-terminator.rs

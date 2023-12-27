@@ -10,9 +10,10 @@ mod structural_impls;
 pub mod util;
 
 use crate::infer::canonical::Canonical;
+use crate::mir::ConstraintCategory;
 use crate::ty::abstract_const::NotConstEvaluatable;
 use crate::ty::subst::SubstsRef;
-use crate::ty::{self, AdtKind, Predicate, Ty, TyCtxt};
+use crate::ty::{self, AdtKind, Ty, TyCtxt};
 
 use rustc_data_structures::sync::Lrc;
 use rustc_errors::{Applicability, Diagnostic};
@@ -183,6 +184,16 @@ impl<'tcx> ObligationCause<'tcx> {
             variant(DerivedObligationCause { parent_trait_pred, parent_code: self.code }).into();
         self
     }
+
+    pub fn to_constraint_category(&self) -> ConstraintCategory<'tcx> {
+        match self.code() {
+            MatchImpl(cause, _) => cause.to_constraint_category(),
+            AscribeUserTypeProvePredicate(predicate_span) => {
+                ConstraintCategory::Predicate(*predicate_span)
+            }
+            _ => ConstraintCategory::BoringNoLocation,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Lift)]
@@ -234,12 +245,22 @@ pub enum ObligationCauseCode<'tcx> {
     /// This is the trait reference from the given projection.
     ProjectionWf(ty::ProjectionTy<'tcx>),
 
-    /// In an impl of trait `X` for type `Y`, type `Y` must
-    /// also implement all supertraits of `X`.
+    /// Must satisfy all of the where-clause predicates of the
+    /// given item.
     ItemObligation(DefId),
 
-    /// Like `ItemObligation`, but with extra detail on the source of the obligation.
+    /// Like `ItemObligation`, but carries the span of the
+    /// predicate when it can be identified.
     BindingObligation(DefId, Span),
+
+    /// Like `ItemObligation`, but carries the `HirId` of the
+    /// expression that caused the obligation, and the `usize`
+    /// indicates exactly which predicate it is in the list of
+    /// instantiated predicates.
+    ExprItemObligation(DefId, rustc_hir::HirId, usize),
+
+    /// Combines `ExprItemObligation` and `BindingObligation`.
+    ExprBindingObligation(DefId, Span, rustc_hir::HirId, usize),
 
     /// A type like `&'a T` is WF only if `T: 'a`.
     ReferenceOutlivesReferent(Ty<'tcx>),
@@ -406,8 +427,10 @@ pub enum ObligationCauseCode<'tcx> {
     BinOp {
         rhs_span: Option<Span>,
         is_lit: bool,
-        output_pred: Option<Predicate<'tcx>>,
+        output_ty: Option<Ty<'tcx>>,
     },
+
+    AscribeUserTypeProvePredicate(Span),
 }
 
 /// The 'location' at which we try to perform HIR-based wf checking.
@@ -457,6 +480,13 @@ impl<'tcx> ObligationCauseCode<'tcx> {
                 Some((&derived.parent_code, Some(derived.parent_trait_pred)))
             }
             _ => None,
+        }
+    }
+
+    pub fn peel_match_impls(&self) -> &Self {
+        match self {
+            MatchImpl(cause, _) => cause.code(),
+            _ => self,
         }
     }
 }
@@ -634,6 +664,10 @@ pub enum ImplSource<'tcx, N> {
 
     /// ImplSource for a `const Drop` implementation.
     ConstDestruct(ImplSourceConstDestructData<N>),
+
+    /// ImplSource for a `std::marker::Tuple` implementation.
+    /// This has no nested predicates ever, so no data.
+    Tuple,
 }
 
 impl<'tcx, N> ImplSource<'tcx, N> {
@@ -648,7 +682,8 @@ impl<'tcx, N> ImplSource<'tcx, N> {
             ImplSource::Object(d) => d.nested,
             ImplSource::FnPointer(d) => d.nested,
             ImplSource::DiscriminantKind(ImplSourceDiscriminantKindData)
-            | ImplSource::Pointee(ImplSourcePointeeData) => Vec::new(),
+            | ImplSource::Pointee(ImplSourcePointeeData)
+            | ImplSource::Tuple => Vec::new(),
             ImplSource::TraitAlias(d) => d.nested,
             ImplSource::TraitUpcasting(d) => d.nested,
             ImplSource::ConstDestruct(i) => i.nested,
@@ -666,7 +701,8 @@ impl<'tcx, N> ImplSource<'tcx, N> {
             ImplSource::Object(d) => &d.nested,
             ImplSource::FnPointer(d) => &d.nested,
             ImplSource::DiscriminantKind(ImplSourceDiscriminantKindData)
-            | ImplSource::Pointee(ImplSourcePointeeData) => &[],
+            | ImplSource::Pointee(ImplSourcePointeeData)
+            | ImplSource::Tuple => &[],
             ImplSource::TraitAlias(d) => &d.nested,
             ImplSource::TraitUpcasting(d) => &d.nested,
             ImplSource::ConstDestruct(i) => &i.nested,
@@ -733,6 +769,7 @@ impl<'tcx, N> ImplSource<'tcx, N> {
                     nested: i.nested.into_iter().map(f).collect(),
                 })
             }
+            ImplSource::Tuple => ImplSource::Tuple,
         }
     }
 }
@@ -893,6 +930,12 @@ impl ObjectSafetyViolation {
             }
             ObjectSafetyViolation::Method(
                 name,
+                MethodViolationCode::ReferencesImplTraitInTrait,
+                _,
+            ) => format!("method `{}` references an `impl Trait` type in its return type", name)
+                .into(),
+            ObjectSafetyViolation::Method(
+                name,
                 MethodViolationCode::WhereClauseReferencesSelf,
                 _,
             ) => {
@@ -997,6 +1040,9 @@ pub enum MethodViolationCode {
     /// e.g., `fn foo(&self) -> Self`
     ReferencesSelfOutput,
 
+    /// e.g., `fn foo(&self) -> impl Sized`
+    ReferencesImplTraitInTrait,
+
     /// e.g., `fn foo(&self) where Self: Clone`
     WhereClauseReferencesSelf,
 
@@ -1007,7 +1053,7 @@ pub enum MethodViolationCode {
     UndispatchableReceiver(Option<Span>),
 }
 
-/// These are the error cases for `codegen_fulfill_obligation`.
+/// These are the error cases for `codegen_select_candidate`.
 #[derive(Copy, Clone, Debug, Hash, HashStable, Encodable, Decodable)]
 pub enum CodegenObligationError {
     /// Ambiguity can happen when monomorphizing during trans

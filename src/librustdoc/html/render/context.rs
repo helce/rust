@@ -31,6 +31,7 @@ use crate::formats::FormatRenderer;
 use crate::html::escape::Escape;
 use crate::html::format::{join_with_double_colon, Buffer};
 use crate::html::markdown::{self, plain_text_summary, ErrorCodes, IdMap};
+use crate::html::url_parts_builder::UrlPartsBuilder;
 use crate::html::{layout, sources};
 use crate::scrape_examples::AllCallLocations;
 use crate::try_err;
@@ -71,7 +72,7 @@ pub(crate) struct Context<'tcx> {
 }
 
 // `Context` is cloned a lot, so we don't want the size to grow unexpectedly.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(all(not(windows), target_arch = "x86_64", target_pointer_width = "64"))]
 rustc_data_structures::static_assert_size!(Context<'_>, 128);
 
 /// Shared mutable state used in [`Context`] and elsewhere.
@@ -301,13 +302,10 @@ impl<'tcx> Context<'tcx> {
     /// may happen, for example, with externally inlined items where the source
     /// of their crate documentation isn't known.
     pub(super) fn src_href(&self, item: &clean::Item) -> Option<String> {
-        self.href_from_span(item.span(self.tcx()), true)
+        self.href_from_span(item.span(self.tcx())?, true)
     }
 
     pub(crate) fn href_from_span(&self, span: clean::Span, with_lines: bool) -> Option<String> {
-        if span.is_dummy() {
-            return None;
-        }
         let mut root = self.root_path();
         let mut path = String::new();
         let cnum = span.cnum(self.sess());
@@ -372,6 +370,35 @@ impl<'tcx> Context<'tcx> {
             path = path,
             anchor = anchor
         ))
+    }
+
+    pub(crate) fn href_from_span_relative(
+        &self,
+        span: clean::Span,
+        relative_to: &str,
+    ) -> Option<String> {
+        self.href_from_span(span, false).map(|s| {
+            let mut url = UrlPartsBuilder::new();
+            let mut dest_href_parts = s.split('/');
+            let mut cur_href_parts = relative_to.split('/');
+            for (cur_href_part, dest_href_part) in (&mut cur_href_parts).zip(&mut dest_href_parts) {
+                if cur_href_part != dest_href_part {
+                    url.push(dest_href_part);
+                    break;
+                }
+            }
+            for dest_href_part in dest_href_parts {
+                url.push(dest_href_part);
+            }
+            let loline = span.lo(self.sess()).line;
+            let hiline = span.hi(self.sess()).line;
+            format!(
+                "{}{}#{}",
+                "../".repeat(cur_href_parts.count()),
+                url.finish(),
+                if loline == hiline { loline.to_string() } else { format!("{loline}-{hiline}") }
+            )
+        })
     }
 }
 

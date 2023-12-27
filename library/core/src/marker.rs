@@ -343,7 +343,7 @@ pub trait StructuralEq {
 /// If you try to implement `Copy` on a struct or enum containing non-`Copy` data, you will get
 /// the error [E0204].
 ///
-/// [E0204]: ../../error-index.html#E0204
+/// [E0204]: ../../error_codes/E0204.html
 ///
 /// ## When *should* my type be `Copy`?
 ///
@@ -799,6 +799,15 @@ impl<T: ?Sized> Unpin for *mut T {}
 #[lang = "destruct"]
 #[rustc_on_unimplemented(message = "can't drop `{Self}`", append_const_msg)]
 pub trait Destruct {}
+
+/// A marker for tuple types.
+///
+/// The implementation of this trait is built-in and cannot be implemented
+/// for any user type.
+#[unstable(feature = "tuple_trait", issue = "none")]
+#[cfg_attr(not(bootstrap), lang = "tuple_trait")]
+#[rustc_on_unimplemented(message = "`{Self}` is not a tuple")]
+pub trait Tuple {}
 
 /// Implementations of `Copy` for primitive types.
 ///

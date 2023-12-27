@@ -1,4 +1,4 @@
--include ../tools.mk
+include ../tools.mk
 
 # ignore-musl
 # ignore-e2k64 NIY

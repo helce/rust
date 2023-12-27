@@ -80,6 +80,8 @@ macro_rules! make_mir_visitor {
                 self.super_body(body);
             }
 
+            extra_body_methods!($($mutability)?);
+
             fn visit_basic_block_data(
                 &mut self,
                 block: BasicBlock,
@@ -235,14 +237,6 @@ macro_rules! make_mir_visitor {
                 self.super_region(region);
             }
 
-            fn visit_const(
-                &mut self,
-                constant: $(& $mutability)? ty::Const<'tcx>,
-                _: Location,
-            ) {
-                self.super_const(constant);
-            }
-
             fn visit_substs(
                 &mut self,
                 substs: & $($mutability)? SubstsRef<'tcx>,
@@ -287,63 +281,7 @@ macro_rules! make_mir_visitor {
                 &mut self,
                 body: &$($mutability)? Body<'tcx>,
             ) {
-                let span = body.span;
-                if let Some(gen) = &$($mutability)? body.generator {
-                    if let Some(yield_ty) = $(& $mutability)? gen.yield_ty {
-                        self.visit_ty(
-                            yield_ty,
-                            TyContext::YieldTy(SourceInfo::outermost(span))
-                        );
-                    }
-                }
-
-                // for best performance, we want to use an iterator rather
-                // than a for-loop, to avoid calling `body::Body::invalidate` for
-                // each basic block.
-                #[allow(unused_macro_rules)]
-                macro_rules! basic_blocks {
-                    (mut) => (body.basic_blocks_mut().iter_enumerated_mut());
-                    () => (body.basic_blocks().iter_enumerated());
-                }
-                for (bb, data) in basic_blocks!($($mutability)?) {
-                    self.visit_basic_block_data(bb, data);
-                }
-
-                for scope in &$($mutability)? body.source_scopes {
-                    self.visit_source_scope_data(scope);
-                }
-
-                self.visit_ty(
-                    $(& $mutability)? body.return_ty(),
-                    TyContext::ReturnTy(SourceInfo::outermost(body.span))
-                );
-
-                for local in body.local_decls.indices() {
-                    self.visit_local_decl(local, & $($mutability)? body.local_decls[local]);
-                }
-
-                #[allow(unused_macro_rules)]
-                macro_rules! type_annotations {
-                    (mut) => (body.user_type_annotations.iter_enumerated_mut());
-                    () => (body.user_type_annotations.iter_enumerated());
-                }
-
-                for (index, annotation) in type_annotations!($($mutability)?) {
-                    self.visit_user_type_annotation(
-                        index, annotation
-                    );
-                }
-
-                for var_debug_info in &$($mutability)? body.var_debug_info {
-                    self.visit_var_debug_info(var_debug_info);
-                }
-
-                self.visit_span($(& $mutability)? body.span);
-
-                for const_ in &$($mutability)? body.required_consts {
-                    let location = START_BLOCK.start_location();
-                    self.visit_constant(const_, location);
-                }
+                super_body!(self, body, $($mutability, true)?);
             }
 
             fn super_basic_block_data(&mut self,
@@ -479,14 +417,15 @@ macro_rules! make_mir_visitor {
                             location
                         )
                     }
-                    StatementKind::CopyNonOverlapping(box crate::mir::CopyNonOverlapping{
-                        src,
-                        dst,
-                        count,
-                    }) => {
-                      self.visit_operand(src, location);
-                      self.visit_operand(dst, location);
-                      self.visit_operand(count, location)
+                    StatementKind::Intrinsic(box ref $($mutability)? intrinsic) => {
+                        match intrinsic {
+                            NonDivergingIntrinsic::Assume(op) => self.visit_operand(op, location),
+                            NonDivergingIntrinsic::CopyNonOverlapping(CopyNonOverlapping { src, dst, count }) => {
+                                self.visit_operand(src, location);
+                                self.visit_operand(dst, location);
+                                self.visit_operand(count, location);
+                            }
+                        }
                     }
                     StatementKind::Nop => {}
                 }
@@ -930,8 +869,9 @@ macro_rules! make_mir_visitor {
                 self.visit_span($(& $mutability)? *span);
                 drop(user_ty); // no visit method for this
                 match literal {
-                    ConstantKind::Ty(ct) => self.visit_const($(& $mutability)? *ct, location),
+                    ConstantKind::Ty(_) => {}
                     ConstantKind::Val(_, ty) => self.visit_ty($(& $mutability)? *ty, TyContext::Location(location)),
+                    ConstantKind::Unevaluated(_, ty) => self.visit_ty($(& $mutability)? *ty, TyContext::Location(location)),
                 }
             }
 
@@ -969,9 +909,6 @@ macro_rules! make_mir_visitor {
             fn super_region(&mut self, _region: $(& $mutability)? ty::Region<'tcx>) {
             }
 
-            fn super_const(&mut self, _const: $(& $mutability)? ty::Const<'tcx>) {
-            }
-
             fn super_substs(&mut self, _substs: & $($mutability)? SubstsRef<'tcx>) {
             }
 
@@ -982,12 +919,7 @@ macro_rules! make_mir_visitor {
                 body: &$($mutability)? Body<'tcx>,
                 location: Location
             ) {
-                #[allow(unused_macro_rules)]
-                macro_rules! basic_blocks {
-                    (mut) => (body.basic_blocks_mut());
-                    () => (body.basic_blocks());
-                }
-                let basic_block = & $($mutability)? basic_blocks!($($mutability)?)[location.block];
+                let basic_block = & $($mutability)? basic_blocks!(body, $($mutability, true)?)[location.block];
                 if basic_block.statements.len() == location.statement_index {
                     if let Some(ref $($mutability)? terminator) = basic_block.terminator {
                         self.visit_terminator(terminator, location)
@@ -998,6 +930,94 @@ macro_rules! make_mir_visitor {
                     self.visit_statement(statement, location)
                 }
             }
+        }
+    }
+}
+
+macro_rules! basic_blocks {
+    ($body:ident, mut, true) => {
+        $body.basic_blocks.as_mut()
+    };
+    ($body:ident, mut, false) => {
+        $body.basic_blocks.as_mut_preserves_cfg()
+    };
+    ($body:ident,) => {
+        $body.basic_blocks
+    };
+}
+
+macro_rules! basic_blocks_iter {
+    ($body:ident, mut, $invalidate:tt) => {
+        basic_blocks!($body, mut, $invalidate).iter_enumerated_mut()
+    };
+    ($body:ident,) => {
+        basic_blocks!($body,).iter_enumerated()
+    };
+}
+
+macro_rules! extra_body_methods {
+    (mut) => {
+        fn visit_body_preserves_cfg(&mut self, body: &mut Body<'tcx>) {
+            self.super_body_preserves_cfg(body);
+        }
+
+        fn super_body_preserves_cfg(&mut self, body: &mut Body<'tcx>) {
+            super_body!(self, body, mut, false);
+        }
+    };
+    () => {};
+}
+
+macro_rules! super_body {
+    ($self:ident, $body:ident, $($mutability:ident, $invalidate:tt)?) => {
+        let span = $body.span;
+        if let Some(gen) = &$($mutability)? $body.generator {
+            if let Some(yield_ty) = $(& $mutability)? gen.yield_ty {
+                $self.visit_ty(
+                    yield_ty,
+                    TyContext::YieldTy(SourceInfo::outermost(span))
+                );
+            }
+        }
+
+        for (bb, data) in basic_blocks_iter!($body, $($mutability, $invalidate)?) {
+            $self.visit_basic_block_data(bb, data);
+        }
+
+        for scope in &$($mutability)? $body.source_scopes {
+            $self.visit_source_scope_data(scope);
+        }
+
+        $self.visit_ty(
+            $(& $mutability)? $body.return_ty(),
+            TyContext::ReturnTy(SourceInfo::outermost($body.span))
+        );
+
+        for local in $body.local_decls.indices() {
+            $self.visit_local_decl(local, & $($mutability)? $body.local_decls[local]);
+        }
+
+        #[allow(unused_macro_rules)]
+        macro_rules! type_annotations {
+            (mut) => ($body.user_type_annotations.iter_enumerated_mut());
+            () => ($body.user_type_annotations.iter_enumerated());
+        }
+
+        for (index, annotation) in type_annotations!($($mutability)?) {
+            $self.visit_user_type_annotation(
+                index, annotation
+            );
+        }
+
+        for var_debug_info in &$($mutability)? $body.var_debug_info {
+            $self.visit_var_debug_info(var_debug_info);
+        }
+
+        $self.visit_span($(& $mutability)? $body.span);
+
+        for const_ in &$($mutability)? $body.required_consts {
+            let location = START_BLOCK.start_location();
+            $self.visit_constant(const_, location);
         }
     }
 }

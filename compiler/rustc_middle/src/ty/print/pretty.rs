@@ -1,7 +1,7 @@
 use crate::mir::interpret::{AllocRange, GlobalAlloc, Pointer, Provenance, Scalar};
 use crate::ty::subst::{GenericArg, GenericArgKind, Subst};
 use crate::ty::{
-    self, ConstInt, DefIdTree, ParamConst, ScalarInt, Term, Ty, TyCtxt, TypeFoldable,
+    self, ConstInt, DefIdTree, ParamConst, ScalarInt, Term, TermKind, Ty, TyCtxt, TypeFoldable,
     TypeSuperFoldable, TypeSuperVisitable, TypeVisitable,
 };
 use rustc_apfloat::ieee::{Double, Single};
@@ -619,12 +619,16 @@ pub trait PrettyPrinter<'tcx>:
             ty::Adt(def, substs) => {
                 p!(print_def_path(def.did(), substs));
             }
-            ty::Dynamic(data, r) => {
+            ty::Dynamic(data, r, repr) => {
                 let print_r = self.should_print_region(r);
                 if print_r {
                     p!("(");
                 }
-                p!("dyn ", print(data));
+                match repr {
+                    ty::Dyn => p!("dyn "),
+                    ty::DynStar => p!("dyn* "),
+                }
+                p!(print(data));
                 if print_r {
                     p!(" + ", print(r), ")");
                 }
@@ -632,7 +636,13 @@ pub trait PrettyPrinter<'tcx>:
             ty::Foreign(def_id) => {
                 p!(print_def_path(def_id, &[]));
             }
-            ty::Projection(ref data) => p!(print(data)),
+            ty::Projection(ref data) => {
+                if self.tcx().def_kind(data.item_def_id) == DefKind::ImplTraitPlaceholder {
+                    return self.pretty_print_opaque_impl_type(data.item_def_id, data.substs);
+                } else {
+                    p!(print(data))
+                }
+            }
             ty::Placeholder(placeholder) => p!(write("Placeholder({:?})", placeholder)),
             ty::Opaque(def_id, substs) => {
                 // FIXME(eddyb) print this with `print_def_path`.
@@ -855,7 +865,7 @@ pub trait PrettyPrinter<'tcx>:
                         }
 
                         p!(")");
-                        if let Term::Ty(ty) = return_ty.skip_binder() {
+                        if let Some(ty) = return_ty.skip_binder().ty() {
                             if !ty.is_unit() {
                                 p!(" -> ", print(return_ty));
                             }
@@ -916,12 +926,14 @@ pub trait PrettyPrinter<'tcx>:
                         // Skip printing `<[generator@] as Generator<_>>::Return` from async blocks,
                         // unless we can find out what generator return type it comes from.
                         let term = if let Some(ty) = term.skip_binder().ty()
-                            && let ty::Projection(ty::ProjectionTy { item_def_id, substs }) = ty.kind()
-                            && Some(*item_def_id) == tcx.lang_items().generator_return()
+                            && let ty::Projection(proj) = ty.kind()
+                            && let assoc = tcx.associated_item(proj.item_def_id)
+                            && assoc.trait_container(tcx) == tcx.lang_items().gen_trait()
+                            && assoc.name == rustc_span::sym::Return
                         {
                             if let ty::Generator(_, substs, _) = substs.type_at(0).kind() {
                                 let return_ty = substs.as_generator().return_ty();
-                                if !return_ty.is_ty_infer() {
+                                if !return_ty.is_ty_var() {
                                     return_ty.into()
                                 } else {
                                     continue;
@@ -942,13 +954,9 @@ pub trait PrettyPrinter<'tcx>:
 
                         p!(write("{} = ", tcx.associated_item(assoc_item_def_id).name));
 
-                        match term {
-                            Term::Ty(ty) => {
-                                p!(print(ty))
-                            }
-                            Term::Const(c) => {
-                                p!(print(c));
-                            }
+                        match term.unpack() {
+                            TermKind::Ty(ty) => p!(print(ty)),
+                            TermKind::Const(c) => p!(print(c)),
                         };
                     }
 
@@ -1193,15 +1201,9 @@ pub trait PrettyPrinter<'tcx>:
         }
 
         match ct.kind() {
-            ty::ConstKind::Unevaluated(ty::Unevaluated {
-                def,
-                substs,
-                promoted: Some(promoted),
-            }) => {
-                p!(print_value_path(def.did, substs));
-                p!(write("::{:?}", promoted));
-            }
-            ty::ConstKind::Unevaluated(ty::Unevaluated { def, substs, promoted: None }) => {
+            ty::ConstKind::Unevaluated(ty::Unevaluated { def, substs, promoted }) => {
+                assert_eq!(promoted, ());
+
                 match self.tcx().def_kind(def.did) {
                     DefKind::Static(..) | DefKind::Const | DefKind::AssocConst => {
                         p!(print_value_path(def.did, substs))
@@ -1275,7 +1277,7 @@ pub trait PrettyPrinter<'tcx>:
                                     let range =
                                         AllocRange { start: offset, size: Size::from_bytes(len) };
                                     if let Ok(byte_str) =
-                                        alloc.inner().get_bytes(&self.tcx(), range)
+                                        alloc.inner().get_bytes_strip_provenance(&self.tcx(), range)
                                     {
                                         p!(pretty_print_byte_str(byte_str))
                                     } else {
@@ -1401,14 +1403,7 @@ pub trait PrettyPrinter<'tcx>:
     }
 
     fn pretty_print_byte_str(mut self, byte_str: &'tcx [u8]) -> Result<Self::Const, Self::Error> {
-        define_scoped_cx!(self);
-        p!("b\"");
-        for &c in byte_str {
-            for e in std::ascii::escape_default(c) {
-                self.write_char(e as char)?;
-            }
-        }
-        p!("\"");
+        write!(self, "b\"{}\"", byte_str.escape_ascii())?;
         Ok(self)
     }
 
@@ -1513,6 +1508,10 @@ pub trait PrettyPrinter<'tcx>:
                 }
                 return Ok(self);
             }
+            (ty::ValTree::Leaf(leaf), ty::Ref(_, inner_ty, _)) => {
+                p!(write("&"));
+                return self.pretty_print_const_scalar_int(leaf, *inner_ty, print_ty);
+            }
             (ty::ValTree::Leaf(leaf), _) => {
                 return self.pretty_print_const_scalar_int(leaf, ty, print_ty);
             }
@@ -1531,6 +1530,34 @@ pub trait PrettyPrinter<'tcx>:
             p!(": ", print(ty));
         }
         Ok(self)
+    }
+
+    fn pretty_closure_as_impl(
+        mut self,
+        closure: ty::ClosureSubsts<'tcx>,
+    ) -> Result<Self::Const, Self::Error> {
+        let sig = closure.sig();
+        let kind = closure.kind_ty().to_opt_closure_kind().unwrap_or(ty::ClosureKind::Fn);
+
+        write!(self, "impl ")?;
+        self.wrap_binder(&sig, |sig, mut cx| {
+            define_scoped_cx!(cx);
+
+            p!(print(kind), "(");
+            for (i, arg) in sig.inputs()[0].tuple_fields().iter().enumerate() {
+                if i > 0 {
+                    p!(", ");
+                }
+                p!(print(arg));
+            }
+            p!(")");
+
+            if !sig.output().is_unit() {
+                p!(" -> ", print(sig.output()));
+            }
+
+            Ok(cx)
+        })
     }
 }
 
@@ -1950,7 +1977,7 @@ impl<'tcx> PrettyPrinter<'tcx> for FmtPrinter<'_, 'tcx> {
 
             ty::ReVar(_) | ty::ReErased => false,
 
-            ty::ReStatic | ty::ReEmpty(_) => true,
+            ty::ReStatic => true,
         }
     }
 
@@ -2032,14 +2059,6 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
             ty::ReErased => {}
             ty::ReStatic => {
                 p!("'static");
-                return Ok(self);
-            }
-            ty::ReEmpty(ty::UniverseIndex::ROOT) => {
-                p!("'<empty>");
-                return Ok(self);
-            }
-            ty::ReEmpty(ui) => {
-                p!(write("'<empty:{:?}>", ui));
                 return Ok(self);
             }
         }
@@ -2446,6 +2465,11 @@ impl<'tcx> ty::PolyTraitPredicate<'tcx> {
     }
 }
 
+#[derive(Debug, Copy, Clone, TypeFoldable, TypeVisitable, Lift)]
+pub struct PrintClosureAsImpl<'tcx> {
+    pub closure: ty::ClosureSubsts<'tcx>,
+}
+
 forward_display_to_print! {
     ty::Region<'tcx>,
     Ty<'tcx>,
@@ -2538,6 +2562,10 @@ define_print_and_forward_display! {
         p!(print(self.0.trait_ref.print_only_trait_path()));
     }
 
+    PrintClosureAsImpl<'tcx> {
+        p!(pretty_closure_as_impl(self.closure))
+    }
+
     ty::ParamTy {
         p!(write("{}", self.name))
     }
@@ -2567,9 +2595,9 @@ define_print_and_forward_display! {
     }
 
     ty::Term<'tcx> {
-      match self {
-        ty::Term::Ty(ty) => p!(print(ty)),
-        ty::Term::Const(c) => p!(print(c)),
+      match self.unpack() {
+        ty::TermKind::Ty(ty) => p!(print(ty)),
+        ty::TermKind::Const(c) => p!(print(c)),
       }
     }
 

@@ -37,7 +37,6 @@ use rustc_errors::{
 use rustc_session::parse::ParseSess;
 use rustc_span::source_map::{Span, DUMMY_SP};
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use tracing::debug;
 
 use std::ops::Range;
 use std::{cmp, mem, slice};
@@ -171,7 +170,7 @@ pub struct ClosureSpans {
 /// attribute, we parse a nested AST node that has `#[cfg]` or `#[cfg_attr]`
 /// In this case, we use a `ReplaceRange` to replace the entire inner AST node
 /// with `FlatToken::AttrTarget`, allowing us to perform eager cfg-expansion
-/// on an `AttrAnnotatedTokenStream`
+/// on an `AttrTokenStream`.
 ///
 /// 2. When we parse an inner attribute while collecting tokens. We
 /// remove inner attributes from the token stream entirely, and
@@ -184,7 +183,7 @@ pub type ReplaceRange = (Range<u32>, Vec<(FlatToken, Spacing)>);
 
 /// Controls how we capture tokens. Capturing can be expensive,
 /// so we try to avoid performing capturing in cases where
-/// we will never need an `AttrAnnotatedTokenStream`
+/// we will never need an `AttrTokenStream`.
 #[derive(Copy, Clone)]
 pub enum Capturing {
     /// We aren't performing any capturing - this is the default mode.
@@ -238,7 +237,7 @@ struct TokenCursor {
     // the trailing `>>` token. The `break_last_token`
     // field is used to track this token - it gets
     // appended to the captured stream when
-    // we evaluate a `LazyTokenStream`
+    // we evaluate a `LazyAttrTokenStream`.
     break_last_token: bool,
 }
 
@@ -281,7 +280,7 @@ impl TokenCursor {
                         if delim != Delimiter::Invisible {
                             return (Token::new(token::OpenDelim(delim), sp.open), Spacing::Alone);
                         }
-                        // No open delimeter to return; continue on to the next iteration.
+                        // No open delimiter to return; continue on to the next iteration.
                     }
                 };
             } else if let Some(frame) = self.stack.pop() {
@@ -1116,10 +1115,14 @@ impl<'a> Parser<'a> {
         let (attrs, blk) = self.parse_inner_attrs_and_block()?;
         let anon_const = AnonConst {
             id: DUMMY_NODE_ID,
-            value: self.mk_expr(blk.span, ExprKind::Block(blk, None), AttrVec::new()),
+            value: self.mk_expr(blk.span, ExprKind::Block(blk, None)),
         };
         let blk_span = anon_const.value.span;
-        Ok(self.mk_expr(span.to(blk_span), ExprKind::ConstBlock(anon_const), AttrVec::from(attrs)))
+        Ok(self.mk_expr_with_attrs(
+            span.to(blk_span),
+            ExprKind::ConstBlock(anon_const),
+            AttrVec::from(attrs),
+        ))
     }
 
     /// Parses mutability (`mut` or nothing).
@@ -1295,7 +1298,11 @@ impl<'a> Parser<'a> {
                 self.bump(); // `in`
                 let path = self.parse_path(PathStyle::Mod)?; // `path`
                 self.expect(&token::CloseDelim(Delimiter::Parenthesis))?; // `)`
-                let vis = VisibilityKind::Restricted { path: P(path), id: ast::DUMMY_NODE_ID };
+                let vis = VisibilityKind::Restricted {
+                    path: P(path),
+                    id: ast::DUMMY_NODE_ID,
+                    shorthand: false,
+                };
                 return Ok(Visibility {
                     span: lo.to(self.prev_token.span),
                     kind: vis,
@@ -1308,7 +1315,11 @@ impl<'a> Parser<'a> {
                 self.bump(); // `(`
                 let path = self.parse_path(PathStyle::Mod)?; // `crate`/`super`/`self`
                 self.expect(&token::CloseDelim(Delimiter::Parenthesis))?; // `)`
-                let vis = VisibilityKind::Restricted { path: P(path), id: ast::DUMMY_NODE_ID };
+                let vis = VisibilityKind::Restricted {
+                    path: P(path),
+                    id: ast::DUMMY_NODE_ID,
+                    shorthand: true,
+                };
                 return Ok(Visibility {
                     span: lo.to(self.prev_token.span),
                     kind: vis,
@@ -1371,7 +1382,7 @@ impl<'a> Parser<'a> {
         match self.parse_str_lit() {
             Ok(str_lit) => Some(str_lit),
             Err(Some(lit)) => match lit.kind {
-                ast::LitKind::Err(_) => None,
+                ast::LitKind::Err => None,
                 _ => {
                     self.struct_span_err(lit.span, "non-string ABI literal")
                         .span_suggestion(
@@ -1453,11 +1464,11 @@ pub fn emit_unclosed_delims(unclosed_delims: &mut Vec<UnmatchedBrace>, sess: &Pa
     }
 }
 
-/// A helper struct used when building an `AttrAnnotatedTokenStream` from
-/// a `LazyTokenStream`. Both delimiter and non-delimited tokens
+/// A helper struct used when building an `AttrTokenStream` from
+/// a `LazyAttrTokenStream`. Both delimiter and non-delimited tokens
 /// are stored as `FlatToken::Token`. A vector of `FlatToken`s
-/// is then 'parsed' to build up an `AttrAnnotatedTokenStream` with nested
-/// `AttrAnnotatedTokenTree::Delimited` tokens
+/// is then 'parsed' to build up an `AttrTokenStream` with nested
+/// `AttrTokenTree::Delimited` tokens.
 #[derive(Debug, Clone)]
 pub enum FlatToken {
     /// A token - this holds both delimiter (e.g. '{' and '}')
@@ -1465,11 +1476,11 @@ pub enum FlatToken {
     Token(Token),
     /// Holds the `AttributesData` for an AST node. The
     /// `AttributesData` is inserted directly into the
-    /// constructed `AttrAnnotatedTokenStream` as
-    /// an `AttrAnnotatedTokenTree::Attributes`
+    /// constructed `AttrTokenStream` as
+    /// an `AttrTokenTree::Attributes`.
     AttrTarget(AttributesData),
     /// A special 'empty' token that is ignored during the conversion
-    /// to an `AttrAnnotatedTokenStream`. This is used to simplify the
+    /// to an `AttrTokenStream`. This is used to simplify the
     /// handling of replace ranges.
     Empty,
 }

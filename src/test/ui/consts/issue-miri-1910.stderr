@@ -4,12 +4,12 @@ error: any use of this value will cause an error
 LL |         copy_nonoverlapping(src, tmp.as_mut_ptr(), 1);
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |         |
-   |         unable to turn pointer into raw bytes
+   |         unable to copy parts of a pointer from memory at ALLOC
    |         inside `std::ptr::read::<u8>` at $SRC_DIR/core/src/ptr/mod.rs:LL:COL
    |         inside `ptr::const_ptr::<impl *const u8>::read` at $SRC_DIR/core/src/ptr/const_ptr.rs:LL:COL
-   |         inside `C` at $DIR/issue-miri-1910.rs:7:5
+   |         inside `C` at $DIR/issue-miri-1910.rs:8:5
    |
-  ::: $DIR/issue-miri-1910.rs:4:1
+  ::: $DIR/issue-miri-1910.rs:5:1
    |
 LL | const C: () = unsafe {
    | -----------
@@ -29,12 +29,12 @@ error: any use of this value will cause an error
 LL |         copy_nonoverlapping(src, tmp.as_mut_ptr(), 1);
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |         |
-   |         unable to turn pointer into raw bytes
+   |         unable to copy parts of a pointer from memory at ALLOC
    |         inside `std::ptr::read::<u8>` at $SRC_DIR/core/src/ptr/mod.rs:LL:COL
    |         inside `ptr::const_ptr::<impl *const u8>::read` at $SRC_DIR/core/src/ptr/const_ptr.rs:LL:COL
-   |         inside `C` at $DIR/issue-miri-1910.rs:7:5
+   |         inside `C` at $DIR/issue-miri-1910.rs:8:5
    |
-  ::: $DIR/issue-miri-1910.rs:4:1
+  ::: $DIR/issue-miri-1910.rs:5:1
    |
 LL | const C: () = unsafe {
    | -----------

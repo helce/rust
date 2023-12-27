@@ -11,6 +11,7 @@ use crate::common::{
 use crate::common::{CompareMode, Config, Debugger, Mode, PassMode, TestPaths};
 use crate::util::logv;
 use getopts::Options;
+use lazycell::LazyCell;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -63,6 +64,7 @@ pub fn parse_config(args: Vec<String>) -> Config {
         .optopt("", "rust-demangler-path", "path to rust-demangler to use in tests", "PATH")
         .reqopt("", "python", "path to python to use for doc tests", "PATH")
         .optopt("", "jsondocck-path", "path to jsondocck to use for doc tests", "PATH")
+        .optopt("", "jsondoclint-path", "path to jsondoclint to use for doc tests", "PATH")
         .optopt("", "valgrind-path", "path to Valgrind executable for Valgrind tests", "PROGRAM")
         .optflag("", "force-valgrind", "fail if Valgrind tests cannot be run under Valgrind")
         .optopt("", "run-clang-based-tests-with", "path to Clang executable", "PATH")
@@ -225,6 +227,7 @@ pub fn parse_config(args: Vec<String>) -> Config {
         rust_demangler_path: matches.opt_str("rust-demangler-path").map(PathBuf::from),
         python: matches.opt_str("python").unwrap(),
         jsondocck_path: matches.opt_str("jsondocck-path"),
+        jsondoclint_path: matches.opt_str("jsondoclint-path"),
         valgrind_path: matches.opt_str("valgrind-path"),
         force_valgrind: matches.opt_present("force-valgrind"),
         run_clang_based_tests_with: matches.opt_str("run-clang-based-tests-with"),
@@ -299,6 +302,8 @@ pub fn parse_config(args: Vec<String>) -> Config {
         npm: matches.opt_str("npm"),
 
         force_rerun: matches.opt_present("force-rerun"),
+
+        target_cfg: LazyCell::new(),
     }
 }
 
@@ -441,7 +446,7 @@ fn configure_cdb(config: &Config) -> Option<Config> {
 fn configure_gdb(config: &Config) -> Option<Config> {
     config.gdb_version?;
 
-    if util::matches_env(&config.target, "msvc") {
+    if config.matches_env("msvc") {
         return None;
     }
 
@@ -541,6 +546,8 @@ fn common_inputs_stamp(config: &Config) -> Stamp {
         let path = rust_src_dir.join(file);
         stamp.add_path(&path);
     }
+
+    stamp.add_dir(&rust_src_dir.join("src/etc/natvis"));
 
     stamp.add_dir(&config.run_lib_path);
 

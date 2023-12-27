@@ -8,7 +8,6 @@ use rustc_hir::definitions::*;
 use rustc_span::hygiene::LocalExpnId;
 use rustc_span::symbol::sym;
 use rustc_span::Span;
-use tracing::debug;
 
 pub(crate) fn collect_definitions(
     resolver: &mut Resolver<'_>,
@@ -155,7 +154,7 @@ impl<'a, 'b> visit::Visitor<'a> for DefCollector<'a, 'b> {
             }
         }
 
-        visit::walk_fn(self, fn_kind, span);
+        visit::walk_fn(self, fn_kind);
     }
 
     fn visit_use_tree(&mut self, use_tree: &'a UseTree, id: NodeId, _nested: bool) {

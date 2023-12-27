@@ -14,7 +14,7 @@ use rustc_span::symbol::{sym, Ident, Symbol};
 use rustc_span::{Span, DUMMY_SP};
 use rustc_target::spec::PanicStrategy;
 use smallvec::{smallvec, SmallVec};
-use tracing::debug;
+use thin_vec::thin_vec;
 
 use std::{iter, mem};
 
@@ -187,7 +187,10 @@ impl<'a> MutVisitor for EntryPointCleaner<'a> {
                     let dc_nested =
                         attr::mk_nested_word_item(Ident::new(sym::dead_code, self.def_site));
                     let allow_dead_code_item = attr::mk_list_item(allow_ident, vec![dc_nested]);
-                    let allow_dead_code = attr::mk_attr_outer(allow_dead_code_item);
+                    let allow_dead_code = attr::mk_attr_outer(
+                        &self.sess.parse_sess.attr_id_generator,
+                        allow_dead_code_item,
+                    );
                     let attrs = attrs
                         .into_iter()
                         .filter(|attr| {
@@ -298,8 +301,10 @@ fn mk_main(cx: &mut TestCtxt<'_>) -> P<ast::Item> {
     let call_test_main = ecx.stmt_expr(call_test_main);
 
     // extern crate test
-    let test_extern_stmt =
-        ecx.stmt_item(sp, ecx.item(sp, test_id, vec![], ast::ItemKind::ExternCrate(None)));
+    let test_extern_stmt = ecx.stmt_item(
+        sp,
+        ecx.item(sp, test_id, ast::AttrVec::new(), ast::ItemKind::ExternCrate(None)),
+    );
 
     // #[rustc_main]
     let main_meta = ecx.meta_word(sp, sym::rustc_main);
@@ -333,7 +338,7 @@ fn mk_main(cx: &mut TestCtxt<'_>) -> P<ast::Item> {
 
     let main = P(ast::Item {
         ident: main_id,
-        attrs: vec![main_attr],
+        attrs: thin_vec![main_attr],
         id: ast::DUMMY_NODE_ID,
         kind: main,
         vis: ast::Visibility { span: sp, kind: ast::VisibilityKind::Public, tokens: None },

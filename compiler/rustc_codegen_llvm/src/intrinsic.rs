@@ -71,6 +71,7 @@ fn get_simple_intrinsic<'ll>(
         sym::nearbyintf64 => "llvm.nearbyint.f64",
         sym::roundf32 => "llvm.round.f32",
         sym::roundf64 => "llvm.round.f64",
+        sym::ptr_mask => "llvm.ptrmask",
         _ => return None,
     };
     Some(cx.get_intrinsic(llvm_name))
@@ -161,7 +162,7 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
             sym::volatile_load | sym::unaligned_volatile_load => {
                 let tp_ty = substs.type_at(0);
                 let ptr = args[0].immediate();
-                let load = if let PassMode::Cast(ty) = fn_abi.ret.mode {
+                let load = if let PassMode::Cast(ty, _) = &fn_abi.ret.mode {
                     let llty = ty.llvm_type(self);
                     let ptr = self.pointercast(ptr, self.type_ptr_to(llty));
                     self.volatile_load(llty, ptr)
@@ -374,7 +375,7 @@ impl<'ll, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'_, 'll, 'tcx> {
         };
 
         if !fn_abi.ret.is_ignore() {
-            if let PassMode::Cast(ty) = fn_abi.ret.mode {
+            if let PassMode::Cast(ty, _) = &fn_abi.ret.mode {
                 let ptr_llty = self.type_ptr_to(ty.llvm_type(self));
                 let ptr = self.pointercast(result.llval, ptr_llty);
                 self.store(llval, ptr, result.align);
@@ -1703,6 +1704,97 @@ unsupported {} from `{}` with element `{}` of size `{}` to `{}`"#,
     bitwise_red!(simd_reduce_xor: vector_reduce_xor, false);
     bitwise_red!(simd_reduce_all: vector_reduce_and, true);
     bitwise_red!(simd_reduce_any: vector_reduce_or, true);
+
+    if name == sym::simd_cast_ptr {
+        require_simd!(ret_ty, "return");
+        let (out_len, out_elem) = ret_ty.simd_size_and_type(bx.tcx());
+        require!(
+            in_len == out_len,
+            "expected return type with length {} (same as input type `{}`), \
+                  found `{}` with length {}",
+            in_len,
+            in_ty,
+            ret_ty,
+            out_len
+        );
+
+        match in_elem.kind() {
+            ty::RawPtr(p) => {
+                let (metadata, check_sized) = p.ty.ptr_metadata_ty(bx.tcx, |ty| {
+                    bx.tcx.normalize_erasing_regions(ty::ParamEnv::reveal_all(), ty)
+                });
+                assert!(!check_sized); // we are in codegen, so we shouldn't see these types
+                require!(metadata.is_unit(), "cannot cast fat pointer `{}`", in_elem)
+            }
+            _ => return_error!("expected pointer, got `{}`", in_elem),
+        }
+        match out_elem.kind() {
+            ty::RawPtr(p) => {
+                let (metadata, check_sized) = p.ty.ptr_metadata_ty(bx.tcx, |ty| {
+                    bx.tcx.normalize_erasing_regions(ty::ParamEnv::reveal_all(), ty)
+                });
+                assert!(!check_sized); // we are in codegen, so we shouldn't see these types
+                require!(metadata.is_unit(), "cannot cast to fat pointer `{}`", out_elem)
+            }
+            _ => return_error!("expected pointer, got `{}`", out_elem),
+        }
+
+        if in_elem == out_elem {
+            return Ok(args[0].immediate());
+        } else {
+            return Ok(bx.pointercast(args[0].immediate(), llret_ty));
+        }
+    }
+
+    if name == sym::simd_expose_addr {
+        require_simd!(ret_ty, "return");
+        let (out_len, out_elem) = ret_ty.simd_size_and_type(bx.tcx());
+        require!(
+            in_len == out_len,
+            "expected return type with length {} (same as input type `{}`), \
+                  found `{}` with length {}",
+            in_len,
+            in_ty,
+            ret_ty,
+            out_len
+        );
+
+        match in_elem.kind() {
+            ty::RawPtr(_) => {}
+            _ => return_error!("expected pointer, got `{}`", in_elem),
+        }
+        match out_elem.kind() {
+            ty::Uint(ty::UintTy::Usize) => {}
+            _ => return_error!("expected `usize`, got `{}`", out_elem),
+        }
+
+        return Ok(bx.ptrtoint(args[0].immediate(), llret_ty));
+    }
+
+    if name == sym::simd_from_exposed_addr {
+        require_simd!(ret_ty, "return");
+        let (out_len, out_elem) = ret_ty.simd_size_and_type(bx.tcx());
+        require!(
+            in_len == out_len,
+            "expected return type with length {} (same as input type `{}`), \
+                  found `{}` with length {}",
+            in_len,
+            in_ty,
+            ret_ty,
+            out_len
+        );
+
+        match in_elem.kind() {
+            ty::Uint(ty::UintTy::Usize) => {}
+            _ => return_error!("expected `usize`, got `{}`", in_elem),
+        }
+        match out_elem.kind() {
+            ty::RawPtr(_) => {}
+            _ => return_error!("expected pointer, got `{}`", out_elem),
+        }
+
+        return Ok(bx.inttoptr(args[0].immediate(), llret_ty));
+    }
 
     if name == sym::simd_cast || name == sym::simd_as {
         require_simd!(ret_ty, "return");

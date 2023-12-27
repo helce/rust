@@ -13,7 +13,7 @@
 #![feature(cell_leak)]
 #![feature(control_flow_enum)]
 #![feature(extend_one)]
-#![feature(let_else)]
+#![cfg_attr(bootstrap, feature(let_else))]
 #![feature(hash_raw_entry)]
 #![feature(hasher_prefixfree_extras)]
 #![feature(maybe_uninit_uninit_array)]
@@ -28,6 +28,8 @@
 #![feature(vec_into_raw_parts)]
 #![allow(rustc::default_hash_types)]
 #![allow(rustc::potential_query_instability)]
+#![deny(rustc::untranslatable_diagnostic)]
+#![deny(rustc::diagnostic_outside_of_impl)]
 
 #[macro_use]
 extern crate tracing;
@@ -73,7 +75,6 @@ pub mod profiling;
 pub mod sharded;
 pub mod stack;
 pub mod sync;
-pub mod thin_vec;
 pub mod tiny_list;
 pub mod transitive_relation;
 pub mod vec_linked_list;
