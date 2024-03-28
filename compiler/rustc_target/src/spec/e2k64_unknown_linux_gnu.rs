@@ -1,18 +1,17 @@
-use crate::spec::{LinkArgs, LinkerFlavor, Target, TargetOptions};
+use crate::spec::{Cc, LinkerFlavor, Lld, Target, TargetOptions};
 
 pub fn target() -> Target {
     let mut base = super::linux_gnu_base::opts();
     base.max_atomic_width = Some(64);
-    base.pre_link_args.entry(LinkerFlavor::Gcc).or_default().push("-fPIC".into());
-    let mut post_args = LinkArgs::new();
-    post_args.insert(
-        LinkerFlavor::Gcc,
-        vec![
-            "-L/usr/lib/lccrt/lib/e2k64/".into(),
-            "-Wl,-rpath=/usr/lib/lccrt/lib/e2k64/".into(),
-            "-llccrt_s".into(),
-            "-llcc".into(),
-            "-lm".into(),
+    base.add_pre_link_args(LinkerFlavor::Gnu(Cc::Yes, Lld::No), &["-fPIC"]);
+    base.add_post_link_args(
+        LinkerFlavor::Gnu(Cc::Yes, Lld::No),
+        &[
+            "-L/usr/lib/lccrt/lib/e2k64/",
+            "-Wl,-rpath=/usr/lib/lccrt/lib/e2k64/",
+            "-llccrt_s",
+            "-llcc",
+            "-lm",
         ],
     );
     Target {
@@ -24,7 +23,6 @@ pub fn target() -> Target {
         options: TargetOptions {
             linker: Some(option_env!("ECC").unwrap_or("/usr/bin/gcc").into()),
             position_independent_executables: false,
-            post_link_args: post_args,
             mcount: "\u{1}_mcount".into(),
             ..base
         },
