@@ -957,14 +957,19 @@ impl Config {
             config.out = crate::util::absolute(&config.out);
         }
 
-        config.initial_rustc = build
-            .rustc
-            .map(PathBuf::from)
-            .unwrap_or_else(|| config.out.join(config.build.triple).join("stage0/bin/rustc"));
-        config.initial_cargo = build
-            .cargo
-            .map(PathBuf::from)
-            .unwrap_or_else(|| config.out.join(config.build.triple).join("stage0/bin/cargo"));
+        if cfg!(test) {
+            config.initial_rustc = PathBuf::from(env!("RUSTC"));
+            config.initial_cargo = PathBuf::from(env!("CARGO"));
+        } else {
+            config.initial_rustc = build
+                .rustc
+                .map(PathBuf::from)
+                .unwrap_or_else(|| config.out.join(config.build.triple).join("stage0/bin/rustc"));
+            config.initial_cargo = build
+                .cargo
+                .map(PathBuf::from)
+                .unwrap_or_else(|| config.out.join(config.build.triple).join("stage0/bin/cargo"));
+        }
 
         // NOTE: it's important this comes *after* we set `initial_rustc` just above.
         if config.dry_run {
