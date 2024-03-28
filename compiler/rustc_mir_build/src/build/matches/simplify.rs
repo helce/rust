@@ -37,12 +37,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     ///
     /// only generates a single switch. If this happens this method returns
     /// `true`.
+    #[instrument(skip(self, candidate), level = "debug")]
     pub(super) fn simplify_candidate<'pat>(
         &mut self,
         candidate: &mut Candidate<'pat, 'tcx>,
     ) -> bool {
         // repeatedly simplify match pairs until fixed point is reached
-        debug!(?candidate, "simplify_candidate");
+        debug!("{candidate:#?}");
 
         // existing_bindings and new_bindings exists to keep the semantics in order.
         // Reversing the binding order for bindings after `@` changes the binding order in places
@@ -131,7 +132,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     ) -> Vec<Candidate<'pat, 'tcx>> {
         pats.iter()
             .map(|box pat| {
-                let mut candidate = Candidate::new(place.clone(), pat, candidate.has_guard);
+                let mut candidate = Candidate::new(place.clone(), pat, candidate.has_guard, self);
                 self.simplify_candidate(&mut candidate);
                 candidate
             })
@@ -155,17 +156,15 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 ascription: thir::Ascription { ref annotation, variance },
             } => {
                 // Apply the type ascription to the value at `match_pair.place`, which is the
-                if let Ok(place_resolved) =
-                    match_pair.place.clone().try_upvars_resolved(self.tcx, &self.upvars)
-                {
+                if let Ok(place_resolved) = match_pair.place.clone().try_upvars_resolved(self) {
                     candidate.ascriptions.push(Ascription {
                         annotation: annotation.clone(),
-                        source: place_resolved.into_place(self.tcx, &self.upvars),
+                        source: place_resolved.into_place(self),
                         variance,
                     });
                 }
 
-                candidate.match_pairs.push(MatchPair::new(match_pair.place, subpattern));
+                candidate.match_pairs.push(MatchPair::new(match_pair.place, subpattern, self));
 
                 Ok(())
             }
@@ -184,12 +183,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 ref subpattern,
                 is_primary: _,
             } => {
-                if let Ok(place_resolved) =
-                    match_pair.place.clone().try_upvars_resolved(self.tcx, &self.upvars)
-                {
+                if let Ok(place_resolved) = match_pair.place.clone().try_upvars_resolved(self) {
                     candidate.bindings.push(Binding {
                         span: match_pair.pattern.span,
-                        source: place_resolved.into_place(self.tcx, &self.upvars),
+                        source: place_resolved.into_place(self),
                         var_id: var,
                         binding_mode: mode,
                     });
@@ -197,7 +194,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
                 if let Some(subpattern) = subpattern.as_ref() {
                     // this is the `x @ P` case; have to keep matching against `P` now
-                    candidate.match_pairs.push(MatchPair::new(match_pair.place, subpattern));
+                    candidate.match_pairs.push(MatchPair::new(match_pair.place, subpattern, self));
                 }
 
                 Ok(())
@@ -267,14 +264,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let irrefutable = adt_def.variants().iter_enumerated().all(|(i, v)| {
                     i == variant_index || {
                         self.tcx.features().exhaustive_patterns
-                            && !v
-                                .uninhabited_from(
-                                    self.tcx,
-                                    substs,
-                                    adt_def.adt_kind(),
-                                    self.param_env,
-                                )
-                                .is_empty()
+                            && v.inhabited_predicate(self.tcx, adt_def)
+                                .subst(self.tcx, substs)
+                                .apply_any_module(self.tcx, self.param_env)
+                                != Some(true)
                     }
                 }) && (adt_def.did().is_local()
                     || !adt_def.is_variant_list_non_exhaustive());
@@ -308,7 +301,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
             PatKind::Deref { ref subpattern } => {
                 let place_builder = match_pair.place.deref();
-                candidate.match_pairs.push(MatchPair::new(place_builder, subpattern));
+                candidate.match_pairs.push(MatchPair::new(place_builder, subpattern, self));
                 Ok(())
             }
 

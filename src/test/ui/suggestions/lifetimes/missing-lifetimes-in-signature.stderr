@@ -18,7 +18,7 @@ LL | |         *dest = g.get();
 LL | |     }
    | |_____^
    |
-help: to declare that the `impl Trait` captures `'_`, you can add an explicit `'_` lifetime bound
+help: to declare that `impl FnOnce()` captures `'_`, you can add an explicit `'_` lifetime bound
    |
 LL | fn foo<G, T>(g: G, dest: &mut T) -> impl FnOnce() + '_
    |                                                   ++++
@@ -164,5 +164,5 @@ LL |     G: Get<T> + 'a,
 
 error: aborting due to 8 previous errors
 
-Some errors have detailed explanations: E0261, E0309, E0621, E0700.
+Some errors have detailed explanations: E0261, E0309, E0311, E0621, E0700.
 For more information about an error, try `rustc --explain E0261`.

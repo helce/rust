@@ -7,7 +7,7 @@ use super::{PatCtxt, PatternError};
 use rustc_arena::TypedArena;
 use rustc_ast::Mutability;
 use rustc_errors::{
-    error_code, pluralize, struct_span_err, Applicability, Diagnostic, DiagnosticBuilder,
+    error_code, pluralize, struct_span_err, Applicability, DelayDm, Diagnostic, DiagnosticBuilder,
     ErrorGuaranteed, MultiSpan,
 };
 use rustc_hir as hir;
@@ -347,27 +347,35 @@ impl<'p, 'tcx> MatchVisitor<'_, 'p, 'tcx> {
             let span_end = affix.last().unwrap().unwrap().0;
             let span = span_start.to(span_end);
             let cnt = affix.len();
-            cx.tcx.struct_span_lint_hir(IRREFUTABLE_LET_PATTERNS, top, span, |lint| {
-                let s = pluralize!(cnt);
-                let mut diag = lint.build(&format!("{kind} irrefutable pattern{s} in let chain"));
-                diag.note(&format!(
-                    "{these} pattern{s} will always match",
-                    these = pluralize!("this", cnt),
-                ));
-                diag.help(&format!(
-                    "consider moving {} {suggestion}",
-                    if cnt > 1 { "them" } else { "it" }
-                ));
-                diag.emit()
-            });
+            let s = pluralize!(cnt);
+            cx.tcx.struct_span_lint_hir(
+                IRREFUTABLE_LET_PATTERNS,
+                top,
+                span,
+                format!("{kind} irrefutable pattern{s} in let chain"),
+                |lint| {
+                    lint.note(format!(
+                        "{these} pattern{s} will always match",
+                        these = pluralize!("this", cnt),
+                    ))
+                    .help(format!(
+                        "consider moving {} {suggestion}",
+                        if cnt > 1 { "them" } else { "it" }
+                    ))
+                },
+            );
         };
         if let Some(until) = chain_refutabilities.iter().position(|r| !matches!(*r, Some((_, false)))) && until > 0 {
             // The chain has a non-zero prefix of irrefutable `let` statements.
 
             // Check if the let source is while, for there is no alternative place to put a prefix,
             // and we shouldn't lint.
+            // For let guards inside a match, prefixes might use bindings of the match pattern,
+            // so can't always be moved out.
+            // FIXME: Add checking whether the bindings are actually used in the prefix,
+            // and lint if they are not.
             let let_source = let_source_parent(self.tcx, top, None);
-            if !matches!(let_source, LetSource::WhileLet) {
+            if !matches!(let_source, LetSource::WhileLet | LetSource::IfLetGuard) {
                 // Emit the lint
                 let prefix = &chain_refutabilities[..until];
                 lint_affix(prefix, "leading", "outside of the construct");
@@ -487,7 +495,7 @@ impl<'p, 'tcx> MatchVisitor<'_, 'p, 'tcx> {
                     ],
                     Applicability::HasPlaceholders,
                 );
-                if !bindings.is_empty() && cx.tcx.sess.is_nightly_build() {
+                if !bindings.is_empty() {
                     err.span_suggestion_verbose(
                         semi_span.shrink_to_lo(),
                         &format!(
@@ -561,26 +569,28 @@ fn check_for_bindings_named_same_as_variants(
                 BINDINGS_WITH_VARIANT_NAME,
                 p.hir_id,
                 p.span,
+                DelayDm(|| format!(
+                    "pattern binding `{}` is named the same as one \
+                        of the variants of the type `{}`",
+                    ident, cx.tcx.def_path_str(edef.did())
+                )),
                 |lint| {
                     let ty_path = cx.tcx.def_path_str(edef.did());
-                    let mut err = lint.build(&format!(
-                        "pattern binding `{}` is named the same as one \
-                         of the variants of the type `{}`",
-                        ident, ty_path
-                    ));
-                    err.code(error_code!(E0170));
+                    lint.code(error_code!(E0170));
+
                     // If this is an irrefutable pattern, and there's > 1 variant,
                     // then we can't actually match on this. Applying the below
                     // suggestion would produce code that breaks on `check_irrefutable`.
                     if rf == Refutable || variant_count == 1 {
-                        err.span_suggestion(
+                        lint.span_suggestion(
                             p.span,
                             "to match on the variant, qualify the path",
                             format!("{}::{}", ty_path, ident),
                             Applicability::MachineApplicable,
                         );
                     }
-                    err.emit();
+
+                    lint
                 },
             )
         }
@@ -598,14 +608,13 @@ fn pat_is_catchall(pat: &DeconstructedPat<'_, '_>) -> bool {
 }
 
 fn unreachable_pattern(tcx: TyCtxt<'_>, span: Span, id: HirId, catchall: Option<Span>) {
-    tcx.struct_span_lint_hir(UNREACHABLE_PATTERNS, id, span, |lint| {
-        let mut err = lint.build("unreachable pattern");
+    tcx.struct_span_lint_hir(UNREACHABLE_PATTERNS, id, span, "unreachable pattern", |lint| {
         if let Some(catchall) = catchall {
             // We had a catchall pattern, hint at that.
-            err.span_label(span, "unreachable pattern");
-            err.span_label(catchall, "matches any value");
+            lint.span_label(span, "unreachable pattern");
+            lint.span_label(catchall, "matches any value");
         }
-        err.emit();
+        lint
     });
 }
 
@@ -621,6 +630,11 @@ fn irrefutable_let_patterns(
     count: usize,
     span: Span,
 ) {
+    let span = match source {
+        LetSource::LetElse(span) => span,
+        _ => span,
+    };
+
     macro_rules! emit_diag {
         (
             $lint:expr,
@@ -630,18 +644,23 @@ fn irrefutable_let_patterns(
         ) => {{
             let s = pluralize!(count);
             let these = pluralize!("this", count);
-            let mut diag = $lint.build(&format!("irrefutable {} pattern{s}", $source_name));
-            diag.note(&format!("{these} pattern{s} will always match, so the {}", $note_sufix));
-            diag.help(concat!("consider ", $help_sufix));
-            diag.emit()
+            tcx.struct_span_lint_hir(
+                IRREFUTABLE_LET_PATTERNS,
+                id,
+                span,
+                format!("irrefutable {} pattern{s}", $source_name),
+                |lint| {
+                    lint.note(&format!(
+                        "{these} pattern{s} will always match, so the {}",
+                        $note_sufix
+                    ))
+                    .help(concat!("consider ", $help_sufix))
+                },
+            )
         }};
     }
 
-    let span = match source {
-        LetSource::LetElse(span) => span,
-        _ => span,
-    };
-    tcx.struct_span_lint_hir(IRREFUTABLE_LET_PATTERNS, id, span, |lint| match source {
+    match source {
         LetSource::GenericLet => {
             emit_diag!(lint, "`let`", "`let` is useless", "removing `let`");
         }
@@ -677,7 +696,7 @@ fn irrefutable_let_patterns(
                 "instead using a `loop { ... }` with a `let` inside it"
             );
         }
-    });
+    };
 }
 
 fn is_let_irrefutable<'p, 'tcx>(
@@ -985,8 +1004,8 @@ fn maybe_point_at_variant<'a, 'p: 'a, 'tcx: 'a>(
 }
 
 /// Check if a by-value binding is by-value. That is, check if the binding's type is not `Copy`.
-fn is_binding_by_move(cx: &MatchVisitor<'_, '_, '_>, hir_id: HirId, span: Span) -> bool {
-    !cx.typeck_results.node_type(hir_id).is_copy_modulo_regions(cx.tcx.at(span), cx.param_env)
+fn is_binding_by_move(cx: &MatchVisitor<'_, '_, '_>, hir_id: HirId) -> bool {
+    !cx.typeck_results.node_type(hir_id).is_copy_modulo_regions(cx.tcx, cx.param_env)
 }
 
 /// Check that there are no borrow or move conflicts in `binding @ subpat` patterns.
@@ -1012,7 +1031,7 @@ fn check_borrow_conflicts_in_at_patterns(cx: &MatchVisitor<'_, '_, '_>, pat: &Pa
 
     // Get the binding move, extract the mutability if by-ref.
     let mut_outer = match typeck_results.extract_binding_mode(sess, pat.hir_id, pat.span) {
-        Some(ty::BindByValue(_)) if is_binding_by_move(cx, pat.hir_id, pat.span) => {
+        Some(ty::BindByValue(_)) if is_binding_by_move(cx, pat.hir_id) => {
             // We have `x @ pat` where `x` is by-move. Reject all borrows in `pat`.
             let mut conflicts_ref = Vec::new();
             sub.each_binding(|_, hir_id, span, _| {
@@ -1051,7 +1070,7 @@ fn check_borrow_conflicts_in_at_patterns(cx: &MatchVisitor<'_, '_, '_>, pat: &Pa
                 (Mutability::Mut, Mutability::Mut) => conflicts_mut_mut.push((span, name)), // 2x `ref mut`.
                 _ => conflicts_mut_ref.push((span, name)), // `ref` + `ref mut` in either direction.
             },
-            Some(ty::BindByValue(_)) if is_binding_by_move(cx, hir_id, span) => {
+            Some(ty::BindByValue(_)) if is_binding_by_move(cx, hir_id) => {
                 conflicts_move.push((span, name)) // `ref mut?` + by-move conflict.
             }
             Some(ty::BindByValue(_)) | None => {} // `ref mut?` + by-copy is fine.
@@ -1136,10 +1155,14 @@ fn let_source_parent(tcx: TyCtxt<'_>, parent: HirId, pat_id: Option<HirId>) -> L
 
     let parent_parent = hir.get_parent_node(parent);
     let parent_parent_node = hir.get(parent_parent);
-    if let hir::Node::Stmt(hir::Stmt { kind: hir::StmtKind::Local(_), span, .. }) =
-        parent_parent_node
-    {
-        return LetSource::LetElse(*span);
+    match parent_parent_node {
+        hir::Node::Stmt(hir::Stmt { kind: hir::StmtKind::Local(_), span, .. }) => {
+            return LetSource::LetElse(*span);
+        }
+        hir::Node::Arm(hir::Arm { guard: Some(hir::Guard::If(_)), .. }) => {
+            return LetSource::IfLetGuard;
+        }
+        _ => {}
     }
 
     let parent_parent_parent = hir.get_parent_node(parent_parent);

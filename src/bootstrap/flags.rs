@@ -78,6 +78,8 @@ pub struct Flags {
     //
     // llvm_out/build/profiles/ is the location this writes to.
     pub llvm_profile_generate: bool,
+    pub llvm_bolt_profile_generate: bool,
+    pub llvm_bolt_profile_use: Option<String>,
 }
 
 #[derive(Debug)]
@@ -107,6 +109,7 @@ pub enum Subcommand {
     Doc {
         paths: Vec<PathBuf>,
         open: bool,
+        json: bool,
     },
     Test {
         paths: Vec<PathBuf>,
@@ -254,6 +257,8 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
         opts.optmulti("D", "", "deny certain clippy lints", "OPT");
         opts.optmulti("W", "", "warn about certain clippy lints", "OPT");
         opts.optmulti("F", "", "forbid certain clippy lints", "OPT");
+        opts.optflag("", "llvm-bolt-profile-generate", "generate BOLT profile for LLVM build");
+        opts.optopt("", "llvm-bolt-profile-use", "use BOLT profile for LLVM build", "PROFILE");
 
         // We can't use getopt to parse the options until we have completed specifying which
         // options are valid, but under the current implementation, some options are conditional on
@@ -325,6 +330,11 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
             }
             Kind::Doc => {
                 opts.optflag("", "open", "open the docs in a browser");
+                opts.optflag(
+                    "",
+                    "json",
+                    "render the documentation in JSON format in addition to the usual HTML format",
+                );
             }
             Kind::Clean => {
                 opts.optflag("", "all", "clean all build artifacts");
@@ -493,6 +503,7 @@ Arguments:
         ./x.py doc src/doc/book
         ./x.py doc src/doc/nomicon
         ./x.py doc src/doc/book library/std
+        ./x.py doc library/std --json
         ./x.py doc library/std --open
 
     If no arguments are passed then everything is documented:
@@ -581,7 +592,11 @@ Arguments:
                 },
             },
             Kind::Bench => Subcommand::Bench { paths, test_args: matches.opt_strs("test-args") },
-            Kind::Doc => Subcommand::Doc { paths, open: matches.opt_present("open") },
+            Kind::Doc => Subcommand::Doc {
+                paths,
+                open: matches.opt_present("open"),
+                json: matches.opt_present("json"),
+            },
             Kind::Clean => {
                 if !paths.is_empty() {
                     println!("\nclean does not take a path argument\n");
@@ -680,6 +695,8 @@ Arguments:
             rust_profile_generate: matches.opt_str("rust-profile-generate"),
             llvm_profile_use: matches.opt_str("llvm-profile-use"),
             llvm_profile_generate: matches.opt_present("llvm-profile-generate"),
+            llvm_bolt_profile_generate: matches.opt_present("llvm-bolt-profile-generate"),
+            llvm_bolt_profile_use: matches.opt_str("llvm-bolt-profile-use"),
         }
     }
 }
@@ -784,6 +801,13 @@ impl Subcommand {
     pub fn open(&self) -> bool {
         match *self {
             Subcommand::Doc { open, .. } => open,
+            _ => false,
+        }
+    }
+
+    pub fn json(&self) -> bool {
+        match *self {
+            Subcommand::Doc { json, .. } => json,
             _ => false,
         }
     }

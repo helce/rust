@@ -1,5 +1,5 @@
 use super::{ForceCollect, Parser, PathStyle, TrailingToken};
-use crate::parser::diagnostics::RemoveLet;
+use crate::errors::RemoveLet;
 use crate::{maybe_recover_from_interpolated_ty_qpath, maybe_whole};
 use rustc_ast::mut_visit::{noop_visit_pat, MutVisitor};
 use rustc_ast::ptr::P;
@@ -10,6 +10,7 @@ use rustc_ast::{
 };
 use rustc_ast_pretty::pprust;
 use rustc_errors::{struct_span_err, Applicability, DiagnosticBuilder, ErrorGuaranteed, PResult};
+use rustc_session::errors::ExprParenthesesNeeded;
 use rustc_span::source_map::{respan, Span, Spanned};
 use rustc_span::symbol::{kw, sym, Ident};
 
@@ -401,6 +402,25 @@ impl<'a> Parser<'a> {
             } else {
                 PatKind::Path(qself, path)
             }
+        } else if matches!(self.token.kind, token::Lifetime(_))
+            // In pattern position, we're totally fine with using "next token isn't colon"
+            // as a heuristic. We could probably just always try to recover if it's a lifetime,
+            // because we never have `'a: label {}` in a pattern position anyways, but it does
+            // keep us from suggesting something like `let 'a: Ty = ..` => `let 'a': Ty = ..`
+            && !self.look_ahead(1, |token| matches!(token.kind, token::Colon))
+        {
+            // Recover a `'a` as a `'a'` literal
+            let lt = self.expect_lifetime();
+            let lit = self.recover_unclosed_char(lt.ident, |self_| {
+                let expected = expected.unwrap_or("pattern");
+                let msg =
+                    format!("expected {}, found {}", expected, super::token_descr(&self_.token));
+
+                let mut err = self_.struct_span_err(self_.token.span, &msg);
+                err.span_label(self_.token.span, format!("expected {}", expected));
+                err
+            });
+            PatKind::Lit(self.mk_expr(lo, ExprKind::Lit(lit)))
         } else {
             // Try to parse everything else as literal with optional minus
             match self.parse_literal_maybe_minus() {
@@ -693,7 +713,7 @@ impl<'a> Parser<'a> {
 
         let sp = self.sess.source_map().start_point(self.token.span);
         if let Some(sp) = self.sess.ambiguous_block_expr_parse.borrow().get(&sp) {
-            self.sess.expr_parentheses_needed(&mut err, *sp);
+            err.subdiagnostic(ExprParenthesesNeeded::surrounding(*sp));
         }
 
         Err(err)
@@ -776,7 +796,6 @@ impl<'a> Parser<'a> {
     /// expression syntax `...expr` for splatting in expressions.
     fn parse_pat_range_to(&mut self, mut re: Spanned<RangeEnd>) -> PResult<'a, PatKind> {
         let end = self.parse_pat_range_end()?;
-        self.sess.gated_spans.gate(sym::half_open_range_patterns, re.span.to(self.prev_token.span));
         if let RangeEnd::Included(ref mut syn @ RangeSyntax::DotDotDot) = &mut re.node {
             *syn = RangeSyntax::DotDotEq;
             self.struct_span_err(re.span, "range-to patterns with `...` are not allowed")
@@ -799,6 +818,7 @@ impl<'a> Parser<'a> {
                 || t.kind == token::Dot // e.g. `.5` for recovery;
                 || t.can_begin_literal_maybe_minus() // e.g. `42`.
                 || t.is_whole_expr()
+                || t.is_lifetime() // recover `'a` instead of `'a'`
             })
     }
 

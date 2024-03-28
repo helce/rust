@@ -1,6 +1,6 @@
 // run-rustfix
 
-#![allow(clippy::ptr_arg)]
+#![allow(clippy::needless_borrow, clippy::ptr_arg)]
 #![warn(clippy::unnecessary_to_owned)]
 #![feature(custom_inner_attributes)]
 
@@ -415,5 +415,14 @@ mod issue_9351 {
         let _x: PathBuf = require_deref_path(path.to_owned());
         generic_arg_used_elsewhere(path.to_owned(), path_buf);
         predicates_are_satisfied(id("abc".to_string()));
+    }
+}
+
+mod issue_9504 {
+    #![allow(dead_code)]
+
+    async fn foo<S: AsRef<str>>(_: S) {}
+    async fn bar() {
+        foo(std::path::PathBuf::new().to_string_lossy().to_string()).await;
     }
 }

@@ -16,8 +16,10 @@ fn check_expectations(tcx: TyCtxt<'_>, tool_filter: Option<Symbol>) {
         return;
     }
 
+    let lint_expectations = tcx.lint_expectations(());
     let fulfilled_expectations = tcx.sess.diagnostic().steal_fulfilled_expectation_ids();
-    let lint_expectations = &tcx.lint_levels(()).lint_expectations;
+
+    tracing::debug!(?lint_expectations, ?fulfilled_expectations);
 
     for (id, expectation) in lint_expectations {
         // This check will always be true, since `lint_expectations` only
@@ -43,17 +45,17 @@ fn emit_unfulfilled_expectation_lint(
         builtin::UNFULFILLED_LINT_EXPECTATIONS,
         hir_id,
         expectation.emission_span,
-        |diag| {
-            let mut diag = diag.build(fluent::lint::expectation);
+        fluent::lint_expectation,
+        |lint| {
             if let Some(rationale) = expectation.reason {
-                diag.note(rationale.as_str());
+                lint.note(rationale.as_str());
             }
 
             if expectation.is_unfulfilled_lint_expectations {
-                diag.note(fluent::lint::note);
+                lint.note(fluent::note);
             }
 
-            diag.emit();
+            lint
         },
     );
 }

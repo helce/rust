@@ -5,9 +5,9 @@
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir::LangItem;
 use rustc_infer::infer::TyCtxtInferExt;
+use rustc_middle::mir;
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, subst::SubstsRef, AdtDef, Ty};
-use rustc_span::DUMMY_SP;
 use rustc_trait_selection::traits::{
     self, ImplSource, Obligation, ObligationCause, SelectionContext,
 };
@@ -91,7 +91,7 @@ impl Qualif for HasMutInterior {
     }
 
     fn in_any_value_of_ty<'tcx>(cx: &ConstCx<'_, 'tcx>, ty: Ty<'tcx>) -> bool {
-        !ty.is_freeze(cx.tcx.at(DUMMY_SP), cx.param_env)
+        !ty.is_freeze(cx.tcx, cx.param_env)
     }
 
     fn in_adt_inherently<'tcx>(
@@ -167,30 +167,28 @@ impl Qualif for NeedsNonConstDrop {
             }),
         );
 
-        cx.tcx.infer_ctxt().enter(|infcx| {
-            let mut selcx = SelectionContext::new(&infcx);
-            let Some(impl_src) = selcx.select(&obligation).ok().flatten() else {
-                // If we couldn't select a const destruct candidate, then it's bad
-                return true;
-            };
+        let infcx = cx.tcx.infer_ctxt().build();
+        let mut selcx = SelectionContext::new(&infcx);
+        let Some(impl_src) = selcx.select(&obligation).ok().flatten() else {
+            // If we couldn't select a const destruct candidate, then it's bad
+            return true;
+        };
 
-            if !matches!(
-                impl_src,
-                ImplSource::ConstDestruct(_)
-                    | ImplSource::Param(_, ty::BoundConstness::ConstIfConst)
-            ) {
-                // If our const destruct candidate is not ConstDestruct or implied by the param env,
-                // then it's bad
-                return true;
-            }
+        if !matches!(
+            impl_src,
+            ImplSource::ConstDestruct(_) | ImplSource::Param(_, ty::BoundConstness::ConstIfConst)
+        ) {
+            // If our const destruct candidate is not ConstDestruct or implied by the param env,
+            // then it's bad
+            return true;
+        }
 
-            if impl_src.borrow_nested_obligations().is_empty() {
-                return false;
-            }
+        if impl_src.borrow_nested_obligations().is_empty() {
+            return false;
+        }
 
-            // If we had any errors, then it's bad
-            !traits::fully_solve_obligations(&infcx, impl_src.nested_obligations()).is_empty()
-        })
+        // If we had any errors, then it's bad
+        !traits::fully_solve_obligations(&infcx, impl_src.nested_obligations()).is_empty()
     }
 
     fn in_adt_inherently<'tcx>(
@@ -308,6 +306,7 @@ where
 
             ProjectionElem::Deref
             | ProjectionElem::Field(_, _)
+            | ProjectionElem::OpaqueCast(_)
             | ProjectionElem::ConstantIndex { .. }
             | ProjectionElem::Subslice { .. }
             | ProjectionElem::Downcast(_, _)
@@ -349,17 +348,13 @@ where
     // FIXME(valtrees): check whether const qualifs should behave the same
     // way for type and mir constants.
     let uneval = match constant.literal {
-        ConstantKind::Ty(ct) if matches!(ct.kind(), ty::ConstKind::Unevaluated(_)) => {
-            let ty::ConstKind::Unevaluated(uv) = ct.kind() else { unreachable!() };
-
-            Some(uv.expand())
-        }
-        ConstantKind::Ty(_) => None,
+        ConstantKind::Ty(ct) if matches!(ct.kind(), ty::ConstKind::Param(_)) => None,
+        ConstantKind::Ty(c) => bug!("expected ConstKind::Param here, found {:?}", c),
         ConstantKind::Unevaluated(uv, _) => Some(uv),
         ConstantKind::Val(..) => None,
     };
 
-    if let Some(ty::Unevaluated { def, substs: _, promoted }) = uneval {
+    if let Some(mir::UnevaluatedConst { def, substs: _, promoted }) = uneval {
         // Use qualifs of the type for the promoted. Promoteds in MIR body should be possible
         // only for `NeedsNonConstDrop` with precise drop checking. This is the only const
         // check performed after the promotion. Verify that with an assertion.
@@ -367,11 +362,8 @@ where
 
         // Don't peek inside trait associated constants.
         if promoted.is_none() && cx.tcx.trait_of_item(def.did).is_none() {
-            let qualifs = if let Some((did, param_did)) = def.as_const_arg() {
-                cx.tcx.at(constant.span).mir_const_qualif_const_arg((did, param_did))
-            } else {
-                cx.tcx.at(constant.span).mir_const_qualif(def.did)
-            };
+            assert_eq!(def.const_param_did, None, "expected associated const: {def:?}");
+            let qualifs = cx.tcx.at(constant.span).mir_const_qualif(def.did);
 
             if !Q::in_qualifs(&qualifs) {
                 return false;

@@ -24,6 +24,25 @@ Automatically refresh project info via `cargo metadata` on
 --
 Run build scripts (`build.rs`) for more precise code analysis.
 --
+[[rust-analyzer.cargo.buildScripts.invocationLocation]]rust-analyzer.cargo.buildScripts.invocationLocation (default: `"workspace"`)::
++
+--
+Specifies the working directory for running build scripts.
+- "workspace": run build scripts for a workspace in the workspace's root directory.
+  This is incompatible with `#rust-analyzer.cargo.buildScripts.invocationStrategy#` set to `once`.
+- "root": run build scripts in the project's root directory.
+This config only has an effect when `#rust-analyzer.cargo.buildScripts.overrideCommand#`
+is set.
+--
+[[rust-analyzer.cargo.buildScripts.invocationStrategy]]rust-analyzer.cargo.buildScripts.invocationStrategy (default: `"per_workspace"`)::
++
+--
+Specifies the invocation strategy to use when running the build scripts command.
+If `per_workspace` is set, the command will be executed for each workspace.
+If `once` is set, the command will be executed once.
+This config only has an effect when `#rust-analyzer.cargo.buildScripts.overrideCommand#`
+is set.
+--
 [[rust-analyzer.cargo.buildScripts.overrideCommand]]rust-analyzer.cargo.buildScripts.overrideCommand (default: `null`)::
 +
 --
@@ -46,6 +65,12 @@ cargo check --quiet --workspace --message-format=json --all-targets
 Use `RUSTC_WRAPPER=rust-analyzer` when running build scripts to
 avoid checking unnecessary things.
 --
+[[rust-analyzer.cargo.extraEnv]]rust-analyzer.cargo.extraEnv (default: `{}`)::
++
+--
+Extra environment variables that will be set when running cargo, rustc
+or other commands within the workspace. Useful for setting RUSTFLAGS.
+--
 [[rust-analyzer.cargo.features]]rust-analyzer.cargo.features (default: `[]`)::
 +
 --
@@ -58,10 +83,15 @@ Set this to `"all"` to pass `--all-features` to cargo.
 --
 Whether to pass `--no-default-features` to cargo.
 --
-[[rust-analyzer.cargo.noSysroot]]rust-analyzer.cargo.noSysroot (default: `false`)::
+[[rust-analyzer.cargo.sysroot]]rust-analyzer.cargo.sysroot (default: `"discover"`)::
 +
 --
-Internal config for debugging, disables loading of sysroot crates.
+Relative path to the sysroot, or "discover" to try to automatically find it via
+"rustc --print sysroot".
+
+Unsetting this disables sysroot loading.
+
+This option does not take effect until rust-analyzer is restarted.
 --
 [[rust-analyzer.cargo.target]]rust-analyzer.cargo.target (default: `null`)::
 +
@@ -93,6 +123,12 @@ Run specified `cargo check` command for diagnostics on save.
 --
 Extra arguments for `cargo check`.
 --
+[[rust-analyzer.checkOnSave.extraEnv]]rust-analyzer.checkOnSave.extraEnv (default: `{}`)::
++
+--
+Extra environment variables that will be set when running `cargo check`.
+Extends `#rust-analyzer.cargo.extraEnv#`.
+--
 [[rust-analyzer.checkOnSave.features]]rust-analyzer.checkOnSave.features (default: `null`)::
 +
 --
@@ -100,6 +136,25 @@ List of features to activate. Defaults to
 `#rust-analyzer.cargo.features#`.
 
 Set to `"all"` to pass `--all-features` to Cargo.
+--
+[[rust-analyzer.checkOnSave.invocationLocation]]rust-analyzer.checkOnSave.invocationLocation (default: `"workspace"`)::
++
+--
+Specifies the working directory for running checks.
+- "workspace": run checks for workspaces in the corresponding workspaces' root directories.
+  This falls back to "root" if `#rust-analyzer.cargo.checkOnSave.invocationStrategy#` is set to `once`.
+- "root": run checks in the project's root directory.
+This config only has an effect when `#rust-analyzer.cargo.buildScripts.overrideCommand#`
+is set.
+--
+[[rust-analyzer.checkOnSave.invocationStrategy]]rust-analyzer.checkOnSave.invocationStrategy (default: `"per_workspace"`)::
++
+--
+Specifies the invocation strategy to use when running the checkOnSave command.
+If `per_workspace` is set, the command will be executed for each workspace.
+If `once` is set, the command will be executed once.
+This config only has an effect when `#rust-analyzer.cargo.buildScripts.overrideCommand#`
+is set.
 --
 [[rust-analyzer.checkOnSave.noDefaultFeatures]]rust-analyzer.checkOnSave.noDefaultFeatures (default: `null`)::
 +
@@ -353,6 +408,11 @@ Group inserted imports by the https://rust-analyzer.github.io/manual.html#auto-i
 --
 Whether to allow import insertion to merge new imports into single path glob imports like `use std::fmt::*;`.
 --
+[[rust-analyzer.imports.prefer.no.std]]rust-analyzer.imports.prefer.no.std (default: `false`)::
++
+--
+Prefer to unconditionally use imports of the core and alloc crate, over the std crate.
+--
 [[rust-analyzer.imports.prefix]]rust-analyzer.imports.prefix (default: `"plain"`)::
 +
 --
@@ -474,6 +534,11 @@ client doesn't set the corresponding capability.
 Whether to show `Implementations` lens. Only applies when
 `#rust-analyzer.lens.enable#` is set.
 --
+[[rust-analyzer.lens.location]]rust-analyzer.lens.location (default: `"above_name"`)::
++
+--
+Where to render annotations.
+--
 [[rust-analyzer.lens.references.adt.enable]]rust-analyzer.lens.references.adt.enable (default: `false`)::
 +
 --
@@ -545,6 +610,11 @@ This config takes a map of crate names with the exported proc-macro names to ign
 --
 Internal config, path to proc-macro server executable (typically,
 this is rust-analyzer itself, but we override this in tests).
+--
+[[rust-analyzer.references.excludeImports]]rust-analyzer.references.excludeImports (default: `false`)::
++
+--
+Exclude imports from find-all-references.
 --
 [[rust-analyzer.runnables.command]]rust-analyzer.runnables.command (default: `null`)::
 +

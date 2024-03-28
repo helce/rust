@@ -17,7 +17,7 @@ use rustc_middle::mir::{
     RETURN_PLACE,
 };
 use rustc_middle::ty::layout::{LayoutError, LayoutOf, LayoutOfHelpers, TyAndLayout};
-use rustc_middle::ty::subst::{InternalSubsts, Subst};
+use rustc_middle::ty::InternalSubsts;
 use rustc_middle::ty::{self, ConstKind, Instance, ParamEnv, Ty, TyCtxt, TypeVisitable};
 use rustc_span::{def_id::DefId, Span};
 use rustc_target::abi::{self, HasDataLayout, Size, TargetDataLayout};
@@ -471,7 +471,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
             return None;
         }
 
-        self.ecx.mir_const_to_op(&c.literal, None).ok()
+        self.ecx.const_to_op(&c.literal, None).ok()
     }
 
     /// Returns the value, if any, of evaluating `place`.
@@ -633,7 +633,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
         }
         if !rvalue
             .ty(&self.ecx.frame().body.local_decls, *self.ecx.tcx)
-            .is_sized(self.ecx.tcx, self.param_env)
+            .is_sized(*self.ecx.tcx, self.param_env)
         {
             // the interpreter doesn't support unsized locals (only unsized arguments),
             // but rustc does (in a kinda broken way), so we have to skip them here

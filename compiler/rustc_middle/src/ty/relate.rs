@@ -5,8 +5,8 @@
 //! subtyping, type equality, etc.
 
 use crate::ty::error::{ExpectedFound, TypeError};
-use crate::ty::subst::{GenericArg, GenericArgKind, Subst, SubstsRef};
 use crate::ty::{self, ImplSubject, Term, TermKind, Ty, TyCtxt, TypeFoldable};
+use crate::ty::{GenericArg, GenericArgKind, SubstsRef};
 use rustc_hir as ast;
 use rustc_hir::def_id::DefId;
 use rustc_span::DUMMY_SP;
@@ -632,11 +632,7 @@ pub fn super_relate_consts<'tcx, R: TypeRelation<'tcx>>(
         // While this is slightly incorrect, it shouldn't matter for `min_const_generics`
         // and is the better alternative to waiting until `generic_const_exprs` can
         // be stabilized.
-        (ty::ConstKind::Unevaluated(au), ty::ConstKind::Unevaluated(bu))
-            if au.def == bu.def && au.promoted == bu.promoted =>
-        {
-            assert_eq!(au.promoted, ());
-
+        (ty::ConstKind::Unevaluated(au), ty::ConstKind::Unevaluated(bu)) if au.def == bu.def => {
             let substs = relation.relate_with_variance(
                 ty::Variance::Invariant,
                 ty::VarianceDiagInfo::default(),
@@ -644,11 +640,7 @@ pub fn super_relate_consts<'tcx, R: TypeRelation<'tcx>>(
                 bu.substs,
             )?;
             return Ok(tcx.mk_const(ty::ConstS {
-                kind: ty::ConstKind::Unevaluated(ty::Unevaluated {
-                    def: au.def,
-                    substs,
-                    promoted: (),
-                }),
+                kind: ty::ConstKind::Unevaluated(ty::UnevaluatedConst { def: au.def, substs }),
                 ty: a.ty(),
             }));
         }

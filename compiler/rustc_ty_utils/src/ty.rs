@@ -1,7 +1,6 @@
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
-use rustc_middle::ty::subst::Subst;
 use rustc_middle::ty::{self, Binder, Predicate, PredicateKind, ToPredicate, Ty, TyCtxt};
 use rustc_trait_selection::traits;
 
@@ -86,9 +85,13 @@ fn impl_defaultness(tcx: TyCtxt<'_>, def_id: DefId) -> hir::Defaultness {
 ///     - a type parameter or projection whose Sizedness can't be known
 ///     - a tuple of type parameters or projections, if there are multiple
 ///       such.
-///     - an Error, if a type contained itself. The representability
-///       check should catch this case.
-fn adt_sized_constraint(tcx: TyCtxt<'_>, def_id: DefId) -> ty::AdtSizedConstraint<'_> {
+///     - an Error, if a type is infinitely sized
+fn adt_sized_constraint(tcx: TyCtxt<'_>, def_id: DefId) -> &[Ty<'_>] {
+    if let Some(def_id) = def_id.as_local() {
+        if matches!(tcx.representability(def_id), ty::Representability::Infinite) {
+            return tcx.intern_type_list(&[tcx.ty_error()]);
+        }
+    }
     let def = tcx.adt_def(def_id);
 
     let result = tcx.mk_type_list(
@@ -100,7 +103,7 @@ fn adt_sized_constraint(tcx: TyCtxt<'_>, def_id: DefId) -> ty::AdtSizedConstrain
 
     debug!("adt_sized_constraint: {:?} => {:?}", def, result);
 
-    ty::AdtSizedConstraint(result)
+    result
 }
 
 /// See `ParamEnv` struct definition for details.
@@ -134,6 +137,7 @@ fn param_env(tcx: TyCtxt<'_>, def_id: DefId) -> ty::ParamEnv<'_> {
     let local_did = def_id.as_local();
     let hir_id = local_did.map(|def_id| tcx.hir().local_def_id_to_hir_id(def_id));
 
+    // FIXME(consts): This is not exactly in line with the constness query.
     let constness = match hir_id {
         Some(hir_id) => match tcx.hir().get(hir_id) {
             hir::Node::TraitItem(hir::TraitItem { kind: hir::TraitItemKind::Fn(..), .. })
@@ -162,7 +166,7 @@ fn param_env(tcx: TyCtxt<'_>, def_id: DefId) -> ty::ParamEnv<'_> {
             }) => hir::Constness::Const,
 
             hir::Node::ImplItem(hir::ImplItem {
-                kind: hir::ImplItemKind::TyAlias(..) | hir::ImplItemKind::Fn(..),
+                kind: hir::ImplItemKind::Type(..) | hir::ImplItemKind::Fn(..),
                 ..
             }) => {
                 let parent_hir_id = tcx.hir().get_parent_node(hir_id);
@@ -198,6 +202,10 @@ fn param_env(tcx: TyCtxt<'_>, def_id: DefId) -> ty::ParamEnv<'_> {
 
             _ => hir::Constness::NotConst,
         },
+        // FIXME(consts): It's suspicious that a param-env for a foreign item
+        // will always have NotConst param-env, though we don't typically use
+        // that param-env for anything meaningful right now, so it's likely
+        // not an issue.
         None => hir::Constness::NotConst,
     };
 

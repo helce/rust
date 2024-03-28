@@ -82,9 +82,10 @@ pub enum MirPhase {
     ///    access to. This occurs in generator bodies. Such locals do not behave like other locals,
     ///    because they eg may be aliased in surprising ways. Runtime MIR has no such special locals -
     ///    all generator bodies are lowered and so all places that look like locals really are locals.
-    ///  - Const prop lints: The lint pass which reports eg `200_u8 + 200_u8` as an error is run as a
-    ///    part of analysis to runtime MIR lowering. This means that transformations which may supress
-    ///    such errors may not run on analysis MIR.
+    ///
+    /// Also note that the lint pass which reports eg `200_u8 + 200_u8` as an error is run as a part
+    /// of analysis to runtime MIR lowering. To ensure lints are reported reliably, this means that
+    /// transformations which may supress such errors should not run on analysis MIR.
     Runtime(RuntimePhase),
 }
 
@@ -829,6 +830,9 @@ pub type AssertMessage<'tcx> = AssertKind<Operand<'tcx>>;
 ///    generator has more than one variant, the parent place's variant index must be set, indicating
 ///    which variant is being used. If it has just one variant, the variant index may or may not be
 ///    included - the single possible variant is inferred if it is not included.
+///  - [`OpaqueCast`](ProjectionElem::OpaqueCast): This projection changes the place's type to the
+///    given one, and makes no other changes. A `OpaqueCast` projection on any type other than an
+///    opaque type from the current crate is not well-formed.
 ///  - [`ConstantIndex`](ProjectionElem::ConstantIndex): Computes an offset in units of `T` into the
 ///    place as described in the documentation for the `ProjectionElem`. The resulting address is
 ///    the parent's address plus that offset, and the type is `T`. This is only legal if the parent
@@ -928,6 +932,10 @@ pub enum ProjectionElem<V, T> {
     ///
     /// The included Symbol is the name of the variant, used for printing MIR.
     Downcast(Option<Symbol>, VariantIdx),
+
+    /// Like an explicit cast from an opaque type to a concrete type, but without
+    /// requiring an intermediate variable.
+    OpaqueCast(T),
 }
 
 /// Alias for projections as they appear in places, where the base is a place
@@ -1141,8 +1149,12 @@ pub enum CastKind {
     Pointer(PointerCast),
     /// Cast into a dyn* object.
     DynStar,
-    /// Remaining unclassified casts.
-    Misc,
+    IntToInt,
+    FloatToInt,
+    FloatToFloat,
+    IntToFloat,
+    PtrToPtr,
+    FnPtrToPtr,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
@@ -1233,11 +1245,11 @@ pub enum BinOp {
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 mod size_asserts {
     use super::*;
-    // These are in alphabetical order, which is easy to maintain.
-    #[cfg(not(bootstrap))]
+    // tidy-alphabetical-start
     static_assert_size!(AggregateKind<'_>, 40);
     static_assert_size!(Operand<'_>, 24);
     static_assert_size!(Place<'_>, 16);
     static_assert_size!(PlaceElem<'_>, 24);
     static_assert_size!(Rvalue<'_>, 40);
+    // tidy-alphabetical-end
 }

@@ -44,7 +44,6 @@
 
 #[cfg(not(no_global_oom_handling))]
 use core::char::{decode_utf16, REPLACEMENT_CHARACTER};
-#[cfg(not(bootstrap))]
 use core::error::Error;
 use core::fmt;
 use core::hash;
@@ -68,7 +67,7 @@ use core::str::Utf8Chunks;
 use crate::borrow::{Cow, ToOwned};
 use crate::boxed::Box;
 use crate::collections::TryReserveError;
-use crate::str::{self, Chars, Utf8Error};
+use crate::str::{self, from_utf8_unchecked_mut, Chars, Utf8Error};
 #[cfg(not(no_global_oom_handling))]
 use crate::str::{from_boxed_utf8_unchecked, FromStr};
 use crate::vec::Vec;
@@ -1850,6 +1849,35 @@ impl String {
         let slice = self.vec.into_boxed_slice();
         unsafe { from_boxed_utf8_unchecked(slice) }
     }
+
+    /// Consumes and leaks the `String`, returning a mutable reference to the contents,
+    /// `&'static mut str`.
+    ///
+    /// This is mainly useful for data that lives for the remainder of
+    /// the program's life. Dropping the returned reference will cause a memory
+    /// leak.
+    ///
+    /// It does not reallocate or shrink the `String`,
+    /// so the leaked allocation may include unused capacity that is not part
+    /// of the returned slice.
+    ///
+    /// # Examples
+    ///
+    /// Simple usage:
+    ///
+    /// ```
+    /// #![feature(string_leak)]
+    ///
+    /// let x = String::from("bucket");
+    /// let static_ref: &'static mut str = x.leak();
+    /// assert_eq!(static_ref, "bucket");
+    /// ```
+    #[unstable(feature = "string_leak", issue = "102929")]
+    #[inline]
+    pub fn leak(self) -> &'static mut str {
+        let slice = self.vec.leak();
+        unsafe { from_utf8_unchecked_mut(slice) }
+    }
 }
 
 impl FromUtf8Error {
@@ -1941,7 +1969,6 @@ impl fmt::Display for FromUtf16Error {
     }
 }
 
-#[cfg(not(bootstrap))]
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Error for FromUtf8Error {
     #[allow(deprecated)]
@@ -1950,7 +1977,6 @@ impl Error for FromUtf8Error {
     }
 }
 
-#[cfg(not(bootstrap))]
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Error for FromUtf16Error {
     #[allow(deprecated)]

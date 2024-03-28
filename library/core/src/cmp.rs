@@ -22,6 +22,7 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
+use crate::const_closure::ConstFnMutClosure;
 use crate::marker::Destruct;
 use crate::marker::StructuralPartialEq;
 
@@ -204,20 +205,10 @@ use self::Ordering::*;
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(alias = "==")]
 #[doc(alias = "!=")]
-#[cfg_attr(
-    bootstrap,
-    rustc_on_unimplemented(
-        message = "can't compare `{Self}` with `{Rhs}`",
-        label = "no implementation for `{Self} == {Rhs}`"
-    )
-)]
-#[cfg_attr(
-    not(bootstrap),
-    rustc_on_unimplemented(
-        message = "can't compare `{Self}` with `{Rhs}`",
-        label = "no implementation for `{Self} == {Rhs}`",
-        append_const_msg,
-    )
+#[rustc_on_unimplemented(
+    message = "can't compare `{Self}` with `{Rhs}`",
+    label = "no implementation for `{Self} == {Rhs}`",
+    append_const_msg
 )]
 #[const_trait]
 #[rustc_diagnostic_item = "PartialEq"]
@@ -1076,20 +1067,10 @@ impl const PartialOrd for Ordering {
 #[doc(alias = "<")]
 #[doc(alias = "<=")]
 #[doc(alias = ">=")]
-#[cfg_attr(
-    bootstrap,
-    rustc_on_unimplemented(
-        message = "can't compare `{Self}` with `{Rhs}`",
-        label = "no implementation for `{Self} < {Rhs}` and `{Self} > {Rhs}`",
-    )
-)]
-#[cfg_attr(
-    not(bootstrap),
-    rustc_on_unimplemented(
-        message = "can't compare `{Self}` with `{Rhs}`",
-        label = "no implementation for `{Self} < {Rhs}` and `{Self} > {Rhs}`",
-        append_const_msg,
-    )
+#[rustc_on_unimplemented(
+    message = "can't compare `{Self}` with `{Rhs}`",
+    label = "no implementation for `{Self} < {Rhs}` and `{Self} > {Rhs}`",
+    append_const_msg
 )]
 #[const_trait]
 #[rustc_diagnostic_item = "PartialOrd"]
@@ -1242,7 +1223,12 @@ pub const fn min<T: ~const Ord + ~const Destruct>(v1: T, v2: T) -> T {
 #[inline]
 #[must_use]
 #[stable(feature = "cmp_min_max_by", since = "1.53.0")]
-pub fn min_by<T, F: FnOnce(&T, &T) -> Ordering>(v1: T, v2: T, compare: F) -> T {
+#[rustc_const_unstable(feature = "const_cmp", issue = "92391")]
+pub const fn min_by<T, F: ~const FnOnce(&T, &T) -> Ordering>(v1: T, v2: T, compare: F) -> T
+where
+    T: ~const Destruct,
+    F: ~const Destruct,
+{
     match compare(&v1, &v2) {
         Ordering::Less | Ordering::Equal => v1,
         Ordering::Greater => v2,
@@ -1264,8 +1250,24 @@ pub fn min_by<T, F: FnOnce(&T, &T) -> Ordering>(v1: T, v2: T, compare: F) -> T {
 #[inline]
 #[must_use]
 #[stable(feature = "cmp_min_max_by", since = "1.53.0")]
-pub fn min_by_key<T, F: FnMut(&T) -> K, K: Ord>(v1: T, v2: T, mut f: F) -> T {
-    min_by(v1, v2, |v1, v2| f(v1).cmp(&f(v2)))
+#[rustc_const_unstable(feature = "const_cmp", issue = "92391")]
+pub const fn min_by_key<T, F: ~const FnMut(&T) -> K, K: ~const Ord>(v1: T, v2: T, mut f: F) -> T
+where
+    T: ~const Destruct,
+    F: ~const Destruct,
+    K: ~const Destruct,
+{
+    const fn imp<T, F: ~const FnMut(&T) -> K, K: ~const Ord>(
+        f: &mut F,
+        (v1, v2): (&T, &T),
+    ) -> Ordering
+    where
+        T: ~const Destruct,
+        K: ~const Destruct,
+    {
+        f(v1).cmp(&f(v2))
+    }
+    min_by(v1, v2, ConstFnMutClosure::new(&mut f, imp))
 }
 
 /// Compares and returns the maximum of two values.
@@ -1306,7 +1308,12 @@ pub const fn max<T: ~const Ord + ~const Destruct>(v1: T, v2: T) -> T {
 #[inline]
 #[must_use]
 #[stable(feature = "cmp_min_max_by", since = "1.53.0")]
-pub fn max_by<T, F: FnOnce(&T, &T) -> Ordering>(v1: T, v2: T, compare: F) -> T {
+#[rustc_const_unstable(feature = "const_cmp", issue = "92391")]
+pub const fn max_by<T, F: ~const FnOnce(&T, &T) -> Ordering>(v1: T, v2: T, compare: F) -> T
+where
+    T: ~const Destruct,
+    F: ~const Destruct,
+{
     match compare(&v1, &v2) {
         Ordering::Less | Ordering::Equal => v2,
         Ordering::Greater => v1,
@@ -1328,8 +1335,24 @@ pub fn max_by<T, F: FnOnce(&T, &T) -> Ordering>(v1: T, v2: T, compare: F) -> T {
 #[inline]
 #[must_use]
 #[stable(feature = "cmp_min_max_by", since = "1.53.0")]
-pub fn max_by_key<T, F: FnMut(&T) -> K, K: Ord>(v1: T, v2: T, mut f: F) -> T {
-    max_by(v1, v2, |v1, v2| f(v1).cmp(&f(v2)))
+#[rustc_const_unstable(feature = "const_cmp", issue = "92391")]
+pub const fn max_by_key<T, F: ~const FnMut(&T) -> K, K: ~const Ord>(v1: T, v2: T, mut f: F) -> T
+where
+    T: ~const Destruct,
+    F: ~const Destruct,
+    K: ~const Destruct,
+{
+    const fn imp<T, F: ~const FnMut(&T) -> K, K: ~const Ord>(
+        f: &mut F,
+        (v1, v2): (&T, &T),
+    ) -> Ordering
+    where
+        T: ~const Destruct,
+        K: ~const Destruct,
+    {
+        f(v1).cmp(&f(v2))
+    }
+    max_by(v1, v2, ConstFnMutClosure::new(&mut f, imp))
 }
 
 // Implementation of PartialEq, Eq, PartialOrd and Ord for primitive types

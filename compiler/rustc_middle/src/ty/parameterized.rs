@@ -1,3 +1,4 @@
+use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def_id::{DefId, DefIndex};
 use rustc_index::vec::{Idx, IndexVec};
 
@@ -29,6 +30,10 @@ impl<I: Idx + 'static, T: ParameterizedOverTcx> ParameterizedOverTcx for IndexVe
     type Value<'tcx> = IndexVec<I, T::Value<'tcx>>;
 }
 
+impl<I: 'static, T: ParameterizedOverTcx> ParameterizedOverTcx for FxHashMap<I, T> {
+    type Value<'tcx> = FxHashMap<I, T::Value<'tcx>>;
+}
+
 impl<T: ParameterizedOverTcx> ParameterizedOverTcx for ty::Binder<'static, T> {
     type Value<'tcx> = ty::Binder<'tcx, T::Value<'tcx>>;
 }
@@ -56,6 +61,7 @@ trivially_parameterized_over_tcx! {
     crate::middle::resolve_lifetime::ObjectLifetimeDefault,
     crate::mir::ConstQualifs,
     ty::AssocItemContainer,
+    ty::DeducedParamAttrs,
     ty::Generics,
     ty::ImplPolarity,
     ty::ReprOptions,
@@ -77,6 +83,7 @@ trivially_parameterized_over_tcx! {
     rustc_hir::def::DefKind,
     rustc_hir::def_id::DefIndex,
     rustc_hir::definitions::DefKey,
+    rustc_index::bit_set::BitSet<u32>,
     rustc_index::bit_set::FiniteBitSet<u32>,
     rustc_session::cstore::ForeignModule,
     rustc_session::cstore::LinkagePreference,

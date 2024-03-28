@@ -122,6 +122,7 @@ use crate::util::{
     check_run, exe, libdir, mtime, output, run, run_suppressed, try_run, try_run_suppressed, CiEnv,
 };
 
+mod bolt;
 mod builder;
 mod cache;
 mod cc_detect;
@@ -198,9 +199,12 @@ const EXTRA_CHECK_CFGS: &[(Option<Mode>, &'static str, Option<&[&'static str]>)]
     (None, "bootstrap", None),
     (Some(Mode::Rustc), "parallel_compiler", None),
     (Some(Mode::ToolRustc), "parallel_compiler", None),
+    (Some(Mode::Codegen), "parallel_compiler", None),
     (Some(Mode::Std), "stdarch_intel_sde", None),
     (Some(Mode::Std), "no_fp_fmt_parse", None),
     (Some(Mode::Std), "no_global_oom_handling", None),
+    (Some(Mode::Std), "no_rc", None),
+    (Some(Mode::Std), "no_sync", None),
     (Some(Mode::Std), "freebsd12", None),
     (Some(Mode::Std), "backtrace_in_libstd", None),
     /* Extra values not defined in the built-in targets yet, but used in std */
@@ -226,6 +230,8 @@ const EXTRA_CHECK_CFGS: &[(Option<Mode>, &'static str, Option<&[&'static str]>)]
     // FIXME: Used by proc-macro2, but we should not be triggering on external dependencies.
     (Some(Mode::Rustc), "span_locations", None),
     (Some(Mode::ToolRustc), "span_locations", None),
+    // Can be passed in RUSTFLAGS to prevent direct syscalls in rustix.
+    (None, "rustix_use_libc", None),
 ];
 
 /// A structure representing a Rust compiler.
@@ -395,7 +401,7 @@ impl Build {
     /// line and the filesystem `config`.
     ///
     /// By default all build output will be placed in the current directory.
-    pub fn new(config: Config) -> Build {
+    pub fn new(mut config: Config) -> Build {
         let src = config.src.clone();
         let out = config.out.clone();
 
@@ -456,19 +462,22 @@ impl Build {
             .expect("failed to read src/version");
         let version = version.trim();
 
-        let bootstrap_out = if std::env::var("BOOTSTRAP_PYTHON").is_ok() {
-            out.join("bootstrap").join("debug")
-        } else {
-            let workspace_target_dir = std::env::var("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| src.join("target"));
-            let bootstrap_out = workspace_target_dir.join("debug");
-            if !bootstrap_out.join("rustc").exists() && !cfg!(test) {
-                // this restriction can be lifted whenever https://github.com/rust-lang/rfcs/pull/3028 is implemented
-                panic!("run `cargo build --bins` before `cargo run`")
-            }
-            bootstrap_out
-        };
+        let bootstrap_out = std::env::current_exe()
+            .expect("could not determine path to running process")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        if !bootstrap_out.join(exe("rustc", config.build)).exists() && !cfg!(test) {
+            // this restriction can be lifted whenever https://github.com/rust-lang/rfcs/pull/3028 is implemented
+            panic!(
+                "`rustc` not found in {}, run `cargo build --bins` before `cargo run`",
+                bootstrap_out.display()
+            )
+        }
+
+        if rust_info.is_from_tarball() && config.description.is_none() {
+            config.description = Some("built from a source tarball".to_owned());
+        }
 
         let mut build = Build {
             initial_rustc: config.initial_rustc.clone(),
@@ -540,13 +549,8 @@ impl Build {
 
         // Make sure we update these before gathering metadata so we don't get an error about missing
         // Cargo.toml files.
-        let rust_submodules = [
-            "src/tools/rust-installer",
-            "src/tools/cargo",
-            "src/tools/miri",
-            "library/backtrace",
-            "library/stdarch",
-        ];
+        let rust_submodules =
+            ["src/tools/rust-installer", "src/tools/cargo", "library/backtrace", "library/stdarch"];
         for s in rust_submodules {
             build.update_submodule(Path::new(s));
         }
@@ -574,7 +578,9 @@ impl Build {
 
         // NOTE: The check for the empty directory is here because when running x.py the first time,
         // the submodule won't be checked out. Check it out now so we can build it.
-        if !channel::GitInfo::new(false, &absolute_path).is_git() && !dir_is_empty(&absolute_path) {
+        if !channel::GitInfo::new(false, &absolute_path).is_managed_git_subrepository()
+            && !dir_is_empty(&absolute_path)
+        {
             return;
         }
 
@@ -645,7 +651,7 @@ impl Build {
             // Sample output: `submodule.src/rust-installer.path src/tools/rust-installer`
             let submodule = Path::new(line.splitn(2, ' ').nth(1).unwrap());
             // Don't update the submodule unless it's already been cloned.
-            if channel::GitInfo::new(false, submodule).is_git() {
+            if channel::GitInfo::new(false, submodule).is_managed_git_subrepository() {
                 self.update_submodule(submodule);
             }
         }
@@ -670,6 +676,9 @@ impl Build {
         if let Subcommand::Setup { profile } = &self.config.cmd {
             return setup::setup(&self.config, *profile);
         }
+
+        // Download rustfmt early so that it can be used in rust-analyzer configs.
+        let _ = &builder::Builder::new(&self).initial_rustfmt();
 
         {
             let builder = builder::Builder::new(&self);
@@ -823,6 +832,11 @@ impl Build {
     /// Output directory for all documentation for a target
     fn doc_out(&self, target: TargetSelection) -> PathBuf {
         self.out.join(&*target.triple).join("doc")
+    }
+
+    /// Output directory for all JSON-formatted documentation for a target
+    fn json_doc_out(&self, target: TargetSelection) -> PathBuf {
+        self.out.join(&*target.triple).join("json-doc")
     }
 
     fn test_out(&self, target: TargetSelection) -> PathBuf {
@@ -1253,7 +1267,7 @@ impl Build {
         match &self.config.channel[..] {
             "stable" => num.to_string(),
             "beta" => {
-                if self.rust_info.is_git() && !self.config.ignore_git {
+                if self.rust_info.is_managed_git_subrepository() && !self.config.ignore_git {
                     format!("{}-beta.{}", num, self.beta_prerelease_version())
                 } else {
                     format!("{}-beta", num)
@@ -1305,10 +1319,6 @@ impl Build {
     /// Returns the value of `package_vers` above for Rust itself.
     fn rust_package_vers(&self) -> String {
         self.package_vers(&self.version)
-    }
-
-    fn llvm_link_tools_dynamically(&self, target: TargetSelection) -> bool {
-        target.contains("linux-gnu") || target.contains("apple-darwin")
     }
 
     /// Returns the `version` string associated with this compiler for Rust

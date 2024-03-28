@@ -15,7 +15,7 @@ use rustc_infer::infer::region_constraints::{GenericKind, VarInfos, VerifyBound,
 use rustc_infer::infer::{InferCtxt, NllRegionVariableOrigin, RegionVariableOrigin};
 use rustc_middle::mir::{
     Body, ClosureOutlivesRequirement, ClosureOutlivesSubject, ClosureRegionRequirements,
-    ConstraintCategory, Local, Location, ReturnConstraint,
+    ConstraintCategory, Local, Location, ReturnConstraint, TerminatorKind,
 };
 use rustc_middle::traits::ObligationCause;
 use rustc_middle::traits::ObligationCauseCode;
@@ -565,7 +565,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     #[instrument(skip(self, infcx, body, polonius_output), level = "debug")]
     pub(super) fn solve(
         &mut self,
-        infcx: &InferCtxt<'_, 'tcx>,
+        infcx: &InferCtxt<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
         body: &Body<'tcx>,
         polonius_output: Option<Rc<PoloniusOutput>>,
@@ -835,7 +835,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// 'a`. See `TypeTest` for more details.
     fn check_type_tests(
         &self,
-        infcx: &InferCtxt<'_, 'tcx>,
+        infcx: &InferCtxt<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
         body: &Body<'tcx>,
         mut propagated_outlives_requirements: Option<&mut Vec<ClosureOutlivesRequirement<'tcx>>>,
@@ -923,7 +923,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     #[instrument(level = "debug", skip(self, infcx, propagated_outlives_requirements))]
     fn try_promote_type_test(
         &self,
-        infcx: &InferCtxt<'_, 'tcx>,
+        infcx: &InferCtxt<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
         body: &Body<'tcx>,
         type_test: &TypeTest<'tcx>,
@@ -1036,7 +1036,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     #[instrument(level = "debug", skip(self, infcx))]
     fn try_promote_type_test_subject(
         &self,
-        infcx: &InferCtxt<'_, 'tcx>,
+        infcx: &InferCtxt<'tcx>,
         ty: Ty<'tcx>,
     ) -> Option<ClosureOutlivesSubject<'tcx>> {
         let tcx = infcx.tcx;
@@ -1212,7 +1212,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// `point`.
     fn eval_verify_bound(
         &self,
-        infcx: &InferCtxt<'_, 'tcx>,
+        infcx: &InferCtxt<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
         body: &Body<'tcx>,
         generic_ty: Ty<'tcx>,
@@ -1262,7 +1262,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
 
     fn eval_if_eq(
         &self,
-        infcx: &InferCtxt<'_, 'tcx>,
+        infcx: &InferCtxt<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
         generic_ty: Ty<'tcx>,
         lower_bound: RegionVid,
@@ -1398,7 +1398,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// whether any of the constraints were too strong. In particular,
     /// we want to check for a case where a universally quantified
     /// region exceeded its bounds. Consider:
-    /// ```compile_fail,E0312
+    /// ```compile_fail
     /// fn foo<'a, 'b>(x: &'a u32) -> &'b u32 { x }
     /// ```
     /// In this case, returning `x` requires `&'a u32 <: &'b u32`
@@ -1451,7 +1451,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// <https://smallcultfollowing.com/babysteps/blog/2019/01/17/polonius-and-region-errors/>
     ///
     /// In the canonical example
-    /// ```compile_fail,E0312
+    /// ```compile_fail
     /// fn foo<'a, 'b>(x: &'a u32) -> &'b u32 { x }
     /// ```
     /// returning `x` requires `&'a u32 <: &'b u32` and hence we establish (transitively) a
@@ -1718,7 +1718,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
 
     fn check_member_constraints(
         &self,
-        infcx: &InferCtxt<'_, 'tcx>,
+        infcx: &InferCtxt<'tcx>,
         errors_buffer: &mut RegionErrors<'tcx>,
     ) {
         let member_constraints = self.member_constraints.clone();
@@ -2235,6 +2235,27 @@ impl<'tcx> RegionInferenceContext<'tcx> {
 
     pub(crate) fn universe_info(&self, universe: ty::UniverseIndex) -> UniverseInfo<'tcx> {
         self.universe_causes[&universe].clone()
+    }
+
+    /// Tries to find the terminator of the loop in which the region 'r' resides.
+    /// Returns the location of the terminator if found.
+    pub(crate) fn find_loop_terminator_location(
+        &self,
+        r: RegionVid,
+        body: &Body<'_>,
+    ) -> Option<Location> {
+        let scc = self.constraint_sccs.scc(r.to_region_vid());
+        let locations = self.scc_values.locations_outlived_by(scc);
+        for location in locations {
+            let bb = &body[location.block];
+            if let Some(terminator) = &bb.terminator {
+                // terminator of a loop should be TerminatorKind::FalseUnwind
+                if let TerminatorKind::FalseUnwind { .. } = terminator.kind {
+                    return Some(location);
+                }
+            }
+        }
+        None
     }
 }
 

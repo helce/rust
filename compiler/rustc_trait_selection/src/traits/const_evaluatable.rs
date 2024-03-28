@@ -9,14 +9,12 @@
 //! `thir_abstract_const` which can then be checked for structural equality with other
 //! generic constants mentioned in the `caller_bounds` of the current environment.
 use rustc_errors::ErrorGuaranteed;
-use rustc_hir::def::DefKind;
 use rustc_infer::infer::InferCtxt;
 use rustc_middle::mir::interpret::ErrorHandled;
 use rustc_middle::ty::abstract_const::{
     walk_abstract_const, AbstractConst, FailureKind, Node, NotConstEvaluatable,
 };
 use rustc_middle::ty::{self, TyCtxt, TypeVisitable};
-use rustc_session::lint;
 use rustc_span::Span;
 
 use std::iter;
@@ -101,7 +99,7 @@ impl<'tcx> ConstUnifyCtxt<'tcx> {
                         a_uv == b_uv
                     }
                     // FIXME(generic_const_exprs): We may want to either actually try
-                    // to evaluate `a_ct` and `b_ct` if they are are fully concrete or something like
+                    // to evaluate `a_ct` and `b_ct` if they are fully concrete or something like
                     // this, for now we just return false here.
                     _ => false,
                 }
@@ -138,7 +136,7 @@ impl<'tcx> ConstUnifyCtxt<'tcx> {
 #[instrument(skip(tcx), level = "debug")]
 pub fn try_unify_abstract_consts<'tcx>(
     tcx: TyCtxt<'tcx>,
-    (a, b): (ty::Unevaluated<'tcx, ()>, ty::Unevaluated<'tcx, ()>),
+    (a, b): (ty::UnevaluatedConst<'tcx>, ty::UnevaluatedConst<'tcx>),
     param_env: ty::ParamEnv<'tcx>,
 ) -> bool {
     (|| {
@@ -159,13 +157,22 @@ pub fn try_unify_abstract_consts<'tcx>(
 
 /// Check if a given constant can be evaluated.
 #[instrument(skip(infcx), level = "debug")]
-pub fn is_const_evaluatable<'cx, 'tcx>(
-    infcx: &InferCtxt<'cx, 'tcx>,
-    uv: ty::Unevaluated<'tcx, ()>,
+pub fn is_const_evaluatable<'tcx>(
+    infcx: &InferCtxt<'tcx>,
+    ct: ty::Const<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     span: Span,
 ) -> Result<(), NotConstEvaluatable> {
     let tcx = infcx.tcx;
+    let uv = match ct.kind() {
+        ty::ConstKind::Unevaluated(uv) => uv,
+        ty::ConstKind::Param(_)
+        | ty::ConstKind::Bound(_, _)
+        | ty::ConstKind::Placeholder(_)
+        | ty::ConstKind::Value(_)
+        | ty::ConstKind::Error(_) => return Ok(()),
+        ty::ConstKind::Infer(_) => return Err(NotConstEvaluatable::MentionsInfer),
+    };
 
     if tcx.features().generic_const_exprs {
         if let Some(ct) = AbstractConst::new(tcx, uv)? {
@@ -235,39 +242,25 @@ pub fn is_const_evaluatable<'cx, 'tcx>(
                   .emit()
             }
 
-            Err(ErrorHandled::TooGeneric) => Err(if uv.has_infer_types_or_consts() {
-                NotConstEvaluatable::MentionsInfer
-                } else if uv.has_param_types_or_consts() {
-                NotConstEvaluatable::MentionsParam
-            } else {
-                let guar = infcx.tcx.sess.delay_span_bug(span, format!("Missing value for constant, but no error reported?"));
-                NotConstEvaluatable::Error(guar)
-            }),
+            Err(ErrorHandled::TooGeneric) => {
+                let err = if uv.has_non_region_infer() {
+                    NotConstEvaluatable::MentionsInfer
+                } else if uv.has_non_region_param() {
+                    NotConstEvaluatable::MentionsParam
+                } else {
+                    let guar = infcx.tcx.sess.delay_span_bug(span, format!("Missing value for constant, but no error reported?"));
+                    NotConstEvaluatable::Error(guar)
+                };
+
+                Err(err)
+            },
             Err(ErrorHandled::Linted) => {
                 let reported =
                     infcx.tcx.sess.delay_span_bug(span, "constant in type had error reported as lint");
                 Err(NotConstEvaluatable::Error(reported))
             }
             Err(ErrorHandled::Reported(e)) => Err(NotConstEvaluatable::Error(e)),
-            Ok(_) => {
-              if uv.substs.has_param_types_or_consts() {
-                  assert!(matches!(infcx.tcx.def_kind(uv.def.did), DefKind::AnonConst));
-                  let mir_body = infcx.tcx.mir_for_ctfe_opt_const_arg(uv.def);
-
-                  if mir_body.is_polymorphic {
-                      let Some(local_def_id) = uv.def.did.as_local() else { return Ok(()) };
-                      tcx.struct_span_lint_hir(
-                          lint::builtin::CONST_EVALUATABLE_UNCHECKED,
-                          tcx.hir().local_def_id_to_hir_id(local_def_id),
-                          span,
-                          |err| {
-                              err.build("cannot use constants which depend on generic parameters in types").emit();
-                        })
-                  }
-              }
-
-              Ok(())
-            },
+            Ok(_) => Ok(()),
         }
     }
 }
@@ -281,7 +274,7 @@ fn satisfied_from_param_env<'tcx>(
     for pred in param_env.caller_bounds() {
         match pred.kind().skip_binder() {
             ty::PredicateKind::ConstEvaluatable(uv) => {
-                if let Some(b_ct) = AbstractConst::new(tcx, uv)? {
+                if let Some(b_ct) = AbstractConst::from_const(tcx, uv)? {
                     let const_unify_ctxt = ConstUnifyCtxt { tcx, param_env };
 
                     // Try to unify with each subtree in the AbstractConst to allow for

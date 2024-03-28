@@ -51,7 +51,7 @@ lint_non_existant_doc_keyword = found non-existing keyword `{$keyword}` used in 
     .help = only existing keywords are allowed in core/std
 
 lint_diag_out_of_impl =
-    diagnostics should only be created in `SessionDiagnostic`/`AddSubdiagnostic` impls
+    diagnostics should only be created in `IntoDiagnostic`/`AddToDiagnostic` impls
 
 lint_untranslatable_diag = diagnostics should be created using translatable messages
 
@@ -433,3 +433,8 @@ lint_check_name_unknown_tool = unknown lint tool: `{$tool_name}`
 lint_check_name_warning = {$msg}
 
 lint_check_name_deprecated = lint name `{$lint_name}` is deprecated and does not have an effect anymore. Use: {$new_name}
+
+lint_opaque_hidden_inferred_bound = opaque type `{$ty}` does not satisfy its associated type bounds
+    .specifically = this associated type bound is unsatisfied for `{$proj_ty}`
+
+lint_opaque_hidden_inferred_bound_sugg = add this bound

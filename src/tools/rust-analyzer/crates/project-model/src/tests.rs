@@ -92,13 +92,17 @@ fn rooted_project_json(data: ProjectJsonData) -> ProjectJson {
 }
 
 fn to_crate_graph(project_workspace: ProjectWorkspace) -> CrateGraph {
-    project_workspace.to_crate_graph(&mut |_, _| Ok(Vec::new()), &mut {
-        let mut counter = 0;
-        move |_path| {
-            counter += 1;
-            Some(FileId(counter))
-        }
-    })
+    project_workspace.to_crate_graph(
+        &mut |_, _| Ok(Vec::new()),
+        &mut {
+            let mut counter = 0;
+            move |_path| {
+                counter += 1;
+                Some(FileId(counter))
+            }
+        },
+        &Default::default(),
+    )
 }
 
 fn check_crate_graph(crate_graph: CrateGraph, expect: Expect) {
@@ -181,6 +185,9 @@ fn cargo_hello_world_project_model_with_wildcard_overrides() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -256,6 +263,9 @@ fn cargo_hello_world_project_model_with_wildcard_overrides() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -331,6 +341,9 @@ fn cargo_hello_world_project_model_with_wildcard_overrides() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -406,6 +419,9 @@ fn cargo_hello_world_project_model_with_wildcard_overrides() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -472,6 +488,9 @@ fn cargo_hello_world_project_model_with_wildcard_overrides() {
                         origin: CratesIo {
                             repo: Some(
                                 "https://github.com/rust-lang/libc",
+                            ),
+                            name: Some(
+                                "libc",
                             ),
                         },
                         is_proc_macro: false,
@@ -563,6 +582,9 @@ fn cargo_hello_world_project_model_with_selective_overrides() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -640,6 +662,9 @@ fn cargo_hello_world_project_model_with_selective_overrides() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -717,6 +742,9 @@ fn cargo_hello_world_project_model_with_selective_overrides() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -794,6 +822,9 @@ fn cargo_hello_world_project_model_with_selective_overrides() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -860,6 +891,9 @@ fn cargo_hello_world_project_model_with_selective_overrides() {
                         origin: CratesIo {
                             repo: Some(
                                 "https://github.com/rust-lang/libc",
+                            ),
+                            name: Some(
+                                "libc",
                             ),
                         },
                         is_proc_macro: false,
@@ -942,6 +976,9 @@ fn cargo_hello_world_project_model() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -1019,6 +1056,9 @@ fn cargo_hello_world_project_model() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -1096,6 +1136,9 @@ fn cargo_hello_world_project_model() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -1173,6 +1216,9 @@ fn cargo_hello_world_project_model() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello-world",
+                            ),
                         },
                         is_proc_macro: false,
                     },
@@ -1239,6 +1285,9 @@ fn cargo_hello_world_project_model() {
                         origin: CratesIo {
                             repo: Some(
                                 "https://github.com/rust-lang/libc",
+                            ),
+                            name: Some(
+                                "libc",
                             ),
                         },
                         is_proc_macro: false,
@@ -1800,6 +1849,9 @@ fn rust_project_hello_world_project_model() {
                         ),
                         origin: CratesIo {
                             repo: None,
+                            name: Some(
+                                "hello_world",
+                            ),
                         },
                         is_proc_macro: false,
                     },

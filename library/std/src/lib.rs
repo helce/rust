@@ -145,8 +145,8 @@
 //! abstracting over differences in common platforms, most notably Windows and
 //! Unix derivatives.
 //!
-//! Common types of I/O, including [files], [TCP], [UDP], are defined in the
-//! [`io`], [`fs`], and [`net`] modules.
+//! Common types of I/O, including [files], [TCP], and [UDP], are defined in
+//! the [`io`], [`fs`], and [`net`] modules.
 //!
 //! The [`thread`] module contains Rust's threading abstractions. [`sync`]
 //! contains further primitive shared memory types, including [`atomic`] and
@@ -251,11 +251,11 @@
 #![feature(doc_notable_trait)]
 #![feature(dropck_eyepatch)]
 #![feature(exhaustive_patterns)]
+#![feature(if_let_guard)]
 #![feature(intra_doc_pointers)]
-#![cfg_attr(bootstrap, feature(label_break_value))]
+#![feature(is_terminal)]
 #![feature(lang_items)]
 #![feature(let_chains)]
-#![cfg_attr(bootstrap, feature(let_else))]
 #![feature(linkage)]
 #![feature(link_cfg)]
 #![feature(min_specialization)]
@@ -280,11 +280,10 @@
 #![feature(core_intrinsics)]
 #![feature(cstr_from_bytes_until_nul)]
 #![feature(cstr_internals)]
-#![feature(duration_checked_float)]
 #![feature(duration_constants)]
-#![cfg_attr(not(bootstrap), feature(error_generic_member_access))]
-#![cfg_attr(not(bootstrap), feature(error_in_core))]
-#![cfg_attr(not(bootstrap), feature(error_iter))]
+#![feature(error_generic_member_access)]
+#![feature(error_in_core)]
+#![feature(error_iter)]
 #![feature(exact_size_is_empty)]
 #![feature(exclusive_wrapper)]
 #![feature(extend_one)]
@@ -293,10 +292,9 @@
 #![feature(hasher_prefixfree_extras)]
 #![feature(hashmap_internals)]
 #![feature(int_error_internals)]
-#![feature(is_some_with)]
+#![feature(is_some_and)]
 #![feature(maybe_uninit_slice)]
 #![feature(maybe_uninit_write_slice)]
-#![feature(mixed_integer_ops)]
 #![feature(nonnull_slice_from_raw_parts)]
 #![feature(panic_can_unwind)]
 #![feature(panic_info_message)]
@@ -315,6 +313,7 @@
 #![feature(strict_provenance)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(const_maybe_uninit_uninit_array)]
+#![feature(const_waker)]
 //
 // Library features (alloc):
 #![feature(alloc_layout_extra)]
@@ -350,9 +349,9 @@
 #![feature(trace_macros)]
 //
 // Only used in tests/benchmarks:
-#![feature(bench_black_box)]
 //
 // Only for const-ness:
+#![feature(const_collections_with_hasher)]
 #![feature(const_io_structs)]
 #![feature(const_ip)]
 #![feature(const_ipv4)]
@@ -529,9 +528,6 @@ pub mod path;
 pub mod process;
 pub mod sync;
 pub mod time;
-
-#[unstable(feature = "once_cell", issue = "74465")]
-pub mod lazy;
 
 // Pull in `std_float` crate  into libstd. The contents of
 // `std_float` are in a different repository: rust-lang/portable-simd.

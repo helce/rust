@@ -13,6 +13,7 @@
 // ignore-emscripten spawning processes is not supported
 // ignore-sgx no processes
 // ignore-e2k64 NIY
+// ignore-fuchsia Backtrace not symbolized, trace different line alignment
 
 use std::env;
 

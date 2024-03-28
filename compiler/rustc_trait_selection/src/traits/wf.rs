@@ -14,8 +14,8 @@ use std::iter;
 /// inference variable, returns `None`, because we are not able to
 /// make any progress at all. This is to prevent "livelock" where we
 /// say "$0 is WF if $0 is WF".
-pub fn obligations<'a, 'tcx>(
-    infcx: &InferCtxt<'a, 'tcx>,
+pub fn obligations<'tcx>(
+    infcx: &InferCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     body_id: hir::HirId,
     recursion_depth: usize,
@@ -79,8 +79,8 @@ pub fn obligations<'a, 'tcx>(
 /// well-formed.  For example, if there is a trait `Set` defined like
 /// `trait Set<K:Eq>`, then the trait reference `Foo: Set<Bar>` is WF
 /// if `Bar: Eq`.
-pub fn trait_obligations<'a, 'tcx>(
-    infcx: &InferCtxt<'a, 'tcx>,
+pub fn trait_obligations<'tcx>(
+    infcx: &InferCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     body_id: hir::HirId,
     trait_pred: &ty::TraitPredicate<'tcx>,
@@ -102,8 +102,8 @@ pub fn trait_obligations<'a, 'tcx>(
 }
 
 #[instrument(skip(infcx), ret)]
-pub fn predicate_obligations<'a, 'tcx>(
-    infcx: &InferCtxt<'a, 'tcx>,
+pub fn predicate_obligations<'tcx>(
+    infcx: &InferCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     body_id: hir::HirId,
     predicate: ty::Predicate<'tcx>,
@@ -148,13 +148,8 @@ pub fn predicate_obligations<'a, 'tcx>(
             wf.compute(a.into());
             wf.compute(b.into());
         }
-        ty::PredicateKind::ConstEvaluatable(uv) => {
-            let obligations = wf.nominal_obligations(uv.def.did, uv.substs);
-            wf.out.extend(obligations);
-
-            for arg in uv.substs.iter() {
-                wf.compute(arg);
-            }
+        ty::PredicateKind::ConstEvaluatable(ct) => {
+            wf.compute(ct.into());
         }
         ty::PredicateKind::ConstEquate(c1, c2) => {
             wf.compute(c1.into());
@@ -219,12 +214,14 @@ fn extend_cause_with_original_assoc_item_obligation<'tcx>(
         trait_ref, item, cause, pred
     );
     let (items, impl_def_id) = match item {
-        Some(hir::Item { kind: hir::ItemKind::Impl(impl_), def_id, .. }) => (impl_.items, *def_id),
+        Some(hir::Item { kind: hir::ItemKind::Impl(impl_), owner_id, .. }) => {
+            (impl_.items, *owner_id)
+        }
         _ => return,
     };
     let fix_span =
         |impl_item_ref: &hir::ImplItemRef| match tcx.hir().impl_item(impl_item_ref.id).kind {
-            hir::ImplItemKind::Const(ty, _) | hir::ImplItemKind::TyAlias(ty) => ty.span,
+            hir::ImplItemKind::Const(ty, _) | hir::ImplItemKind::Type(ty) => ty.span,
             _ => impl_item_ref.span,
         };
 
@@ -241,7 +238,7 @@ fn extend_cause_with_original_assoc_item_obligation<'tcx>(
                     tcx.impl_item_implementor_ids(impl_def_id).get(&projection_ty.item_def_id)
                 && let Some(impl_item_span) = items
                     .iter()
-                    .find(|item| item.id.def_id.to_def_id() == impl_item_id)
+                    .find(|item| item.id.owner_id.to_def_id() == impl_item_id)
                     .map(fix_span)
             {
                 cause.span = impl_item_span;
@@ -256,7 +253,7 @@ fn extend_cause_with_original_assoc_item_obligation<'tcx>(
                     tcx.impl_item_implementor_ids(impl_def_id).get(&item_def_id)
                 && let Some(impl_item_span) = items
                     .iter()
-                    .find(|item| item.id.def_id.to_def_id() == impl_item_id)
+                    .find(|item| item.id.owner_id.to_def_id() == impl_item_id)
                     .map(fix_span)
             {
                 cause.span = impl_item_span;
@@ -275,7 +272,7 @@ impl<'tcx> WfPredicates<'tcx> {
         traits::ObligationCause::new(self.span, self.body_id, code)
     }
 
-    fn normalize(self, infcx: &InferCtxt<'_, 'tcx>) -> Vec<traits::PredicateObligation<'tcx>> {
+    fn normalize(self, infcx: &InferCtxt<'tcx>) -> Vec<traits::PredicateObligation<'tcx>> {
         let cause = self.cause(traits::WellFormed(None));
         let param_env = self.param_env;
         let mut obligations = Vec::with_capacity(self.out.len());
@@ -392,7 +389,8 @@ impl<'tcx> WfPredicates<'tcx> {
         //     `i32: Clone`
         //     `i32: Copy`
         // ]
-        let obligations = self.nominal_obligations(data.item_def_id, data.substs);
+        // Projection types do not require const predicates.
+        let obligations = self.nominal_obligations_without_const(data.item_def_id, data.substs);
         self.out.extend(obligations);
 
         let tcx = self.tcx();
@@ -449,14 +447,14 @@ impl<'tcx> WfPredicates<'tcx> {
                 // obligations are handled by the parent (e.g. `ty::Ref`).
                 GenericArgKind::Lifetime(_) => continue,
 
-                GenericArgKind::Const(constant) => {
-                    match constant.kind() {
+                GenericArgKind::Const(ct) => {
+                    match ct.kind() {
                         ty::ConstKind::Unevaluated(uv) => {
                             let obligations = self.nominal_obligations(uv.def.did, uv.substs);
                             self.out.extend(obligations);
 
                             let predicate =
-                                ty::Binder::dummy(ty::PredicateKind::ConstEvaluatable(uv))
+                                ty::Binder::dummy(ty::PredicateKind::ConstEvaluatable(ct))
                                     .to_predicate(self.tcx());
                             let cause = self.cause(traits::WellFormed(None));
                             self.out.push(traits::Obligation::with_depth(
@@ -473,7 +471,7 @@ impl<'tcx> WfPredicates<'tcx> {
                                 cause,
                                 self.recursion_depth,
                                 self.param_env,
-                                ty::Binder::dummy(ty::PredicateKind::WellFormed(constant.into()))
+                                ty::Binder::dummy(ty::PredicateKind::WellFormed(ct.into()))
                                     .to_predicate(self.tcx()),
                             ));
                         }
@@ -549,7 +547,7 @@ impl<'tcx> WfPredicates<'tcx> {
                 }
 
                 ty::FnDef(did, substs) => {
-                    let obligations = self.nominal_obligations(did, substs);
+                    let obligations = self.nominal_obligations_without_const(did, substs);
                     self.out.extend(obligations);
                 }
 

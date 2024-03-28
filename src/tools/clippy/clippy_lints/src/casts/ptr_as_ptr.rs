@@ -26,14 +26,14 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, msrv: Option<RustcVer
             (Mutability::Not, Mutability::Not) | (Mutability::Mut, Mutability::Mut));
         // The `U` in `pointer::cast` have to be `Sized`
         // as explained here: https://github.com/rust-lang/rust/issues/60602.
-        if to_pointee_ty.is_sized(cx.tcx.at(expr.span), cx.param_env);
+        if to_pointee_ty.is_sized(cx.tcx, cx.param_env);
         then {
             let mut applicability = Applicability::MachineApplicable;
             let cast_expr_sugg = Sugg::hir_with_applicability(cx, cast_expr, "_", &mut applicability);
             let turbofish = match &cast_to_hir_ty.kind {
                     TyKind::Infer => Cow::Borrowed(""),
                     TyKind::Ptr(mut_ty) if matches!(mut_ty.ty.kind, TyKind::Infer) => Cow::Borrowed(""),
-                    _ => Cow::Owned(format!("::<{}>", to_pointee_ty)),
+                    _ => Cow::Owned(format!("::<{to_pointee_ty}>")),
                 };
             span_lint_and_sugg(
                 cx,
@@ -41,7 +41,7 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, msrv: Option<RustcVer
                 expr.span,
                 "`as` casting between raw pointers without changing its mutability",
                 "try `pointer::cast`, a safer alternative",
-                format!("{}.cast{}()", cast_expr_sugg.maybe_par(), turbofish),
+                format!("{}.cast{turbofish}()", cast_expr_sugg.maybe_par()),
                 applicability,
             );
         }

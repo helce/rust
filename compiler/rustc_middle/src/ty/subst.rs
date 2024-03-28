@@ -1,12 +1,12 @@
 // Type substitutions.
 
-use crate::mir;
 use crate::ty::codec::{TyDecoder, TyEncoder};
 use crate::ty::fold::{FallibleTypeFolder, TypeFoldable, TypeFolder, TypeSuperFoldable};
 use crate::ty::sty::{ClosureSubsts, GeneratorSubsts, InlineConstSubsts};
 use crate::ty::visit::{TypeVisitable, TypeVisitor};
 use crate::ty::{self, Lift, List, ParamConst, Ty, TyCtxt};
 
+use rustc_data_structures::captures::Captures;
 use rustc_data_structures::intern::{Interned, WithStableHash};
 use rustc_hir::def_id::DefId;
 use rustc_macros::HashStable;
@@ -187,6 +187,14 @@ impl<'tcx> GenericArg<'tcx> {
         match self.unpack() {
             GenericArgKind::Const(c) => c,
             _ => bug!("expected a const, but found another kind"),
+        }
+    }
+
+    pub fn is_non_region_infer(self) -> bool {
+        match self.unpack() {
+            GenericArgKind::Lifetime(_) => false,
+            GenericArgKind::Type(ty) => ty.is_ty_infer(),
+            GenericArgKind::Const(ct) => ct.is_ct_infer(),
         }
     }
 }
@@ -492,23 +500,107 @@ impl<'tcx> TypeFoldable<'tcx> for &'tcx ty::List<Ty<'tcx>> {
 }
 
 impl<'tcx, T: TypeVisitable<'tcx>> TypeVisitable<'tcx> for &'tcx ty::List<T> {
+    #[inline]
     fn visit_with<V: TypeVisitor<'tcx>>(&self, visitor: &mut V) -> ControlFlow<V::BreakTy> {
         self.iter().try_for_each(|t| t.visit_with(visitor))
     }
 }
 
-// Just call `foo.subst(tcx, substs)` to perform a substitution across `foo`.
-#[rustc_on_unimplemented(message = "Calling `subst` must now be done through an `EarlyBinder`")]
-pub trait Subst<'tcx>: Sized {
-    type Inner;
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Encodable, Decodable, HashStable)]
+pub struct EarlyBinder<T>(pub T);
 
-    fn subst(self, tcx: TyCtxt<'tcx>, substs: &[GenericArg<'tcx>]) -> Self::Inner;
+/// For early binders, you should first call `subst` before using any visitors.
+impl<'tcx, T> !TypeFoldable<'tcx> for ty::EarlyBinder<T> {}
+impl<'tcx, T> !TypeVisitable<'tcx> for ty::EarlyBinder<T> {}
+
+impl<T> EarlyBinder<T> {
+    pub fn as_ref(&self) -> EarlyBinder<&T> {
+        EarlyBinder(&self.0)
+    }
+
+    pub fn map_bound_ref<F, U>(&self, f: F) -> EarlyBinder<U>
+    where
+        F: FnOnce(&T) -> U,
+    {
+        self.as_ref().map_bound(f)
+    }
+
+    pub fn map_bound<F, U>(self, f: F) -> EarlyBinder<U>
+    where
+        F: FnOnce(T) -> U,
+    {
+        let value = f(self.0);
+        EarlyBinder(value)
+    }
+
+    pub fn try_map_bound<F, U, E>(self, f: F) -> Result<EarlyBinder<U>, E>
+    where
+        F: FnOnce(T) -> Result<U, E>,
+    {
+        let value = f(self.0)?;
+        Ok(EarlyBinder(value))
+    }
+
+    pub fn rebind<U>(&self, value: U) -> EarlyBinder<U> {
+        EarlyBinder(value)
+    }
 }
 
-impl<'tcx, T: TypeFoldable<'tcx>> Subst<'tcx> for ty::EarlyBinder<T> {
-    type Inner = T;
+impl<T> EarlyBinder<Option<T>> {
+    pub fn transpose(self) -> Option<EarlyBinder<T>> {
+        self.0.map(|v| EarlyBinder(v))
+    }
+}
 
-    fn subst(self, tcx: TyCtxt<'tcx>, substs: &[GenericArg<'tcx>]) -> Self::Inner {
+impl<T, U> EarlyBinder<(T, U)> {
+    pub fn transpose_tuple2(self) -> (EarlyBinder<T>, EarlyBinder<U>) {
+        (EarlyBinder(self.0.0), EarlyBinder(self.0.1))
+    }
+}
+
+impl<'tcx, 's, T: IntoIterator<Item = I>, I: TypeFoldable<'tcx>> EarlyBinder<T> {
+    pub fn subst_iter(
+        self,
+        tcx: TyCtxt<'tcx>,
+        substs: &'s [GenericArg<'tcx>],
+    ) -> impl Iterator<Item = I> + Captures<'s> + Captures<'tcx> {
+        self.0.into_iter().map(move |t| EarlyBinder(t).subst(tcx, substs))
+    }
+}
+
+impl<'tcx, 's, 'a, T: IntoIterator<Item = &'a I>, I: Copy + TypeFoldable<'tcx> + 'a>
+    EarlyBinder<T>
+{
+    pub fn subst_iter_copied(
+        self,
+        tcx: TyCtxt<'tcx>,
+        substs: &'s [GenericArg<'tcx>],
+    ) -> impl Iterator<Item = I> + Captures<'s> + Captures<'tcx> + Captures<'a> {
+        self.0.into_iter().map(move |t| EarlyBinder(*t).subst(tcx, substs))
+    }
+}
+
+pub struct EarlyBinderIter<T> {
+    t: T,
+}
+
+impl<T: IntoIterator> EarlyBinder<T> {
+    pub fn transpose_iter(self) -> EarlyBinderIter<T::IntoIter> {
+        EarlyBinderIter { t: self.0.into_iter() }
+    }
+}
+
+impl<T: Iterator> Iterator for EarlyBinderIter<T> {
+    type Item = EarlyBinder<T::Item>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.t.next().map(|i| EarlyBinder(i))
+    }
+}
+
+impl<'tcx, T: TypeFoldable<'tcx>> ty::EarlyBinder<T> {
+    pub fn subst(self, tcx: TyCtxt<'tcx>, substs: &[GenericArg<'tcx>]) -> T {
         let mut folder = SubstFolder { tcx, substs, binders_passed: 0 };
         self.0.fold_with(&mut folder)
     }
@@ -544,9 +636,21 @@ impl<'a, 'tcx> TypeFolder<'tcx> for SubstFolder<'a, 'tcx> {
     fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
         #[cold]
         #[inline(never)]
-        fn region_param_out_of_range(data: ty::EarlyBoundRegion) -> ! {
+        fn region_param_out_of_range(data: ty::EarlyBoundRegion, substs: &[GenericArg<'_>]) -> ! {
             bug!(
-                "Region parameter out of range when substituting in region {} (index={})",
+                "Region parameter out of range when substituting in region {} (index={}, substs = {:?})",
+                data.name,
+                data.index,
+                substs,
+            )
+        }
+
+        #[cold]
+        #[inline(never)]
+        fn region_param_invalid(data: ty::EarlyBoundRegion, other: GenericArgKind<'_>) -> ! {
+            bug!(
+                "Unexpected parameter {:?} when substituting in region {} (index={})",
+                other,
                 data.name,
                 data.index
             )
@@ -562,7 +666,8 @@ impl<'a, 'tcx> TypeFolder<'tcx> for SubstFolder<'a, 'tcx> {
                 let rk = self.substs.get(data.index as usize).map(|k| k.unpack());
                 match rk {
                     Some(GenericArgKind::Lifetime(lt)) => self.shift_region_through_binders(lt),
-                    _ => region_param_out_of_range(data),
+                    Some(other) => region_param_invalid(data, other),
+                    None => region_param_out_of_range(data, self.substs),
                 }
             }
             _ => r,
@@ -586,11 +691,6 @@ impl<'a, 'tcx> TypeFolder<'tcx> for SubstFolder<'a, 'tcx> {
         } else {
             c.super_fold_with(self)
         }
-    }
-
-    #[inline]
-    fn fold_mir_const(&mut self, c: mir::ConstantKind<'tcx>) -> mir::ConstantKind<'tcx> {
-        c.super_fold_with(self)
     }
 }
 

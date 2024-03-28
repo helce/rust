@@ -43,9 +43,8 @@ impl<'a, T: EarlyLintPass> EarlyContextAndPass<'a, T> {
             self.context.lookup_with_diagnostics(
                 lint_id.lint,
                 Some(span),
-                |lint| {
-                    lint.build(msg).emit();
-                },
+                msg,
+                |lint| lint,
                 diagnostic,
             );
         }
@@ -59,6 +58,7 @@ impl<'a, T: EarlyLintPass> EarlyContextAndPass<'a, T> {
         F: FnOnce(&mut Self),
     {
         let is_crate_node = id == ast::CRATE_NODE_ID;
+        debug!(?id);
         let push = self.context.builder.push(attrs, is_crate_node, None);
 
         self.check_id(id);
@@ -409,7 +409,7 @@ pub fn check_ast_node<'a>(
     if sess.opts.unstable_opts.no_interleave_lints {
         for (i, pass) in passes.iter_mut().enumerate() {
             buffered =
-                sess.prof.extra_verbose_generic_activity("run_lint", pass.name()).run(|| {
+                sess.prof.verbose_generic_activity_with_arg("run_lint", pass.name()).run(|| {
                     early_lint_node(
                         sess,
                         !pre_expansion && i == 0,

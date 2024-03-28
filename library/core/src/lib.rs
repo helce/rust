@@ -114,6 +114,7 @@
 #![feature(const_fmt_arguments_new)]
 #![feature(const_heap)]
 #![feature(const_convert)]
+#![feature(const_index_range_slice_index)]
 #![feature(const_inherent_unchecked_arith)]
 #![feature(const_int_unchecked_arith)]
 #![feature(const_intrinsic_forget)]
@@ -137,17 +138,21 @@
 #![feature(const_size_of_val)]
 #![feature(const_slice_from_raw_parts_mut)]
 #![feature(const_slice_ptr_len)]
+#![feature(const_slice_split_at_mut)]
 #![feature(const_str_from_utf8_unchecked_mut)]
 #![feature(const_swap)]
 #![feature(const_trait_impl)]
+#![feature(const_try)]
 #![feature(const_type_id)]
 #![feature(const_type_name)]
 #![feature(const_default_impls)]
 #![feature(const_unicode_case_lookup)]
 #![feature(const_unsafecell_get_mut)]
+#![feature(const_waker)]
 #![feature(core_panic)]
 #![feature(duration_consts_float)]
 #![feature(maybe_uninit_uninit_array)]
+#![feature(ptr_alignment_type)]
 #![feature(ptr_metadata)]
 #![feature(slice_ptr_get)]
 #![feature(slice_split_at_unchecked)]
@@ -160,6 +165,7 @@
 #![feature(const_slice_index)]
 #![feature(const_is_char_boundary)]
 #![feature(const_cstr_methods)]
+#![feature(is_ascii_octdigit)]
 //
 // Language features:
 #![feature(abi_unadjusted)]
@@ -168,6 +174,7 @@
 #![feature(allow_internal_unstable)]
 #![feature(associated_type_bounds)]
 #![feature(auto_traits)]
+#![feature(c_unwind)]
 #![feature(cfg_sanitize)]
 #![feature(cfg_target_has_atomic)]
 #![feature(cfg_target_has_atomic_equal_alignment)]
@@ -185,13 +192,13 @@
 #![feature(extern_types)]
 #![feature(fundamental)]
 #![feature(if_let_guard)]
+#![feature(inline_const)]
 #![feature(intra_doc_pointers)]
 #![feature(intrinsics)]
 #![feature(lang_items)]
 #![feature(link_llvm_intrinsics)]
 #![feature(macro_metavar_expr)]
 #![feature(min_specialization)]
-#![feature(mixed_integer_ops)]
 #![feature(must_not_suspend)]
 #![feature(negative_impls)]
 #![feature(never_type)]
@@ -205,12 +212,14 @@
 #![feature(simd_ffi)]
 #![feature(staged_api)]
 #![feature(stmt_expr_attributes)]
+#![feature(target_feature_11)]
 #![feature(trait_alias)]
 #![feature(transparent_unions)]
 #![feature(try_blocks)]
 #![feature(unboxed_closures)]
 #![feature(unsized_fn_params)]
 #![feature(asm_const)]
+#![feature(const_transmute_copy)]
 //
 // Target features:
 #![feature(arm_target_feature)]
@@ -220,6 +229,7 @@
 #![feature(hexagon_target_feature)]
 #![feature(mips_target_feature)]
 #![feature(powerpc_target_feature)]
+#![feature(riscv_target_feature)]
 #![feature(rtm_target_feature)]
 #![feature(sse4a_target_feature)]
 #![feature(tbm_target_feature)]
@@ -306,7 +316,6 @@ pub mod clone;
 pub mod cmp;
 pub mod convert;
 pub mod default;
-#[cfg(not(bootstrap))]
 pub mod error;
 pub mod marker;
 pub mod ops;
@@ -323,8 +332,6 @@ pub mod cell;
 pub mod char;
 pub mod ffi;
 pub mod iter;
-#[unstable(feature = "once_cell", issue = "74465")]
-pub mod lazy;
 pub mod option;
 pub mod panic;
 pub mod panicking;
@@ -352,6 +359,8 @@ pub mod alloc;
 mod bool;
 mod tuple;
 mod unit;
+
+mod const_closure;
 
 #[stable(feature = "core_primitive", since = "1.43.0")]
 pub mod primitive;

@@ -2,12 +2,11 @@
 
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use crate::ty::layout::IntegerExt;
-use crate::ty::query::TyCtxtAt;
-use crate::ty::subst::{GenericArgKind, Subst, SubstsRef};
 use crate::ty::{
     self, DefIdTree, FallibleTypeFolder, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable,
     TypeVisitable,
 };
+use crate::ty::{GenericArgKind, SubstsRef};
 use rustc_apfloat::Float as _;
 use rustc_ast as ast;
 use rustc_attr::{self as attr, SignedInt, UnsignedInt};
@@ -821,12 +820,8 @@ impl<'tcx> Ty<'tcx> {
     /// does copies even when the type actually doesn't satisfy the
     /// full requirements for the `Copy` trait (cc #29149) -- this
     /// winds up being reported as an error during NLL borrow check.
-    pub fn is_copy_modulo_regions(
-        self,
-        tcx_at: TyCtxtAt<'tcx>,
-        param_env: ty::ParamEnv<'tcx>,
-    ) -> bool {
-        self.is_trivially_pure_clone_copy() || tcx_at.is_copy_raw(param_env.and(self))
+    pub fn is_copy_modulo_regions(self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
+        self.is_trivially_pure_clone_copy() || tcx.is_copy_raw(param_env.and(self))
     }
 
     /// Checks whether values of this type `T` have a size known at
@@ -835,8 +830,8 @@ impl<'tcx> Ty<'tcx> {
     /// over-approximation in generic contexts, where one can have
     /// strange rules like `<T as Foo<'static>>::Bar: Sized` that
     /// actually carry lifetime requirements.
-    pub fn is_sized(self, tcx_at: TyCtxtAt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
-        self.is_trivially_sized(tcx_at.tcx) || tcx_at.is_sized_raw(param_env.and(self))
+    pub fn is_sized(self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
+        self.is_trivially_sized(tcx) || tcx.is_sized_raw(param_env.and(self))
     }
 
     /// Checks whether values of this type `T` implement the `Freeze`
@@ -846,8 +841,8 @@ impl<'tcx> Ty<'tcx> {
     /// optimization as well as the rules around static values. Note
     /// that the `Freeze` trait is not exposed to end users and is
     /// effectively an implementation detail.
-    pub fn is_freeze(self, tcx_at: TyCtxtAt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
-        self.is_trivially_freeze() || tcx_at.is_freeze_raw(param_env.and(self))
+    pub fn is_freeze(self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
+        self.is_trivially_freeze() || tcx.is_freeze_raw(param_env.and(self))
     }
 
     /// Fast path helper for testing if a type is `Freeze`.
@@ -886,8 +881,8 @@ impl<'tcx> Ty<'tcx> {
     }
 
     /// Checks whether values of this type `T` implement the `Unpin` trait.
-    pub fn is_unpin(self, tcx_at: TyCtxtAt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
-        self.is_trivially_unpin() || tcx_at.is_unpin_raw(param_env.and(self))
+    pub fn is_unpin(self, tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> bool {
+        self.is_trivially_unpin() || tcx.is_unpin_raw(param_env.and(self))
     }
 
     /// Fast path helper for testing if a type is `Unpin`.
@@ -958,7 +953,7 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
-    /// Checks if `ty` has has a significant drop.
+    /// Checks if `ty` has a significant drop.
     ///
     /// Note that this method can return false even if `ty` has a destructor
     /// attached; even if that is the case then the adt has been marked with
@@ -1289,12 +1284,24 @@ pub fn is_doc_hidden(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
         .any(|items| items.iter().any(|item| item.has_name(sym::hidden)))
 }
 
+/// Determines whether an item is annotated with `doc(notable_trait)`.
+pub fn is_doc_notable_trait(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
+    tcx.get_attrs(def_id, sym::doc)
+        .filter_map(|attr| attr.meta_item_list())
+        .any(|items| items.iter().any(|item| item.has_name(sym::notable_trait)))
+}
+
 /// Determines whether an item is an intrinsic by Abi.
 pub fn is_intrinsic(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
     matches!(tcx.fn_sig(def_id).abi(), Abi::RustIntrinsic | Abi::PlatformIntrinsic)
 }
 
 pub fn provide(providers: &mut ty::query::Providers) {
-    *providers =
-        ty::query::Providers { normalize_opaque_types, is_doc_hidden, is_intrinsic, ..*providers }
+    *providers = ty::query::Providers {
+        normalize_opaque_types,
+        is_doc_hidden,
+        is_doc_notable_trait,
+        is_intrinsic,
+        ..*providers
+    }
 }

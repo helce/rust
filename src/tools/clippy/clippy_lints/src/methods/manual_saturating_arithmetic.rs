@@ -21,11 +21,7 @@ pub fn check(
         return;
     }
 
-    let mm = if let Some(mm) = is_min_or_max(cx, unwrap_arg) {
-        mm
-    } else {
-        return;
-    };
+    let Some(mm) = is_min_or_max(cx, unwrap_arg) else { return };
 
     if ty.is_signed() {
         use self::{
@@ -33,9 +29,7 @@ pub fn check(
             Sign::{Neg, Pos},
         };
 
-        let sign = if let Some(sign) = lit_sign(arith_rhs) {
-            sign
-        } else {
+        let Some(sign) = lit_sign(arith_rhs) else {
             return;
         };
 
@@ -57,11 +51,10 @@ pub fn check(
         super::MANUAL_SATURATING_ARITHMETIC,
         expr.span,
         "manual saturating arithmetic",
-        &format!("try using `saturating_{}`", arith),
+        &format!("try using `saturating_{arith}`"),
         format!(
-            "{}.saturating_{}({})",
+            "{}.saturating_{arith}({})",
             snippet_with_applicability(cx, arith_lhs.span, "..", &mut applicability),
-            arith,
             snippet_with_applicability(cx, arith_rhs.span, "..", &mut applicability),
         ),
         applicability,

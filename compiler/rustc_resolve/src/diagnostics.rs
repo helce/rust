@@ -24,7 +24,7 @@ use rustc_span::hygiene::MacroKind;
 use rustc_span::lev_distance::find_best_match_for_name;
 use rustc_span::source_map::SourceMap;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::{BytePos, Span};
+use rustc_span::{BytePos, Span, SyntaxContext};
 
 use crate::imports::{Import, ImportKind, ImportResolver};
 use crate::late::{PatternSource, Rib};
@@ -47,6 +47,7 @@ pub(crate) type Suggestion = (Vec<(Span, String)>, String, Applicability);
 /// similarly named label and whether or not it is reachable.
 pub(crate) type LabelSuggestion = (Ident, bool);
 
+#[derive(Debug)]
 pub(crate) enum SuggestionTarget {
     /// The target has a similar name as the name used by the programmer (probably a typo)
     SimilarlyNamed,
@@ -54,6 +55,7 @@ pub(crate) enum SuggestionTarget {
     SingleItem,
 }
 
+#[derive(Debug)]
 pub(crate) struct TypoSuggestion {
     pub candidate: Symbol,
     pub res: Res,
@@ -70,6 +72,7 @@ impl TypoSuggestion {
 }
 
 /// A free importable items suggested in case of resolution failure.
+#[derive(Debug, Clone)]
 pub(crate) struct ImportSuggestion {
     pub did: Option<DefId>,
     pub descr: &'static str,
@@ -120,7 +123,7 @@ impl<'a> Resolver<'a> {
     }
 
     fn report_with_use_injections(&mut self, krate: &Crate) {
-        for UseError { mut err, candidates, def_id, instead, suggestion, path } in
+        for UseError { mut err, candidates, def_id, instead, suggestion, path, is_call } in
             self.use_injections.drain(..)
         {
             let (span, found_use) = if let Some(def_id) = def_id.as_local() {
@@ -128,6 +131,7 @@ impl<'a> Resolver<'a> {
             } else {
                 (None, FoundUse::No)
             };
+
             if !candidates.is_empty() {
                 show_candidates(
                     &self.session,
@@ -137,13 +141,18 @@ impl<'a> Resolver<'a> {
                     &candidates,
                     if instead { Instead::Yes } else { Instead::No },
                     found_use,
-                    IsPattern::No,
+                    DiagnosticMode::Normal,
                     path,
                 );
+                err.emit();
             } else if let Some((span, msg, sugg, appl)) = suggestion {
                 err.span_suggestion(span, msg, sugg, appl);
+                err.emit();
+            } else if let [segment] = path.as_slice() && is_call {
+                err.stash(segment.ident.span, rustc_errors::StashKey::CallIntoMethod);
+            } else {
+                err.emit();
             }
-            err.emit();
         }
     }
 
@@ -475,11 +484,12 @@ impl<'a> Resolver<'a> {
         module: Module<'a>,
         names: &mut Vec<TypoSuggestion>,
         filter_fn: &impl Fn(Res) -> bool,
+        ctxt: Option<SyntaxContext>,
     ) {
         for (key, resolution) in self.resolutions(module).borrow().iter() {
             if let Some(binding) = resolution.borrow().binding {
                 let res = binding.res();
-                if filter_fn(res) {
+                if filter_fn(res) && ctxt.map_or(true, |ctxt| ctxt == key.ident.span.ctxt()) {
                     names.push(TypoSuggestion::typo_from_res(key.ident.name, res));
                 }
             }
@@ -511,24 +521,18 @@ impl<'a> Resolver<'a> {
 
                 let sm = self.session.source_map();
                 let def_id = match outer_res {
-                    Res::SelfTy { trait_: maybe_trait_defid, alias_to: maybe_impl_defid } => {
-                        if let Some(impl_span) =
-                            maybe_impl_defid.and_then(|(def_id, _)| self.opt_span(def_id))
-                        {
+                    Res::SelfTyParam { .. } => {
+                        err.span_label(span, "can't use `Self` here");
+                        return err;
+                    }
+                    Res::SelfTyAlias { alias_to: def_id, .. } => {
+                        if let Some(impl_span) = self.opt_span(def_id) {
                             err.span_label(
                                 reduce_impl_span_to_impl_keyword(sm, impl_span),
                                 "`Self` type implicitly declared here, by this `impl`",
                             );
                         }
-                        match (maybe_trait_defid, maybe_impl_defid) {
-                            (Some(_), None) => {
-                                err.span_label(span, "can't use `Self` here");
-                            }
-                            (_, Some(_)) => {
-                                err.span_label(span, "use a type here instead");
-                            }
-                            (None, None) => bug!("`impl` without trait nor type?"),
-                        }
+                        err.span_label(span, "use a type here instead");
                         return err;
                     }
                     Res::Def(DefKind::TyParam, def_id) => {
@@ -545,8 +549,9 @@ impl<'a> Resolver<'a> {
                     }
                     _ => {
                         bug!(
-                            "GenericParamsFromOuterFunction should only be used with Res::SelfTy, \
-                            DefKind::TyParam or DefKind::ConstParam"
+                            "GenericParamsFromOuterFunction should only be used with \
+                            Res::SelfTyParam, Res::SelfTyAlias, DefKind::TyParam or \
+                            DefKind::ConstParam"
                         );
                     }
                 };
@@ -696,7 +701,7 @@ impl<'a> Resolver<'a> {
                         &import_suggestions,
                         Instead::No,
                         FoundUse::Yes,
-                        IsPattern::Yes,
+                        DiagnosticMode::Pattern,
                         vec![],
                     );
                 }
@@ -1046,6 +1051,19 @@ impl<'a> Resolver<'a> {
                 err.span_label(trait_item_span, "item in trait");
                 err
             }
+            ResolutionError::TraitImplDuplicate { name, trait_item_span, old_span } => {
+                let mut err = struct_span_err!(
+                    self.session,
+                    span,
+                    E0201,
+                    "duplicate definitions with name `{}`:",
+                    name,
+                );
+                err.span_label(old_span, "previous definition here");
+                err.span_label(trait_item_span, "item in trait");
+                err.span_label(span, "duplicate definition");
+                err
+            }
             ResolutionError::InvalidAsmSym => {
                 let mut err = self.session.struct_span_err(span, "invalid `sym` operand");
                 err.span_label(span, "is a local variable");
@@ -1166,10 +1184,10 @@ impl<'a> Resolver<'a> {
                 Scope::CrateRoot => {
                     let root_ident = Ident::new(kw::PathRoot, ident.span);
                     let root_module = this.resolve_crate_root(root_ident);
-                    this.add_module_candidates(root_module, &mut suggestions, filter_fn);
+                    this.add_module_candidates(root_module, &mut suggestions, filter_fn, None);
                 }
                 Scope::Module(module, _) => {
-                    this.add_module_candidates(module, &mut suggestions, filter_fn);
+                    this.add_module_candidates(module, &mut suggestions, filter_fn, None);
                 }
                 Scope::MacroUsePrelude => {
                     suggestions.extend(this.macro_use_prelude.iter().filter_map(
@@ -1206,7 +1224,7 @@ impl<'a> Resolver<'a> {
                 Scope::StdLibPrelude => {
                     if let Some(prelude) = this.prelude {
                         let mut tmp_suggestions = Vec::new();
-                        this.add_module_candidates(prelude, &mut tmp_suggestions, filter_fn);
+                        this.add_module_candidates(prelude, &mut tmp_suggestions, filter_fn, None);
                         suggestions.extend(
                             tmp_suggestions
                                 .into_iter()
@@ -1479,7 +1497,7 @@ impl<'a> Resolver<'a> {
             &import_suggestions,
             Instead::No,
             FoundUse::Yes,
-            IsPattern::No,
+            DiagnosticMode::Normal,
             vec![],
         );
 
@@ -2440,12 +2458,34 @@ enum FoundUse {
     No,
 }
 
-/// Whether a binding is part of a pattern or an expression. Used for diagnostics.
-enum IsPattern {
+/// Whether a binding is part of a pattern or a use statement. Used for diagnostics.
+enum DiagnosticMode {
+    Normal,
     /// The binding is part of a pattern
-    Yes,
-    /// The binding is part of an expression
-    No,
+    Pattern,
+    /// The binding is part of a use statement
+    Import,
+}
+
+pub(crate) fn import_candidates(
+    session: &Session,
+    source_span: &IndexVec<LocalDefId, Span>,
+    err: &mut Diagnostic,
+    // This is `None` if all placement locations are inside expansions
+    use_placement_span: Option<Span>,
+    candidates: &[ImportSuggestion],
+) {
+    show_candidates(
+        session,
+        source_span,
+        err,
+        use_placement_span,
+        candidates,
+        Instead::Yes,
+        FoundUse::Yes,
+        DiagnosticMode::Import,
+        vec![],
+    );
 }
 
 /// When an entity with a given name is not available in scope, we search for
@@ -2460,7 +2500,7 @@ fn show_candidates(
     candidates: &[ImportSuggestion],
     instead: Instead,
     found_use: FoundUse,
-    is_pattern: IsPattern,
+    mode: DiagnosticMode,
     path: Vec<Segment>,
 ) {
     if candidates.is_empty() {
@@ -2495,7 +2535,7 @@ fn show_candidates(
         };
 
         let instead = if let Instead::Yes = instead { " instead" } else { "" };
-        let mut msg = if let IsPattern::Yes = is_pattern {
+        let mut msg = if let DiagnosticMode::Pattern = mode {
             format!(
                 "if you meant to match on {}{}{}, use the full path in the pattern",
                 kind, instead, name
@@ -2508,19 +2548,25 @@ fn show_candidates(
             err.note(note);
         }
 
-        if let (IsPattern::Yes, Some(span)) = (is_pattern, use_placement_span) {
-            err.span_suggestions(
-                span,
-                &msg,
-                accessible_path_strings.into_iter().map(|a| a.0),
-                Applicability::MaybeIncorrect,
-            );
-        } else if let Some(span) = use_placement_span {
+        if let Some(span) = use_placement_span {
+            let add_use = match mode {
+                DiagnosticMode::Pattern => {
+                    err.span_suggestions(
+                        span,
+                        &msg,
+                        accessible_path_strings.into_iter().map(|a| a.0),
+                        Applicability::MaybeIncorrect,
+                    );
+                    return;
+                }
+                DiagnosticMode::Import => "",
+                DiagnosticMode::Normal => "use ",
+            };
             for candidate in &mut accessible_path_strings {
                 // produce an additional newline to separate the new use statement
                 // from the directly following item.
                 let additional_newline = if let FoundUse::Yes = found_use { "" } else { "\n" };
-                candidate.0 = format!("use {};\n{}", &candidate.0, additional_newline);
+                candidate.0 = format!("{}{};\n{}", add_use, &candidate.0, additional_newline);
             }
 
             err.span_suggestions(
@@ -2550,11 +2596,14 @@ fn show_candidates(
 
             err.note(&msg);
         }
-    } else {
+    } else if !matches!(mode, DiagnosticMode::Import) {
         assert!(!inaccessible_path_strings.is_empty());
 
-        let prefix =
-            if let IsPattern::Yes = is_pattern { "you might have meant to match on " } else { "" };
+        let prefix = if let DiagnosticMode::Pattern = mode {
+            "you might have meant to match on "
+        } else {
+            ""
+        };
         if inaccessible_path_strings.len() == 1 {
             let (name, descr, def_id, note) = &inaccessible_path_strings[0];
             let msg = format!(
@@ -2562,7 +2611,7 @@ fn show_candidates(
                 prefix,
                 descr,
                 name,
-                if let IsPattern::Yes = is_pattern { ", which" } else { "" }
+                if let DiagnosticMode::Pattern = mode { ", which" } else { "" }
             );
 
             if let Some(local_def_id) = def_id.and_then(|did| did.as_local()) {

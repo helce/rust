@@ -1,9 +1,6 @@
 use crate::mir::interpret::LitToConstInput;
 use crate::mir::ConstantKind;
-use crate::ty::{
-    self, InlineConstSubsts, InlineConstSubstsParts, InternalSubsts, ParamEnv, ParamEnvAnd, Ty,
-    TyCtxt, TypeVisitable,
-};
+use crate::ty::{self, InternalSubsts, ParamEnv, ParamEnvAnd, Ty, TyCtxt};
 use rustc_data_structures::intern::Interned;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
@@ -81,10 +78,9 @@ impl<'tcx> Const<'tcx> {
         match Self::try_eval_lit_or_param(tcx, ty, expr) {
             Some(v) => v,
             None => tcx.mk_const(ty::ConstS {
-                kind: ty::ConstKind::Unevaluated(ty::Unevaluated {
+                kind: ty::ConstKind::Unevaluated(ty::UnevaluatedConst {
                     def: def.to_global(),
                     substs: InternalSubsts::identity_for_item(tcx, def.did.to_def_id()),
-                    promoted: (),
                 }),
                 ty,
             }),
@@ -149,46 +145,6 @@ impl<'tcx> Const<'tcx> {
             }
             _ => None,
         }
-    }
-
-    pub fn from_inline_const(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Self {
-        debug!("Const::from_inline_const(def_id={:?})", def_id);
-
-        let hir_id = tcx.hir().local_def_id_to_hir_id(def_id);
-
-        let body_id = match tcx.hir().get(hir_id) {
-            hir::Node::AnonConst(ac) => ac.body,
-            _ => span_bug!(
-                tcx.def_span(def_id.to_def_id()),
-                "from_inline_const can only process anonymous constants"
-            ),
-        };
-
-        let expr = &tcx.hir().body(body_id).value;
-
-        let ty = tcx.typeck(def_id).node_type(hir_id);
-
-        let ret = match Self::try_eval_lit_or_param(tcx, ty, expr) {
-            Some(v) => v,
-            None => {
-                let typeck_root_def_id = tcx.typeck_root_def_id(def_id.to_def_id());
-                let parent_substs =
-                    tcx.erase_regions(InternalSubsts::identity_for_item(tcx, typeck_root_def_id));
-                let substs =
-                    InlineConstSubsts::new(tcx, InlineConstSubstsParts { parent_substs, ty })
-                        .substs;
-                tcx.mk_const(ty::ConstS {
-                    kind: ty::ConstKind::Unevaluated(ty::Unevaluated {
-                        def: ty::WithOptConstParam::unknown(def_id).to_global(),
-                        substs,
-                        promoted: (),
-                    }),
-                    ty,
-                })
-            }
-        };
-        debug_assert!(!ret.has_free_regions());
-        ret
     }
 
     /// Interns the given value as a constant.
@@ -306,6 +262,10 @@ impl<'tcx> Const<'tcx> {
     pub fn eval_usize(self, tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>) -> u64 {
         self.try_eval_usize(tcx, param_env)
             .unwrap_or_else(|| bug!("expected usize, got {:#?}", self))
+    }
+
+    pub fn is_ct_infer(self) -> bool {
+        matches!(self.kind(), ty::ConstKind::Infer(_))
     }
 }
 

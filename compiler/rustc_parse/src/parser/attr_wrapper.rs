@@ -32,11 +32,6 @@ pub struct AttrWrapper {
     start_pos: usize,
 }
 
-// This struct is passed around very frequently,
-// so make sure it doesn't accidentally get larger
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-rustc_data_structures::static_assert_size!(AttrWrapper, 16);
-
 impl AttrWrapper {
     pub(super) fn new(attrs: AttrVec, start_pos: usize) -> AttrWrapper {
         AttrWrapper { attrs, start_pos }
@@ -95,9 +90,6 @@ struct LazyAttrTokenStreamImpl {
     break_last_token: bool,
     replace_ranges: Box<[ReplaceRange]>,
 }
-
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-rustc_data_structures::static_assert_size!(LazyAttrTokenStreamImpl, 144);
 
 impl ToAttrTokenStream for LazyAttrTokenStreamImpl {
     fn to_attr_token_stream(&self) -> AttrTokenStream {
@@ -281,16 +273,23 @@ impl<'a> Parser<'a> {
         let cursor_snapshot_next_calls = cursor_snapshot.num_next_calls;
         let mut end_pos = self.token_cursor.num_next_calls;
 
+        let mut captured_trailing = false;
+
         // Capture a trailing token if requested by the callback 'f'
         match trailing {
             TrailingToken::None => {}
+            TrailingToken::Gt => {
+                assert_eq!(self.token.kind, token::Gt);
+            }
             TrailingToken::Semi => {
                 assert_eq!(self.token.kind, token::Semi);
                 end_pos += 1;
+                captured_trailing = true;
             }
             TrailingToken::MaybeComma => {
                 if self.token.kind == token::Comma {
                     end_pos += 1;
+                    captured_trailing = true;
                 }
             }
         }
@@ -300,11 +299,7 @@ impl<'a> Parser<'a> {
         // was not actually bumped past it. When the `LazyAttrTokenStream` gets converted
         // into an `AttrTokenStream`, we will create the proper token.
         if self.token_cursor.break_last_token {
-            assert_eq!(
-                trailing,
-                TrailingToken::None,
-                "Cannot set `break_last_token` and have trailing token"
-            );
+            assert!(!captured_trailing, "Cannot set break_last_token and have trailing token");
             end_pos += 1;
         }
 
@@ -459,6 +454,16 @@ fn make_token_stream(
             panic!("Unexpected last token {:?}", last_token)
         }
     }
-    assert!(stack.is_empty(), "Stack should be empty: final_buf={:?} stack={:?}", final_buf, stack);
     AttrTokenStream::new(final_buf.inner)
+}
+
+// Some types are used a lot. Make sure they don't unintentionally get bigger.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+mod size_asserts {
+    use super::*;
+    use rustc_data_structures::static_assert_size;
+    // tidy-alphabetical-start
+    static_assert_size!(AttrWrapper, 16);
+    static_assert_size!(LazyAttrTokenStreamImpl, 144);
+    // tidy-alphabetical-end
 }

@@ -7,6 +7,7 @@
 //! Everything here is basically just a shim around calling either `rustbook` or
 //! `rustdoc`.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -81,6 +82,7 @@ book!(
     Reference, "src/doc/reference", "reference", submodule;
     RustByExample, "src/doc/rust-by-example", "rust-by-example", submodule;
     RustdocBook, "src/doc/rustdoc", "rustdoc";
+    StyleGuide, "src/doc/style-guide", "style-guide";
 );
 
 fn open(builder: &Builder<'_>, path: impl AsRef<Path>) {
@@ -226,7 +228,7 @@ impl Step for TheBook {
         }
 
         // build the version info page and CSS
-        builder.ensure(Standalone { compiler, target });
+        let shared_assets = builder.ensure(SharedAssets { target });
 
         // build the redirect pages
         builder.info(&format!("Documenting book redirect pages ({})", target));
@@ -235,7 +237,7 @@ impl Step for TheBook {
             let path = file.path();
             let path = path.to_str().unwrap();
 
-            invoke_rustdoc(builder, compiler, target, path);
+            invoke_rustdoc(builder, compiler, &shared_assets, target, path);
         }
 
         if builder.was_invoked_explicitly::<Self>(Kind::Doc) {
@@ -249,6 +251,7 @@ impl Step for TheBook {
 fn invoke_rustdoc(
     builder: &Builder<'_>,
     compiler: Compiler,
+    shared_assets: &SharedAssetsPaths,
     target: TargetSelection,
     markdown: &str,
 ) {
@@ -258,7 +261,6 @@ fn invoke_rustdoc(
 
     let header = builder.src.join("src/doc/redirect.inc");
     let footer = builder.src.join("src/doc/footer.inc");
-    let version_info = out.join("version_info.html");
 
     let mut cmd = builder.rustdoc_cmd(compiler);
 
@@ -267,7 +269,7 @@ fn invoke_rustdoc(
     cmd.arg("--html-after-content")
         .arg(&footer)
         .arg("--html-before-content")
-        .arg(&version_info)
+        .arg(&shared_assets.version_info)
         .arg("--html-in-header")
         .arg(&header)
         .arg("--markdown-no-toc")
@@ -298,7 +300,7 @@ impl Step for Standalone {
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         let builder = run.builder;
-        run.path("src/doc").default_condition(builder.config.docs)
+        run.path("src/doc").alias("standalone").default_condition(builder.config.docs)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -323,21 +325,11 @@ impl Step for Standalone {
         let out = builder.doc_out(target);
         t!(fs::create_dir_all(&out));
 
+        let version_info = builder.ensure(SharedAssets { target: self.target }).version_info;
+
         let favicon = builder.src.join("src/doc/favicon.inc");
         let footer = builder.src.join("src/doc/footer.inc");
         let full_toc = builder.src.join("src/doc/full-toc.inc");
-        t!(fs::copy(builder.src.join("src/doc/rust.css"), out.join("rust.css")));
-
-        let version_input = builder.src.join("src/doc/version_info.html.template");
-        let version_info = out.join("version_info.html");
-
-        if !builder.config.dry_run && !up_to_date(&version_input, &version_info) {
-            let info = t!(fs::read_to_string(&version_input))
-                .replace("VERSION", &builder.rust_release())
-                .replace("SHORT_HASH", builder.rust_info.sha_short().unwrap_or(""))
-                .replace("STAMP", builder.rust_info.sha().unwrap_or(""));
-            t!(fs::write(&version_info, &info));
-        }
 
         for file in t!(fs::read_dir(builder.src.join("src/doc"))) {
             let file = t!(file);
@@ -383,15 +375,9 @@ impl Step for Standalone {
             }
 
             if filename == "not_found.md" {
-                cmd.arg("--markdown-css")
-                    .arg(format!("https://doc.rust-lang.org/rustdoc{}.css", &builder.version))
-                    .arg("--markdown-css")
-                    .arg("https://doc.rust-lang.org/rust.css");
+                cmd.arg("--markdown-css").arg("https://doc.rust-lang.org/rust.css");
             } else {
-                cmd.arg("--markdown-css")
-                    .arg(format!("rustdoc{}.css", &builder.version))
-                    .arg("--markdown-css")
-                    .arg("rust.css");
+                cmd.arg("--markdown-css").arg("rust.css");
             }
             builder.run(&mut cmd);
         }
@@ -402,6 +388,45 @@ impl Step for Standalone {
             let index = out.join("index.html");
             open(builder, &index);
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SharedAssetsPaths {
+    pub version_info: PathBuf,
+}
+
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct SharedAssets {
+    target: TargetSelection,
+}
+
+impl Step for SharedAssets {
+    type Output = SharedAssetsPaths;
+    const DEFAULT: bool = false;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        // Other tasks depend on this, no need to execute it on its own
+        run.never()
+    }
+
+    // Generate shared resources used by other pieces of documentation.
+    fn run(self, builder: &Builder<'_>) -> Self::Output {
+        let out = builder.doc_out(self.target);
+
+        let version_input = builder.src.join("src").join("doc").join("version_info.html.template");
+        let version_info = out.join("version_info.html");
+        if !builder.config.dry_run && !up_to_date(&version_input, &version_info) {
+            let info = t!(fs::read_to_string(&version_input))
+                .replace("VERSION", &builder.rust_release())
+                .replace("SHORT_HASH", builder.rust_info.sha_short().unwrap_or(""))
+                .replace("STAMP", builder.rust_info.sha().unwrap_or(""));
+            t!(fs::write(&version_info, &info));
+        }
+
+        builder.copy(&builder.src.join("src").join("doc").join("rust.css"), &out.join("rust.css"));
+
+        SharedAssetsPaths { version_info }
     }
 }
 
@@ -431,49 +456,25 @@ impl Step for Std {
     fn run(self, builder: &Builder<'_>) {
         let stage = self.stage;
         let target = self.target;
-        builder.info(&format!("Documenting stage{} std ({})", stage, target));
-        if builder.no_std(target) == Some(true) {
-            panic!(
-                "building std documentation for no_std target {target} is not supported\n\
-                 Set `docs = false` in the config to disable documentation."
-            );
-        }
         let out = builder.doc_out(target);
         t!(fs::create_dir_all(&out));
-        let compiler = builder.compiler(stage, builder.config.build);
 
-        let out_dir = builder.stage_out(compiler, Mode::Std).join(target.triple).join("doc");
+        builder.ensure(SharedAssets { target: self.target });
 
-        t!(fs::copy(builder.src.join("src/doc/rust.css"), out.join("rust.css")));
+        let index_page = builder.src.join("src/doc/index.md").into_os_string();
+        let mut extra_args = vec![
+            OsStr::new("--markdown-css"),
+            OsStr::new("rust.css"),
+            OsStr::new("--markdown-no-toc"),
+            OsStr::new("--index-page"),
+            &index_page,
+        ];
 
-        let run_cargo_rustdoc_for = |package: &str| {
-            let mut cargo =
-                builder.cargo(compiler, Mode::Std, SourceType::InTree, target, "rustdoc");
-            compile::std_cargo(builder, target, compiler.stage, &mut cargo);
+        if !builder.config.docs_minification {
+            extra_args.push(OsStr::new("--disable-minification"));
+        }
 
-            cargo
-                .arg("-p")
-                .arg(package)
-                .arg("-Zskip-rustdoc-fingerprint")
-                .arg("--")
-                .arg("--markdown-css")
-                .arg("rust.css")
-                .arg("--markdown-no-toc")
-                .arg("-Z")
-                .arg("unstable-options")
-                .arg("--resource-suffix")
-                .arg(&builder.version)
-                .arg("--index-page")
-                .arg(&builder.src.join("src/doc/index.md"));
-
-            if !builder.config.docs_minification {
-                cargo.arg("--disable-minification");
-            }
-
-            builder.run(&mut cargo.into());
-        };
-
-        let paths = builder
+        let requested_crates = builder
             .paths
             .iter()
             .map(components_simplified)
@@ -491,35 +492,153 @@ impl Step for Std {
             })
             .collect::<Vec<_>>();
 
-        // Only build the following crates. While we could just iterate over the
-        // folder structure, that would also build internal crates that we do
-        // not want to show in documentation. These crates will later be visited
-        // by the rustc step, so internal documentation will show them.
-        //
-        // Note that the order here is important! The crates need to be
-        // processed starting from the leaves, otherwise rustdoc will not
-        // create correct links between crates because rustdoc depends on the
-        // existence of the output directories to know if it should be a local
-        // or remote link.
-        let krates = ["core", "alloc", "std", "proc_macro", "test"];
-        for krate in &krates {
-            run_cargo_rustdoc_for(krate);
-            if paths.iter().any(|p| p == krate) {
-                // No need to document more of the libraries if we have the one we want.
-                break;
-            }
-        }
-        builder.cp_r(&out_dir, &out);
+        doc_std(
+            builder,
+            DocumentationFormat::HTML,
+            stage,
+            target,
+            &out,
+            &extra_args,
+            &requested_crates,
+        );
 
         // Look for library/std, library/core etc in the `x.py doc` arguments and
         // open the corresponding rendered docs.
-        for requested_crate in paths {
-            if krates.iter().any(|k| *k == requested_crate.as_str()) {
+        for requested_crate in requested_crates {
+            if STD_PUBLIC_CRATES.iter().any(|k| *k == requested_crate.as_str()) {
                 let index = out.join(requested_crate).join("index.html");
                 open(builder, &index);
             }
         }
     }
+}
+
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct JsonStd {
+    pub stage: u32,
+    pub target: TargetSelection,
+}
+
+impl Step for JsonStd {
+    type Output = ();
+    const DEFAULT: bool = false;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        let default = run.builder.config.docs && run.builder.config.cmd.json();
+        run.all_krates("test").path("library").default_condition(default)
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(Std { stage: run.builder.top_stage, target: run.target });
+    }
+
+    /// Build JSON documentation for the standard library crates.
+    ///
+    /// This is largely just a wrapper around `cargo doc`.
+    fn run(self, builder: &Builder<'_>) {
+        let stage = self.stage;
+        let target = self.target;
+        let out = builder.json_doc_out(target);
+        t!(fs::create_dir_all(&out));
+        let extra_args = [OsStr::new("--output-format"), OsStr::new("json")];
+        doc_std(builder, DocumentationFormat::JSON, stage, target, &out, &extra_args, &[])
+    }
+}
+
+/// Name of the crates that are visible to consumers of the standard library.
+/// Documentation for internal crates is handled by the rustc step, so internal crates will show
+/// up there.
+///
+/// Order here is important!
+/// Crates need to be processed starting from the leaves, otherwise rustdoc will not
+/// create correct links between crates because rustdoc depends on the
+/// existence of the output directories to know if it should be a local
+/// or remote link.
+const STD_PUBLIC_CRATES: [&str; 5] = ["core", "alloc", "std", "proc_macro", "test"];
+
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+enum DocumentationFormat {
+    HTML,
+    JSON,
+}
+
+impl DocumentationFormat {
+    fn as_str(&self) -> &str {
+        match self {
+            DocumentationFormat::HTML => "HTML",
+            DocumentationFormat::JSON => "JSON",
+        }
+    }
+}
+
+/// Build the documentation for public standard library crates.
+///
+/// `requested_crates` can be used to build only a subset of the crates. If empty, all crates will
+/// be built.
+fn doc_std(
+    builder: &Builder<'_>,
+    format: DocumentationFormat,
+    stage: u32,
+    target: TargetSelection,
+    out: &Path,
+    extra_args: &[&OsStr],
+    requested_crates: &[String],
+) {
+    builder.info(&format!(
+        "Documenting stage{} std ({}) in {} format",
+        stage,
+        target,
+        format.as_str()
+    ));
+    if builder.no_std(target) == Some(true) {
+        panic!(
+            "building std documentation for no_std target {target} is not supported\n\
+             Set `docs = false` in the config to disable documentation."
+        );
+    }
+    let compiler = builder.compiler(stage, builder.config.build);
+    // This is directory where the compiler will place the output of the command.
+    // We will then copy the files from this directory into the final `out` directory, the specified
+    // as a function parameter.
+    let out_dir = builder.stage_out(compiler, Mode::Std).join(target.triple).join("doc");
+    // `cargo` uses the same directory for both JSON docs and HTML docs.
+    // This could lead to cross-contamination when copying files into the specified `out` directory.
+    // For example:
+    // ```bash
+    // x doc std
+    // x doc std --json
+    // ```
+    // could lead to HTML docs being copied into the JSON docs output directory.
+    // To avoid this issue, we clean the doc folder before invoking `cargo`.
+    if out_dir.exists() {
+        builder.remove_dir(&out_dir);
+    }
+
+    let run_cargo_rustdoc_for = |package: &str| {
+        let mut cargo = builder.cargo(compiler, Mode::Std, SourceType::InTree, target, "rustdoc");
+        compile::std_cargo(builder, target, compiler.stage, &mut cargo);
+        cargo
+            .arg("-p")
+            .arg(package)
+            .arg("-Zskip-rustdoc-fingerprint")
+            .arg("--")
+            .arg("-Z")
+            .arg("unstable-options")
+            .arg("--resource-suffix")
+            .arg(&builder.version)
+            .args(extra_args);
+        builder.run(&mut cargo.into());
+    };
+
+    for krate in STD_PUBLIC_CRATES {
+        run_cargo_rustdoc_for(krate);
+        if requested_crates.iter().any(|p| p == krate) {
+            // No need to document more of the libraries if we have the one we want.
+            break;
+        }
+    }
+
+    builder.cp_r(&out_dir, &out);
 }
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]

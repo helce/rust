@@ -299,10 +299,10 @@ impl IntRange {
                 lint::builtin::OVERLAPPING_RANGE_ENDPOINTS,
                 hir_id,
                 pcx.span,
+                "multiple patterns overlap on their endpoints",
                 |lint| {
-                    let mut err = lint.build("multiple patterns overlap on their endpoints");
                     for (int_range, span) in overlaps {
-                        err.span_label(
+                        lint.span_label(
                             span,
                             &format!(
                                 "this range overlaps on `{}`...",
@@ -310,9 +310,9 @@ impl IntRange {
                             ),
                         );
                     }
-                    err.span_label(pcx.span, "... with this range");
-                    err.note("you likely meant to write mutually exclusive ranges");
-                    err.emit();
+                    lint.span_label(pcx.span, "... with this range");
+                    lint.note("you likely meant to write mutually exclusive ranges");
+                    lint
                 },
             );
         }
@@ -988,10 +988,12 @@ impl<'tcx> SplitWildcard<'tcx> {
                     .filter(|(_, v)| {
                         // If `exhaustive_patterns` is enabled, we exclude variants known to be
                         // uninhabited.
-                        let is_uninhabited = is_exhaustive_pat_feature
-                            && v.uninhabited_from(cx.tcx, substs, def.adt_kind(), cx.param_env)
-                                .contains(cx.tcx, cx.module);
-                        !is_uninhabited
+                        !is_exhaustive_pat_feature
+                            || v.inhabited_predicate(cx.tcx, *def).subst(cx.tcx, substs).apply(
+                                cx.tcx,
+                                cx.param_env,
+                                cx.module,
+                            )
                     })
                     .map(|(idx, _)| Variant(idx))
                     .collect();

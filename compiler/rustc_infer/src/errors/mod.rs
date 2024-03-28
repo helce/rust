@@ -1,10 +1,11 @@
 use hir::GenericParamKind;
 use rustc_errors::{
-    fluent, AddSubdiagnostic, Applicability, DiagnosticMessage, DiagnosticStyledString, MultiSpan,
+    fluent, AddToDiagnostic, Applicability, Diagnostic, DiagnosticMessage, DiagnosticStyledString,
+    MultiSpan, SubdiagnosticMessage,
 };
 use rustc_hir as hir;
 use rustc_hir::{FnRetTy, Ty};
-use rustc_macros::SessionDiagnostic;
+use rustc_macros::{Diagnostic, Subdiagnostic};
 use rustc_middle::ty::{Region, TyCtxt};
 use rustc_span::symbol::kw;
 use rustc_span::{symbol::Ident, BytePos, Span};
@@ -16,20 +17,20 @@ use crate::infer::error_reporting::{
 
 pub mod note_and_explain;
 
-#[derive(SessionDiagnostic)]
-#[diag(infer::opaque_hidden_type)]
+#[derive(Diagnostic)]
+#[diag(infer_opaque_hidden_type)]
 pub struct OpaqueHiddenTypeDiag {
     #[primary_span]
     #[label]
     pub span: Span,
-    #[note(infer::opaque_type)]
+    #[note(opaque_type)]
     pub opaque_type: Span,
-    #[note(infer::hidden_type)]
+    #[note(hidden_type)]
     pub hidden_type: Span,
 }
 
-#[derive(SessionDiagnostic)]
-#[diag(infer::type_annotations_needed, code = "E0282")]
+#[derive(Diagnostic)]
+#[diag(infer_type_annotations_needed, code = "E0282")]
 pub struct AnnotationRequired<'a> {
     #[primary_span]
     pub span: Span,
@@ -46,8 +47,8 @@ pub struct AnnotationRequired<'a> {
 }
 
 // Copy of `AnnotationRequired` for E0283
-#[derive(SessionDiagnostic)]
-#[diag(infer::type_annotations_needed, code = "E0283")]
+#[derive(Diagnostic)]
+#[diag(infer_type_annotations_needed, code = "E0283")]
 pub struct AmbigousImpl<'a> {
     #[primary_span]
     pub span: Span,
@@ -64,8 +65,8 @@ pub struct AmbigousImpl<'a> {
 }
 
 // Copy of `AnnotationRequired` for E0284
-#[derive(SessionDiagnostic)]
-#[diag(infer::type_annotations_needed, code = "E0284")]
+#[derive(Diagnostic)]
+#[diag(infer_type_annotations_needed, code = "E0284")]
 pub struct AmbigousReturn<'a> {
     #[primary_span]
     pub span: Span,
@@ -81,8 +82,8 @@ pub struct AmbigousReturn<'a> {
     pub multi_suggestions: Vec<SourceKindMultiSuggestion<'a>>,
 }
 
-#[derive(SessionDiagnostic)]
-#[diag(infer::need_type_info_in_generator, code = "E0698")]
+#[derive(Diagnostic)]
+#[diag(infer_need_type_info_in_generator, code = "E0698")]
 pub struct NeedTypeInfoInGenerator<'a> {
     #[primary_span]
     pub span: Span,
@@ -92,8 +93,8 @@ pub struct NeedTypeInfoInGenerator<'a> {
 }
 
 // Used when a better one isn't available
-#[derive(SessionSubdiagnostic)]
-#[label(infer::label_bad)]
+#[derive(Subdiagnostic)]
+#[label(infer_label_bad)]
 pub struct InferenceBadError<'a> {
     #[primary_span]
     pub span: Span,
@@ -106,10 +107,10 @@ pub struct InferenceBadError<'a> {
     pub name: String,
 }
 
-#[derive(SessionSubdiagnostic)]
+#[derive(Subdiagnostic)]
 pub enum SourceKindSubdiag<'a> {
     #[suggestion_verbose(
-        infer::source_kind_subdiag_let,
+        infer_source_kind_subdiag_let,
         code = ": {type_name}",
         applicability = "has-placeholders"
     )]
@@ -124,7 +125,7 @@ pub enum SourceKindSubdiag<'a> {
         prefix: &'a str,
         arg_name: String,
     },
-    #[label(infer::source_kind_subdiag_generic_label)]
+    #[label(infer_source_kind_subdiag_generic_label)]
     GenericLabel {
         #[primary_span]
         span: Span,
@@ -135,7 +136,7 @@ pub enum SourceKindSubdiag<'a> {
         parent_name: String,
     },
     #[suggestion_verbose(
-        infer::source_kind_subdiag_generic_suggestion,
+        infer_source_kind_subdiag_generic_suggestion,
         code = "::<{args}>",
         applicability = "has-placeholders"
     )]
@@ -147,10 +148,10 @@ pub enum SourceKindSubdiag<'a> {
     },
 }
 
-#[derive(SessionSubdiagnostic)]
+#[derive(Subdiagnostic)]
 pub enum SourceKindMultiSuggestion<'a> {
     #[multipart_suggestion_verbose(
-        infer::source_kind_fully_qualified,
+        infer_source_kind_fully_qualified,
         applicability = "has-placeholders"
     )]
     FullyQualified {
@@ -163,7 +164,7 @@ pub enum SourceKindMultiSuggestion<'a> {
         successor_pos: &'a str,
     },
     #[multipart_suggestion_verbose(
-        infer::source_kind_closure_return,
+        infer_source_kind_closure_return,
         applicability = "has-placeholders"
     )]
     ClosureReturn {
@@ -228,8 +229,11 @@ pub enum RegionOriginNote<'a> {
     },
 }
 
-impl AddSubdiagnostic for RegionOriginNote<'_> {
-    fn add_to_diagnostic(self, diag: &mut rustc_errors::Diagnostic) {
+impl AddToDiagnostic for RegionOriginNote<'_> {
+    fn add_to_diagnostic_with<F>(self, diag: &mut Diagnostic, _: F)
+    where
+        F: Fn(&mut Diagnostic, SubdiagnosticMessage) -> SubdiagnosticMessage,
+    {
         let mut label_or_note = |span, msg: DiagnosticMessage| {
             let sub_count = diag.children.iter().filter(|d| d.span.is_dummy()).count();
             let expanded_sub_count = diag.children.iter().filter(|d| !d.span.is_dummy()).count();
@@ -256,7 +260,7 @@ impl AddSubdiagnostic for RegionOriginNote<'_> {
                 requirement,
                 expected_found: Some((expected, found)),
             } => {
-                label_or_note(span, fluent::infer::subtype);
+                label_or_note(span, fluent::infer_subtype);
                 diag.set_arg("requirement", requirement);
 
                 diag.note_expected_found(&"", expected, &"", found);
@@ -265,7 +269,7 @@ impl AddSubdiagnostic for RegionOriginNote<'_> {
                 // FIXME: this really should be handled at some earlier stage. Our
                 // handling of region checking when type errors are present is
                 // *terrible*.
-                label_or_note(span, fluent::infer::subtype_2);
+                label_or_note(span, fluent::infer_subtype_2);
                 diag.set_arg("requirement", requirement);
             }
         };
@@ -289,13 +293,16 @@ pub enum LifetimeMismatchLabels {
     },
 }
 
-impl AddSubdiagnostic for LifetimeMismatchLabels {
-    fn add_to_diagnostic(self, diag: &mut rustc_errors::Diagnostic) {
+impl AddToDiagnostic for LifetimeMismatchLabels {
+    fn add_to_diagnostic_with<F>(self, diag: &mut Diagnostic, _: F)
+    where
+        F: Fn(&mut Diagnostic, SubdiagnosticMessage) -> SubdiagnosticMessage,
+    {
         match self {
             LifetimeMismatchLabels::InRet { param_span, ret_span, span, label_var1 } => {
-                diag.span_label(param_span, fluent::infer::declared_different);
-                diag.span_label(ret_span, fluent::infer::nothing);
-                diag.span_label(span, fluent::infer::data_returned);
+                diag.span_label(param_span, fluent::infer_declared_different);
+                diag.span_label(ret_span, fluent::infer_nothing);
+                diag.span_label(span, fluent::infer_data_returned);
                 diag.set_arg("label_var1_exists", label_var1.is_some());
                 diag.set_arg("label_var1", label_var1.map(|x| x.to_string()).unwrap_or_default());
             }
@@ -308,13 +315,13 @@ impl AddSubdiagnostic for LifetimeMismatchLabels {
                 sub: label_var2,
             } => {
                 if hir_equal {
-                    diag.span_label(ty_sup, fluent::infer::declared_multiple);
-                    diag.span_label(ty_sub, fluent::infer::nothing);
-                    diag.span_label(span, fluent::infer::data_lifetime_flow);
+                    diag.span_label(ty_sup, fluent::infer_declared_multiple);
+                    diag.span_label(ty_sub, fluent::infer_nothing);
+                    diag.span_label(span, fluent::infer_data_lifetime_flow);
                 } else {
-                    diag.span_label(ty_sup, fluent::infer::types_declared_different);
-                    diag.span_label(ty_sub, fluent::infer::nothing);
-                    diag.span_label(span, fluent::infer::data_flows);
+                    diag.span_label(ty_sup, fluent::infer_types_declared_different);
+                    diag.span_label(ty_sub, fluent::infer_nothing);
+                    diag.span_label(span, fluent::infer_data_flows);
                     diag.set_arg("label_var1_exists", label_var1.is_some());
                     diag.set_arg(
                         "label_var1",
@@ -339,8 +346,11 @@ pub struct AddLifetimeParamsSuggestion<'a> {
     pub add_note: bool,
 }
 
-impl AddSubdiagnostic for AddLifetimeParamsSuggestion<'_> {
-    fn add_to_diagnostic(self, diag: &mut rustc_errors::Diagnostic) {
+impl AddToDiagnostic for AddLifetimeParamsSuggestion<'_> {
+    fn add_to_diagnostic_with<F>(self, diag: &mut Diagnostic, _: F)
+    where
+        F: Fn(&mut Diagnostic, SubdiagnosticMessage) -> SubdiagnosticMessage,
+    {
         let mut mk_suggestion = || {
             let (
                 hir::Ty { kind: hir::TyKind::Rptr(lifetime_sub, _), .. },
@@ -409,7 +419,7 @@ impl AddSubdiagnostic for AddLifetimeParamsSuggestion<'_> {
             }
 
             diag.multipart_suggestion(
-                fluent::infer::lifetime_param_suggestion,
+                fluent::infer_lifetime_param_suggestion,
                 suggestions,
                 Applicability::MaybeIncorrect,
             );
@@ -417,13 +427,13 @@ impl AddSubdiagnostic for AddLifetimeParamsSuggestion<'_> {
             true
         };
         if mk_suggestion() && self.add_note {
-            diag.note(fluent::infer::lifetime_param_suggestion_elided);
+            diag.note(fluent::infer_lifetime_param_suggestion_elided);
         }
     }
 }
 
-#[derive(SessionDiagnostic)]
-#[diag(infer::lifetime_mismatch, code = "E0623")]
+#[derive(Diagnostic)]
+#[diag(infer_lifetime_mismatch, code = "E0623")]
 pub struct LifetimeMismatch<'a> {
     #[primary_span]
     pub span: Span,
@@ -438,53 +448,49 @@ pub struct IntroducesStaticBecauseUnmetLifetimeReq {
     pub binding_span: Span,
 }
 
-impl AddSubdiagnostic for IntroducesStaticBecauseUnmetLifetimeReq {
-    fn add_to_diagnostic(mut self, diag: &mut rustc_errors::Diagnostic) {
+impl AddToDiagnostic for IntroducesStaticBecauseUnmetLifetimeReq {
+    fn add_to_diagnostic_with<F>(mut self, diag: &mut Diagnostic, _: F)
+    where
+        F: Fn(&mut Diagnostic, SubdiagnosticMessage) -> SubdiagnosticMessage,
+    {
         self.unmet_requirements
-            .push_span_label(self.binding_span, fluent::infer::msl_introduces_static);
-        diag.span_note(self.unmet_requirements, fluent::infer::msl_unmet_req);
+            .push_span_label(self.binding_span, fluent::infer_msl_introduces_static);
+        diag.span_note(self.unmet_requirements, fluent::infer_msl_unmet_req);
     }
 }
 
-pub struct ImplNote {
-    pub impl_span: Option<Span>,
+// FIXME(#100717): replace with a `Option<Span>` when subdiagnostic supports that
+#[derive(Subdiagnostic)]
+pub enum DoesNotOutliveStaticFromImpl {
+    #[note(infer_does_not_outlive_static_from_impl)]
+    Spanned {
+        #[primary_span]
+        span: Span,
+    },
+    #[note(infer_does_not_outlive_static_from_impl)]
+    Unspanned,
 }
 
-impl AddSubdiagnostic for ImplNote {
-    fn add_to_diagnostic(self, diag: &mut rustc_errors::Diagnostic) {
-        match self.impl_span {
-            Some(span) => diag.span_note(span, fluent::infer::msl_impl_note),
-            None => diag.note(fluent::infer::msl_impl_note),
-        };
-    }
+#[derive(Subdiagnostic)]
+pub enum ImplicitStaticLifetimeSubdiag {
+    #[note(infer_implicit_static_lifetime_note)]
+    Note {
+        #[primary_span]
+        span: Span,
+    },
+    #[suggestion_verbose(
+        infer_implicit_static_lifetime_suggestion,
+        code = " + '_",
+        applicability = "maybe-incorrect"
+    )]
+    Sugg {
+        #[primary_span]
+        span: Span,
+    },
 }
 
-pub enum TraitSubdiag {
-    Note { span: Span },
-    Sugg { span: Span },
-}
-
-// FIXME(#100717) used in `Vec<TraitSubdiag>` so requires eager translation/list support
-impl AddSubdiagnostic for TraitSubdiag {
-    fn add_to_diagnostic(self, diag: &mut rustc_errors::Diagnostic) {
-        match self {
-            TraitSubdiag::Note { span } => {
-                diag.span_note(span, "this has an implicit `'static` lifetime requirement");
-            }
-            TraitSubdiag::Sugg { span } => {
-                diag.span_suggestion_verbose(
-                    span,
-                    "consider relaxing the implicit `'static` requirement",
-                    " + '_".to_owned(),
-                    rustc_errors::Applicability::MaybeIncorrect,
-                );
-            }
-        }
-    }
-}
-
-#[derive(SessionDiagnostic)]
-#[diag(infer::mismatched_static_lifetime)]
+#[derive(Diagnostic)]
+#[diag(infer_mismatched_static_lifetime)]
 pub struct MismatchedStaticLifetime<'a> {
     #[primary_span]
     pub cause_span: Span,
@@ -493,7 +499,7 @@ pub struct MismatchedStaticLifetime<'a> {
     #[subdiagnostic]
     pub expl: Option<note_and_explain::RegionExplanation<'a>>,
     #[subdiagnostic]
-    pub impl_note: ImplNote,
-    #[subdiagnostic]
-    pub trait_subdiags: Vec<TraitSubdiag>,
+    pub does_not_outlive_static_from_impl: DoesNotOutliveStaticFromImpl,
+    #[subdiagnostic(eager)]
+    pub implicit_static_lifetimes: Vec<ImplicitStaticLifetimeSubdiag>,
 }

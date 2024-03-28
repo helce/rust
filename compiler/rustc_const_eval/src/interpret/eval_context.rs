@@ -258,6 +258,9 @@ impl<'tcx> fmt::Display for FrameInfo<'tcx> {
             {
                 write!(f, "inside closure")?;
             } else {
+                // Note: this triggers a `good_path_bug` state, which means that if we ever get here
+                // we must emit a diagnostic. We should never display a `FrameInfo` unless we
+                // actually want to emit a warning or error to the user.
                 write!(f, "inside `{}`", self.instance)?;
             }
             if !self.span.is_dummy() {
@@ -465,7 +468,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 
     #[inline]
     pub fn type_is_freeze(&self, ty: Ty<'tcx>) -> bool {
-        ty.is_freeze(self.tcx, self.param_env)
+        ty.is_freeze(*self.tcx, self.param_env)
     }
 
     pub fn load_mir(
@@ -683,11 +686,10 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         self.stack_mut().push(frame);
 
         // Make sure all the constants required by this frame evaluate successfully (post-monomorphization check).
-        for const_ in &body.required_consts {
-            let span = const_.span;
-            let const_ =
-                self.subst_from_current_frame_and_normalize_erasing_regions(const_.literal)?;
-            self.mir_const_to_op(&const_, None).map_err(|err| {
+        for ct in &body.required_consts {
+            let span = ct.span;
+            let ct = self.subst_from_current_frame_and_normalize_erasing_regions(ct.literal)?;
+            self.const_to_op(&ct, None).map_err(|err| {
                 // If there was an error, set the span of the current frame to this constant.
                 // Avoiding doing this when evaluation succeeds.
                 self.frame_mut().loc = Err(span);
@@ -929,11 +931,13 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
     }
 
     #[must_use]
-    pub fn generate_stacktrace(&self) -> Vec<FrameInfo<'tcx>> {
+    pub fn generate_stacktrace_from_stack(
+        stack: &[Frame<'mir, 'tcx, M::Provenance, M::FrameExtra>],
+    ) -> Vec<FrameInfo<'tcx>> {
         let mut frames = Vec::new();
         // This deliberately does *not* honor `requires_caller_location` since it is used for much
         // more than just panics.
-        for frame in self.stack().iter().rev() {
+        for frame in stack.iter().rev() {
             let lint_root = frame.current_source_info().and_then(|source_info| {
                 match &frame.body.source_scopes[source_info.scope].local_data {
                     mir::ClearCrossCrate::Set(data) => Some(data.lint_root),
@@ -946,6 +950,11 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         }
         trace!("generate stacktrace: {:#?}", frames);
         frames
+    }
+
+    #[must_use]
+    pub fn generate_stacktrace(&self) -> Vec<FrameInfo<'tcx>> {
+        Self::generate_stacktrace_from_stack(self.stack())
     }
 }
 

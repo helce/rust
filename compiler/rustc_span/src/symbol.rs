@@ -125,7 +125,7 @@ symbols! {
     Symbols {
         AcqRel,
         Acquire,
-        AddSubdiagnostic,
+        AddToDiagnostic,
         Alignment,
         Any,
         Arc,
@@ -210,6 +210,7 @@ symbols! {
         Implied,
         Input,
         Into,
+        IntoDiagnostic,
         IntoFuture,
         IntoIterator,
         IoRead,
@@ -223,6 +224,7 @@ symbols! {
         Left,
         LinkedList,
         LintPass,
+        LocalKey,
         Mutex,
         MutexGuard,
         N,
@@ -265,6 +267,7 @@ symbols! {
         Rc,
         Ready,
         Receiver,
+        RefCell,
         Relaxed,
         Release,
         Result,
@@ -273,11 +276,11 @@ symbols! {
         Rust,
         RustcDecodable,
         RustcEncodable,
+        RwLock,
         RwLockReadGuard,
         RwLockWriteGuard,
         Send,
         SeqCst,
-        SessionDiagnostic,
         SliceIndex,
         Some,
         String,
@@ -396,6 +399,7 @@ symbols! {
         assume_init,
         async_await,
         async_closure,
+        async_fn_in_trait,
         atomic,
         atomic_mod,
         atomics,
@@ -447,6 +451,7 @@ symbols! {
         call_once,
         caller_location,
         capture_disjoint_fields,
+        cause,
         cdylib,
         ceilf32,
         ceilf64,
@@ -781,6 +786,7 @@ symbols! {
         globs,
         gt,
         half_open_range_patterns,
+        half_open_range_patterns_in_slices,
         hash,
         hexagon_target_feature,
         hidden,
@@ -990,7 +996,18 @@ symbols! {
         never_type,
         never_type_fallback,
         new,
+        new_binary,
+        new_debug,
+        new_display,
+        new_lower_exp,
+        new_lower_hex,
+        new_octal,
+        new_pointer,
         new_unchecked,
+        new_upper_exp,
+        new_upper_hex,
+        new_v1,
+        new_v1_formatted,
         next,
         nll,
         no,
@@ -1214,9 +1231,7 @@ symbols! {
         rust_eh_unregister_frames,
         rust_oom,
         rustc,
-        rustc_access_level,
         rustc_allocator,
-        rustc_allocator_nounwind,
         rustc_allocator_zeroed,
         rustc_allow_const_fn_unstable,
         rustc_allow_incoherent_impl,
@@ -1242,6 +1257,7 @@ symbols! {
         rustc_dump_program_clauses,
         rustc_dump_user_substs,
         rustc_dump_vtable,
+        rustc_effective_visibility,
         rustc_error,
         rustc_evaluate_where_clauses,
         rustc_expected_cgu_reuse,
@@ -1262,6 +1278,7 @@ symbols! {
         rustc_mir,
         rustc_must_implement_one_of,
         rustc_nonnull_optimization_guaranteed,
+        rustc_nounwind,
         rustc_object_lifetime_default,
         rustc_on_unimplemented,
         rustc_outlives,
@@ -1281,6 +1298,7 @@ symbols! {
         rustc_reallocator,
         rustc_regions,
         rustc_reservation_impl,
+        rustc_safe_intrinsic,
         rustc_serialize,
         rustc_skip_array_during_method_dispatch,
         rustc_specialization_trait,
@@ -1688,6 +1706,7 @@ impl Ident {
     /// macro (e.g., `macro` or `macro_rules!` items) and stay different if they came from different
     /// non-transparent macros.
     /// Technically, this operation strips all transparent marks from ident's syntactic context.
+    #[inline]
     pub fn normalize_to_macro_rules(self) -> Ident {
         Ident::new(self.name, self.span.normalize_to_macro_rules())
     }
@@ -1703,6 +1722,7 @@ impl Ident {
 }
 
 impl PartialEq for Ident {
+    #[inline]
     fn eq(&self, rhs: &Self) -> bool {
         self.name == rhs.name && self.span.eq_ctxt(rhs.span)
     }
@@ -1878,6 +1898,13 @@ impl fmt::Debug for Symbol {
 impl fmt::Display for Symbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self.as_str(), f)
+    }
+}
+
+// takes advantage of `str::to_string` specialization
+impl ToString for Symbol {
+    fn to_string(&self) -> String {
+        self.as_str().to_string()
     }
 }
 

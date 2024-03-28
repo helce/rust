@@ -2,12 +2,12 @@
 #![feature(array_chunks)]
 #![feature(array_methods)]
 #![feature(array_windows)]
-#![feature(bench_black_box)]
 #![feature(bigint_helper_methods)]
 #![feature(cell_update)]
 #![feature(const_assume)]
 #![feature(const_black_box)]
 #![feature(const_bool_to_option)]
+#![feature(const_caller_location)]
 #![feature(const_cell_into_inner)]
 #![feature(const_convert)]
 #![feature(const_heap)]
@@ -21,6 +21,7 @@
 #![feature(const_ptr_write)]
 #![feature(const_trait_impl)]
 #![feature(const_likely)]
+#![feature(const_location_fields)]
 #![feature(core_intrinsics)]
 #![feature(core_private_bignum)]
 #![feature(core_private_diy_float)]
@@ -48,8 +49,8 @@
 #![feature(slice_from_ptr_range)]
 #![feature(split_as_slice)]
 #![feature(maybe_uninit_uninit_array)]
-#![feature(maybe_uninit_array_assume_init)]
 #![feature(maybe_uninit_write_slice)]
+#![feature(maybe_uninit_uninit_array_transpose)]
 #![feature(min_specialization)]
 #![feature(numfmt)]
 #![feature(step_trait)]
@@ -74,6 +75,7 @@
 #![feature(iterator_try_reduce)]
 #![feature(const_mut_refs)]
 #![feature(const_pin)]
+#![feature(const_waker)]
 #![feature(never_type)]
 #![feature(unwrap_infallible)]
 #![feature(pointer_byte_offsets)]
@@ -93,13 +95,13 @@
 #![feature(strict_provenance_atomic_ptr)]
 #![feature(trusted_random_access)]
 #![feature(unsize)]
-#![feature(unzip_option)]
 #![feature(const_array_from_ref)]
 #![feature(const_slice_from_ref)]
 #![feature(waker_getters)]
 #![feature(slice_flatten)]
 #![feature(provide_any)]
 #![feature(utf8_chunks)]
+#![feature(is_ascii_octdigit)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate test;
@@ -130,6 +132,7 @@ mod nonzero;
 mod num;
 mod ops;
 mod option;
+mod panic;
 mod pattern;
 mod pin;
 mod pin_macro;

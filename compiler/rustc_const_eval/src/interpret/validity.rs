@@ -15,7 +15,6 @@ use rustc_middle::mir::interpret::InterpError;
 use rustc_middle::ty;
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_span::symbol::{sym, Symbol};
-use rustc_span::DUMMY_SP;
 use rustc_target::abi::{Abi, Scalar as ScalarAbi, Size, VariantIdx, Variants, WrappingRange};
 
 use std::hash::Hash;
@@ -56,7 +55,7 @@ macro_rules! throw_validation_failure {
 /// This lets you use the patterns as a kind of validation list, asserting which errors
 /// can possibly happen:
 ///
-/// ```
+/// ```ignore(illustrative)
 /// let v = try_validation!(some_fn(), some_path, {
 ///     Foo | Bar | Baz => { "some failure" },
 /// });
@@ -65,7 +64,7 @@ macro_rules! throw_validation_failure {
 /// The patterns must be of type `UndefinedBehaviorInfo`.
 /// An additional expected parameter can also be added to the failure message:
 ///
-/// ```
+/// ```ignore(illustrative)
 /// let v = try_validation!(some_fn(), some_path, {
 ///     Foo | Bar | Baz => { "some failure" } expected { "something that wasn't a failure" },
 /// });
@@ -74,7 +73,7 @@ macro_rules! throw_validation_failure {
 /// An additional nicety is that both parameters actually take format args, so you can just write
 /// the format string in directly:
 ///
-/// ```
+/// ```ignore(illustrative)
 /// let v = try_validation!(some_fn(), some_path, {
 ///     Foo | Bar | Baz => { "{:?}", some_failure } expected { "{}", expected_value },
 /// });
@@ -726,7 +725,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
     ) -> InterpResult<'tcx> {
         // Special check preventing `UnsafeCell` inside unions in the inner part of constants.
         if matches!(self.ctfe_mode, Some(CtfeValidationMode::Const { inner: true, .. })) {
-            if !op.layout.ty.is_freeze(self.ecx.tcx.at(DUMMY_SP), self.ecx.param_env) {
+            if !op.layout.ty.is_freeze(*self.ecx.tcx, self.ecx.param_env) {
                 throw_validation_failure!(self.path, { "`UnsafeCell` in a `const`" });
             }
         }

@@ -5,6 +5,25 @@
 #![crate_name = "test_docs"]
 #![feature(rustdoc_internals)]
 #![feature(doc_cfg)]
+#![feature(associated_type_defaults)]
+
+/*!
+Enable the feature <span class="stab portability"><code>some-feature</code></span> to enjoy
+this crate even more!
+Enable the feature <span class="stab portability"><code>some-feature</code></span> to enjoy
+this crate even more!
+Enable the feature <span class="stab portability"><code>some-feature</code></span> to enjoy
+this crate even more!
+
+Also, stop using `bar` as it's <span class="stab deprecated" title="">deprecated</span>.
+Also, stop using `bar` as it's <span class="stab deprecated" title="">deprecated</span>.
+Also, stop using `bar` as it's <span class="stab deprecated" title="">deprecated</span>.
+
+Finally, you can use `quz` only on <span class="stab portability"><code>Unix or x86-64</code>
+</span>.
+Finally, you can use `quz` only on <span class="stab portability"><code>Unix or x86-64</code>
+</span>.
+*/
 
 use std::convert::AsRef;
 use std::fmt;
@@ -298,6 +317,18 @@ pub mod details {
     /// <div>I'm the content of the details!</div>
     /// </details>
     pub struct Details;
+
+    impl Details {
+        /// We check the appearance of the `<details>`/`<summary>` in here.
+        ///
+        /// ## Hello
+        ///
+        /// <details>
+        /// <summary><h4>I'm a summary</h4></summary>
+        /// <div>I'm the content of the details!</div>
+        /// </details>
+        pub fn method() {}
+    }
 }
 
 pub mod doc_block_table {
@@ -324,4 +355,64 @@ pub mod doc_block_table {
         }
     }
 
+}
+
+pub struct NotableStructWithLongName<R>(R);
+
+impl<R: std::io::Read> NotableStructWithLongName<R> {
+    pub fn create_an_iterator_from_read(r: R) -> NotableStructWithLongName<R> { Self(r) }
+}
+
+impl<R: std::io::Read> std::iter::Iterator for NotableStructWithLongName<R> {
+    type Item = ();
+
+    fn next(&mut self) -> Option<Self::Item> { () }
+}
+
+pub trait TraitWithNoDocblocks {
+    fn first_fn(&self);
+    fn second_fn(&self);
+}
+
+pub struct TypeWithNoDocblocks;
+
+impl TypeWithNoDocblocks {
+    fn x() -> Option<Self> {
+        Some(Self)
+    }
+    fn y() -> Option<u32> {
+        // code comment
+        let t = Self::x()?;
+        Some(0)
+    }
+}
+
+impl TypeWithNoDocblocks {
+    pub fn first_fn(&self) {}
+    pub fn second_fn<'a>(&'a self) {
+        let x = 12;
+        let y = "a";
+        let z = false;
+    }
+}
+
+pub unsafe fn unsafe_fn() {}
+
+pub fn safe_fn() {}
+
+#[repr(C)]
+pub struct WithGenerics<T: TraitWithNoDocblocks, S = String, E = WhoLetTheDogOut, P = i8> {
+    s: S,
+    t: T,
+    e: E,
+    p: P,
+}
+
+pub const CONST: u8 = 0;
+
+pub trait TraitWithoutGenerics {
+    const C: u8 = CONST;
+    type T = SomeType;
+
+    fn foo();
 }

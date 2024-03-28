@@ -332,7 +332,10 @@ impl<'ll> CodegenCx<'ll, '_> {
             }
         }
 
-        if self.use_dll_storage_attrs && self.tcx.is_dllimport_foreign_item(def_id) {
+        if self.use_dll_storage_attrs
+            && let Some(library) = self.tcx.native_library(def_id)
+            && library.kind.is_dllimport()
+        {
             // For foreign (native) libs we know the exact storage type to use.
             unsafe {
                 llvm::LLVMSetDLLStorageClass(g, llvm::DLLStorageClass::DllImport);
@@ -552,7 +555,7 @@ impl<'ll> StaticMethods for CodegenCx<'ll, '_> {
                 // `#[used(compiler)]` is explicitly requested. This is to avoid similar breakage
                 // on other targets, in particular MachO targets have *their* static constructor
                 // lists broken if `llvm.compiler.used` is emitted rather than llvm.used. However,
-                // that check happens when assigning the `CodegenFnAttrFlags` in `rustc_typeck`,
+                // that check happens when assigning the `CodegenFnAttrFlags` in `rustc_hir_analysis`,
                 // so we don't need to take care of it here.
                 self.add_compiler_used_global(g);
             }

@@ -35,7 +35,7 @@ fn implied_outlives_bounds<'tcx>(
 }
 
 fn compute_implied_outlives_bounds<'tcx>(
-    infcx: &InferCtxt<'_, 'tcx>,
+    infcx: &InferCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     ty: Ty<'tcx>,
 ) -> Fallible<Vec<OutlivesBound<'tcx>>> {
@@ -79,7 +79,7 @@ fn compute_implied_outlives_bounds<'tcx>(
         // implied bounds in some cases, mostly when dealing with projections.
         fulfill_cx.register_predicate_obligations(
             infcx,
-            obligations.iter().filter(|o| o.predicate.has_infer_types_or_consts()).cloned(),
+            obligations.iter().filter(|o| o.predicate.has_non_region_infer()).cloned(),
         );
 
         // From the full set of obligations, just filter down to the
@@ -156,6 +156,9 @@ fn implied_bounds_from_components<'tcx>(
                 Component::Region(r) => Some(OutlivesBound::RegionSubRegion(sub_region, r)),
                 Component::Param(p) => Some(OutlivesBound::RegionSubParam(sub_region, p)),
                 Component::Projection(p) => Some(OutlivesBound::RegionSubProjection(sub_region, p)),
+                Component::Opaque(def_id, substs) => {
+                    Some(OutlivesBound::RegionSubOpaque(sub_region, def_id, substs))
+                }
                 Component::EscapingProjection(_) =>
                 // If the projection has escaping regions, don't
                 // try to infer any implied bounds even for its

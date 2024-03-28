@@ -83,10 +83,11 @@ pub(crate) fn structure_node_kind(kind: StructureNodeKind) -> lsp_types::SymbolK
 
 pub(crate) fn document_highlight_kind(
     category: ReferenceCategory,
-) -> lsp_types::DocumentHighlightKind {
+) -> Option<lsp_types::DocumentHighlightKind> {
     match category {
-        ReferenceCategory::Read => lsp_types::DocumentHighlightKind::READ,
-        ReferenceCategory::Write => lsp_types::DocumentHighlightKind::WRITE,
+        ReferenceCategory::Read => Some(lsp_types::DocumentHighlightKind::READ),
+        ReferenceCategory::Write => Some(lsp_types::DocumentHighlightKind::WRITE),
+        ReferenceCategory::Import => None,
     }
 }
 
@@ -1176,13 +1177,13 @@ pub(crate) fn code_lens(
                 })
             }
         }
-        AnnotationKind::HasImpls { file_id, data } => {
+        AnnotationKind::HasImpls { pos: file_range, data } => {
             if !client_commands_config.show_reference {
                 return Ok(());
             }
-            let line_index = snap.file_line_index(file_id)?;
+            let line_index = snap.file_line_index(file_range.file_id)?;
             let annotation_range = range(&line_index, annotation.range);
-            let url = url(snap, file_id);
+            let url = url(snap, file_range.file_id);
 
             let id = lsp_types::TextDocumentIdentifier { uri: url.clone() };
 
@@ -1220,13 +1221,13 @@ pub(crate) fn code_lens(
                 data: Some(to_value(lsp_ext::CodeLensResolveData::Impls(goto_params)).unwrap()),
             })
         }
-        AnnotationKind::HasReferences { file_id, data } => {
+        AnnotationKind::HasReferences { pos: file_range, data } => {
             if !client_commands_config.show_reference {
                 return Ok(());
             }
-            let line_index = snap.file_line_index(file_id)?;
+            let line_index = snap.file_line_index(file_range.file_id)?;
             let annotation_range = range(&line_index, annotation.range);
-            let url = url(snap, file_id);
+            let url = url(snap, file_range.file_id);
 
             let id = lsp_types::TextDocumentIdentifier { uri: url.clone() };
 

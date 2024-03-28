@@ -1,10 +1,10 @@
 //! Type context book-keeping.
 
 use crate::arena::Arena;
-use crate::dep_graph::{DepGraph, DepKind, DepKindStruct};
+use crate::dep_graph::{DepGraph, DepKindStruct};
 use crate::hir::place::Place as HirPlace;
 use crate::infer::canonical::{Canonical, CanonicalVarInfo, CanonicalVarInfos};
-use crate::lint::{struct_lint_level, LintLevelSource};
+use crate::lint::struct_lint_level;
 use crate::middle::codegen_fn_attrs::CodegenFnAttrs;
 use crate::middle::resolve_lifetime;
 use crate::middle::stability;
@@ -15,7 +15,6 @@ use crate::mir::{
 use crate::thir::Thir;
 use crate::traits;
 use crate::ty::query::{self, TyCtxtAt};
-use crate::ty::subst::{GenericArg, GenericArgKind, InternalSubsts, Subst, SubstsRef, UserSubsts};
 use crate::ty::{
     self, AdtDef, AdtDefData, AdtKind, Binder, BindingMode, BoundVar, CanonicalPolyFnSig,
     ClosureSizeProfileData, Const, ConstS, ConstVid, DefIdTree, ExistentialPredicate, FloatTy,
@@ -24,6 +23,7 @@ use crate::ty::{
     RegionKind, ReprOptions, TraitObjectVisitor, Ty, TyKind, TyS, TyVar, TyVid, TypeAndMut, UintTy,
     Visibility,
 };
+use crate::ty::{GenericArg, GenericArgKind, InternalSubsts, SubstsRef, UserSubsts};
 use rustc_ast as ast;
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
@@ -34,12 +34,16 @@ use rustc_data_structures::sharded::{IntoPointer, ShardedHashMap};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::{self, Lock, Lrc, ReadGuard, RwLock, WorkerLocal};
+use rustc_data_structures::unord::UnordSet;
 use rustc_data_structures::vec_map::VecMap;
-use rustc_errors::{DecorateLint, ErrorGuaranteed, LintDiagnosticBuilder, MultiSpan};
+use rustc_errors::{
+    DecorateLint, DiagnosticBuilder, DiagnosticMessage, ErrorGuaranteed, MultiSpan,
+};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LocalDefId, LOCAL_CRATE};
 use rustc_hir::definitions::Definitions;
+use rustc_hir::hir_id::OwnerId;
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{
@@ -53,7 +57,7 @@ use rustc_query_system::ich::StableHashingContext;
 use rustc_serialize::opaque::{FileEncodeResult, FileEncoder};
 use rustc_session::config::{CrateType, OutputFilenames};
 use rustc_session::cstore::CrateStoreDyn;
-use rustc_session::lint::{Level, Lint};
+use rustc_session::lint::Lint;
 use rustc_session::Limit;
 use rustc_session::Session;
 use rustc_span::def_id::{DefPathHash, StableCrateId};
@@ -76,7 +80,7 @@ use std::mem;
 use std::ops::{Bound, Deref};
 use std::sync::Arc;
 
-use super::{ImplPolarity, RvalueScopes};
+use super::{ImplPolarity, ResolverOutputs, RvalueScopes};
 
 pub trait OnDiskCache<'tcx>: rustc_data_structures::sync::Sync {
     /// Creates a new `OnDiskCache` instance from the serialized data in `data`.
@@ -195,9 +199,9 @@ impl<'tcx> CtxtInterners<'tcx> {
                 .intern(kind, |kind| {
                     let flags = super::flags::FlagComputation::for_kind(&kind);
 
-                    // It's impossible to hash inference regions (and will ICE), so we don't need to try to cache them.
+                    // It's impossible to hash inference variables (and will ICE), so we don't need to try to cache them.
                     // Without incremental, we rarely stable-hash types, so let's not do it proactively.
-                    let stable_hash = if flags.flags.intersects(TypeFlags::HAS_RE_INFER)
+                    let stable_hash = if flags.flags.intersects(TypeFlags::NEEDS_INFER)
                         || sess.opts.incremental.is_none()
                     {
                         Fingerprint::ZERO
@@ -288,7 +292,7 @@ pub struct CommonConsts<'tcx> {
 }
 
 pub struct LocalTableInContext<'a, V> {
-    hir_owner: LocalDefId,
+    hir_owner: OwnerId,
     data: &'a ItemLocalMap<V>,
 }
 
@@ -300,7 +304,7 @@ pub struct LocalTableInContext<'a, V> {
 /// would result in lookup errors, or worse, in silently wrong data being
 /// stored/returned.
 #[inline]
-fn validate_hir_id_for_typeck_results(hir_owner: LocalDefId, hir_id: hir::HirId) {
+fn validate_hir_id_for_typeck_results(hir_owner: OwnerId, hir_id: hir::HirId) {
     if hir_id.owner != hir_owner {
         invalid_hir_id_for_typeck_results(hir_owner, hir_id);
     }
@@ -308,7 +312,7 @@ fn validate_hir_id_for_typeck_results(hir_owner: LocalDefId, hir_id: hir::HirId)
 
 #[cold]
 #[inline(never)]
-fn invalid_hir_id_for_typeck_results(hir_owner: LocalDefId, hir_id: hir::HirId) {
+fn invalid_hir_id_for_typeck_results(hir_owner: OwnerId, hir_id: hir::HirId) {
     ty::tls::with(|tcx| {
         bug!(
             "node {} with HirId::owner {:?} cannot be placed in TypeckResults with hir_owner {:?}",
@@ -344,7 +348,7 @@ impl<'a, V> ::std::ops::Index<hir::HirId> for LocalTableInContext<'a, V> {
 }
 
 pub struct LocalTableInContextMut<'a, V> {
-    hir_owner: LocalDefId,
+    hir_owner: OwnerId,
     data: &'a mut ItemLocalMap<V>,
 }
 
@@ -416,7 +420,7 @@ pub struct GeneratorDiagnosticData<'tcx> {
 #[derive(TyEncodable, TyDecodable, Debug, HashStable)]
 pub struct TypeckResults<'tcx> {
     /// The `HirId::owner` all `ItemLocalId`s in this table are relative to.
-    pub hir_owner: LocalDefId,
+    pub hir_owner: OwnerId,
 
     /// Resolved definitions for `<T>::X` associated paths and
     /// method calls, including those of overloaded operators.
@@ -528,19 +532,17 @@ pub struct TypeckResults<'tcx> {
     /// This is used for warning unused imports. During type
     /// checking, this `Lrc` should not be cloned: it must have a ref-count
     /// of 1 so that we can insert things into the set mutably.
-    pub used_trait_imports: Lrc<FxHashSet<LocalDefId>>,
+    pub used_trait_imports: Lrc<UnordSet<LocalDefId>>,
 
     /// If any errors occurred while type-checking this body,
     /// this field will be set to `Some(ErrorGuaranteed)`.
     pub tainted_by_errors: Option<ErrorGuaranteed>,
 
     /// All the opaque types that have hidden types set
-    /// by this function. For return-position-impl-trait we also store the
-    /// type here, so that mir-borrowck can figure out hidden types,
+    /// by this function. We also store the
+    /// type here, so that mir-borrowck can use it as a hint for figuring out hidden types,
     /// even if they are only set in dead code (which doesn't show up in MIR).
-    /// For type-alias-impl-trait, this map is only used to prevent query cycles,
-    /// so the hidden types are all `None`.
-    pub concrete_opaque_types: VecMap<LocalDefId, Option<Ty<'tcx>>>,
+    pub concrete_opaque_types: VecMap<LocalDefId, ty::OpaqueHiddenType<'tcx>>,
 
     /// Tracks the minimum captures required for a closure;
     /// see `MinCaptureInformationMap` for more details.
@@ -572,7 +574,7 @@ pub struct TypeckResults<'tcx> {
 
     /// Tracks the rvalue scoping rules which defines finer scoping for rvalue expressions
     /// by applying extended parameter rules.
-    /// Details may be find in `rustc_typeck::check::rvalue_scopes`.
+    /// Details may be find in `rustc_hir_analysis::check::rvalue_scopes`.
     pub rvalue_scopes: RvalueScopes,
 
     /// Stores the type, expression, span and optional scope span of all types
@@ -591,7 +593,7 @@ pub struct TypeckResults<'tcx> {
 }
 
 impl<'tcx> TypeckResults<'tcx> {
-    pub fn new(hir_owner: LocalDefId) -> TypeckResults<'tcx> {
+    pub fn new(hir_owner: OwnerId) -> TypeckResults<'tcx> {
         TypeckResults {
             hir_owner,
             type_dependent_defs: Default::default(),
@@ -1066,10 +1068,9 @@ pub struct GlobalCtxt<'tcx> {
     pub consts: CommonConsts<'tcx>,
 
     definitions: RwLock<Definitions>,
-    cstore: Box<CrateStoreDyn>,
 
     /// Output of the resolver.
-    pub(crate) untracked_resolutions: ty::ResolverOutputs,
+    pub(crate) untracked_resolutions: ty::ResolverGlobalCtxt,
     untracked_resolver_for_lowering: Steal<ty::ResolverAstLowering>,
     /// The entire crate as AST. This field serves as the input for the hir_crate query,
     /// which lowers it from AST to HIR. It must not be read or used by anything else.
@@ -1083,7 +1084,7 @@ pub struct GlobalCtxt<'tcx> {
 
     pub queries: &'tcx dyn query::QueryEngine<'tcx>,
     pub query_caches: query::QueryCaches<'tcx>,
-    query_kinds: &'tcx [DepKindStruct<'tcx>],
+    pub(crate) query_kinds: &'tcx [DepKindStruct<'tcx>],
 
     // Internal caches for metadata decoding. No need to track deps on this.
     pub ty_rcache: Lock<FxHashMap<ty::CReaderCacheKey, Ty<'tcx>>>,
@@ -1232,10 +1233,7 @@ impl<'tcx> TyCtxt<'tcx> {
         lint_store: Lrc<dyn Any + sync::Send + sync::Sync>,
         arena: &'tcx WorkerLocal<Arena<'tcx>>,
         hir_arena: &'tcx WorkerLocal<hir::Arena<'tcx>>,
-        definitions: Definitions,
-        cstore: Box<CrateStoreDyn>,
-        untracked_resolutions: ty::ResolverOutputs,
-        untracked_resolver_for_lowering: ty::ResolverAstLowering,
+        resolver_outputs: ResolverOutputs,
         krate: Lrc<ast::Crate>,
         dep_graph: DepGraph,
         on_disk_cache: Option<&'tcx dyn OnDiskCache<'tcx>>,
@@ -1244,6 +1242,11 @@ impl<'tcx> TyCtxt<'tcx> {
         crate_name: &str,
         output_filenames: OutputFilenames,
     ) -> GlobalCtxt<'tcx> {
+        let ResolverOutputs {
+            definitions,
+            global_ctxt: untracked_resolutions,
+            ast_lowering: untracked_resolver_for_lowering,
+        } = resolver_outputs;
         let data_layout = TargetDataLayout::parse(&s.target).unwrap_or_else(|err| {
             s.emit_fatal(err);
         });
@@ -1252,7 +1255,7 @@ impl<'tcx> TyCtxt<'tcx> {
             &interners,
             s,
             &definitions,
-            &*cstore,
+            &*untracked_resolutions.cstore,
             // This is only used to create a stable hashing context.
             &untracked_resolutions.source_span,
         );
@@ -1267,7 +1270,6 @@ impl<'tcx> TyCtxt<'tcx> {
             interners,
             dep_graph,
             definitions: RwLock::new(definitions),
-            cstore,
             prof: s.prof.clone(),
             types: common_types,
             lifetimes: common_lifetimes,
@@ -1288,10 +1290,6 @@ impl<'tcx> TyCtxt<'tcx> {
             alloc_map: Lock::new(interpret::AllocMap::new()),
             output_filenames: Arc::new(output_filenames),
         }
-    }
-
-    pub(crate) fn query_kind(self, k: DepKind) -> &'tcx DepKindStruct<'tcx> {
-        &self.query_kinds[k as usize]
     }
 
     /// Constructs a `TyKind::Error` type and registers a `delay_span_bug` to ensure it gets used.
@@ -1372,7 +1370,7 @@ impl<'tcx> TyCtxt<'tcx> {
         if let Some(id) = id.as_local() {
             self.definitions_untracked().def_key(id)
         } else {
-            self.cstore.def_key(id)
+            self.untracked_resolutions.cstore.def_key(id)
         }
     }
 
@@ -1386,7 +1384,7 @@ impl<'tcx> TyCtxt<'tcx> {
         if let Some(id) = id.as_local() {
             self.definitions_untracked().def_path(id)
         } else {
-            self.cstore.def_path(id)
+            self.untracked_resolutions.cstore.def_path(id)
         }
     }
 
@@ -1396,7 +1394,7 @@ impl<'tcx> TyCtxt<'tcx> {
         if let Some(def_id) = def_id.as_local() {
             self.definitions_untracked().def_path_hash(def_id)
         } else {
-            self.cstore.def_path_hash(def_id)
+            self.untracked_resolutions.cstore.def_path_hash(def_id)
         }
     }
 
@@ -1405,7 +1403,7 @@ impl<'tcx> TyCtxt<'tcx> {
         if crate_num == LOCAL_CRATE {
             self.sess.local_stable_crate_id()
         } else {
-            self.cstore.stable_crate_id(crate_num)
+            self.untracked_resolutions.cstore.stable_crate_id(crate_num)
         }
     }
 
@@ -1416,7 +1414,7 @@ impl<'tcx> TyCtxt<'tcx> {
         if stable_crate_id == self.sess.local_stable_crate_id() {
             LOCAL_CRATE
         } else {
-            self.cstore.stable_crate_id_to_crate_num(stable_crate_id)
+            self.untracked_resolutions.cstore.stable_crate_id_to_crate_num(stable_crate_id)
         }
     }
 
@@ -1435,8 +1433,9 @@ impl<'tcx> TyCtxt<'tcx> {
         } else {
             // If this is a DefPathHash from an upstream crate, let the CrateStore map
             // it to a DefId.
-            let cnum = self.cstore.stable_crate_id_to_crate_num(stable_crate_id);
-            self.cstore.def_path_hash_to_def_id(cnum, hash)
+            let cstore = &*self.untracked_resolutions.cstore;
+            let cnum = cstore.stable_crate_id_to_crate_num(stable_crate_id);
+            cstore.def_path_hash_to_def_id(cnum, hash)
         }
     }
 
@@ -1448,7 +1447,7 @@ impl<'tcx> TyCtxt<'tcx> {
         let (crate_name, stable_crate_id) = if def_id.is_local() {
             (self.crate_name, self.sess.local_stable_crate_id())
         } else {
-            let cstore = &self.cstore;
+            let cstore = &*self.untracked_resolutions.cstore;
             (cstore.crate_name(def_id.krate), cstore.stable_crate_id(def_id.krate))
         };
 
@@ -1523,7 +1522,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Note that this is *untracked* and should only be used within the query
     /// system if the result is otherwise tracked through queries
     pub fn cstore_untracked(self) -> &'tcx CrateStoreDyn {
-        &*self.cstore
+        &*self.untracked_resolutions.cstore
     }
 
     /// Note that this is *untracked* and should only be used within the query
@@ -1549,7 +1548,7 @@ impl<'tcx> TyCtxt<'tcx> {
         let hcx = StableHashingContext::new(
             self.sess,
             &*definitions,
-            &*self.cstore,
+            &*self.untracked_resolutions.cstore,
             &self.untracked_resolutions.source_span,
         );
         f(hcx)
@@ -1725,7 +1724,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
     #[inline]
     pub fn local_visibility(self, def_id: LocalDefId) -> Visibility {
-        self.visibility(def_id.to_def_id()).expect_local()
+        self.visibility(def_id).expect_local()
     }
 }
 
@@ -2367,7 +2366,7 @@ impl<'tcx> TyCtxt<'tcx> {
             st,
             self.sess,
             &self.definitions.read(),
-            &*self.cstore,
+            &*self.untracked_resolutions.cstore,
             // This is only used to create a stable hashing context.
             &self.untracked_resolutions.source_span,
         )
@@ -2812,44 +2811,6 @@ impl<'tcx> TyCtxt<'tcx> {
         iter.intern_with(|xs| self.intern_bound_variable_kinds(xs))
     }
 
-    /// Walks upwards from `id` to find a node which might change lint levels with attributes.
-    /// It stops at `bound` and just returns it if reached.
-    pub fn maybe_lint_level_root_bounded(self, mut id: HirId, bound: HirId) -> HirId {
-        let hir = self.hir();
-        loop {
-            if id == bound {
-                return bound;
-            }
-
-            if hir.attrs(id).iter().any(|attr| Level::from_attr(attr).is_some()) {
-                return id;
-            }
-            let next = hir.get_parent_node(id);
-            if next == id {
-                bug!("lint traversal reached the root of the crate");
-            }
-            id = next;
-        }
-    }
-
-    pub fn lint_level_at_node(
-        self,
-        lint: &'static Lint,
-        mut id: hir::HirId,
-    ) -> (Level, LintLevelSource) {
-        let sets = self.lint_levels(());
-        loop {
-            if let Some(pair) = sets.level_and_source(lint, id, self.sess) {
-                return pair;
-            }
-            let next = self.hir().get_parent_node(id);
-            if next == id {
-                bug!("lint traversal reached the root of the crate");
-            }
-            id = next;
-        }
-    }
-
     /// Emit a lint at `span` from a lint struct (some type that implements `DecorateLint`,
     /// typically generated by `#[derive(LintDiagnostic)]`).
     pub fn emit_spanned_lint(
@@ -2859,18 +2820,28 @@ impl<'tcx> TyCtxt<'tcx> {
         span: impl Into<MultiSpan>,
         decorator: impl for<'a> DecorateLint<'a, ()>,
     ) {
-        self.struct_span_lint_hir(lint, hir_id, span, |diag| decorator.decorate_lint(diag))
+        self.struct_span_lint_hir(lint, hir_id, span, decorator.msg(), |diag| {
+            decorator.decorate_lint(diag)
+        })
     }
 
+    /// Emit a lint at the appropriate level for a hir node, with an associated span.
+    ///
+    /// Return value of the `decorate` closure is ignored, see [`struct_lint_level`] for a detailed explanation.
+    ///
+    /// [`struct_lint_level`]: rustc_middle::lint::struct_lint_level#decorate-signature
     pub fn struct_span_lint_hir(
         self,
         lint: &'static Lint,
         hir_id: HirId,
         span: impl Into<MultiSpan>,
-        decorate: impl for<'a> FnOnce(LintDiagnosticBuilder<'a, ()>),
+        msg: impl Into<DiagnosticMessage>,
+        decorate: impl for<'a, 'b> FnOnce(
+            &'b mut DiagnosticBuilder<'a, ()>,
+        ) -> &'b mut DiagnosticBuilder<'a, ()>,
     ) {
         let (level, src) = self.lint_level_at_node(lint, hir_id);
-        struct_lint_level(self.sess, lint, level, src, Some(span.into()), decorate);
+        struct_lint_level(self.sess, lint, level, src, Some(span.into()), msg, decorate);
     }
 
     /// Emit a lint from a lint struct (some type that implements `DecorateLint`, typically
@@ -2881,17 +2852,25 @@ impl<'tcx> TyCtxt<'tcx> {
         id: HirId,
         decorator: impl for<'a> DecorateLint<'a, ()>,
     ) {
-        self.struct_lint_node(lint, id, |diag| decorator.decorate_lint(diag))
+        self.struct_lint_node(lint, id, decorator.msg(), |diag| decorator.decorate_lint(diag))
     }
 
+    /// Emit a lint at the appropriate level for a hir node.
+    ///
+    /// Return value of the `decorate` closure is ignored, see [`struct_lint_level`] for a detailed explanation.
+    ///
+    /// [`struct_lint_level`]: rustc_middle::lint::struct_lint_level#decorate-signature
     pub fn struct_lint_node(
         self,
         lint: &'static Lint,
         id: HirId,
-        decorate: impl for<'a> FnOnce(LintDiagnosticBuilder<'a, ()>),
+        msg: impl Into<DiagnosticMessage>,
+        decorate: impl for<'a, 'b> FnOnce(
+            &'b mut DiagnosticBuilder<'a, ()>,
+        ) -> &'b mut DiagnosticBuilder<'a, ()>,
     ) {
         let (level, src) = self.lint_level_at_node(lint, id);
-        struct_lint_level(self.sess, lint, level, src, None, decorate);
+        struct_lint_level(self.sess, lint, level, src, None, msg, decorate);
     }
 
     pub fn in_scope_traits(self, id: HirId) -> Option<&'tcx [TraitCandidate]> {
@@ -2906,7 +2885,7 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     pub fn is_late_bound(self, id: HirId) -> bool {
-        self.is_late_bound_map(id.owner).map_or(false, |set| {
+        self.is_late_bound_map(id.owner.def_id).map_or(false, |set| {
             let def_id = self.hir().local_def_id(id);
             set.contains(&def_id)
         })
@@ -2975,6 +2954,21 @@ impl<'tcx> TyCtxtAt<'tcx> {
     pub fn ty_error_with_message(self, msg: &str) -> Ty<'tcx> {
         self.tcx.ty_error_with_message(self.span, msg)
     }
+}
+
+/// Parameter attributes that can only be determined by examining the body of a function instead
+/// of just its signature.
+///
+/// These can be useful for optimization purposes when a function is directly called. We compute
+/// them and store them into the crate metadata so that downstream crates can make use of them.
+///
+/// Right now, we only have `read_only`, but `no_capture` and `no_alias` might be useful in the
+/// future.
+#[derive(Clone, Copy, PartialEq, Debug, Default, TyDecodable, TyEncodable, HashStable)]
+pub struct DeducedParamAttrs {
+    /// The parameter is marked immutable in the function and contains no `UnsafeCell` (i.e. its
+    /// type is freeze).
+    pub read_only: bool,
 }
 
 // We are comparing types with different invariant lifetimes, so `ptr::eq`

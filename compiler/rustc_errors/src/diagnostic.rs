@@ -1,21 +1,17 @@
 use crate::snippet::Style;
 use crate::{
-    CodeSuggestion, DiagnosticMessage, EmissionGuarantee, Level, LintDiagnosticBuilder, MultiSpan,
+    CodeSuggestion, DiagnosticBuilder, DiagnosticMessage, EmissionGuarantee, Level, MultiSpan,
     SubdiagnosticMessage, Substitution, SubstitutionPart, SuggestionStyle,
 };
 use rustc_data_structures::fx::FxHashMap;
 use rustc_error_messages::FluentValue;
-use rustc_hir as hir;
 use rustc_lint_defs::{Applicability, LintExpectationId};
 use rustc_span::edition::LATEST_STABLE_EDITION;
-use rustc_span::symbol::{Ident, MacroRulesNormalizedIdent, Symbol};
-use rustc_span::{edition::Edition, Span, DUMMY_SP};
-use rustc_target::spec::{PanicStrategy, SplitDebuginfo, StackProtector, TargetTriple};
+use rustc_span::symbol::Symbol;
+use rustc_span::{Span, DUMMY_SP};
 use std::borrow::Cow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::num::ParseIntError;
-use std::path::{Path, PathBuf};
 
 /// Error type for `Diagnostic`'s `suggestions` field, indicating that
 /// `.disable_suggestions()` was called on the `Diagnostic`.
@@ -25,7 +21,11 @@ pub struct SuggestionsDisabled;
 /// Simplified version of `FluentArg` that can implement `Encodable` and `Decodable`. Collection of
 /// `DiagnosticArg` are converted to `FluentArgs` (consuming the collection) at the start of
 /// diagnostic emission.
-pub type DiagnosticArg<'source> = (Cow<'source, str>, DiagnosticArgValue<'source>);
+pub type DiagnosticArg<'iter, 'source> =
+    (&'iter DiagnosticArgName<'source>, &'iter DiagnosticArgValue<'source>);
+
+/// Name of a diagnostic argument.
+pub type DiagnosticArgName<'source> = Cow<'source, str>;
 
 /// Simplified version of `FluentValue` that can implement `Encodable` and `Decodable`. Converted
 /// to a `FluentValue` by the emitter to be used in diagnostic translation.
@@ -35,125 +35,12 @@ pub enum DiagnosticArgValue<'source> {
     Number(usize),
 }
 
-/// Converts a value of a type into a `DiagnosticArg` (typically a field of a `SessionDiagnostic`
+/// Converts a value of a type into a `DiagnosticArg` (typically a field of an `IntoDiagnostic`
 /// struct). Implemented as a custom trait rather than `From` so that it is implemented on the type
 /// being converted rather than on `DiagnosticArgValue`, which enables types from other `rustc_*`
 /// crates to implement this.
 pub trait IntoDiagnosticArg {
     fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static>;
-}
-
-pub struct DiagnosticArgFromDisplay<'a>(pub &'a dyn fmt::Display);
-
-impl IntoDiagnosticArg for DiagnosticArgFromDisplay<'_> {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-        self.0.to_string().into_diagnostic_arg()
-    }
-}
-
-impl<'a> From<&'a dyn fmt::Display> for DiagnosticArgFromDisplay<'a> {
-    fn from(t: &'a dyn fmt::Display) -> Self {
-        DiagnosticArgFromDisplay(t)
-    }
-}
-
-impl<'a, T: fmt::Display> From<&'a T> for DiagnosticArgFromDisplay<'a> {
-    fn from(t: &'a T) -> Self {
-        DiagnosticArgFromDisplay(t)
-    }
-}
-
-macro_rules! into_diagnostic_arg_using_display {
-    ($( $ty:ty ),+ $(,)?) => {
-        $(
-            impl IntoDiagnosticArg for $ty {
-                fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-                    self.to_string().into_diagnostic_arg()
-                }
-            }
-        )+
-    }
-}
-
-into_diagnostic_arg_using_display!(
-    i8,
-    u8,
-    i16,
-    u16,
-    i32,
-    u32,
-    i64,
-    u64,
-    i128,
-    u128,
-    std::io::Error,
-    std::num::NonZeroU32,
-    hir::Target,
-    Edition,
-    Ident,
-    MacroRulesNormalizedIdent,
-    ParseIntError,
-    StackProtector,
-    &TargetTriple,
-    SplitDebuginfo
-);
-
-impl IntoDiagnosticArg for bool {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-        if self {
-            DiagnosticArgValue::Str(Cow::Borrowed("true"))
-        } else {
-            DiagnosticArgValue::Str(Cow::Borrowed("false"))
-        }
-    }
-}
-
-impl IntoDiagnosticArg for char {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-        DiagnosticArgValue::Str(Cow::Owned(format!("{:?}", self)))
-    }
-}
-
-impl IntoDiagnosticArg for Symbol {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-        self.to_ident_string().into_diagnostic_arg()
-    }
-}
-
-impl<'a> IntoDiagnosticArg for &'a str {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-        self.to_string().into_diagnostic_arg()
-    }
-}
-
-impl IntoDiagnosticArg for String {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-        DiagnosticArgValue::Str(Cow::Owned(self))
-    }
-}
-
-impl<'a> IntoDiagnosticArg for &'a Path {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-        DiagnosticArgValue::Str(Cow::Owned(self.display().to_string()))
-    }
-}
-
-impl IntoDiagnosticArg for PathBuf {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-        DiagnosticArgValue::Str(Cow::Owned(self.display().to_string()))
-    }
-}
-
-impl IntoDiagnosticArg for usize {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-        DiagnosticArgValue::Number(self)
-    }
-}
-
-impl IntoDiagnosticArg for PanicStrategy {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-        DiagnosticArgValue::Str(Cow::Owned(self.desc().to_string()))
-    }
 }
 
 impl<'source> Into<FluentValue<'source>> for DiagnosticArgValue<'source> {
@@ -165,22 +52,24 @@ impl<'source> Into<FluentValue<'source>> for DiagnosticArgValue<'source> {
     }
 }
 
-impl IntoDiagnosticArg for hir::ConstContext {
-    fn into_diagnostic_arg(self) -> DiagnosticArgValue<'static> {
-        DiagnosticArgValue::Str(Cow::Borrowed(match self {
-            hir::ConstContext::ConstFn => "constant function",
-            hir::ConstContext::Static(_) => "static",
-            hir::ConstContext::Const => "constant",
-        }))
-    }
-}
-
 /// Trait implemented by error types. This should not be implemented manually. Instead, use
-/// `#[derive(SessionSubdiagnostic)]` -- see [rustc_macros::SessionSubdiagnostic].
-#[rustc_diagnostic_item = "AddSubdiagnostic"]
-pub trait AddSubdiagnostic {
+/// `#[derive(Subdiagnostic)]` -- see [rustc_macros::Subdiagnostic].
+#[cfg_attr(bootstrap, rustc_diagnostic_item = "AddSubdiagnostic")]
+#[cfg_attr(not(bootstrap), rustc_diagnostic_item = "AddToDiagnostic")]
+pub trait AddToDiagnostic
+where
+    Self: Sized,
+{
     /// Add a subdiagnostic to an existing diagnostic.
-    fn add_to_diagnostic(self, diag: &mut Diagnostic);
+    fn add_to_diagnostic(self, diag: &mut Diagnostic) {
+        self.add_to_diagnostic_with(diag, |_, m| m);
+    }
+
+    /// Add a subdiagnostic to an existing diagnostic where `f` is invoked on every message used
+    /// (to optionally perform eager translation).
+    fn add_to_diagnostic_with<F>(self, diag: &mut Diagnostic, f: F)
+    where
+        F: Fn(&mut Diagnostic, SubdiagnosticMessage) -> SubdiagnosticMessage;
 }
 
 /// Trait implemented by lint types. This should not be implemented manually. Instead, use
@@ -188,7 +77,12 @@ pub trait AddSubdiagnostic {
 #[rustc_diagnostic_item = "DecorateLint"]
 pub trait DecorateLint<'a, G: EmissionGuarantee> {
     /// Decorate and emit a lint.
-    fn decorate_lint(self, diag: LintDiagnosticBuilder<'a, G>);
+    fn decorate_lint<'b>(
+        self,
+        diag: &'b mut DiagnosticBuilder<'a, G>,
+    ) -> &'b mut DiagnosticBuilder<'a, G>;
+
+    fn msg(&self) -> DiagnosticMessage;
 }
 
 #[must_use]
@@ -203,7 +97,7 @@ pub struct Diagnostic {
     pub span: MultiSpan,
     pub children: Vec<SubDiagnostic>,
     pub suggestions: Result<Vec<CodeSuggestion>, SuggestionsDisabled>,
-    args: Vec<DiagnosticArg<'static>>,
+    args: FxHashMap<DiagnosticArgName<'static>, DiagnosticArgValue<'static>>,
 
     /// This is not used for highlighting or rendering any error message.  Rather, it can be used
     /// as a sort key to sort a buffer of diagnostics.  By default, it is the primary span of
@@ -295,7 +189,7 @@ impl Diagnostic {
             span: MultiSpan::new(),
             children: vec![],
             suggestions: Ok(vec![]),
-            args: vec![],
+            args: Default::default(),
             sort_span: DUMMY_SP,
             is_lint: false,
         }
@@ -338,9 +232,10 @@ impl Diagnostic {
             // The lint index inside the attribute is manually transferred here.
             let lint_index = expectation_id.get_lint_index();
             expectation_id.set_lint_index(None);
-            let mut stable_id = *unstable_to_stable
+            let mut stable_id = unstable_to_stable
                 .get(&expectation_id)
-                .expect("each unstable `LintExpectationId` must have a matching stable id");
+                .expect("each unstable `LintExpectationId` must have a matching stable id")
+                .normalize();
 
             stable_id.set_lint_index(lint_index);
             *expectation_id = stable_id;
@@ -672,6 +567,11 @@ impl Diagnostic {
         style: SuggestionStyle,
     ) -> &mut Self {
         assert!(!suggestion.is_empty());
+        debug_assert!(
+            !(suggestion.iter().any(|(sp, text)| sp.is_empty() && text.is_empty())),
+            "Span must not be empty and have no suggestion"
+        );
+
         self.push_suggestion(CodeSuggestion {
             substitutions: vec![Substitution {
                 parts: suggestion
@@ -749,6 +649,10 @@ impl Diagnostic {
         applicability: Applicability,
         style: SuggestionStyle,
     ) -> &mut Self {
+        debug_assert!(
+            !(sp.is_empty() && suggestion.to_string().is_empty()),
+            "Span must not be empty and have no suggestion"
+        );
         self.push_suggestion(CodeSuggestion {
             substitutions: vec![Substitution {
                 parts: vec![SubstitutionPart { snippet: suggestion.to_string(), span: sp }],
@@ -787,8 +691,32 @@ impl Diagnostic {
         suggestions: impl Iterator<Item = String>,
         applicability: Applicability,
     ) -> &mut Self {
+        self.span_suggestions_with_style(
+            sp,
+            msg,
+            suggestions,
+            applicability,
+            SuggestionStyle::ShowCode,
+        )
+    }
+
+    /// [`Diagnostic::span_suggestions()`] but you can set the [`SuggestionStyle`].
+    pub fn span_suggestions_with_style(
+        &mut self,
+        sp: Span,
+        msg: impl Into<SubdiagnosticMessage>,
+        suggestions: impl Iterator<Item = String>,
+        applicability: Applicability,
+        style: SuggestionStyle,
+    ) -> &mut Self {
         let mut suggestions: Vec<_> = suggestions.collect();
         suggestions.sort();
+
+        debug_assert!(
+            !(sp.is_empty() && suggestions.iter().any(|suggestion| suggestion.is_empty())),
+            "Span must not be empty and have no suggestion"
+        );
+
         let substitutions = suggestions
             .into_iter()
             .map(|snippet| Substitution { parts: vec![SubstitutionPart { snippet, span: sp }] })
@@ -796,22 +724,33 @@ impl Diagnostic {
         self.push_suggestion(CodeSuggestion {
             substitutions,
             msg: self.subdiagnostic_message_to_diagnostic_message(msg),
-            style: SuggestionStyle::ShowCode,
+            style,
             applicability,
         });
         self
     }
 
-    /// Prints out a message with multiple suggested edits of the code.
-    /// See also [`Diagnostic::span_suggestion()`].
+    /// Prints out a message with multiple suggested edits of the code, where each edit consists of
+    /// multiple parts.
+    /// See also [`Diagnostic::multipart_suggestion()`].
     pub fn multipart_suggestions(
         &mut self,
         msg: impl Into<SubdiagnosticMessage>,
         suggestions: impl Iterator<Item = Vec<(Span, String)>>,
         applicability: Applicability,
     ) -> &mut Self {
+        let suggestions: Vec<_> = suggestions.collect();
+        debug_assert!(
+            !(suggestions
+                .iter()
+                .flat_map(|suggs| suggs)
+                .any(|(sp, suggestion)| sp.is_empty() && suggestion.is_empty())),
+            "Span must not be empty and have no suggestion"
+        );
+
         self.push_suggestion(CodeSuggestion {
             substitutions: suggestions
+                .into_iter()
                 .map(|sugg| Substitution {
                     parts: sugg
                         .into_iter()
@@ -825,6 +764,7 @@ impl Diagnostic {
         });
         self
     }
+
     /// Prints out a message with a suggested edit of the code. If the suggestion is presented
     /// inline, it will only show the message and not the suggestion.
     ///
@@ -890,10 +830,27 @@ impl Diagnostic {
         self
     }
 
-    /// Add a subdiagnostic from a type that implements `SessionSubdiagnostic` - see
-    /// [rustc_macros::SessionSubdiagnostic].
-    pub fn subdiagnostic(&mut self, subdiagnostic: impl AddSubdiagnostic) -> &mut Self {
+    /// Add a subdiagnostic from a type that implements `Subdiagnostic` (see
+    /// [rustc_macros::Subdiagnostic]).
+    pub fn subdiagnostic(&mut self, subdiagnostic: impl AddToDiagnostic) -> &mut Self {
         subdiagnostic.add_to_diagnostic(self);
+        self
+    }
+
+    /// Add a subdiagnostic from a type that implements `Subdiagnostic` (see
+    /// [rustc_macros::Subdiagnostic]). Performs eager translation of any translatable messages
+    /// used in the subdiagnostic, so suitable for use with repeated messages (i.e. re-use of
+    /// interpolated variables).
+    pub fn eager_subdiagnostic(
+        &mut self,
+        handler: &crate::Handler,
+        subdiagnostic: impl AddToDiagnostic,
+    ) -> &mut Self {
+        subdiagnostic.add_to_diagnostic_with(self, |diag, msg| {
+            let args = diag.args();
+            let msg = diag.subdiagnostic_message_to_diagnostic_message(msg);
+            handler.eagerly_translate(msg, args)
+        });
         self
     }
 
@@ -929,8 +886,11 @@ impl Diagnostic {
         self
     }
 
-    pub fn args(&self) -> &[DiagnosticArg<'static>] {
-        &self.args
+    // Exact iteration order of diagnostic arguments shouldn't make a difference to output because
+    // they're only used in interpolation.
+    #[allow(rustc::potential_query_instability)]
+    pub fn args<'a>(&'a self) -> impl Iterator<Item = DiagnosticArg<'a, 'static>> {
+        self.args.iter()
     }
 
     pub fn set_arg(
@@ -938,7 +898,7 @@ impl Diagnostic {
         name: impl Into<Cow<'static, str>>,
         arg: impl IntoDiagnosticArg,
     ) -> &mut Self {
-        self.args.push((name.into(), arg.into_diagnostic_arg()));
+        self.args.insert(name.into(), arg.into_diagnostic_arg());
         self
     }
 
@@ -949,7 +909,7 @@ impl Diagnostic {
     /// Helper function that takes a `SubdiagnosticMessage` and returns a `DiagnosticMessage` by
     /// combining it with the primary message of the diagnostic (if translatable, otherwise it just
     /// passes the user's string along).
-    fn subdiagnostic_message_to_diagnostic_message(
+    pub(crate) fn subdiagnostic_message_to_diagnostic_message(
         &self,
         attr: impl Into<SubdiagnosticMessage>,
     ) -> DiagnosticMessage {

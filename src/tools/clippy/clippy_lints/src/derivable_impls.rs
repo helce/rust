@@ -1,5 +1,6 @@
-use clippy_utils::diagnostics::span_lint_and_help;
+use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::{is_default_equivalent, peel_blocks};
+use rustc_errors::Applicability;
 use rustc_hir::{
     def::{DefKind, Res},
     Body, Expr, ExprKind, GenericArg, Impl, ImplItemKind, Item, ItemKind, Node, PathSegment, QPath, TyKind,
@@ -69,7 +70,7 @@ impl<'tcx> LateLintPass<'tcx> for DerivableImpls {
                 self_ty,
                 ..
             }) = item.kind;
-            if !cx.tcx.has_attr(item.def_id.to_def_id(), sym::automatically_derived);
+            if !cx.tcx.has_attr(item.owner_id.to_def_id(), sym::automatically_derived);
             if !item.span.from_expansion();
             if let Some(def_id) = trait_ref.trait_def_id();
             if cx.tcx.is_diagnostic_item(sym::Default, def_id);
@@ -77,7 +78,7 @@ impl<'tcx> LateLintPass<'tcx> for DerivableImpls {
             if let Some(Node::ImplItem(impl_item)) = cx.tcx.hir().find(impl_item_hir);
             if let ImplItemKind::Fn(_, b) = &impl_item.kind;
             if let Body { value: func_expr, .. } = cx.tcx.hir().body(*b);
-            if let Some(adt_def) = cx.tcx.type_of(item.def_id).ty_adt_def();
+            if let Some(adt_def) = cx.tcx.type_of(item.owner_id).ty_adt_def();
             if let attrs = cx.tcx.hir().attrs(item.hir_id());
             if !attrs.iter().any(|attr| attr.doc_str().is_some());
             if let child_attrs = cx.tcx.hir().attrs(impl_item_hir);
@@ -100,15 +101,28 @@ impl<'tcx> LateLintPass<'tcx> for DerivableImpls {
                     ExprKind::Struct(_, fields, _) => fields.iter().all(|ef| is_default_equivalent(cx, ef.expr)),
                     _ => false,
                 };
+
                 if should_emit {
-                    let path_string = cx.tcx.def_path_str(adt_def.did());
-                    span_lint_and_help(
+                    let struct_span = cx.tcx.def_span(adt_def.did());
+                    span_lint_and_then(
                         cx,
                         DERIVABLE_IMPLS,
                         item.span,
                         "this `impl` can be derived",
-                        None,
-                        &format!("try annotating `{}` with `#[derive(Default)]`", path_string),
+                        |diag| {
+                            diag.span_suggestion_hidden(
+                                item.span,
+                                "remove the manual implementation...",
+                                String::new(),
+                                Applicability::MachineApplicable
+                            );
+                            diag.span_suggestion(
+                                struct_span.shrink_to_lo(),
+                                "...and instead derive it",
+                                "#[derive(Default)]\n".to_string(),
+                                Applicability::MachineApplicable
+                            );
+                        }
                     );
                 }
             }

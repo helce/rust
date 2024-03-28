@@ -1,12 +1,6 @@
 //! WASI-specific extensions to general I/O primitives.
 
-#![deny(unsafe_op_in_unsafe_fn)]
-#![stable(feature = "io_safety_wasi", since = "1.65.0")]
+#![stable(feature = "io_safety", since = "1.63.0")]
 
-mod fd;
-mod raw;
-
-#[stable(feature = "io_safety_wasi", since = "1.65.0")]
-pub use fd::*;
-#[stable(feature = "io_safety_wasi", since = "1.65.0")]
-pub use raw::*;
+#[stable(feature = "io_safety", since = "1.63.0")]
+pub use crate::os::fd::*;

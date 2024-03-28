@@ -22,10 +22,8 @@ struct InvalidHtmlTagsLinter<'a, 'tcx> {
 }
 
 pub(crate) fn check_invalid_html_tags(krate: Crate, cx: &mut DocContext<'_>) -> Crate {
-    if cx.tcx.sess.is_nightly_build() {
-        let mut coll = InvalidHtmlTagsLinter { cx };
-        coll.visit_crate(&krate);
-    }
+    let mut coll = InvalidHtmlTagsLinter { cx };
+    coll.visit_crate(&krate);
     krate
 }
 
@@ -186,7 +184,60 @@ fn extract_html_tag(
                     }
                     drop_tag(tags, tag_name, r, f);
                 } else {
-                    tags.push((tag_name, r));
+                    let mut is_self_closing = false;
+                    let mut quote_pos = None;
+                    if c != '>' {
+                        let mut quote = None;
+                        let mut after_eq = false;
+                        for (i, c) in text[pos..].char_indices() {
+                            if !c.is_whitespace() {
+                                if let Some(q) = quote {
+                                    if c == q {
+                                        quote = None;
+                                        quote_pos = None;
+                                        after_eq = false;
+                                    }
+                                } else if c == '>' {
+                                    break;
+                                } else if c == '/' && !after_eq {
+                                    is_self_closing = true;
+                                } else {
+                                    if is_self_closing {
+                                        is_self_closing = false;
+                                    }
+                                    if (c == '"' || c == '\'') && after_eq {
+                                        quote = Some(c);
+                                        quote_pos = Some(pos + i);
+                                    } else if c == '=' {
+                                        after_eq = true;
+                                    }
+                                }
+                            } else if quote.is_none() {
+                                after_eq = false;
+                            }
+                        }
+                    }
+                    if let Some(quote_pos) = quote_pos {
+                        let qr = Range { start: quote_pos, end: quote_pos };
+                        f(
+                            &format!("unclosed quoted HTML attribute on tag `{}`", tag_name),
+                            &qr,
+                            false,
+                        );
+                    }
+                    if is_self_closing {
+                        // https://html.spec.whatwg.org/#parse-error-non-void-html-element-start-tag-with-trailing-solidus
+                        let valid = ALLOWED_UNCLOSED.contains(&&tag_name[..])
+                            || tags.iter().take(pos + 1).any(|(at, _)| {
+                                let at = at.to_lowercase();
+                                at == "svg" || at == "math"
+                            });
+                        if !valid {
+                            f(&format!("invalid self-closing HTML tag `{}`", tag_name), &r, false);
+                        }
+                    } else {
+                        tags.push((tag_name, r));
+                    }
                 }
             }
             break;
@@ -240,9 +291,8 @@ impl<'a, 'tcx> DocVisitor for InvalidHtmlTagsLinter<'a, 'tcx> {
                     Some(sp) => sp,
                     None => item.attr_span(tcx),
                 };
-                tcx.struct_span_lint_hir(crate::lint::INVALID_HTML_TAGS, hir_id, sp, |lint| {
+                tcx.struct_span_lint_hir(crate::lint::INVALID_HTML_TAGS, hir_id, sp, msg, |lint| {
                     use rustc_lint_defs::Applicability;
-                    let mut diag = lint.build(msg);
                     // If a tag looks like `<this>`, it might actually be a generic.
                     // We don't try to detect stuff `<like, this>` because that's not valid HTML,
                     // and we don't try to detect stuff `<like this>` because that's not valid Rust.
@@ -305,11 +355,10 @@ impl<'a, 'tcx> DocVisitor for InvalidHtmlTagsLinter<'a, 'tcx> {
                         if (generics_start > 0 && dox.as_bytes()[generics_start - 1] == b'<')
                             || (generics_end < dox.len() && dox.as_bytes()[generics_end] == b'>')
                         {
-                            diag.emit();
-                            return;
+                            return lint;
                         }
                         // multipart form is chosen here because ``Vec<i32>`` would be confusing.
-                        diag.multipart_suggestion(
+                        lint.multipart_suggestion(
                             "try marking as source code",
                             vec![
                                 (generics_sp.shrink_to_lo(), String::from("`")),
@@ -318,7 +367,8 @@ impl<'a, 'tcx> DocVisitor for InvalidHtmlTagsLinter<'a, 'tcx> {
                             Applicability::MaybeIncorrect,
                         );
                     }
-                    diag.emit()
+
+                    lint
                 });
             };
 

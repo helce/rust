@@ -13,7 +13,6 @@ use rustc_middle::mir::{
     TerminatorKind, UnOp, START_BLOCK,
 };
 use rustc_middle::ty::fold::BottomUpFolder;
-use rustc_middle::ty::subst::Subst;
 use rustc_middle::ty::{self, InstanceDef, ParamEnv, Ty, TyCtxt, TypeFoldable, TypeVisitable};
 use rustc_mir_dataflow::impls::MaybeStorageLive;
 use rustc_mir_dataflow::storage::always_storage_live_locals;
@@ -106,7 +105,7 @@ pub fn equal_up_to_regions<'tcx>(
             },
         )
     };
-    tcx.infer_ctxt().enter(|infcx| infcx.can_eq(param_env, normalize(src), normalize(dest)).is_ok())
+    tcx.infer_ctxt().build().can_eq(param_env, normalize(src), normalize(dest)).is_ok()
 }
 
 struct TypeChecker<'a, 'tcx> {
@@ -236,9 +235,8 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
             // `Operand::Copy` is only supposed to be used with `Copy` types.
             if let Operand::Copy(place) = operand {
                 let ty = place.ty(&self.body.local_decls, self.tcx).ty;
-                let span = self.body.source_info(location).span;
 
-                if !ty.is_copy_modulo_regions(self.tcx.at(span), self.param_env) {
+                if !ty.is_copy_modulo_regions(self.tcx, self.param_env) {
                     self.fail(location, format!("`Operand::Copy` with non-`Copy` type {}", ty));
                 }
             }
@@ -285,7 +283,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                         this.fail(
                         location,
                         format!(
-                            "Field projection `{:?}.{:?}` specified type `{:?}`, but actual type is {:?}",
+                            "Field projection `{:?}.{:?}` specified type `{:?}`, but actual type is `{:?}`",
                             parent, f, ty, f_ty
                         )
                     )
@@ -557,25 +555,40 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                 check_kinds!(a, "Cannot shallow init type {:?}", ty::RawPtr(..));
             }
             Rvalue::Cast(kind, operand, target_type) => {
+                let op_ty = operand.ty(self.body, self.tcx);
                 match kind {
-                    CastKind::Misc => {
-                        let op_ty = operand.ty(self.body, self.tcx);
-                        if op_ty.is_enum() {
+                    CastKind::DynStar => {
+                        // FIXME(dyn-star): make sure nothing needs to be done here.
+                    }
+                    // FIXME: Add Checks for these
+                    CastKind::PointerFromExposedAddress
+                    | CastKind::PointerExposeAddress
+                    | CastKind::Pointer(_) => {}
+                    CastKind::IntToInt | CastKind::IntToFloat => {
+                        let input_valid = op_ty.is_integral() || op_ty.is_char() || op_ty.is_bool();
+                        let target_valid = target_type.is_numeric() || target_type.is_char();
+                        if !input_valid || !target_valid {
+                            self.fail(
+                                location,
+                                format!("Wrong cast kind {kind:?} for the type {op_ty}",),
+                            );
+                        }
+                    }
+                    CastKind::FnPtrToPtr | CastKind::PtrToPtr => {
+                        if !(op_ty.is_any_ptr() && target_type.is_unsafe_ptr()) {
+                            self.fail(location, "Can't cast {op_ty} into 'Ptr'");
+                        }
+                    }
+                    CastKind::FloatToFloat | CastKind::FloatToInt => {
+                        if !op_ty.is_floating_point() || !target_type.is_numeric() {
                             self.fail(
                                 location,
                                 format!(
-                                    "enum -> int casts should go through `Rvalue::Discriminant`: {operand:?}:{op_ty} as {target_type}",
+                                    "Trying to cast non 'Float' as {kind:?} into {target_type:?}"
                                 ),
                             );
                         }
                     }
-                    CastKind::DynStar => {
-                        // FIXME(dyn-star): make sure nothing needs to be done here.
-                    }
-                    // Nothing to check here
-                    CastKind::PointerFromExposedAddress
-                    | CastKind::PointerExposeAddress
-                    | CastKind::Pointer(_) => {}
                 }
             }
             Rvalue::Repeat(_, _)

@@ -86,7 +86,7 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
         // ```
         //
         // the type assigned to `Some(n)` in `unadjusted_pat` would be `Option<i32>` (this is
-        // determined in rustc_typeck::check::match). The adjustments would be
+        // determined in rustc_hir_analysis::check::match). The adjustments would be
         //
         // `vec![&&Option<i32>, &Option<i32>]`.
         //
@@ -200,6 +200,7 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
         }
     }
 
+    #[instrument(skip(self), level = "debug")]
     fn lower_pattern_unadjusted(&mut self, pat: &'tcx hir::Pat<'tcx>) -> Box<Pat<'tcx>> {
         let mut ty = self.typeck_results.node_type(pat.hir_id);
         let mut span = pat.span;
@@ -432,7 +433,8 @@ impl<'a, 'tcx> PatCtxt<'a, 'tcx> {
                 | DefKind::AssocTy,
                 _,
             )
-            | Res::SelfTy { .. }
+            | Res::SelfTyParam { .. }
+            | Res::SelfTyAlias { .. }
             | Res::SelfCtor(..) => PatKind::Leaf { subpatterns },
             _ => {
                 let pattern_error = match res {
@@ -684,7 +686,7 @@ macro_rules! ClonePatternFoldableImpls {
 }
 
 ClonePatternFoldableImpls! { <'tcx>
-    Span, Field, Mutability, Symbol, LocalVarId, usize, ty::Const<'tcx>,
+    Span, Field, Mutability, Symbol, LocalVarId, usize,
     Region<'tcx>, Ty<'tcx>, BindingMode, AdtDef<'tcx>,
     SubstsRef<'tcx>, &'tcx GenericArg<'tcx>, UserType<'tcx>,
     UserTypeProjection, CanonicalUserTypeAnnotation<'tcx>

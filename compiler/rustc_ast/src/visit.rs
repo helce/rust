@@ -140,6 +140,11 @@ pub trait Visitor<'ast>: Sized {
     fn visit_expr(&mut self, ex: &'ast Expr) {
         walk_expr(self, ex)
     }
+    /// This method is a hack to workaround unstable of `stmt_expr_attributes`.
+    /// It can be removed once that feature is stabilized.
+    fn visit_method_receiver_expr(&mut self, ex: &'ast Expr) {
+        self.visit_expr(ex)
+    }
     fn visit_expr_post(&mut self, _ex: &'ast Expr) {}
     fn visit_ty(&mut self, t: &'ast Ty) {
         walk_ty(self, t)
@@ -244,14 +249,12 @@ pub trait Visitor<'ast>: Sized {
 
 #[macro_export]
 macro_rules! walk_list {
-    ($visitor: expr, $method: ident, $list: expr) => {
-        for elem in $list {
-            $visitor.$method(elem)
-        }
-    };
-    ($visitor: expr, $method: ident, $list: expr, $($extra_args: expr),*) => {
-        for elem in $list {
-            $visitor.$method(elem, $($extra_args,)*)
+    ($visitor: expr, $method: ident, $list: expr $(, $($extra_args: expr),* )?) => {
+        {
+            #[cfg_attr(not(bootstrap), allow(for_loops_over_fallibles))]
+            for elem in $list {
+                $visitor.$method(elem $(, $($extra_args,)* )?)
+            }
         }
     }
 }
@@ -685,7 +688,7 @@ pub fn walk_assoc_item<'a, V: Visitor<'a>>(visitor: &mut V, item: &'a AssocItem,
             let kind = FnKind::Fn(FnCtxt::Assoc(ctxt), ident, sig, vis, generics, body.as_deref());
             visitor.visit_fn(kind, span, id);
         }
-        AssocItemKind::TyAlias(box TyAlias { generics, bounds, ty, .. }) => {
+        AssocItemKind::Type(box TyAlias { generics, bounds, ty, .. }) => {
             visitor.visit_generics(generics);
             walk_list!(visitor, visit_param_bound, bounds, BoundKind::Bound);
             walk_list!(visitor, visit_ty, ty);
@@ -795,8 +798,9 @@ pub fn walk_expr<'a, V: Visitor<'a>>(visitor: &mut V, expression: &'a Expr) {
             visitor.visit_expr(callee_expression);
             walk_list!(visitor, visit_expr, arguments);
         }
-        ExprKind::MethodCall(ref segment, ref arguments, _span) => {
+        ExprKind::MethodCall(ref segment, ref receiver, ref arguments, _span) => {
             visitor.visit_path_segment(segment);
+            visitor.visit_expr(receiver);
             walk_list!(visitor, visit_expr, arguments);
         }
         ExprKind::Binary(_, ref left_expression, ref right_expression) => {

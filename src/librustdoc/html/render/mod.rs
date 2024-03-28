@@ -74,7 +74,9 @@ use crate::html::format::{
     PrintWithSpace,
 };
 use crate::html::highlight;
-use crate::html::markdown::{HeadingOffset, IdMap, Markdown, MarkdownHtml, MarkdownSummaryLine};
+use crate::html::markdown::{
+    HeadingOffset, IdMap, Markdown, MarkdownItemInfo, MarkdownSummaryLine,
+};
 use crate::html::sources;
 use crate::html::static_files::SCRAPE_EXAMPLES_HELP_MD;
 use crate::scrape_examples::{CallData, CallLocation};
@@ -239,8 +241,8 @@ struct AllTypes {
     opaque_tys: FxHashSet<ItemEntry>,
     statics: FxHashSet<ItemEntry>,
     constants: FxHashSet<ItemEntry>,
-    attributes: FxHashSet<ItemEntry>,
-    derives: FxHashSet<ItemEntry>,
+    attribute_macros: FxHashSet<ItemEntry>,
+    derive_macros: FxHashSet<ItemEntry>,
     trait_aliases: FxHashSet<ItemEntry>,
 }
 
@@ -259,8 +261,8 @@ impl AllTypes {
             opaque_tys: new_set(100),
             statics: new_set(100),
             constants: new_set(100),
-            attributes: new_set(100),
-            derives: new_set(100),
+            attribute_macros: new_set(100),
+            derive_macros: new_set(100),
             trait_aliases: new_set(100),
         }
     }
@@ -283,27 +285,75 @@ impl AllTypes {
                 ItemType::OpaqueTy => self.opaque_tys.insert(ItemEntry::new(new_url, name)),
                 ItemType::Static => self.statics.insert(ItemEntry::new(new_url, name)),
                 ItemType::Constant => self.constants.insert(ItemEntry::new(new_url, name)),
-                ItemType::ProcAttribute => self.attributes.insert(ItemEntry::new(new_url, name)),
-                ItemType::ProcDerive => self.derives.insert(ItemEntry::new(new_url, name)),
+                ItemType::ProcAttribute => {
+                    self.attribute_macros.insert(ItemEntry::new(new_url, name))
+                }
+                ItemType::ProcDerive => self.derive_macros.insert(ItemEntry::new(new_url, name)),
                 ItemType::TraitAlias => self.trait_aliases.insert(ItemEntry::new(new_url, name)),
                 _ => true,
             };
         }
     }
-}
 
-impl AllTypes {
+    fn item_sections(&self) -> FxHashSet<ItemSection> {
+        let mut sections = FxHashSet::default();
+
+        if !self.structs.is_empty() {
+            sections.insert(ItemSection::Structs);
+        }
+        if !self.enums.is_empty() {
+            sections.insert(ItemSection::Enums);
+        }
+        if !self.unions.is_empty() {
+            sections.insert(ItemSection::Unions);
+        }
+        if !self.primitives.is_empty() {
+            sections.insert(ItemSection::PrimitiveTypes);
+        }
+        if !self.traits.is_empty() {
+            sections.insert(ItemSection::Traits);
+        }
+        if !self.macros.is_empty() {
+            sections.insert(ItemSection::Macros);
+        }
+        if !self.functions.is_empty() {
+            sections.insert(ItemSection::Functions);
+        }
+        if !self.typedefs.is_empty() {
+            sections.insert(ItemSection::TypeDefinitions);
+        }
+        if !self.opaque_tys.is_empty() {
+            sections.insert(ItemSection::OpaqueTypes);
+        }
+        if !self.statics.is_empty() {
+            sections.insert(ItemSection::Statics);
+        }
+        if !self.constants.is_empty() {
+            sections.insert(ItemSection::Constants);
+        }
+        if !self.attribute_macros.is_empty() {
+            sections.insert(ItemSection::AttributeMacros);
+        }
+        if !self.derive_macros.is_empty() {
+            sections.insert(ItemSection::DeriveMacros);
+        }
+        if !self.trait_aliases.is_empty() {
+            sections.insert(ItemSection::TraitAliases);
+        }
+
+        sections
+    }
+
     fn print(self, f: &mut Buffer) {
-        fn print_entries(f: &mut Buffer, e: &FxHashSet<ItemEntry>, title: &str, class: &str) {
+        fn print_entries(f: &mut Buffer, e: &FxHashSet<ItemEntry>, kind: ItemSection) {
             if !e.is_empty() {
                 let mut e: Vec<&ItemEntry> = e.iter().collect();
                 e.sort();
                 write!(
                     f,
-                    "<h3 id=\"{}\">{}</h3><ul class=\"{} docblock\">",
-                    title.replace(' ', "-"), // IDs cannot contain whitespaces.
-                    title,
-                    class
+                    "<h3 id=\"{id}\">{title}</h3><ul class=\"all-items\">",
+                    id = kind.id(),
+                    title = kind.name(),
                 );
 
                 for s in e.iter() {
@@ -314,27 +364,23 @@ impl AllTypes {
             }
         }
 
-        f.write_str(
-            "<h1 class=\"fqn\">\
-                 <span class=\"in-band\">List of all items</span>\
-             </h1>",
-        );
+        f.write_str("<h1 class=\"fqn\">List of all items</h1>");
         // Note: print_entries does not escape the title, because we know the current set of titles
         // doesn't require escaping.
-        print_entries(f, &self.structs, "Structs", "structs");
-        print_entries(f, &self.enums, "Enums", "enums");
-        print_entries(f, &self.unions, "Unions", "unions");
-        print_entries(f, &self.primitives, "Primitives", "primitives");
-        print_entries(f, &self.traits, "Traits", "traits");
-        print_entries(f, &self.macros, "Macros", "macros");
-        print_entries(f, &self.attributes, "Attribute Macros", "attributes");
-        print_entries(f, &self.derives, "Derive Macros", "derives");
-        print_entries(f, &self.functions, "Functions", "functions");
-        print_entries(f, &self.typedefs, "Typedefs", "typedefs");
-        print_entries(f, &self.trait_aliases, "Trait Aliases", "trait-aliases");
-        print_entries(f, &self.opaque_tys, "Opaque Types", "opaque-types");
-        print_entries(f, &self.statics, "Statics", "statics");
-        print_entries(f, &self.constants, "Constants", "constants")
+        print_entries(f, &self.structs, ItemSection::Structs);
+        print_entries(f, &self.enums, ItemSection::Enums);
+        print_entries(f, &self.unions, ItemSection::Unions);
+        print_entries(f, &self.primitives, ItemSection::PrimitiveTypes);
+        print_entries(f, &self.traits, ItemSection::Traits);
+        print_entries(f, &self.macros, ItemSection::Macros);
+        print_entries(f, &self.attribute_macros, ItemSection::AttributeMacros);
+        print_entries(f, &self.derive_macros, ItemSection::DeriveMacros);
+        print_entries(f, &self.functions, ItemSection::Functions);
+        print_entries(f, &self.typedefs, ItemSection::TypeDefinitions);
+        print_entries(f, &self.trait_aliases, ItemSection::TraitAliases);
+        print_entries(f, &self.opaque_tys, ItemSection::OpaqueTypes);
+        print_entries(f, &self.statics, ItemSection::Statics);
+        print_entries(f, &self.constants, ItemSection::Constants);
     }
 }
 
@@ -348,9 +394,7 @@ fn scrape_examples_help(shared: &SharedContext<'_>) -> String {
     let mut ids = IdMap::default();
     format!(
         "<div class=\"main-heading\">\
-            <h1 class=\"fqn\">\
-                <span class=\"in-band\">About scraped examples</span>\
-            </h1>\
+            <h1 class=\"fqn\">About scraped examples</h1>\
         </div>\
         <div>{}</div>",
         Markdown {
@@ -536,7 +580,6 @@ fn short_item_info(
     parent: Option<&clean::Item>,
 ) -> Vec<String> {
     let mut extra_info = vec![];
-    let error_codes = cx.shared.codes;
 
     if let Some(depr @ Deprecation { note, since, is_since_rustc_version: _, suggestion: _ }) =
         item.deprecation(cx.tcx())
@@ -560,13 +603,7 @@ fn short_item_info(
 
         if let Some(note) = note {
             let note = note.as_str();
-            let html = MarkdownHtml(
-                note,
-                &mut cx.id_map,
-                error_codes,
-                cx.shared.edition(),
-                &cx.shared.playground,
-            );
+            let html = MarkdownItemInfo(note, &mut cx.id_map);
             message.push_str(&format!(": {}", html.into_string()));
         }
         extra_info.push(format!(
@@ -1239,6 +1276,15 @@ fn notable_traits_decl(decl: &clean::FnDecl, cx: &Context<'_>) -> String {
 
     if let Some((did, ty)) = decl.output.as_return().and_then(|t| Some((t.def_id(cx.cache())?, t)))
     {
+        // Box has pass-through impls for Read, Write, Iterator, and Future when the
+        // boxed type implements one of those. We don't want to treat every Box return
+        // as being notably an Iterator (etc), though, so we exempt it. Pin has the same
+        // issue, with a pass-through impl for Future.
+        if Some(did) == cx.tcx().lang_items().owned_box()
+            || Some(did) == cx.tcx().lang_items().pin_type()
+        {
+            return "".to_string();
+        }
         if let Some(impls) = cx.cache().impls.get(&did) {
             for i in impls {
                 let impl_ = i.inner_impl();
@@ -1251,7 +1297,12 @@ fn notable_traits_decl(decl: &clean::FnDecl, cx: &Context<'_>) -> String {
                 if let Some(trait_) = &impl_.trait_ {
                     let trait_did = trait_.def_id();
 
-                    if cx.cache().traits.get(&trait_did).map_or(false, |t| t.is_notable) {
+                    if cx
+                        .cache()
+                        .traits
+                        .get(&trait_did)
+                        .map_or(false, |t| t.is_notable_trait(cx.tcx()))
+                    {
                         if out.is_empty() {
                             write!(
                                 &mut out,
@@ -1555,7 +1606,7 @@ fn render_impl(
             link,
             render_mode,
             false,
-            trait_.map(|t| &t.trait_),
+            trait_,
             rendering_params,
         );
     }
@@ -1615,7 +1666,7 @@ fn render_impl(
                 &mut default_impl_items,
                 &mut impl_items,
                 cx,
-                &t.trait_,
+                t,
                 i.inner_impl(),
                 &i.impl_item,
                 parent,
@@ -1747,7 +1798,7 @@ pub(crate) fn render_impl_summary(
     write!(w, "<section id=\"{}\" class=\"impl has-srclink\"{}>", id, aliases);
     render_rightside(w, cx, &i.impl_item, containing_item, RenderMode::Normal);
     write!(w, "<a href=\"#{}\" class=\"anchor\"></a>", id);
-    write!(w, "<h3 class=\"code-header in-band\">");
+    write!(w, "<h3 class=\"code-header\">");
 
     if let Some(use_absolute) = use_absolute {
         write!(w, "{}", inner_impl.print(use_absolute, cx));
@@ -1811,12 +1862,12 @@ fn print_sidebar(cx: &Context<'_>, it: &clean::Item, buffer: &mut Buffer) {
 
     buffer.write_str("<div class=\"sidebar-elems\">");
     if it.is_crate() {
-        write!(buffer, "<div class=\"block\"><ul>");
+        write!(buffer, "<ul class=\"block\">");
         if let Some(ref version) = cx.cache().crate_version {
             write!(buffer, "<li class=\"version\">Version {}</li>", Escape(version));
         }
         write!(buffer, "<li><a id=\"all-types\" href=\"all.html\">All Items</a></li>");
-        buffer.write_str("</ul></div>");
+        buffer.write_str("</ul>");
     }
 
     match *it.kind {
@@ -1842,7 +1893,7 @@ fn print_sidebar(cx: &Context<'_>, it: &clean::Item, buffer: &mut Buffer) {
     if !it.is_mod() {
         let path: String = cx.current.iter().map(|s| s.as_str()).intersperse("::").collect();
 
-        write!(buffer, "<h2 class=\"location\"><a href=\"index.html\">In {}</a></h2>", path);
+        write!(buffer, "<h2><a href=\"index.html\">In {}</a></h2>", path);
     }
 
     // Closes sidebar-elems div.
@@ -2216,21 +2267,8 @@ fn extract_for_impl_name(item: &clean::Item, cx: &Context<'_>) -> Option<(String
     }
 }
 
-/// Don't call this function directly!!! Use `print_sidebar_title` or `print_sidebar_block` instead!
-fn print_sidebar_title_inner(buf: &mut Buffer, id: &str, title: &str) {
-    write!(
-        buf,
-        "<h3 class=\"sidebar-title\">\
-             <a href=\"#{}\">{}</a>\
-         </h3>",
-        id, title
-    );
-}
-
 fn print_sidebar_title(buf: &mut Buffer, id: &str, title: &str) {
-    buf.push_str("<div class=\"block\">");
-    print_sidebar_title_inner(buf, id, title);
-    buf.push_str("</div>");
+    write!(buf, "<h3><a href=\"#{}\">{}</a></h3>", id, title);
 }
 
 fn print_sidebar_block(
@@ -2239,13 +2277,12 @@ fn print_sidebar_block(
     title: &str,
     items: impl Iterator<Item = impl fmt::Display>,
 ) {
-    buf.push_str("<div class=\"block\">");
-    print_sidebar_title_inner(buf, id, title);
-    buf.push_str("<ul>");
+    print_sidebar_title(buf, id, title);
+    buf.push_str("<ul class=\"block\">");
     for item in items {
         write!(buf, "<li>{}</li>", item);
     }
-    buf.push_str("</ul></div>");
+    buf.push_str("</ul>");
 }
 
 fn sidebar_trait(cx: &Context<'_>, buf: &mut Buffer, it: &clean::Item, t: &clean::Trait) {
@@ -2469,7 +2506,7 @@ fn sidebar_enum(cx: &Context<'_>, buf: &mut Buffer, it: &clean::Item, e: &clean:
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-enum ItemSection {
+pub(crate) enum ItemSection {
     Reexports,
     PrimitiveTypes,
     Modules,
@@ -2621,11 +2658,27 @@ fn item_ty_to_section(ty: ItemType) -> ItemSection {
     }
 }
 
-fn sidebar_module(buf: &mut Buffer, items: &[clean::Item]) {
+pub(crate) fn sidebar_module_like(buf: &mut Buffer, item_sections_in_use: FxHashSet<ItemSection>) {
     use std::fmt::Write as _;
 
     let mut sidebar = String::new();
 
+    for &sec in ItemSection::ALL.iter().filter(|sec| item_sections_in_use.contains(sec)) {
+        let _ = write!(sidebar, "<li><a href=\"#{}\">{}</a></li>", sec.id(), sec.name());
+    }
+
+    if !sidebar.is_empty() {
+        write!(
+            buf,
+            "<section>\
+                 <ul class=\"block\">{}</ul>\
+             </section>",
+            sidebar
+        );
+    }
+}
+
+fn sidebar_module(buf: &mut Buffer, items: &[clean::Item]) {
     let item_sections_in_use: FxHashSet<_> = items
         .iter()
         .filter(|it| {
@@ -2640,21 +2693,8 @@ fn sidebar_module(buf: &mut Buffer, items: &[clean::Item]) {
         })
         .map(|it| item_ty_to_section(it.type_()))
         .collect();
-    for &sec in ItemSection::ALL.iter().filter(|sec| item_sections_in_use.contains(sec)) {
-        let _ = write!(sidebar, "<li><a href=\"#{}\">{}</a></li>", sec.id(), sec.name());
-    }
 
-    if !sidebar.is_empty() {
-        write!(
-            buf,
-            "<section>\
-                 <div class=\"block\">\
-                     <ul>{}</ul>\
-                 </div>\
-             </section>",
-            sidebar
-        );
-    }
+    sidebar_module_like(buf, item_sections_in_use);
 }
 
 fn sidebar_foreign_type(cx: &Context<'_>, buf: &mut Buffer, it: &clean::Item) {

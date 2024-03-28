@@ -10,8 +10,8 @@ use std::{
 use anyhow::Context;
 use ide::{
     AnnotationConfig, AssistKind, AssistResolveStrategy, FileId, FilePosition, FileRange,
-    HoverAction, HoverGotoTypeData, Query, RangeInfo, Runnable, RunnableKind, SingleResolve,
-    SourceChange, TextEdit,
+    HoverAction, HoverGotoTypeData, Query, RangeInfo, ReferenceCategory, Runnable, RunnableKind,
+    SingleResolve, SourceChange, TextEdit,
 };
 use ide_db::SymbolKind;
 use lsp_server::ErrorCode;
@@ -658,7 +658,7 @@ pub(crate) fn handle_parent_module(
 
         // check if invoked at the crate root
         let file_id = from_proto::file_id(&snap, &params.text_document.uri)?;
-        let crate_id = match snap.analysis.crate_for(file_id)?.first() {
+        let crate_id = match snap.analysis.crates_for(file_id)?.first() {
             Some(&crate_id) => crate_id,
             None => return Ok(None),
         };
@@ -1012,6 +1012,8 @@ pub(crate) fn handle_references(
     let _p = profile::span("handle_references");
     let position = from_proto::file_position(&snap, params.text_document_position)?;
 
+    let exclude_imports = snap.config.find_all_refs_exclude_imports();
+
     let refs = match snap.analysis.find_all_refs(position, None)? {
         None => return Ok(None),
         Some(refs) => refs,
@@ -1032,7 +1034,11 @@ pub(crate) fn handle_references(
             refs.references
                 .into_iter()
                 .flat_map(|(file_id, refs)| {
-                    refs.into_iter().map(move |(range, _)| FileRange { file_id, range })
+                    refs.into_iter()
+                        .filter(|&(_, category)| {
+                            !exclude_imports || category != Some(ReferenceCategory::Import)
+                        })
+                        .map(move |(range, _)| FileRange { file_id, range })
                 })
                 .chain(decl)
         })
@@ -1234,6 +1240,7 @@ pub(crate) fn handle_code_lens(
             annotate_references: lens_config.refs_adt,
             annotate_method_references: lens_config.method_refs,
             annotate_enum_variant_references: lens_config.enum_variant_refs,
+            location: lens_config.location.into(),
         },
         file_id,
     )?;
@@ -1283,7 +1290,7 @@ pub(crate) fn handle_document_highlight(
         .into_iter()
         .map(|ide::HighlightedRange { range, category }| lsp_types::DocumentHighlight {
             range: to_proto::range(&line_index, range),
-            kind: category.map(to_proto::document_highlight_kind),
+            kind: category.and_then(to_proto::document_highlight_kind),
         })
         .collect();
     Ok(Some(res))
@@ -1775,13 +1782,22 @@ fn run_rustfmt(
 ) -> Result<Option<Vec<lsp_types::TextEdit>>> {
     let file_id = from_proto::file_id(snap, &text_document.uri)?;
     let file = snap.analysis.file_text(file_id)?;
-    let crate_ids = snap.analysis.crate_for(file_id)?;
+
+    // find the edition of the package the file belongs to
+    // (if it belongs to multiple we'll just pick the first one and pray)
+    let edition = snap
+        .analysis
+        .relevant_crates_for(file_id)?
+        .into_iter()
+        .find_map(|crate_id| snap.cargo_target_for_crate_root(crate_id))
+        .map(|(ws, target)| ws[ws[target].package].edition);
 
     let line_index = snap.file_line_index(file_id)?;
 
     let mut command = match snap.config.rustfmt() {
         RustfmtConfig::Rustfmt { extra_args, enable_range_formatting } => {
             let mut cmd = process::Command::new(toolchain::rustfmt());
+            cmd.envs(snap.config.extra_env());
             cmd.args(extra_args);
             // try to chdir to the file so we can respect `rustfmt.toml`
             // FIXME: use `rustfmt --config-path` once
@@ -1800,9 +1816,7 @@ fn run_rustfmt(
                     );
                 }
             }
-            if let Some(&crate_id) = crate_ids.first() {
-                // Assume all crates are in the same edition
-                let edition = snap.analysis.crate_edition(crate_id)?;
+            if let Some(edition) = edition {
                 cmd.arg("--edition");
                 cmd.arg(edition.to_string());
             }
@@ -1839,6 +1853,7 @@ fn run_rustfmt(
         }
         RustfmtConfig::CustomCommand { command, args } => {
             let mut cmd = process::Command::new(command);
+            cmd.envs(snap.config.extra_env());
             cmd.args(args);
             cmd
         }

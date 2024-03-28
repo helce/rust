@@ -48,6 +48,8 @@ impl<'tcx> Cx<'tcx> {
             _ => None,
         };
 
+        trace!(?expr.ty);
+
         // Now apply adjustments, if any.
         for adjustment in self.typeck_results.expr_adjustments(hir_expr) {
             trace!(?expr, ?adjustment);
@@ -55,6 +57,8 @@ impl<'tcx> Cx<'tcx> {
             expr =
                 self.apply_adjustment(hir_expr, expr, adjustment, adjustment_span.unwrap_or(span));
         }
+
+        trace!(?expr.ty, "after adjustments");
 
         // Next, wrap this up in the expr's scope.
         expr = Expr {
@@ -155,6 +159,7 @@ impl<'tcx> Cx<'tcx> {
             Adjust::Borrow(AutoBorrow::RawPtr(mutability)) => {
                 ExprKind::AddressOf { mutability, arg: self.thir.exprs.push(expr) }
             }
+            Adjust::DynStar => ExprKind::Cast { source: self.thir.exprs.push(expr) },
         };
 
         Expr { temp_lifetime, ty: adjustment.target, span, kind }
@@ -994,7 +999,7 @@ impl<'tcx> Cx<'tcx> {
             .temporary_scope(self.region_scope_tree, closure_expr.hir_id.local_id);
         let var_ty = place.base_ty;
 
-        // The result of capture analysis in `rustc_typeck/check/upvar.rs`represents a captured path
+        // The result of capture analysis in `rustc_hir_analysis/check/upvar.rs`represents a captured path
         // as it's seen for use within the closure and not at the time of closure creation.
         //
         // That is we see expect to see it start from a captured upvar and not something that is local

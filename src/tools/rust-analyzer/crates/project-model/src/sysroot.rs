@@ -9,6 +9,7 @@ use std::{env, fs, iter, ops, path::PathBuf, process::Command};
 use anyhow::{format_err, Result};
 use la_arena::{Arena, Idx};
 use paths::{AbsPath, AbsPathBuf};
+use rustc_hash::FxHashMap;
 
 use crate::{utf8_stdout, ManifestPath};
 
@@ -63,22 +64,38 @@ impl Sysroot {
         self.by_name("proc_macro")
     }
 
-    pub fn crates<'a>(&'a self) -> impl Iterator<Item = SysrootCrate> + ExactSizeIterator + 'a {
+    pub fn crates(&self) -> impl Iterator<Item = SysrootCrate> + ExactSizeIterator + '_ {
         self.crates.iter().map(|(id, _data)| id)
     }
+}
 
-    pub fn discover(dir: &AbsPath) -> Result<Sysroot> {
-        tracing::debug!("Discovering sysroot for {}", dir.display());
-        let sysroot_dir = discover_sysroot_dir(dir)?;
-        let sysroot_src_dir = discover_sysroot_src_dir(&sysroot_dir, dir)?;
+impl Sysroot {
+    /// Attempts to discover the toolchain's sysroot from the given `dir`.
+    pub fn discover(dir: &AbsPath, extra_env: &FxHashMap<String, String>) -> Result<Sysroot> {
+        tracing::debug!("discovering sysroot for {}", dir.display());
+        let sysroot_dir = discover_sysroot_dir(dir, extra_env)?;
+        let sysroot_src_dir =
+            discover_sysroot_src_dir_or_add_component(&sysroot_dir, dir, extra_env)?;
         let res = Sysroot::load(sysroot_dir, sysroot_src_dir)?;
         Ok(res)
     }
 
-    pub fn discover_rustc(cargo_toml: &ManifestPath) -> Option<ManifestPath> {
-        tracing::debug!("Discovering rustc source for {}", cargo_toml.display());
+    pub fn discover_rustc(
+        cargo_toml: &ManifestPath,
+        extra_env: &FxHashMap<String, String>,
+    ) -> Option<ManifestPath> {
+        tracing::debug!("discovering rustc source for {}", cargo_toml.display());
         let current_dir = cargo_toml.parent();
-        discover_sysroot_dir(current_dir).ok().and_then(|sysroot_dir| get_rustc_src(&sysroot_dir))
+        let sysroot_dir = discover_sysroot_dir(current_dir, extra_env).ok()?;
+        get_rustc_src(&sysroot_dir)
+    }
+
+    pub fn with_sysroot_dir(sysroot_dir: AbsPathBuf) -> Result<Sysroot> {
+        let sysroot_src_dir = discover_sysroot_src_dir(&sysroot_dir).ok_or_else(|| {
+            format_err!("can't load standard library from sysroot {}", sysroot_dir.display())
+        })?;
+        let res = Sysroot::load(sysroot_dir, sysroot_src_dir)?;
+        Ok(res)
     }
 
     pub fn load(sysroot_dir: AbsPathBuf, sysroot_src_dir: AbsPathBuf) -> Result<Sysroot> {
@@ -144,33 +161,46 @@ impl Sysroot {
     }
 }
 
-fn discover_sysroot_dir(current_dir: &AbsPath) -> Result<AbsPathBuf> {
+fn discover_sysroot_dir(
+    current_dir: &AbsPath,
+    extra_env: &FxHashMap<String, String>,
+) -> Result<AbsPathBuf> {
     let mut rustc = Command::new(toolchain::rustc());
+    rustc.envs(extra_env);
     rustc.current_dir(current_dir).args(&["--print", "sysroot"]);
     tracing::debug!("Discovering sysroot by {:?}", rustc);
     let stdout = utf8_stdout(rustc)?;
     Ok(AbsPathBuf::assert(PathBuf::from(stdout)))
 }
 
-fn discover_sysroot_src_dir(
-    sysroot_path: &AbsPathBuf,
-    current_dir: &AbsPath,
-) -> Result<AbsPathBuf> {
+fn discover_sysroot_src_dir(sysroot_path: &AbsPathBuf) -> Option<AbsPathBuf> {
     if let Ok(path) = env::var("RUST_SRC_PATH") {
-        let path = AbsPathBuf::try_from(path.as_str())
-            .map_err(|path| format_err!("RUST_SRC_PATH must be absolute: {}", path.display()))?;
-        let core = path.join("core");
-        if fs::metadata(&core).is_ok() {
-            tracing::debug!("Discovered sysroot by RUST_SRC_PATH: {}", path.display());
-            return Ok(path);
+        if let Ok(path) = AbsPathBuf::try_from(path.as_str()) {
+            let core = path.join("core");
+            if fs::metadata(&core).is_ok() {
+                tracing::debug!("Discovered sysroot by RUST_SRC_PATH: {}", path.display());
+                return Some(path);
+            }
+            tracing::debug!("RUST_SRC_PATH is set, but is invalid (no core: {:?}), ignoring", core);
+        } else {
+            tracing::debug!("RUST_SRC_PATH is set, but is invalid, ignoring");
         }
-        tracing::debug!("RUST_SRC_PATH is set, but is invalid (no core: {:?}), ignoring", core);
     }
 
     get_rust_src(sysroot_path)
+}
+
+fn discover_sysroot_src_dir_or_add_component(
+    sysroot_path: &AbsPathBuf,
+    current_dir: &AbsPath,
+    extra_env: &FxHashMap<String, String>,
+) -> Result<AbsPathBuf> {
+    discover_sysroot_src_dir(sysroot_path)
         .or_else(|| {
             let mut rustup = Command::new(toolchain::rustup());
+            rustup.envs(extra_env);
             rustup.current_dir(current_dir).args(&["component", "add", "rust-src"]);
+            tracing::info!("adding rust-src component by {:?}", rustup);
             utf8_stdout(rustup).ok()?;
             get_rust_src(sysroot_path)
         })
@@ -189,7 +219,7 @@ try installing the Rust source the same way you installed rustc",
 fn get_rustc_src(sysroot_path: &AbsPath) -> Option<ManifestPath> {
     let rustc_src = sysroot_path.join("lib/rustlib/rustc-src/rust/compiler/rustc/Cargo.toml");
     let rustc_src = ManifestPath::try_from(rustc_src).ok()?;
-    tracing::debug!("Checking for rustc source code: {}", rustc_src.display());
+    tracing::debug!("checking for rustc source code: {}", rustc_src.display());
     if fs::metadata(&rustc_src).is_ok() {
         Some(rustc_src)
     } else {
@@ -199,7 +229,7 @@ fn get_rustc_src(sysroot_path: &AbsPath) -> Option<ManifestPath> {
 
 fn get_rust_src(sysroot_path: &AbsPath) -> Option<AbsPathBuf> {
     let rust_src = sysroot_path.join("lib/rustlib/src/rust/library");
-    tracing::debug!("Checking sysroot: {}", rust_src.display());
+    tracing::debug!("checking sysroot library: {}", rust_src.display());
     if fs::metadata(&rust_src).is_ok() {
         Some(rust_src)
     } else {

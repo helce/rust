@@ -29,7 +29,7 @@ fn droppy() -> () {
         StorageLive(_4);                 // scope 3 at $DIR/enum_cast.rs:+5:17: +5:18
         _4 = move _2;                    // scope 3 at $DIR/enum_cast.rs:+5:17: +5:18
         _5 = discriminant(_4);           // scope 3 at $DIR/enum_cast.rs:+5:17: +5:27
-        _3 = move _5 as usize (Misc);    // scope 3 at $DIR/enum_cast.rs:+5:17: +5:27
+        _3 = move _5 as usize (IntToInt); // scope 3 at $DIR/enum_cast.rs:+5:17: +5:27
         drop(_4) -> [return: bb1, unwind: bb4]; // scope 3 at $DIR/enum_cast.rs:+5:26: +5:27
     }
 

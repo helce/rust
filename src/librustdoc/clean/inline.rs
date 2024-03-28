@@ -55,12 +55,39 @@ pub(crate) fn try_inline(
     let mut ret = Vec::new();
 
     debug!("attrs={:?}", attrs);
-    let attrs_clone = attrs;
+
+    let attrs_without_docs = attrs.map(|attrs| {
+        attrs.into_iter().filter(|a| a.doc_str().is_none()).cloned().collect::<Vec<_>>()
+    });
+    // We need this ugly code because:
+    //
+    // ```
+    // attrs_without_docs.map(|a| a.as_slice())
+    // ```
+    //
+    // will fail because it returns a temporary slice and:
+    //
+    // ```
+    // attrs_without_docs.map(|s| {
+    //     vec = s.as_slice();
+    //     vec
+    // })
+    // ```
+    //
+    // will fail because we're moving an uninitialized variable into a closure.
+    let vec;
+    let attrs_without_docs = match attrs_without_docs {
+        Some(s) => {
+            vec = s;
+            Some(vec.as_slice())
+        }
+        None => None,
+    };
 
     let kind = match res {
         Res::Def(DefKind::Trait, did) => {
             record_extern_fqn(cx, did, ItemType::Trait);
-            build_impls(cx, Some(parent_module), did, attrs, &mut ret);
+            build_impls(cx, Some(parent_module), did, attrs_without_docs, &mut ret);
             clean::TraitItem(Box::new(build_external_trait(cx, did)))
         }
         Res::Def(DefKind::Fn, did) => {
@@ -69,27 +96,27 @@ pub(crate) fn try_inline(
         }
         Res::Def(DefKind::Struct, did) => {
             record_extern_fqn(cx, did, ItemType::Struct);
-            build_impls(cx, Some(parent_module), did, attrs, &mut ret);
+            build_impls(cx, Some(parent_module), did, attrs_without_docs, &mut ret);
             clean::StructItem(build_struct(cx, did))
         }
         Res::Def(DefKind::Union, did) => {
             record_extern_fqn(cx, did, ItemType::Union);
-            build_impls(cx, Some(parent_module), did, attrs, &mut ret);
+            build_impls(cx, Some(parent_module), did, attrs_without_docs, &mut ret);
             clean::UnionItem(build_union(cx, did))
         }
         Res::Def(DefKind::TyAlias, did) => {
             record_extern_fqn(cx, did, ItemType::Typedef);
-            build_impls(cx, Some(parent_module), did, attrs, &mut ret);
+            build_impls(cx, Some(parent_module), did, attrs_without_docs, &mut ret);
             clean::TypedefItem(build_type_alias(cx, did))
         }
         Res::Def(DefKind::Enum, did) => {
             record_extern_fqn(cx, did, ItemType::Enum);
-            build_impls(cx, Some(parent_module), did, attrs, &mut ret);
+            build_impls(cx, Some(parent_module), did, attrs_without_docs, &mut ret);
             clean::EnumItem(build_enum(cx, did))
         }
         Res::Def(DefKind::ForeignTy, did) => {
             record_extern_fqn(cx, did, ItemType::ForeignType);
-            build_impls(cx, Some(parent_module), did, attrs, &mut ret);
+            build_impls(cx, Some(parent_module), did, attrs_without_docs, &mut ret);
             clean::ForeignTypeItem
         }
         // Never inline enum variants but leave them shown as re-exports.
@@ -123,7 +150,7 @@ pub(crate) fn try_inline(
         _ => return None,
     };
 
-    let (attrs, cfg) = merge_attrs(cx, Some(parent_module), load_attrs(cx, did), attrs_clone);
+    let (attrs, cfg) = merge_attrs(cx, Some(parent_module), load_attrs(cx, did), attrs);
     cx.inlined.insert(did.into());
     let mut item = clean::Item::from_def_id_and_attrs_and_parts(
         did,
@@ -362,7 +389,7 @@ pub(crate) fn build_impl(
     if !did.is_local() {
         if let Some(traitref) = associated_trait {
             let did = traitref.def_id;
-            if !cx.cache.access_levels.is_public(did) {
+            if !cx.cache.effective_visibilities.is_directly_public(did) {
                 return;
             }
 
@@ -391,7 +418,7 @@ pub(crate) fn build_impl(
     // reachable in rustdoc generated documentation
     if !did.is_local() {
         if let Some(did) = for_.def_id(&cx.cache) {
-            if !cx.cache.access_levels.is_public(did) {
+            if !cx.cache.effective_visibilities.is_directly_public(did) {
                 return;
             }
 
@@ -425,7 +452,7 @@ pub(crate) fn build_impl(
                         let assoc_kind = match item.kind {
                             hir::ImplItemKind::Const(..) => ty::AssocKind::Const,
                             hir::ImplItemKind::Fn(..) => ty::AssocKind::Fn,
-                            hir::ImplItemKind::TyAlias(..) => ty::AssocKind::Type,
+                            hir::ImplItemKind::Type(..) => ty::AssocKind::Type,
                         };
                         let trait_item = tcx
                             .associated_items(associated_trait.def_id)
@@ -733,10 +760,6 @@ pub(crate) fn record_extern_trait(cx: &mut DocContext<'_>, did: DefId) {
     debug!("record_extern_trait: {:?}", did);
     let trait_ = build_external_trait(cx, did);
 
-    let trait_ = clean::TraitWithExtraInfo {
-        trait_,
-        is_notable: clean::utils::has_doc_flag(cx.tcx, did, sym::notable_trait),
-    };
     cx.external_traits.borrow_mut().insert(did, trait_);
     cx.active_extern_traits.remove(&did);
 }

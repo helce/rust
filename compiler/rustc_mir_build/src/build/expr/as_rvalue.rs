@@ -12,7 +12,7 @@ use rustc_middle::mir::AssertKind;
 use rustc_middle::mir::Place;
 use rustc_middle::mir::*;
 use rustc_middle::thir::*;
-use rustc_middle::ty::cast::CastTy;
+use rustc_middle::ty::cast::{mir_cast_kind, CastTy};
 use rustc_middle::ty::{self, Ty, UpvarSubsts};
 use rustc_span::Span;
 
@@ -217,16 +217,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let from_ty = CastTy::from_ty(ty);
                 let cast_ty = CastTy::from_ty(expr.ty);
                 debug!("ExprKind::Cast from_ty={from_ty:?}, cast_ty={:?}/{cast_ty:?}", expr.ty,);
-                let cast_kind = match (from_ty, cast_ty) {
-                    (Some(CastTy::Ptr(_) | CastTy::FnPtr), Some(CastTy::Int(_))) => {
-                        CastKind::PointerExposeAddress
-                    }
-                    (Some(CastTy::Int(_)), Some(CastTy::Ptr(_))) => {
-                        CastKind::PointerFromExposedAddress
-                    }
-                    (_, Some(CastTy::DynStar)) => CastKind::DynStar,
-                    (_, _) => CastKind::Misc,
-                };
+                let cast_kind = mir_cast_kind(ty, expr.ty);
                 block.and(Rvalue::Cast(cast_kind, source, expr.ty))
             }
             ExprKind::Pointer { cast, source } => {
@@ -329,10 +320,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     let place_builder =
                         unpack!(block = this.as_place_builder(block, &this.thir[*thir_place]));
 
-                    if let Ok(place_builder_resolved) =
-                        place_builder.try_upvars_resolved(this.tcx, &this.upvars)
-                    {
-                        let mir_place = place_builder_resolved.into_place(this.tcx, &this.upvars);
+                    if let Ok(place_builder_resolved) = place_builder.try_upvars_resolved(this) {
+                        let mir_place = place_builder_resolved.into_place(this);
                         this.cfg.push_fake_read(
                             block,
                             this.source_info(this.tcx.hir().span(*hir_id)),
@@ -623,8 +612,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             // by the parent itself. The mutability of the current capture
             // is same as that of the capture in the parent closure.
             PlaceBase::Upvar { .. } => {
-                let enclosing_upvars_resolved =
-                    arg_place_builder.clone().into_place(this.tcx, &this.upvars);
+                let enclosing_upvars_resolved = arg_place_builder.clone().into_place(this);
 
                 match enclosing_upvars_resolved.as_ref() {
                     PlaceRef {
@@ -661,7 +649,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             Mutability::Mut => BorrowKind::Mut { allow_two_phase_borrow: false },
         };
 
-        let arg_place = arg_place_builder.into_place(this.tcx, &this.upvars);
+        let arg_place = arg_place_builder.into_place(this);
 
         this.cfg.push_assign(
             block,

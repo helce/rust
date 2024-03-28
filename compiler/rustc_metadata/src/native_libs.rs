@@ -33,29 +33,26 @@ pub fn find_native_static_library(
     search_paths: &[PathBuf],
     sess: &Session,
 ) -> PathBuf {
-    let verbatim = verbatim.unwrap_or(false);
-    // On Windows, static libraries sometimes show up as libfoo.a and other
-    // times show up as foo.lib
-    let oslibname = if verbatim {
-        name.to_string()
+    let formats = if verbatim.unwrap_or(false) {
+        vec![("".into(), "".into())]
     } else {
-        format!("{}{}{}", sess.target.staticlib_prefix, name, sess.target.staticlib_suffix)
+        let os = (sess.target.staticlib_prefix.clone(), sess.target.staticlib_suffix.clone());
+        // On Windows, static libraries sometimes show up as libfoo.a and other
+        // times show up as foo.lib
+        let unix = ("lib".into(), ".a".into());
+        if os == unix { vec![os] } else { vec![os, unix] }
     };
-    let unixlibname = format!("lib{}.a", name);
 
     for path in search_paths {
-        let test = path.join(&oslibname);
-        if test.exists() {
-            return test;
-        }
-        if oslibname != unixlibname {
-            let test = path.join(&unixlibname);
+        for (prefix, suffix) in &formats {
+            let test = path.join(format!("{}{}{}", prefix, name, suffix));
             if test.exists() {
                 return test;
             }
         }
     }
-    sess.emit_fatal(MissingNativeLibrary { libname: name });
+
+    sess.emit_fatal(MissingNativeLibrary::new(name, verbatim.unwrap_or(false)));
 }
 
 fn find_bundled_library(
@@ -101,7 +98,7 @@ struct Collector<'tcx> {
 
 impl<'tcx> Collector<'tcx> {
     fn process_item(&mut self, id: rustc_hir::ItemId) {
-        if !matches!(self.tcx.def_kind(id.def_id), DefKind::ForeignMod) {
+        if !matches!(self.tcx.def_kind(id.owner_id), DefKind::ForeignMod) {
             return;
         }
 
@@ -375,17 +372,17 @@ impl<'tcx> Collector<'tcx> {
                 }
                 _ => {
                     for child_item in foreign_mod_items {
-                        if self.tcx.def_kind(child_item.id.def_id).has_codegen_attrs()
+                        if self.tcx.def_kind(child_item.id.owner_id).has_codegen_attrs()
                             && self
                                 .tcx
-                                .codegen_fn_attrs(child_item.id.def_id)
+                                .codegen_fn_attrs(child_item.id.owner_id)
                                 .link_ordinal
                                 .is_some()
                         {
                             let link_ordinal_attr = self
                                 .tcx
                                 .hir()
-                                .attrs(self.tcx.hir().local_def_id_to_hir_id(child_item.id.def_id))
+                                .attrs(child_item.id.owner_id.into())
                                 .iter()
                                 .find(|a| a.has_name(sym::link_ordinal))
                                 .unwrap();
@@ -405,7 +402,7 @@ impl<'tcx> Collector<'tcx> {
                 filename,
                 kind,
                 cfg,
-                foreign_module: Some(it.def_id.to_def_id()),
+                foreign_module: Some(it.owner_id.to_def_id()),
                 wasm_import_module: wasm_import_module.map(|(name, _)| name),
                 verbatim,
                 dll_imports,
@@ -508,7 +505,7 @@ impl<'tcx> Collector<'tcx> {
     fn i686_arg_list_size(&self, item: &hir::ForeignItemRef) -> usize {
         let argument_types: &List<Ty<'_>> = self.tcx.erase_late_bound_regions(
             self.tcx
-                .type_of(item.id.def_id)
+                .type_of(item.id.owner_id)
                 .fn_sig(self.tcx)
                 .inputs()
                 .map_bound(|slice| self.tcx.mk_type_list(slice.iter())),
@@ -560,7 +557,7 @@ impl<'tcx> Collector<'tcx> {
             }
         };
 
-        let codegen_fn_attrs = self.tcx.codegen_fn_attrs(item.id.def_id);
+        let codegen_fn_attrs = self.tcx.codegen_fn_attrs(item.id.owner_id);
         let import_name_type = codegen_fn_attrs
             .link_ordinal
             .map_or(import_name_type, |ord| Some(PeImportNameType::Ordinal(ord)));
@@ -570,7 +567,7 @@ impl<'tcx> Collector<'tcx> {
             import_name_type,
             calling_convention,
             span: item.span,
-            is_fn: self.tcx.def_kind(item.id.def_id).is_fn_like(),
+            is_fn: self.tcx.def_kind(item.id.owner_id).is_fn_like(),
         }
     }
 }

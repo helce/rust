@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
 use rustc_errors::ErrorGuaranteed;
-use rustc_macros::{LintDiagnostic, SessionDiagnostic};
-use rustc_session::SessionDiagnostic;
+use rustc_errors::IntoDiagnostic;
+use rustc_macros::{Diagnostic, LintDiagnostic};
 use rustc_span::Span;
 
-#[derive(SessionDiagnostic)]
-#[diag(monomorphize::recursion_limit)]
+#[derive(Diagnostic)]
+#[diag(monomorphize_recursion_limit)]
 pub struct RecursionLimit {
     #[primary_span]
     pub span: Span,
@@ -14,26 +14,26 @@ pub struct RecursionLimit {
     #[note]
     pub def_span: Span,
     pub def_path_str: String,
-    #[note(monomorphize::written_to_path)]
+    #[note(monomorphize_written_to_path)]
     pub was_written: Option<()>,
     pub path: PathBuf,
 }
 
-#[derive(SessionDiagnostic)]
-#[diag(monomorphize::type_length_limit)]
-#[help(monomorphize::consider_type_length_limit)]
+#[derive(Diagnostic)]
+#[diag(monomorphize_type_length_limit)]
+#[help(monomorphize_consider_type_length_limit)]
 pub struct TypeLengthLimit {
     #[primary_span]
     pub span: Span,
     pub shrunk: String,
-    #[note(monomorphize::written_to_path)]
+    #[note(monomorphize_written_to_path)]
     pub was_written: Option<()>,
     pub path: PathBuf,
     pub type_length: usize,
 }
 
-#[derive(SessionDiagnostic)]
-#[diag(monomorphize::requires_lang_item)]
+#[derive(Diagnostic)]
+#[diag(monomorphize_requires_lang_item)]
 pub struct RequiresLangItem {
     pub lang_item: String,
 }
@@ -44,13 +44,12 @@ pub struct UnusedGenericParams {
     pub param_names: Vec<String>,
 }
 
-impl SessionDiagnostic<'_> for UnusedGenericParams {
+impl IntoDiagnostic<'_> for UnusedGenericParams {
     fn into_diagnostic(
         self,
         handler: &'_ rustc_errors::Handler,
     ) -> rustc_errors::DiagnosticBuilder<'_, ErrorGuaranteed> {
-        let mut diag =
-            handler.struct_err(rustc_errors::fluent::monomorphize::unused_generic_params);
+        let mut diag = handler.struct_err(rustc_errors::fluent::monomorphize_unused_generic_params);
         diag.set_span(self.span);
         for (span, name) in self.param_spans.into_iter().zip(self.param_names) {
             // FIXME: I can figure out how to do a label with a fluent string with a fixed message,
@@ -63,7 +62,7 @@ impl SessionDiagnostic<'_> for UnusedGenericParams {
 }
 
 #[derive(LintDiagnostic)]
-#[diag(monomorphize::large_assignments)]
+#[diag(monomorphize_large_assignments)]
 #[note]
 pub struct LargeAssignmentsLint {
     #[label]
@@ -72,12 +71,12 @@ pub struct LargeAssignmentsLint {
     pub limit: u64,
 }
 
-#[derive(SessionDiagnostic)]
-#[diag(monomorphize::unknown_partition_strategy)]
+#[derive(Diagnostic)]
+#[diag(monomorphize_unknown_partition_strategy)]
 pub struct UnknownPartitionStrategy;
 
-#[derive(SessionDiagnostic)]
-#[diag(monomorphize::symbol_already_defined)]
+#[derive(Diagnostic)]
+#[diag(monomorphize_symbol_already_defined)]
 pub struct SymbolAlreadyDefined {
     #[primary_span]
     pub span: Option<Span>,

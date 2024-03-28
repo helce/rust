@@ -35,6 +35,7 @@ mod into_iter_on_ref;
 mod is_digit_ascii_radix;
 mod iter_cloned_collect;
 mod iter_count;
+mod iter_kv_map;
 mod iter_next_slice;
 mod iter_nth;
 mod iter_nth_zero;
@@ -101,20 +102,18 @@ use bind_instead_of_map::BindInsteadOfMap;
 use clippy_utils::consts::{constant, Constant};
 use clippy_utils::diagnostics::{span_lint, span_lint_and_help};
 use clippy_utils::ty::{contains_adt_constructor, implements_trait, is_copy, is_type_diagnostic_item};
-use clippy_utils::{
-    contains_return, get_trait_def_id, is_trait_method, iter_input_pats, meets_msrv, msrvs, paths, return_ty,
-};
+use clippy_utils::{contains_return, is_trait_method, iter_input_pats, meets_msrv, msrvs, return_ty};
 use if_chain::if_chain;
 use rustc_hir as hir;
 use rustc_hir::def::Res;
 use rustc_hir::{Expr, ExprKind, PrimTy, QPath, TraitItem, TraitItemKind};
+use rustc_hir_analysis::hir_ty_to_ty;
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::{self, TraitRef, Ty};
 use rustc_semver::RustcVersion;
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::{sym, Span};
-use rustc_typeck::hir_ty_to_ty;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -3036,6 +3035,37 @@ declare_clippy_lint! {
     "use of `File::read_to_end` or `File::read_to_string`"
 }
 
+declare_clippy_lint! {
+    /// ### What it does
+    ///
+    /// Checks for iterating a map (`HashMap` or `BTreeMap`) and
+    /// ignoring either the keys or values.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// Readability. There are `keys` and `values` methods that
+    /// can be used to express that we only need the keys or the values.
+    ///
+    /// ### Example
+    ///
+    /// ```
+    /// # use std::collections::HashMap;
+    /// let map: HashMap<u32, u32> = HashMap::new();
+    /// let values = map.iter().map(|(_, value)| value).collect::<Vec<_>>();
+    /// ```
+    ///
+    /// Use instead:
+    /// ```
+    /// # use std::collections::HashMap;
+    /// let map: HashMap<u32, u32> = HashMap::new();
+    /// let values = map.values().collect::<Vec<_>>();
+    /// ```
+    #[clippy::version = "1.65.0"]
+    pub ITER_KV_MAP,
+    complexity,
+    "iterating on map using `iter` when `keys` or `values` would do"
+}
+
 pub struct Methods {
     avoid_breaking_exported_api: bool,
     msrv: Option<RustcVersion>,
@@ -3159,6 +3189,7 @@ impl_lint_pass!(Methods => [
     UNNECESSARY_SORT_BY,
     VEC_RESIZE_TO_ZERO,
     VERBOSE_FILE_READS,
+    ITER_KV_MAP,
 ]);
 
 /// Extracts a method call name, args, and `Span` of the method name.
@@ -3217,70 +3248,64 @@ impl<'tcx> LateLintPass<'tcx> for Methods {
             return;
         }
         let name = impl_item.ident.name.as_str();
-        let parent = cx.tcx.hir().get_parent_item(impl_item.hir_id());
+        let parent = cx.tcx.hir().get_parent_item(impl_item.hir_id()).def_id;
         let item = cx.tcx.hir().expect_item(parent);
-        let self_ty = cx.tcx.type_of(item.def_id);
+        let self_ty = cx.tcx.type_of(item.owner_id);
 
         let implements_trait = matches!(item.kind, hir::ItemKind::Impl(hir::Impl { of_trait: Some(_), .. }));
-        if_chain! {
-            if let hir::ImplItemKind::Fn(ref sig, id) = impl_item.kind;
-            if let Some(first_arg) = iter_input_pats(sig.decl, cx.tcx.hir().body(id)).next();
-
-            let method_sig = cx.tcx.fn_sig(impl_item.def_id);
+        if let hir::ImplItemKind::Fn(ref sig, id) = impl_item.kind {
+            let method_sig = cx.tcx.fn_sig(impl_item.owner_id);
             let method_sig = cx.tcx.erase_late_bound_regions(method_sig);
-
-            let first_arg_ty = method_sig.inputs().iter().next();
-
-            // check conventions w.r.t. conversion method names and predicates
-            if let Some(first_arg_ty) = first_arg_ty;
-
-            then {
-                // if this impl block implements a trait, lint in trait definition instead
-                if !implements_trait && cx.access_levels.is_exported(impl_item.def_id) {
-                    // check missing trait implementations
-                    for method_config in &TRAIT_METHODS {
-                        if name == method_config.method_name &&
-                            sig.decl.inputs.len() == method_config.param_count &&
-                            method_config.output_type.matches(&sig.decl.output) &&
-                            method_config.self_kind.matches(cx, self_ty, *first_arg_ty) &&
-                            fn_header_equals(method_config.fn_header, sig.header) &&
-                            method_config.lifetime_param_cond(impl_item)
-                        {
-                            span_lint_and_help(
-                                cx,
-                                SHOULD_IMPLEMENT_TRAIT,
-                                impl_item.span,
-                                &format!(
-                                    "method `{}` can be confused for the standard trait method `{}::{}`",
-                                    method_config.method_name,
-                                    method_config.trait_name,
-                                    method_config.method_name
-                                ),
-                                None,
-                                &format!(
-                                    "consider implementing the trait `{}` or choosing a less ambiguous method name",
-                                    method_config.trait_name
-                                )
-                            );
-                        }
+            let first_arg_ty_opt = method_sig.inputs().iter().next().copied();
+            // if this impl block implements a trait, lint in trait definition instead
+            if !implements_trait && cx.effective_visibilities.is_exported(impl_item.owner_id.def_id) {
+                // check missing trait implementations
+                for method_config in &TRAIT_METHODS {
+                    if name == method_config.method_name
+                        && sig.decl.inputs.len() == method_config.param_count
+                        && method_config.output_type.matches(&sig.decl.output)
+                        // in case there is no first arg, since we already have checked the number of arguments
+                        // it's should be always true
+                        && first_arg_ty_opt.map_or(true, |first_arg_ty| method_config
+                            .self_kind.matches(cx, self_ty, first_arg_ty)
+                            )
+                        && fn_header_equals(method_config.fn_header, sig.header)
+                        && method_config.lifetime_param_cond(impl_item)
+                    {
+                        span_lint_and_help(
+                            cx,
+                            SHOULD_IMPLEMENT_TRAIT,
+                            impl_item.span,
+                            &format!(
+                                "method `{}` can be confused for the standard trait method `{}::{}`",
+                                method_config.method_name, method_config.trait_name, method_config.method_name
+                            ),
+                            None,
+                            &format!(
+                                "consider implementing the trait `{}` or choosing a less ambiguous method name",
+                                method_config.trait_name
+                            ),
+                        );
                     }
                 }
+            }
 
-                if sig.decl.implicit_self.has_implicit_self()
+            if sig.decl.implicit_self.has_implicit_self()
                     && !(self.avoid_breaking_exported_api
-                        && cx.access_levels.is_exported(impl_item.def_id))
+                    && cx.effective_visibilities.is_exported(impl_item.owner_id.def_id))
+                    && let Some(first_arg) = iter_input_pats(sig.decl, cx.tcx.hir().body(id)).next()
+                    && let Some(first_arg_ty) = first_arg_ty_opt
                 {
                     wrong_self_convention::check(
                         cx,
                         name,
                         self_ty,
-                        *first_arg_ty,
+                        first_arg_ty,
                         first_arg.pat.span,
                         implements_trait,
                         false
                     );
                 }
-            }
         }
 
         // if this impl block implements a trait, lint in trait definition instead
@@ -3345,7 +3370,9 @@ impl<'tcx> LateLintPass<'tcx> for Methods {
             then {
                 let first_arg_span = first_arg_ty.span;
                 let first_arg_ty = hir_ty_to_ty(cx.tcx, first_arg_ty);
-                let self_ty = TraitRef::identity(cx.tcx, item.def_id.to_def_id()).self_ty().skip_binder();
+                let self_ty = TraitRef::identity(cx.tcx, item.owner_id.to_def_id())
+                    .self_ty()
+                    .skip_binder();
                 wrong_self_convention::check(
                     cx,
                     item.ident.name.as_str(),
@@ -3353,7 +3380,7 @@ impl<'tcx> LateLintPass<'tcx> for Methods {
                     first_arg_ty,
                     first_arg_span,
                     false,
-                    true
+                    true,
                 );
             }
         }
@@ -3362,7 +3389,9 @@ impl<'tcx> LateLintPass<'tcx> for Methods {
             if item.ident.name == sym::new;
             if let TraitItemKind::Fn(_, _) = item.kind;
             let ret_ty = return_ty(cx, item.hir_id());
-            let self_ty = TraitRef::identity(cx.tcx, item.def_id.to_def_id()).self_ty().skip_binder();
+            let self_ty = TraitRef::identity(cx.tcx, item.owner_id.to_def_id())
+                .self_ty()
+                .skip_binder();
             if !ret_ty.contains(self_ty);
 
             then {
@@ -3498,6 +3527,9 @@ impl Methods {
                 (name @ ("map" | "map_err"), [m_arg]) => {
                     if name == "map" {
                         map_clone::check(cx, expr, recv, m_arg, self.msrv);
+                        if let Some((map_name @ ("iter" | "into_iter"), recv2, _, _)) = method_call(recv) {
+                            iter_kv_map::check(cx, map_name, expr, recv2, m_arg);
+                        }
                     } else {
                         map_err_ignore::check(cx, expr, m_arg);
                     }
@@ -3763,7 +3795,6 @@ const TRAIT_METHODS: [ShouldImplTraitCase; 30] = [
     ShouldImplTraitCase::new("std::borrow::BorrowMut", "borrow_mut",  1,  FN_HEADER,  SelfKind::RefMut,  OutType::Ref, true),
     ShouldImplTraitCase::new("std::clone::Clone", "clone",  1,  FN_HEADER,  SelfKind::Ref,  OutType::Any, true),
     ShouldImplTraitCase::new("std::cmp::Ord", "cmp",  2,  FN_HEADER,  SelfKind::Ref,  OutType::Any, true),
-    // FIXME: default doesn't work
     ShouldImplTraitCase::new("std::default::Default", "default",  0,  FN_HEADER,  SelfKind::No,  OutType::Any, true),
     ShouldImplTraitCase::new("std::ops::Deref", "deref",  1,  FN_HEADER,  SelfKind::Ref,  OutType::Ref, true),
     ShouldImplTraitCase::new("std::ops::DerefMut", "deref_mut",  1,  FN_HEADER,  SelfKind::RefMut,  OutType::Ref, true),
@@ -3791,7 +3822,7 @@ enum SelfKind {
     Value,
     Ref,
     RefMut,
-    No,
+    No, // When we want the first argument type to be different than `Self`
 }
 
 impl SelfKind {
@@ -3817,14 +3848,13 @@ impl SelfKind {
                 return m == mutability && t == parent_ty;
             }
 
-            let trait_path = match mutability {
-                hir::Mutability::Not => &paths::ASREF_TRAIT,
-                hir::Mutability::Mut => &paths::ASMUT_TRAIT,
+            let trait_sym = match mutability {
+                hir::Mutability::Not => sym::AsRef,
+                hir::Mutability::Mut => sym::AsMut,
             };
 
-            let trait_def_id = match get_trait_def_id(cx, trait_path) {
-                Some(did) => did,
-                None => return false,
+            let Some(trait_def_id) = cx.tcx.get_diagnostic_item(trait_sym) else {
+                return false
             };
             implements_trait(cx, ty, trait_def_id, &[parent_ty.into()])
         }

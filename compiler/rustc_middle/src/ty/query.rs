@@ -1,11 +1,11 @@
 use crate::dep_graph;
 use crate::infer::canonical::{self, Canonical};
-use crate::lint::LintLevelMap;
+use crate::lint::LintExpectation;
 use crate::metadata::ModChild;
 use crate::middle::codegen_fn_attrs::CodegenFnAttrs;
 use crate::middle::exported_symbols::{ExportedSymbol, SymbolExportInfo};
 use crate::middle::lib_features::LibFeatures;
-use crate::middle::privacy::AccessLevels;
+use crate::middle::privacy::EffectiveVisibilities;
 use crate::middle::resolve_lifetime::{ObjectLifetimeDefault, Region, ResolveLifetimes};
 use crate::middle::stability::{self, DeprecationEntry};
 use crate::mir;
@@ -32,7 +32,7 @@ use crate::ty::layout::TyAndLayout;
 use crate::ty::subst::{GenericArg, SubstsRef};
 use crate::ty::util::AlwaysRequiresDrop;
 use crate::ty::GeneratorDiagnosticData;
-use crate::ty::{self, AdtSizedConstraint, CrateInherentImpls, ParamEnvAnd, Ty, TyCtxt};
+use crate::ty::{self, CrateInherentImpls, ParamEnvAnd, Ty, TyCtxt};
 use rustc_ast as ast;
 use rustc_ast::expand::allocator::AllocatorKind;
 use rustc_attr as attr;
@@ -40,17 +40,19 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::svh::Svh;
 use rustc_data_structures::sync::Lrc;
+use rustc_data_structures::unord::UnordSet;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, DefIdSet, LocalDefId};
+use rustc_hir::hir_id::OwnerId;
 use rustc_hir::lang_items::{LangItem, LanguageItems};
 use rustc_hir::{Crate, ItemLocalId, TraitCandidate};
 use rustc_index::{bit_set::FiniteBitSet, vec::IndexVec};
 use rustc_session::config::{EntryFnType, OptLevel, OutputFilenames, SymbolManglingVersion};
 use rustc_session::cstore::{CrateDepKind, CrateSource};
 use rustc_session::cstore::{ExternCrate, ForeignModule, LinkagePreference, NativeLib};
-use rustc_session::utils::NativeLibKind;
+use rustc_session::lint::LintExpectationId;
 use rustc_session::Limits;
 use rustc_span::symbol::Symbol;
 use rustc_span::{Span, DUMMY_SP};
@@ -275,8 +277,9 @@ macro_rules! define_callbacks {
             fn default() -> Self {
                 Providers {
                     $($name: |_, key| bug!(
-                        "`tcx.{}({:?})` unsupported by its crate; \
-                         perhaps the `{}` query was never assigned a provider function",
+                        "`tcx.{}({:?})` is not supported for external or local crate;\n
+                        hint: Queries can be either made to the local crate, or the external crate. This error means you tried to use it for one that's not supported (likely the local crate).\n
+                        If that's not the case, {} was likely never assigned to a provider function.\n",
                         stringify!($name),
                         key,
                         stringify!($name),
@@ -335,7 +338,7 @@ macro_rules! define_callbacks {
 rustc_query_append! { define_callbacks! }
 
 mod sealed {
-    use super::{DefId, LocalDefId};
+    use super::{DefId, LocalDefId, OwnerId};
 
     /// An analogue of the `Into` trait that's intended only for query parameters.
     ///
@@ -360,6 +363,13 @@ mod sealed {
     }
 
     impl IntoQueryParam<DefId> for LocalDefId {
+        #[inline(always)]
+        fn into_query_param(self) -> DefId {
+            self.to_def_id()
+        }
+    }
+
+    impl IntoQueryParam<DefId> for OwnerId {
         #[inline(always)]
         fn into_query_param(self) -> DefId {
             self.to_def_id()

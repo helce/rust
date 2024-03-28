@@ -80,10 +80,14 @@ impl<T: ?Sized> *mut T {
     #[unstable(feature = "set_ptr_value", issue = "75091")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
     #[inline]
-    pub fn with_metadata_of<U>(self, mut val: *mut U) -> *mut U
+    pub fn with_metadata_of<U>(self, val: *const U) -> *mut U
     where
         U: ?Sized,
     {
+        // Prepare in the type system that we will replace the pointer value with a mutable
+        // pointer, taking the mutable provenance from the `self` pointer.
+        let mut val = val as *mut U;
+        // Pointer to the pointer value within the value.
         let target = &mut val as *mut *mut U as *mut *mut u8;
         // SAFETY: In case of a thin pointer, this operations is identical
         // to a simple assignment. In case of a fat pointer, with the current
@@ -584,7 +588,6 @@ impl<T: ?Sized> *mut T {
     ///
     /// For non-`Sized` pointees this operation changes only the data pointer,
     /// leaving the metadata untouched.
-    #[cfg(not(bootstrap))]
     #[unstable(feature = "ptr_mask", issue = "98290")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
     #[inline(always)]
@@ -727,7 +730,7 @@ impl<T: ?Sized> *mut T {
 
     /// Returns whether two pointers are guaranteed to be inequal.
     ///
-    /// At runtime this function behaves like `Some(self == other)`.
+    /// At runtime this function behaves like `Some(self != other)`.
     /// However, in some contexts (e.g., compile-time evaluation),
     /// it is not always possible to determine inequality of two pointers, so this function may
     /// spuriously return `None` for pointers that later actually turn out to have its inequality known.
@@ -868,7 +871,7 @@ impl<T: ?Sized> *mut T {
     /// units of T: the distance in bytes is divided by `mem::size_of::<T>()`.
     ///
     /// This computes the same value that [`offset_from`](#method.offset_from)
-    /// would compute, but with the added precondition that that the offset is
+    /// would compute, but with the added precondition that the offset is
     /// guaranteed to be non-negative.  This method is equivalent to
     /// `usize::from(self.offset_from(origin)).unwrap_unchecked()`,
     /// but it provides slightly more information to the optimizer, which can

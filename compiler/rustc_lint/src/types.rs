@@ -11,7 +11,7 @@ use rustc_middle::ty::subst::SubstsRef;
 use rustc_middle::ty::{self, AdtKind, DefIdTree, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable};
 use rustc_span::source_map;
 use rustc_span::symbol::sym;
-use rustc_span::{Span, Symbol, DUMMY_SP};
+use rustc_span::{Span, Symbol};
 use rustc_target::abi::{Abi, WrappingRange};
 use rustc_target::abi::{Integer, TagEncoding, Variants};
 use rustc_target::spec::abi::Abi as SpecAbi;
@@ -116,8 +116,8 @@ impl TypeLimits {
     }
 }
 
-/// Attempts to special-case the overflowing literal lint when it occurs as a range endpoint.
-/// Returns `true` iff the lint was overridden.
+/// Attempts to special-case the overflowing literal lint when it occurs as a range endpoint (`expr..MAX+1`).
+/// Returns `true` iff the lint was emitted.
 fn lint_overflowing_range_endpoint<'tcx>(
     cx: &LateContext<'tcx>,
     lit: &hir::Lit,
@@ -140,37 +140,46 @@ fn lint_overflowing_range_endpoint<'tcx>(
         return false;
     }
 
-    let mut overwritten = false;
     // We can suggest using an inclusive range
     // (`..=`) instead only if it is the `end` that is
     // overflowing and only by 1.
-    if eps[1].expr.hir_id == expr.hir_id && lit_val - 1 == max {
-        cx.struct_span_lint(OVERFLOWING_LITERALS, struct_expr.span, |lint| {
-            let mut err = lint.build(fluent::lint::range_endpoint_out_of_range);
-            err.set_arg("ty", ty);
-            if let Ok(start) = cx.sess().source_map().span_to_snippet(eps[0].span) {
-                use ast::{LitIntType, LitKind};
-                // We need to preserve the literal's suffix,
-                // as it may determine typing information.
-                let suffix = match lit.node {
-                    LitKind::Int(_, LitIntType::Signed(s)) => s.name_str(),
-                    LitKind::Int(_, LitIntType::Unsigned(s)) => s.name_str(),
-                    LitKind::Int(_, LitIntType::Unsuffixed) => "",
-                    _ => bug!(),
-                };
-                let suggestion = format!("{}..={}{}", start, lit_val - 1, suffix);
-                err.span_suggestion(
-                    struct_expr.span,
-                    fluent::lint::suggestion,
-                    suggestion,
-                    Applicability::MachineApplicable,
-                );
-                err.emit();
-                overwritten = true;
-            }
-        });
-    }
-    overwritten
+    if !(eps[1].expr.hir_id == expr.hir_id && lit_val - 1 == max) {
+        return false;
+    };
+    let Ok(start) = cx.sess().source_map().span_to_snippet(eps[0].span) else { return false };
+
+    cx.struct_span_lint(
+        OVERFLOWING_LITERALS,
+        struct_expr.span,
+        fluent::lint_range_endpoint_out_of_range,
+        |lint| {
+            use ast::{LitIntType, LitKind};
+
+            lint.set_arg("ty", ty);
+
+            // We need to preserve the literal's suffix,
+            // as it may determine typing information.
+            let suffix = match lit.node {
+                LitKind::Int(_, LitIntType::Signed(s)) => s.name_str(),
+                LitKind::Int(_, LitIntType::Unsigned(s)) => s.name_str(),
+                LitKind::Int(_, LitIntType::Unsuffixed) => "",
+                _ => bug!(),
+            };
+            let suggestion = format!("{}..={}{}", start, lit_val - 1, suffix);
+            lint.span_suggestion(
+                struct_expr.span,
+                fluent::suggestion,
+                suggestion,
+                Applicability::MachineApplicable,
+            );
+
+            lint
+        },
+    );
+
+    // We've just emitted a lint, special cased for `(...)..MAX+1` ranges,
+    // return `true` so the callers don't also emit a lint
+    true
 }
 
 // For `isize` & `usize`, be conservative with the warnings, so that the
@@ -221,52 +230,58 @@ fn report_bin_hex_error(
     negative: bool,
 ) {
     let size = Integer::from_attr(&cx.tcx, ty).size();
-    cx.struct_span_lint(OVERFLOWING_LITERALS, expr.span, |lint| {
-        let (t, actually) = match ty {
-            attr::IntType::SignedInt(t) => {
-                let actually = if negative {
-                    -(size.sign_extend(val) as i128)
-                } else {
-                    size.sign_extend(val) as i128
-                };
-                (t.name_str(), actually.to_string())
-            }
-            attr::IntType::UnsignedInt(t) => {
-                let actually = size.truncate(val);
-                (t.name_str(), actually.to_string())
-            }
-        };
-        let mut err = lint.build(fluent::lint::overflowing_bin_hex);
-        if negative {
-            // If the value is negative,
-            // emits a note about the value itself, apart from the literal.
-            err.note(fluent::lint::negative_note);
-            err.note(fluent::lint::negative_becomes_note);
-        } else {
-            err.note(fluent::lint::positive_note);
-        }
-        if let Some(sugg_ty) =
-            get_type_suggestion(cx.typeck_results().node_type(expr.hir_id), val, negative)
-        {
-            err.set_arg("suggestion_ty", sugg_ty);
-            if let Some(pos) = repr_str.chars().position(|c| c == 'i' || c == 'u') {
-                let (sans_suffix, _) = repr_str.split_at(pos);
-                err.span_suggestion(
-                    expr.span,
-                    fluent::lint::suggestion,
-                    format!("{}{}", sans_suffix, sugg_ty),
-                    Applicability::MachineApplicable,
-                );
+    cx.struct_span_lint(
+        OVERFLOWING_LITERALS,
+        expr.span,
+        fluent::lint_overflowing_bin_hex,
+        |lint| {
+            let (t, actually) = match ty {
+                attr::IntType::SignedInt(t) => {
+                    let actually = if negative {
+                        -(size.sign_extend(val) as i128)
+                    } else {
+                        size.sign_extend(val) as i128
+                    };
+                    (t.name_str(), actually.to_string())
+                }
+                attr::IntType::UnsignedInt(t) => {
+                    let actually = size.truncate(val);
+                    (t.name_str(), actually.to_string())
+                }
+            };
+
+            if negative {
+                // If the value is negative,
+                // emits a note about the value itself, apart from the literal.
+                lint.note(fluent::negative_note);
+                lint.note(fluent::negative_becomes_note);
             } else {
-                err.help(fluent::lint::help);
+                lint.note(fluent::positive_note);
             }
-        }
-        err.set_arg("ty", t);
-        err.set_arg("lit", repr_str);
-        err.set_arg("dec", val);
-        err.set_arg("actually", actually);
-        err.emit();
-    });
+            if let Some(sugg_ty) =
+                get_type_suggestion(cx.typeck_results().node_type(expr.hir_id), val, negative)
+            {
+                lint.set_arg("suggestion_ty", sugg_ty);
+                if let Some(pos) = repr_str.chars().position(|c| c == 'i' || c == 'u') {
+                    let (sans_suffix, _) = repr_str.split_at(pos);
+                    lint.span_suggestion(
+                        expr.span,
+                        fluent::suggestion,
+                        format!("{}{}", sans_suffix, sugg_ty),
+                        Applicability::MachineApplicable,
+                    );
+                } else {
+                    lint.help(fluent::help);
+                }
+            }
+            lint.set_arg("ty", t)
+                .set_arg("lit", repr_str)
+                .set_arg("dec", val)
+                .set_arg("actually", actually);
+
+            lint
+        },
+    );
 }
 
 // This function finds the next fitting type and generates a suggestion string.
@@ -345,30 +360,31 @@ fn lint_int_literal<'tcx>(
         }
 
         if lint_overflowing_range_endpoint(cx, lit, v, max, e, t.name_str()) {
-            // The overflowing literal lint was overridden.
+            // The overflowing literal lint was emited by `lint_overflowing_range_endpoint`.
             return;
         }
 
-        cx.struct_span_lint(OVERFLOWING_LITERALS, e.span, |lint| {
-            let mut err = lint.build(fluent::lint::overflowing_int);
-            err.set_arg("ty", t.name_str());
-            err.set_arg(
-                "lit",
-                cx.sess()
-                    .source_map()
-                    .span_to_snippet(lit.span)
-                    .expect("must get snippet from literal"),
-            );
-            err.set_arg("min", min);
-            err.set_arg("max", max);
-            err.note(fluent::lint::note);
+        cx.struct_span_lint(OVERFLOWING_LITERALS, e.span, fluent::lint_overflowing_int, |lint| {
+            lint.set_arg("ty", t.name_str())
+                .set_arg(
+                    "lit",
+                    cx.sess()
+                        .source_map()
+                        .span_to_snippet(lit.span)
+                        .expect("must get snippet from literal"),
+                )
+                .set_arg("min", min)
+                .set_arg("max", max)
+                .note(fluent::note);
+
             if let Some(sugg_ty) =
                 get_type_suggestion(cx.typeck_results().node_type(e.hir_id), v, negative)
             {
-                err.set_arg("suggestion_ty", sugg_ty);
-                err.help(fluent::lint::help);
+                lint.set_arg("suggestion_ty", sugg_ty);
+                lint.help(fluent::help);
             }
-            err.emit();
+
+            lint
         });
     }
 }
@@ -393,16 +409,19 @@ fn lint_uint_literal<'tcx>(
             match par_e.kind {
                 hir::ExprKind::Cast(..) => {
                     if let ty::Char = cx.typeck_results().expr_ty(par_e).kind() {
-                        cx.struct_span_lint(OVERFLOWING_LITERALS, par_e.span, |lint| {
-                            lint.build(fluent::lint::only_cast_u8_to_char)
-                                .span_suggestion(
+                        cx.struct_span_lint(
+                            OVERFLOWING_LITERALS,
+                            par_e.span,
+                            fluent::lint_only_cast_u8_to_char,
+                            |lint| {
+                                lint.span_suggestion(
                                     par_e.span,
-                                    fluent::lint::suggestion,
+                                    fluent::suggestion,
                                     format!("'\\u{{{:X}}}'", lit_val),
                                     Applicability::MachineApplicable,
                                 )
-                                .emit();
-                        });
+                            },
+                        );
                         return;
                     }
                 }
@@ -410,7 +429,7 @@ fn lint_uint_literal<'tcx>(
             }
         }
         if lint_overflowing_range_endpoint(cx, lit, lit_val, max, e, t.name_str()) {
-            // The overflowing literal lint was overridden.
+            // The overflowing literal lint was emited by `lint_overflowing_range_endpoint`.
             return;
         }
         if let Some(repr_str) = get_bin_hex_repr(cx, lit) {
@@ -424,9 +443,8 @@ fn lint_uint_literal<'tcx>(
             );
             return;
         }
-        cx.struct_span_lint(OVERFLOWING_LITERALS, e.span, |lint| {
-            lint.build(fluent::lint::overflowing_uint)
-                .set_arg("ty", t.name_str())
+        cx.struct_span_lint(OVERFLOWING_LITERALS, e.span, fluent::lint_overflowing_uint, |lint| {
+            lint.set_arg("ty", t.name_str())
                 .set_arg(
                     "lit",
                     cx.sess()
@@ -436,8 +454,7 @@ fn lint_uint_literal<'tcx>(
                 )
                 .set_arg("min", min)
                 .set_arg("max", max)
-                .note(fluent::lint::note)
-                .emit();
+                .note(fluent::note)
         });
     }
 }
@@ -467,19 +484,22 @@ fn lint_literal<'tcx>(
                 _ => bug!(),
             };
             if is_infinite == Ok(true) {
-                cx.struct_span_lint(OVERFLOWING_LITERALS, e.span, |lint| {
-                    lint.build(fluent::lint::overflowing_literal)
-                        .set_arg("ty", t.name_str())
-                        .set_arg(
-                            "lit",
-                            cx.sess()
-                                .source_map()
-                                .span_to_snippet(lit.span)
-                                .expect("must get snippet from literal"),
-                        )
-                        .note(fluent::lint::note)
-                        .emit();
-                });
+                cx.struct_span_lint(
+                    OVERFLOWING_LITERALS,
+                    e.span,
+                    fluent::lint_overflowing_literal,
+                    |lint| {
+                        lint.set_arg("ty", t.name_str())
+                            .set_arg(
+                                "lit",
+                                cx.sess()
+                                    .source_map()
+                                    .span_to_snippet(lit.span)
+                                    .expect("must get snippet from literal"),
+                            )
+                            .note(fluent::note)
+                    },
+                );
             }
         }
         _ => {}
@@ -497,9 +517,12 @@ impl<'tcx> LateLintPass<'tcx> for TypeLimits {
             }
             hir::ExprKind::Binary(binop, ref l, ref r) => {
                 if is_comparison(binop) && !check_limits(cx, binop, &l, &r) {
-                    cx.struct_span_lint(UNUSED_COMPARISONS, e.span, |lint| {
-                        lint.build(fluent::lint::unused_comparisons).emit();
-                    });
+                    cx.struct_span_lint(
+                        UNUSED_COMPARISONS,
+                        e.span,
+                        fluent::lint_unused_comparisons,
+                        |lint| lint,
+                    );
                 }
             }
             hir::ExprKind::Lit(ref lit) => lint_literal(cx, self, e, lit),
@@ -819,8 +842,8 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
             self.emit_ffi_unsafe_type_lint(
                 ty,
                 sp,
-                fluent::lint::improper_ctypes_array_reason,
-                Some(fluent::lint::improper_ctypes_array_help),
+                fluent::lint_improper_ctypes_array_reason,
+                Some(fluent::lint_improper_ctypes_array_help),
             );
             true
         } else {
@@ -863,7 +886,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
             } else {
                 // All fields are ZSTs; this means that the type should behave
                 // like (), which is FFI-unsafe
-                FfiUnsafe { ty, reason: fluent::lint::improper_ctypes_struct_zst, help: None }
+                FfiUnsafe { ty, reason: fluent::lint_improper_ctypes_struct_zst, help: None }
             }
         } else {
             // We can't completely trust repr(C) markings; make sure the fields are
@@ -877,7 +900,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                     FfiPhantom(..) if def.is_enum() => {
                         return FfiUnsafe {
                             ty,
-                            reason: fluent::lint::improper_ctypes_enum_phantomdata,
+                            reason: fluent::lint_improper_ctypes_enum_phantomdata,
                             help: None,
                         };
                     }
@@ -908,12 +931,12 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
         match *ty.kind() {
             ty::Adt(def, substs) => {
                 if def.is_box() && matches!(self.mode, CItemKind::Definition) {
-                    if ty.boxed_ty().is_sized(tcx.at(DUMMY_SP), self.cx.param_env) {
+                    if ty.boxed_ty().is_sized(tcx, self.cx.param_env) {
                         return FfiSafe;
                     } else {
                         return FfiUnsafe {
                             ty,
-                            reason: fluent::lint::improper_ctypes_box,
+                            reason: fluent::lint_improper_ctypes_box,
                             help: None,
                         };
                     }
@@ -927,14 +950,14 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                             return FfiUnsafe {
                                 ty,
                                 reason: if def.is_struct() {
-                                    fluent::lint::improper_ctypes_struct_layout_reason
+                                    fluent::lint_improper_ctypes_struct_layout_reason
                                 } else {
-                                    fluent::lint::improper_ctypes_union_layout_reason
+                                    fluent::lint_improper_ctypes_union_layout_reason
                                 },
                                 help: if def.is_struct() {
-                                    Some(fluent::lint::improper_ctypes_struct_layout_help)
+                                    Some(fluent::lint_improper_ctypes_struct_layout_help)
                                 } else {
-                                    Some(fluent::lint::improper_ctypes_union_layout_help)
+                                    Some(fluent::lint_improper_ctypes_union_layout_help)
                                 },
                             };
                         }
@@ -945,9 +968,9 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                             return FfiUnsafe {
                                 ty,
                                 reason: if def.is_struct() {
-                                    fluent::lint::improper_ctypes_struct_non_exhaustive
+                                    fluent::lint_improper_ctypes_struct_non_exhaustive
                                 } else {
-                                    fluent::lint::improper_ctypes_union_non_exhaustive
+                                    fluent::lint_improper_ctypes_union_non_exhaustive
                                 },
                                 help: None,
                             };
@@ -957,14 +980,14 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                             return FfiUnsafe {
                                 ty,
                                 reason: if def.is_struct() {
-                                    fluent::lint::improper_ctypes_struct_fieldless_reason
+                                    fluent::lint_improper_ctypes_struct_fieldless_reason
                                 } else {
-                                    fluent::lint::improper_ctypes_union_fieldless_reason
+                                    fluent::lint_improper_ctypes_union_fieldless_reason
                                 },
                                 help: if def.is_struct() {
-                                    Some(fluent::lint::improper_ctypes_struct_fieldless_help)
+                                    Some(fluent::lint_improper_ctypes_struct_fieldless_help)
                                 } else {
-                                    Some(fluent::lint::improper_ctypes_union_fieldless_help)
+                                    Some(fluent::lint_improper_ctypes_union_fieldless_help)
                                 },
                             };
                         }
@@ -985,8 +1008,8 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                             if repr_nullable_ptr(self.cx, ty, self.mode).is_none() {
                                 return FfiUnsafe {
                                     ty,
-                                    reason: fluent::lint::improper_ctypes_enum_repr_reason,
-                                    help: Some(fluent::lint::improper_ctypes_enum_repr_help),
+                                    reason: fluent::lint_improper_ctypes_enum_repr_reason,
+                                    help: Some(fluent::lint_improper_ctypes_enum_repr_help),
                                 };
                             }
                         }
@@ -994,7 +1017,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                         if def.is_variant_list_non_exhaustive() && !def.did().is_local() {
                             return FfiUnsafe {
                                 ty,
-                                reason: fluent::lint::improper_ctypes_non_exhaustive,
+                                reason: fluent::lint_improper_ctypes_non_exhaustive,
                                 help: None,
                             };
                         }
@@ -1005,7 +1028,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                             if is_non_exhaustive && !variant.def_id.is_local() {
                                 return FfiUnsafe {
                                     ty,
-                                    reason: fluent::lint::improper_ctypes_non_exhaustive_variant,
+                                    reason: fluent::lint_improper_ctypes_non_exhaustive_variant,
                                     help: None,
                                 };
                             }
@@ -1023,12 +1046,12 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
 
             ty::Char => FfiUnsafe {
                 ty,
-                reason: fluent::lint::improper_ctypes_char_reason,
-                help: Some(fluent::lint::improper_ctypes_char_help),
+                reason: fluent::lint_improper_ctypes_char_reason,
+                help: Some(fluent::lint_improper_ctypes_char_help),
             },
 
             ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128) => {
-                FfiUnsafe { ty, reason: fluent::lint::improper_ctypes_128bit, help: None }
+                FfiUnsafe { ty, reason: fluent::lint_improper_ctypes_128bit, help: None }
             }
 
             // Primitive types with a stable representation.
@@ -1036,30 +1059,30 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
 
             ty::Slice(_) => FfiUnsafe {
                 ty,
-                reason: fluent::lint::improper_ctypes_slice_reason,
-                help: Some(fluent::lint::improper_ctypes_slice_help),
+                reason: fluent::lint_improper_ctypes_slice_reason,
+                help: Some(fluent::lint_improper_ctypes_slice_help),
             },
 
             ty::Dynamic(..) => {
-                FfiUnsafe { ty, reason: fluent::lint::improper_ctypes_dyn, help: None }
+                FfiUnsafe { ty, reason: fluent::lint_improper_ctypes_dyn, help: None }
             }
 
             ty::Str => FfiUnsafe {
                 ty,
-                reason: fluent::lint::improper_ctypes_str_reason,
-                help: Some(fluent::lint::improper_ctypes_str_help),
+                reason: fluent::lint_improper_ctypes_str_reason,
+                help: Some(fluent::lint_improper_ctypes_str_help),
             },
 
             ty::Tuple(..) => FfiUnsafe {
                 ty,
-                reason: fluent::lint::improper_ctypes_tuple_reason,
-                help: Some(fluent::lint::improper_ctypes_tuple_help),
+                reason: fluent::lint_improper_ctypes_tuple_reason,
+                help: Some(fluent::lint_improper_ctypes_tuple_help),
             },
 
             ty::RawPtr(ty::TypeAndMut { ty, .. }) | ty::Ref(_, ty, _)
                 if {
                     matches!(self.mode, CItemKind::Definition)
-                        && ty.is_sized(self.cx.tcx.at(DUMMY_SP), self.cx.param_env)
+                        && ty.is_sized(self.cx.tcx, self.cx.param_env)
                 } =>
             {
                 FfiSafe
@@ -1084,8 +1107,8 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                 if self.is_internal_abi(sig.abi()) {
                     return FfiUnsafe {
                         ty,
-                        reason: fluent::lint::improper_ctypes_fnptr_reason,
-                        help: Some(fluent::lint::improper_ctypes_fnptr_help),
+                        reason: fluent::lint_improper_ctypes_fnptr_reason,
+                        help: Some(fluent::lint_improper_ctypes_fnptr_help),
                     };
                 }
 
@@ -1116,7 +1139,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
             // While opaque types are checked for earlier, if a projection in a struct field
             // normalizes to an opaque type, then it will reach this branch.
             ty::Opaque(..) => {
-                FfiUnsafe { ty, reason: fluent::lint::improper_ctypes_opaque, help: None }
+                FfiUnsafe { ty, reason: fluent::lint_improper_ctypes_opaque, help: None }
             }
 
             // `extern "C" fn` functions can have type parameters, which may or may not be FFI-safe,
@@ -1150,25 +1173,24 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
             CItemKind::Definition => IMPROPER_CTYPES_DEFINITIONS,
         };
 
-        self.cx.struct_span_lint(lint, sp, |lint| {
+        self.cx.struct_span_lint(lint, sp, fluent::lint_improper_ctypes, |lint| {
             let item_description = match self.mode {
                 CItemKind::Declaration => "block",
                 CItemKind::Definition => "fn",
             };
-            let mut diag = lint.build(fluent::lint::improper_ctypes);
-            diag.set_arg("ty", ty);
-            diag.set_arg("desc", item_description);
-            diag.span_label(sp, fluent::lint::label);
+            lint.set_arg("ty", ty);
+            lint.set_arg("desc", item_description);
+            lint.span_label(sp, fluent::label);
             if let Some(help) = help {
-                diag.help(help);
+                lint.help(help);
             }
-            diag.note(note);
+            lint.note(note);
             if let ty::Adt(def, _) = ty.kind() {
                 if let Some(sp) = self.cx.tcx.hir().span_if_local(def.did()) {
-                    diag.span_note(sp, fluent::lint::note);
+                    lint.span_note(sp, fluent::note);
                 }
             }
-            diag.emit();
+            lint
         });
     }
 
@@ -1202,7 +1224,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
         }
 
         if let Some(ty) = ty.visit_with(&mut ProhibitOpaqueTypes { cx: self.cx }).break_value() {
-            self.emit_ffi_unsafe_type_lint(ty, sp, fluent::lint::improper_ctypes_opaque, None);
+            self.emit_ffi_unsafe_type_lint(ty, sp, fluent::lint_improper_ctypes_opaque, None);
             true
         } else {
             false
@@ -1247,7 +1269,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                 self.emit_ffi_unsafe_type_lint(
                     ty,
                     sp,
-                    fluent::lint::improper_ctypes_only_phantomdata,
+                    fluent::lint_improper_ctypes_only_phantomdata,
                     None,
                 );
             }
@@ -1338,7 +1360,7 @@ declare_lint_pass!(VariantSizeDifferences => [VARIANT_SIZE_DIFFERENCES]);
 impl<'tcx> LateLintPass<'tcx> for VariantSizeDifferences {
     fn check_item(&mut self, cx: &LateContext<'_>, it: &hir::Item<'_>) {
         if let hir::ItemKind::Enum(ref enum_definition, _) = it.kind {
-            let t = cx.tcx.type_of(it.def_id);
+            let t = cx.tcx.type_of(it.owner_id);
             let ty = cx.tcx.erase_regions(t);
             let Ok(layout) = cx.layout_of(ty) else { return };
             let Variants::Multiple {
@@ -1381,11 +1403,8 @@ impl<'tcx> LateLintPass<'tcx> for VariantSizeDifferences {
                 cx.struct_span_lint(
                     VARIANT_SIZE_DIFFERENCES,
                     enum_definition.variants[largest_index].span,
-                    |lint| {
-                        lint.build(fluent::lint::variant_size_differences)
-                            .set_arg("largest", largest)
-                            .emit();
-                    },
+                    fluent::lint_variant_size_differences,
+                    |lint| lint.set_arg("largest", largest),
                 );
             }
         }
@@ -1493,25 +1512,16 @@ impl InvalidAtomicOrdering {
 
     fn check_atomic_load_store(cx: &LateContext<'_>, expr: &Expr<'_>) {
         if let Some((method, args)) = Self::inherent_atomic_method_call(cx, expr, &[sym::load, sym::store])
-            && let Some((ordering_arg, invalid_ordering)) = match method {
-                sym::load => Some((&args[0], sym::Release)),
-                sym::store => Some((&args[1], sym::Acquire)),
+            && let Some((ordering_arg, invalid_ordering, msg)) = match method {
+                sym::load => Some((&args[0], sym::Release, fluent::lint_atomic_ordering_load)),
+                sym::store => Some((&args[1], sym::Acquire, fluent::lint_atomic_ordering_store)),
                 _ => None,
             }
             && let Some(ordering) = Self::match_ordering(cx, ordering_arg)
             && (ordering == invalid_ordering || ordering == sym::AcqRel)
         {
-            cx.struct_span_lint(INVALID_ATOMIC_ORDERING, ordering_arg.span, |diag| {
-                if method == sym::load {
-                    diag.build(fluent::lint::atomic_ordering_load)
-                        .help(fluent::lint::help)
-                        .emit()
-                } else {
-                    debug_assert_eq!(method, sym::store);
-                    diag.build(fluent::lint::atomic_ordering_store)
-                        .help(fluent::lint::help)
-                        .emit();
-                }
+            cx.struct_span_lint(INVALID_ATOMIC_ORDERING, ordering_arg.span, msg, |lint| {
+                lint.help(fluent::help)
             });
         }
     }
@@ -1523,10 +1533,9 @@ impl InvalidAtomicOrdering {
             && matches!(cx.tcx.get_diagnostic_name(def_id), Some(sym::fence | sym::compiler_fence))
             && Self::match_ordering(cx, &args[0]) == Some(sym::Relaxed)
         {
-            cx.struct_span_lint(INVALID_ATOMIC_ORDERING, args[0].span, |diag| {
-                diag.build(fluent::lint::atomic_ordering_fence)
-                    .help(fluent::lint::help)
-                    .emit();
+            cx.struct_span_lint(INVALID_ATOMIC_ORDERING, args[0].span, fluent::lint_atomic_ordering_fence, |lint| {
+                lint
+                    .help(fluent::help)
             });
         }
     }
@@ -1545,7 +1554,7 @@ impl InvalidAtomicOrdering {
 
         if matches!(fail_ordering, sym::Release | sym::AcqRel) {
             #[derive(LintDiagnostic)]
-            #[diag(lint::atomic_ordering_invalid)]
+            #[diag(lint_atomic_ordering_invalid)]
             #[help]
             struct InvalidAtomicOrderingDiag {
                 method: Symbol,
