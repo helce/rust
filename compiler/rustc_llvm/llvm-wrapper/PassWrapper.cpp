@@ -163,6 +163,12 @@ extern "C" void LLVMRustTimeTraceProfilerFinish(const char* FileName) {
 #define SUBTARGET_HEXAGON
 #endif
 
+#ifdef LLVM_COMPONENT_ELBRUS
+#define SUBTARGET_ELBRUS SUBTARGET(Elbrus)
+#else
+#define SUBTARGET_ELBRUS
+#endif
+
 #ifdef LLVM_COMPONENT_LOONGARCH
 #define SUBTARGET_LOONGARCH SUBTARGET(LoongArch)
 #else
@@ -183,6 +189,7 @@ extern "C" void LLVMRustTimeTraceProfilerFinish(const char* FileName) {
   SUBTARGET_SPARC                                                              \
   SUBTARGET_HEXAGON                                                            \
   SUBTARGET_RISCV                                                              \
+  SUBTARGET_ELBRUS                                                             \
   SUBTARGET_LOONGARCH                                                          \
 
 #define SUBTARGET(x)                                                           \

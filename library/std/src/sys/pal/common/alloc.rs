@@ -30,6 +30,7 @@ pub const MIN_ALIGN: usize = 8;
     target_arch = "sparc64",
     target_arch = "riscv64",
     target_arch = "wasm64",
+    target_arch = "e2k",
 ))]
 pub const MIN_ALIGN: usize = 16;
 // The allocator on the esp-idf and zkvm platforms guarantee 4 byte alignment.

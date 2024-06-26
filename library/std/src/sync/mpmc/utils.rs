@@ -23,7 +23,7 @@ use crate::ops::{Deref, DerefMut};
     any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "powerpc64",),
     repr(align(128))
 )]
-// arm, mips, mips64, and riscv64 have 32-byte cache line size.
+// arm, mips, mips64, e2k, and riscv64 have 32-byte cache line size.
 //
 // Sources:
 // - https://github.com/golang/go/blob/3dd58676054223962cd915bb0934d1f9f489d4d2/src/internal/cpu/cpu_arm.go#L7
@@ -39,6 +39,7 @@ use crate::ops::{Deref, DerefMut};
         target_arch = "mips64",
         target_arch = "mips64r6",
         target_arch = "riscv64",
+        target_arch = "e2k",
     ),
     repr(align(32))
 )]
@@ -65,6 +66,7 @@ use crate::ops::{Deref, DerefMut};
         target_arch = "mips64",
         target_arch = "mips64r6",
         target_arch = "riscv64",
+        target_arch = "e2k",
         target_arch = "s390x",
     )),
     repr(align(64))

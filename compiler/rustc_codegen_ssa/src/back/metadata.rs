@@ -213,6 +213,7 @@ pub(crate) fn create_object_file(sess: &Session) -> Option<write::Object<'static
         "msp430" => (Architecture::Msp430, None),
         "hexagon" => (Architecture::Hexagon, None),
         "bpf" => (Architecture::Bpf, None),
+        "e2k" => (Architecture::E2k, None),
         "loongarch64" => (Architecture::LoongArch64, None),
         "csky" => (Architecture::Csky, None),
         "arm64ec" => (Architecture::Aarch64, Some(SubArchitecture::Arm64EC)),
@@ -326,6 +327,20 @@ pub(crate) fn create_object_file(sess: &Session) -> Option<write::Object<'static
                 "ilp32e" => e_flags |= elf::EF_RISCV_RVE,
                 _ => bug!("unknown RISC-V ABI name"),
             }
+
+            e_flags
+        }
+        Architecture::E2k => {
+            // Usually generic is elbrus-v2, but llvm sets it to elbrus-v4
+            let e_flags = match sess.target.options.cpu.as_ref() {
+                "elbrus-v2" => elf::EF_E2K_MACH_EV2,
+                "elbrus-v3" => elf::EF_E2K_MACH_EV3,
+                "elbrus-v4" => elf::EF_E2K_MACH_EV4,
+                "elbrus-v5" => elf::EF_E2K_MACH_EV5,
+                "elbrus-v6" => elf::EF_E2K_MACH_EV6,
+                "elbrus-v7" => elf::EF_E2K_MACH_EV7,
+                _ => elf::EF_E2K_MACH_EV4,
+            };
 
             e_flags
         }

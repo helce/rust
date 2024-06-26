@@ -1679,6 +1679,8 @@ supported_targets! {
     ("bpfeb-unknown-none", bpfeb_unknown_none),
     ("bpfel-unknown-none", bpfel_unknown_none),
 
+    ("e2k-unknown-linux-gnu", e2k_unknown_linux_gnu),
+
     ("armv6k-nintendo-3ds", armv6k_nintendo_3ds),
 
     ("aarch64-nintendo-switch-freestanding", aarch64_nintendo_switch_freestanding),

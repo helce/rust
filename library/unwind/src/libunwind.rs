@@ -78,6 +78,9 @@ pub const unwinder_private_data_size: usize = 20;
 #[cfg(all(target_arch = "hexagon", target_os = "linux"))]
 pub const unwinder_private_data_size: usize = 35;
 
+#[cfg(target_arch = "e2k")]
+pub const unwinder_private_data_size: usize = 6;
+
 #[cfg(target_arch = "loongarch64")]
 pub const unwinder_private_data_size: usize = 2;
 

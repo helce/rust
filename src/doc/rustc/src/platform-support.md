@@ -156,6 +156,7 @@ target | std | notes
 [`armv7a-none-eabi`](platform-support/arm-none-eabi.md) | * | Bare ARMv7-A
 [`armv7r-none-eabi`](platform-support/armv7r-none-eabi.md) | * | Bare ARMv7-R
 [`armv7r-none-eabihf`](platform-support/armv7r-none-eabi.md) | * | Bare ARMv7-R, hardfloat
+`e2k-unknown-linux-gnu` | ✓ | E2K generic Linux (kernel 5.10, glibc 2.35)
 `i586-pc-windows-msvc` | * | 32-bit Windows w/o SSE [^x86_32-floats-x87]
 `i586-unknown-linux-gnu` | ✓ | 32-bit Linux w/o SSE (kernel 3.2, glibc 2.17) [^x86_32-floats-x87]
 `i586-unknown-linux-musl` | ✓ | 32-bit Linux w/o SSE, musl 1.2.3 [^x86_32-floats-x87]

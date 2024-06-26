@@ -11,6 +11,7 @@ mod arm;
 mod avr;
 mod bpf;
 mod csky;
+mod e2k;
 mod hexagon;
 mod loongarch;
 mod m68k;
@@ -882,6 +883,7 @@ impl<'a, Ty> FnAbi<'a, Ty> {
                 }
             }
             "bpf" => bpf::compute_abi_info(self),
+            "e2k" => e2k::compute_abi_info(self),
             arch => {
                 return Err(AdjustForForeignAbiError::Unsupported {
                     arch: Symbol::intern(arch),

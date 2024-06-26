@@ -24,6 +24,7 @@ const OPTIONAL_COMPONENTS: &[&str] = &[
     "hexagon",
     "riscv",
     "bpf",
+    "elbrus",
 ];
 
 const REQUIRED_COMPONENTS: &[&str] =

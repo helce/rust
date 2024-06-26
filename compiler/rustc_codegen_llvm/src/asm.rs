@@ -263,6 +263,7 @@ impl<'ll, 'tcx> AsmBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                 InlineAsmArch::SpirV => {}
                 InlineAsmArch::Wasm32 | InlineAsmArch::Wasm64 => {}
                 InlineAsmArch::Bpf => {}
+                InlineAsmArch::E2k => {}
                 InlineAsmArch::Msp430 => {
                     constraints.push("~{sr}".to_string());
                 }
@@ -694,6 +695,7 @@ fn reg_to_llvm(reg: InlineAsmRegOrRegClass, layout: Option<&TyAndLayout<'_>>) ->
             InlineAsmRegClass::Wasm(WasmInlineAsmRegClass::local) => "r",
             InlineAsmRegClass::Bpf(BpfInlineAsmRegClass::reg) => "r",
             InlineAsmRegClass::Bpf(BpfInlineAsmRegClass::wreg) => "w",
+            InlineAsmRegClass::E2k(E2kInlineAsmRegClass::reg) => "r",
             InlineAsmRegClass::Avr(AvrInlineAsmRegClass::reg) => "r",
             InlineAsmRegClass::Avr(AvrInlineAsmRegClass::reg_upper) => "d",
             InlineAsmRegClass::Avr(AvrInlineAsmRegClass::reg_pair) => "r",
@@ -793,6 +795,7 @@ fn modifier_to_llvm(
         }
         InlineAsmRegClass::Wasm(WasmInlineAsmRegClass::local) => None,
         InlineAsmRegClass::Bpf(_) => None,
+        InlineAsmRegClass::E2k(E2kInlineAsmRegClass::reg) => None,
         InlineAsmRegClass::Avr(AvrInlineAsmRegClass::reg_pair)
         | InlineAsmRegClass::Avr(AvrInlineAsmRegClass::reg_iw)
         | InlineAsmRegClass::Avr(AvrInlineAsmRegClass::reg_ptr) => match modifier {
@@ -873,6 +876,7 @@ fn dummy_output_type<'ll>(cx: &CodegenCx<'ll, '_>, reg: InlineAsmRegClass) -> &'
         InlineAsmRegClass::Wasm(WasmInlineAsmRegClass::local) => cx.type_i32(),
         InlineAsmRegClass::Bpf(BpfInlineAsmRegClass::reg) => cx.type_i64(),
         InlineAsmRegClass::Bpf(BpfInlineAsmRegClass::wreg) => cx.type_i32(),
+        InlineAsmRegClass::E2k(E2kInlineAsmRegClass::reg) => cx.type_i64(),
         InlineAsmRegClass::Avr(AvrInlineAsmRegClass::reg) => cx.type_i8(),
         InlineAsmRegClass::Avr(AvrInlineAsmRegClass::reg_upper) => cx.type_i8(),
         InlineAsmRegClass::Avr(AvrInlineAsmRegClass::reg_pair) => cx.type_i16(),
