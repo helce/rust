@@ -179,6 +179,8 @@ impl<'ll, 'tcx> AsmBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                                 template_str.push(c);
                             }
                         }
+                    } else if s.contains("%#") && asm_arch == InlineAsmArch::E2k {
+                        template_str.push_str(&s.replace("%#", "${:wbs}"))
                     } else {
                         template_str.push_str(s)
                     }

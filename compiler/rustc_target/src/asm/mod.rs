@@ -433,7 +433,7 @@ impl InlineAsmReg {
             Self::Mips(_) => cb(self),
             Self::S390x(_) => cb(self),
             Self::Bpf(r) => r.overlapping_regs(|r| cb(Self::Bpf(r))),
-            Self::E2k(r) => cb(self),
+            Self::E2k(_) => cb(self),
             Self::Avr(r) => r.overlapping_regs(|r| cb(Self::Avr(r))),
             Self::Msp430(_) => cb(self),
             Self::M68k(_) => cb(self),
