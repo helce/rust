@@ -883,7 +883,7 @@ impl<'a, Ty> FnAbi<'a, Ty> {
                 }
             }
             "bpf" => bpf::compute_abi_info(self),
-            "e2k" => e2k::compute_abi_info(self),
+            "e2k" => e2k::compute_abi_info(cx, self),
             arch => {
                 return Err(AdjustForForeignAbiError::Unsupported {
                     arch: Symbol::intern(arch),

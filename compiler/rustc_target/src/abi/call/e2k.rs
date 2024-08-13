@@ -1,30 +1,49 @@
 use crate::abi::call::{ArgAbi, FnAbi, Reg, Uniform};
+use crate::abi::{self, HasDataLayout, TyAbiInterface};
 
-fn classify_ret<Ty>(ret: &mut ArgAbi<'_, Ty>) {
+fn classify_ret<'a, Ty, C>(cx: &C, ret: &mut ArgAbi<'a, Ty>)
+where
+    Ty: TyAbiInterface<'a, C> + Copy,
+    C: HasDataLayout,
+{
     if ret.layout.is_aggregate() {
-        ret.cast_to(Uniform { unit: Reg::i64(), total: ret.layout.size });
+        ret.cast_to(Uniform {
+            unit: Reg::i64(),
+            total: ret.layout.size.align_to(Reg::i64().align(cx)),
+        });
     } else {
         ret.extend_integer_width_to(64);
     }
 }
 
-fn classify_arg<Ty>(arg: &mut ArgAbi<'_, Ty>) {
+fn classify_arg<'a, Ty, C>(cx: &C, arg: &mut ArgAbi<'a, Ty>)
+where
+    Ty: TyAbiInterface<'a, C> + Copy,
+    C: HasDataLayout,
+{
     if arg.layout.is_aggregate() {
-        arg.cast_to(Uniform { unit: Reg::i64(), total: arg.layout.size });
+        arg.cast_to(Uniform {
+            unit: Reg::i64(),
+            total: arg.layout.size.align_to(Reg::i64().align(cx)),
+        });
     } else {
         arg.extend_integer_width_to(64);
     }
 }
 
-pub fn compute_abi_info<Ty>(fn_abi: &mut FnAbi<'_, Ty>) {
+pub fn compute_abi_info<'a, Ty, C>(cx: &C, fn_abi: &mut FnAbi<'a, Ty>)
+where
+    Ty: TyAbiInterface<'a, C> + Copy,
+    C: HasDataLayout,
+{
     if !fn_abi.ret.is_ignore() {
-        classify_ret(&mut fn_abi.ret);
+        classify_ret(cx, &mut fn_abi.ret);
     }
 
     for arg in fn_abi.args.iter_mut() {
         if arg.is_ignore() {
             continue;
         }
-        classify_arg(arg);
+        classify_arg(cx, arg);
     }
 }
