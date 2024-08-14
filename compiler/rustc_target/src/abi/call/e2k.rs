@@ -6,6 +6,11 @@ where
     Ty: TyAbiInterface<'a, C> + Copy,
     C: HasDataLayout,
 {
+    if !ret.layout.is_sized() {
+        // Not touching this...
+        return;
+    }
+
     if ret.layout.is_aggregate() {
         ret.cast_to(Uniform {
             unit: Reg::i64(),
@@ -21,6 +26,11 @@ where
     Ty: TyAbiInterface<'a, C> + Copy,
     C: HasDataLayout,
 {
+    if !arg.layout.is_sized() {
+        // Not touching this...
+        return;
+    }
+
     if arg.layout.is_aggregate() {
         arg.cast_to(Uniform {
             unit: Reg::i64(),
