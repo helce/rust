@@ -718,6 +718,7 @@ const KNOWN_DIRECTIVE_NAMES: &[&str] = &[
     "ignore-compare-mode-polonius",
     "ignore-cross-compile",
     "ignore-debug",
+    "ignore-e2k",
     "ignore-eabi",
     "ignore-emscripten",
     "ignore-endian-big",

@@ -186,6 +186,9 @@
     [csky_unknown_linux_gnuabiv2hf] compile-flags: --target csky-unknown-linux-gnuabiv2hf
     [csky_unknown_linux_gnuabiv2hf] needs-llvm-components: csky
 */
+//@ revisions: e2k_unknown_linux_gnu
+//@ [e2k_unknown_linux_gnu] compile-flags: --target e2k-unknown-linux-gnu
+//@ [e2k_unknown_linux_gnu] needs-llvm-components: elbrus
 //@ revisions: hexagon_unknown_linux_musl
 //@ [hexagon_unknown_linux_musl] compile-flags: --target hexagon-unknown-linux-musl
 //@ [hexagon_unknown_linux_musl] needs-llvm-components: hexagon
