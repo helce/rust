@@ -1,3 +1,4 @@
+# needs-llvm-components: x86
 include ../tools.mk
 
 # Issue #10814

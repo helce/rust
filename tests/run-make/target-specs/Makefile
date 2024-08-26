@@ -1,3 +1,4 @@
+# needs-llvm-components: x86
 include ../tools.mk
 all:
 	$(RUSTC) foo.rs --target=my-awesome-platform.json --crate-type=lib --emit=asm

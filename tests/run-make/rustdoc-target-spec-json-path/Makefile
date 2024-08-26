@@ -1,3 +1,4 @@
+# needs-llvm-components: x86
 include ../tools.mk
 
 # Test that rustdoc will properly canonicalize the target spec json path just like rustc

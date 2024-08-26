@@ -1,3 +1,4 @@
+# needs-llvm-components: x86
 # ignore-cross-compile
 include ../tools.mk
 
