@@ -1,4 +1,5 @@
 //@ compile-flags: -O
+//@ ignore-e2k doesn't unroll it
 
 #![crate_type = "lib"]
 

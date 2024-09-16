@@ -1,3 +1,4 @@
+//@ ignore-e2k switch-to-lookup not supported
 //@ revisions: O Os
 //@[Os] compile-flags: -Copt-level=s
 //@[O] compile-flags: -O
