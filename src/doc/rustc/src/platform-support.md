@@ -157,6 +157,19 @@ target | std | notes
 [`armv7r-none-eabi`](platform-support/armv7r-none-eabi.md) | * | Bare ARMv7-R
 [`armv7r-none-eabihf`](platform-support/armv7r-none-eabi.md) | * | Bare ARMv7-R, hardfloat
 `e2k-unknown-linux-gnu` | ✓ | E2K generic Linux (kernel 5.10, glibc 2.35)
+`e2kv3-unknown-linux-gnu` | ✓ | E2K elbrus-v3 Linux (kernel 5.10, glibc 2.35)
+`e2kv4-unknown-linux-gnu` | ✓ | E2K elbrus-v4 Linux (kernel 5.10, glibc 2.35)
+`e2kv5-unknown-linux-gnu` | ✓ | E2K elbrus-v5 Linux (kernel 5.10, glibc 2.35)
+`e2kv6-unknown-linux-gnu` | ✓ | E2K elbrus-v6 Linux (kernel 5.10, glibc 2.35)
+`e2kv7-unknown-linux-gnu` | ✓ | E2K elbrus-v7 Linux (kernel 5.10, glibc 2.35)
+`e2k4c-unknown-linux-gnu` | ✓ | E2K elbrus-4c Linux (kernel 5.10, glibc 2.35)
+`e2k8c-unknown-linux-gnu` | ✓ | E2K elbrus-8c Linux (kernel 5.10, glibc 2.35)
+`e2k1cplus-unknown-linux-gnu` | ✓ | E2K elbrus-1cplus Linux (kernel 5.10, glibc 2.35)
+`e2k8c2-unknown-linux-gnu` | ✓ | E2K elbrus-8c2 Linux (kernel 5.10, glibc 2.35)
+`e2k12c-unknown-linux-gnu` | ✓ | E2K elbrus-12c Linux (kernel 5.10, glibc 2.35)
+`e2k16c-unknown-linux-gnu` | ✓ | E2K elbrus-16c Linux (kernel 5.10, glibc 2.35)
+`e2k2c3-unknown-linux-gnu` | ✓ | E2K elbrus-2c3 Linux (kernel 5.10, glibc 2.35)
+`e2k48c-unknown-linux-gnu` | ✓ | E2K elbrus-48c Linux (kernel 5.10, glibc 2.35)
 `i586-pc-windows-msvc` | * | 32-bit Windows w/o SSE [^x86_32-floats-x87]
 `i586-unknown-linux-gnu` | ✓ | 32-bit Linux w/o SSE (kernel 3.2, glibc 2.17) [^x86_32-floats-x87]
 `i586-unknown-linux-musl` | ✓ | 32-bit Linux w/o SSE, musl 1.2.3 [^x86_32-floats-x87]
