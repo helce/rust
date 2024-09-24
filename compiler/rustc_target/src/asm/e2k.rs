@@ -14,7 +14,7 @@ impl E2kInlineAsmRegClass {
         &[]
     }
 
-    pub fn suggest_class(self, _arch: InlineAsmArch, ty: InlineAsmType) -> Option<Self> {
+    pub fn suggest_class(self, _arch: InlineAsmArch, _ty: InlineAsmType) -> Option<Self> {
         None
     }
 
