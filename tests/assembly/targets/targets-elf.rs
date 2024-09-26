@@ -189,6 +189,45 @@
 //@ revisions: e2k_unknown_linux_gnu
 //@ [e2k_unknown_linux_gnu] compile-flags: --target e2k-unknown-linux-gnu
 //@ [e2k_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2kv3_unknown_linux_gnu
+//@ [e2kv3_unknown_linux_gnu] compile-flags: --target e2kv3-unknown-linux-gnu
+//@ [e2kv3_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2kv4_unknown_linux_gnu
+//@ [e2kv4_unknown_linux_gnu] compile-flags: --target e2kv4-unknown-linux-gnu
+//@ [e2kv4_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2kv5_unknown_linux_gnu
+//@ [e2kv5_unknown_linux_gnu] compile-flags: --target e2kv5-unknown-linux-gnu
+//@ [e2kv5_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2kv6_unknown_linux_gnu
+//@ [e2kv6_unknown_linux_gnu] compile-flags: --target e2kv6-unknown-linux-gnu
+//@ [e2kv6_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2kv7_unknown_linux_gnu
+//@ [e2kv7_unknown_linux_gnu] compile-flags: --target e2kv7-unknown-linux-gnu
+//@ [e2kv7_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2k4c_unknown_linux_gnu
+//@ [e2k4c_unknown_linux_gnu] compile-flags: --target e2k4c-unknown-linux-gnu
+//@ [e2k4c_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2k8c_unknown_linux_gnu
+//@ [e2k8c_unknown_linux_gnu] compile-flags: --target e2k8c-unknown-linux-gnu
+//@ [e2k8c_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2k1cplus_unknown_linux_gnu
+//@ [e2k1cplus_unknown_linux_gnu] compile-flags: --target e2k1cplus-unknown-linux-gnu
+//@ [e2k1cplus_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2k8c2_unknown_linux_gnu
+//@ [e2k8c2_unknown_linux_gnu] compile-flags: --target e2k8c2-unknown-linux-gnu
+//@ [e2k8c2_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2k12c_unknown_linux_gnu
+//@ [e2k12c_unknown_linux_gnu] compile-flags: --target e2k12c-unknown-linux-gnu
+//@ [e2k12c_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2k16c_unknown_linux_gnu
+//@ [e2k16c_unknown_linux_gnu] compile-flags: --target e2k16c-unknown-linux-gnu
+//@ [e2k16c_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2k2c3_unknown_linux_gnu
+//@ [e2k2c3_unknown_linux_gnu] compile-flags: --target e2k2c3-unknown-linux-gnu
+//@ [e2k2c3_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2k48c_unknown_linux_gnu
+//@ [e2k48c_unknown_linux_gnu] compile-flags: --target e2k48c-unknown-linux-gnu
+//@ [e2k48c_unknown_linux_gnu] needs-llvm-components: elbrus
 //@ revisions: hexagon_unknown_linux_musl
 //@ [hexagon_unknown_linux_musl] compile-flags: --target hexagon-unknown-linux-musl
 //@ [hexagon_unknown_linux_musl] needs-llvm-components: hexagon
