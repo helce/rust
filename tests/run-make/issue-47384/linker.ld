@@ -1,3 +1,4 @@
+SEARCH_DIR("=/usr/lib");
 SECTIONS
 {
     .static : ALIGN(4)
