@@ -1693,6 +1693,7 @@ supported_targets! {
     ("e2k16c-unknown-linux-gnu", e2k16c_unknown_linux_gnu),
     ("e2k2c3-unknown-linux-gnu", e2k2c3_unknown_linux_gnu),
     ("e2k48c-unknown-linux-gnu", e2k48c_unknown_linux_gnu),
+    ("e2k8v7-unknown-linux-gnu", e2k8v7_unknown_linux_gnu),
 
     ("armv6k-nintendo-3ds", armv6k_nintendo_3ds),
 
