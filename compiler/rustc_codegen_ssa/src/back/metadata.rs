@@ -333,12 +333,23 @@ pub(crate) fn create_object_file(sess: &Session) -> Option<write::Object<'static
         Architecture::E2k => {
             // Usually generic is elbrus-v2, but llvm sets it to elbrus-v4
             let e_flags = match sess.target.options.cpu.as_ref() {
+                // iset flags
                 "elbrus-v2" => elf::EF_E2K_MACH_EV2,
                 "elbrus-v3" => elf::EF_E2K_MACH_EV3,
                 "elbrus-v4" => elf::EF_E2K_MACH_EV4,
                 "elbrus-v5" => elf::EF_E2K_MACH_EV5,
                 "elbrus-v6" => elf::EF_E2K_MACH_EV6,
                 "elbrus-v7" => elf::EF_E2K_MACH_EV7,
+                // tune-cpu flags
+                "elbrus-4c"  => elf::EF_E2K_MACH_EV3     | elf::EF_E2K_INCOMPAT,
+                "elbrus-8c"  => elf::EF_E2K_MACH_8C      | elf::EF_E2K_INCOMPAT,
+                "elbrus-1c+" => elf::EF_E2K_MACH_1CPLUS  | elf::EF_E2K_INCOMPAT,
+                "elbrus-8c2" => elf::EF_E2K_MACH_EV5     | elf::EF_E2K_INCOMPAT,
+                "elbrus-12c" => elf::EF_E2K_MACH_12C     | elf::EF_E2K_INCOMPAT,
+                "elbrus-16c" => elf::EF_E2K_MACH_16C     | elf::EF_E2K_INCOMPAT,
+                "elbrus-2c3" => elf::EF_E2K_MACH_2C3     | elf::EF_E2K_INCOMPAT,
+                "elbrus-48c" => elf::EF_E2K_MACH_48C     | elf::EF_E2K_INCOMPAT,
+                "elbrus-8v7" => elf::EF_E2K_MACH_8V7     | elf::EF_E2K_INCOMPAT,
                 _ => elf::EF_E2K_MACH_EV4,
             };
 
