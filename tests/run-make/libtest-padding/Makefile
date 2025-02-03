@@ -5,7 +5,7 @@ include ../tools.mk
 NORMALIZE=sed 's%[0-9,]\{1,\} ns/iter (+/- [0-9,]\{1,\})%?? ns/iter (+/- ??)%' | sed 's%finished in [0-9\.]\{1,\}%finished in ??%'
 
 all:
-	$(RUSTC) --test tests.rs
+	$(RUSTC) -O --test tests.rs
 
 	$(call RUN,tests) --test-threads=1 | $(NORMALIZE) > "$(TMPDIR)"/test.stdout
 	$(RUSTC_TEST_OP) "$(TMPDIR)"/test.stdout test.stdout
