@@ -28,7 +28,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
 
         match err {
             ArgumentSorts(values, _) | Sorts(values) => {
-                match (values.expected.kind(), values.found.kind()) {
+                match (*values.expected.kind(), *values.found.kind()) {
                     (ty::Closure(..), ty::Closure(..)) => {
                         diag.note("no two closures, even if identical, have the same type");
                         diag.help("consider boxing your closure and/or using it as a trait object");
@@ -299,17 +299,19 @@ impl<T> Trait<T> for X {
                     }
                     (ty::Dynamic(t, _, ty::DynKind::Dyn), ty::Alias(ty::Opaque, alias))
                         if let Some(def_id) = t.principal_def_id()
-                            && tcx.explicit_item_bounds(alias.def_id).skip_binder().iter().any(
-                                |(pred, _span)| match pred.kind().skip_binder() {
+                            && tcx
+                                .explicit_item_super_predicates(alias.def_id)
+                                .skip_binder()
+                                .iter()
+                                .any(|(pred, _span)| match pred.kind().skip_binder() {
                                     ty::ClauseKind::Trait(trait_predicate)
                                         if trait_predicate.polarity
-                                            == ty::ImplPolarity::Positive =>
+                                            == ty::PredicatePolarity::Positive =>
                                     {
                                         trait_predicate.def_id() == def_id
                                     }
                                     _ => false,
-                                },
-                            ) =>
+                                }) =>
                     {
                         diag.help(format!(
                             "you can box the `{}` to coerce it to `Box<{}>`, but you'll have to \
@@ -412,13 +414,13 @@ impl<T> Trait<T> for X {
                             ty::Alias(..) => values.expected,
                             _ => values.found,
                         };
-                        let preds = tcx.explicit_item_bounds(opaque_ty.def_id);
+                        let preds = tcx.explicit_item_super_predicates(opaque_ty.def_id);
                         for (pred, _span) in preds.skip_binder() {
                             let ty::ClauseKind::Trait(trait_predicate) = pred.kind().skip_binder()
                             else {
                                 continue;
                             };
-                            if trait_predicate.polarity != ty::ImplPolarity::Positive {
+                            if trait_predicate.polarity != ty::PredicatePolarity::Positive {
                                 continue;
                             }
                             let def_id = trait_predicate.def_id();
@@ -450,7 +452,7 @@ impl<T> Trait<T> for X {
                     }
                     (ty::FnPtr(sig), ty::FnDef(def_id, _))
                     | (ty::FnDef(def_id, _), ty::FnPtr(sig)) => {
-                        if tcx.fn_sig(*def_id).skip_binder().unsafety() < sig.unsafety() {
+                        if tcx.fn_sig(def_id).skip_binder().unsafety() < sig.unsafety() {
                             diag.note(
                                 "unsafe functions cannot be coerced into safe function pointers",
                             );
@@ -525,7 +527,7 @@ impl<T> Trait<T> for X {
         diag: &mut Diag<'_>,
         msg: impl Fn() -> String,
         body_owner_def_id: DefId,
-        proj_ty: &ty::AliasTy<'tcx>,
+        proj_ty: ty::AliasTy<'tcx>,
         ty: Ty<'tcx>,
     ) -> bool {
         let tcx = self.tcx;
@@ -539,7 +541,7 @@ impl<T> Trait<T> for X {
         };
         // Get the `DefId` for the type parameter corresponding to `A` in `<A as T>::Foo`.
         // This will also work for `impl Trait`.
-        let ty::Param(param_ty) = proj_ty.self_ty().kind() else {
+        let ty::Param(param_ty) = *proj_ty.self_ty().kind() else {
             return false;
         };
         let generics = tcx.generics_of(body_owner_def_id);
@@ -596,7 +598,7 @@ impl<T> Trait<T> for X {
     fn expected_projection(
         &self,
         diag: &mut Diag<'_>,
-        proj_ty: &ty::AliasTy<'tcx>,
+        proj_ty: ty::AliasTy<'tcx>,
         values: ExpectedFound<Ty<'tcx>>,
         body_owner_def_id: DefId,
         cause_code: &ObligationCauseCode<'_>,
@@ -707,7 +709,7 @@ fn foo(&self) -> Self::T { String::new() }
         &self,
         diag: &mut Diag<'_>,
         msg: impl Fn() -> String,
-        proj_ty: &ty::AliasTy<'tcx>,
+        proj_ty: ty::AliasTy<'tcx>,
         ty: Ty<'tcx>,
     ) -> bool {
         let tcx = self.tcx;

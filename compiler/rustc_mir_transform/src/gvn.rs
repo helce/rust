@@ -82,6 +82,7 @@
 //! Second, when writing constants in MIR, we do not write `Const::Slice` or `Const`
 //! that contain `AllocId`s.
 
+use rustc_const_eval::const_eval::DummyMachine;
 use rustc_const_eval::interpret::{intern_const_alloc_for_constprop, MemoryKind};
 use rustc_const_eval::interpret::{ImmTy, InterpCx, OpTy, Projectable, Scalar};
 use rustc_data_structures::fx::FxIndexSet;
@@ -94,14 +95,13 @@ use rustc_middle::mir::interpret::GlobalAlloc;
 use rustc_middle::mir::visit::*;
 use rustc_middle::mir::*;
 use rustc_middle::ty::layout::LayoutOf;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeAndMut};
+use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::def_id::DefId;
 use rustc_span::DUMMY_SP;
 use rustc_target::abi::{self, Abi, Size, VariantIdx, FIRST_VARIANT};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 
-use crate::dataflow_const_prop::DummyMachine;
 use crate::ssa::{AssignedValue, SsaLocals};
 use either::Either;
 
@@ -131,7 +131,7 @@ fn propagate_ssa<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         |local, value, location| {
             let value = match value {
                 // We do not know anything of this assigned value.
-                AssignedValue::Arg | AssignedValue::Terminator(_) => None,
+                AssignedValue::Arg | AssignedValue::Terminator => None,
                 // Try to get some insight.
                 AssignedValue::Rvalue(rvalue) => {
                     let value = state.simplify_rvalue(rvalue, location);
@@ -355,7 +355,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
     }
 
     fn insert_tuple(&mut self, values: Vec<VnIndex>) -> VnIndex {
-        self.insert(Value::Aggregate(AggregateTy::Tuple, VariantIdx::from_u32(0), values))
+        self.insert(Value::Aggregate(AggregateTy::Tuple, VariantIdx::ZERO, values))
     }
 
     #[instrument(level = "trace", skip(self), ret)]
@@ -367,7 +367,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             Repeat(..) => return None,
 
             Constant { ref value, disambiguator: _ } => {
-                self.ecx.eval_mir_constant(value, None, None).ok()?
+                self.ecx.eval_mir_constant(value, DUMMY_SP, None).ok()?
             }
             Aggregate(kind, variant, ref fields) => {
                 let fields = fields
@@ -451,11 +451,10 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                     AddressKind::Ref(bk) => Ty::new_ref(
                         self.tcx,
                         self.tcx.lifetimes.re_erased,
-                        ty::TypeAndMut { ty: mplace.layout.ty, mutbl: bk.to_mutbl_lossy() },
+                        mplace.layout.ty,
+                        bk.to_mutbl_lossy(),
                     ),
-                    AddressKind::Address(mutbl) => {
-                        Ty::new_ptr(self.tcx, TypeAndMut { ty: mplace.layout.ty, mutbl })
-                    }
+                    AddressKind::Address(mutbl) => Ty::new_ptr(self.tcx, mplace.layout.ty, mutbl),
                 };
                 let layout = self.ecx.layout_of(ty).ok()?;
                 ImmTy::from_immediate(pointer, layout).into()
@@ -488,7 +487,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                     NullOp::OffsetOf(fields) => {
                         layout.offset_of_subfield(&self.ecx, fields.iter()).bytes()
                     }
-                    NullOp::UbCheck(_) => return None,
+                    NullOp::UbChecks => return None,
                 };
                 let usize_layout = self.ecx.layout_of(self.tcx.types.usize).unwrap();
                 let imm = ImmTy::try_from_uint(val, usize_layout)?;
@@ -886,6 +885,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 AggregateKind::Adt(did, ..) => tcx.def_kind(did) != DefKind::Enum,
                 // Coroutines are never ZST, as they at least contain the implicit states.
                 AggregateKind::Coroutine(..) => false,
+                AggregateKind::RawPtr(..) => bug!("MIR for RawPtr aggregate must have 2 fields"),
             };
 
             if is_zst {
@@ -911,6 +911,8 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             }
             // Do not track unions.
             AggregateKind::Adt(_, _, _, _, Some(_)) => return None,
+            // FIXME: Do the extra work to GVN `from_raw_parts`
+            AggregateKind::RawPtr(..) => return None,
         };
 
         let fields: Option<Vec<_>> = fields
@@ -1203,7 +1205,7 @@ impl<'tcx> VnState<'_, 'tcx> {
             // not give the same value as the former mention.
             && value.is_deterministic()
         {
-            return Some(ConstOperand { span: rustc_span::DUMMY_SP, user_ty: None, const_: value });
+            return Some(ConstOperand { span: DUMMY_SP, user_ty: None, const_: value });
         }
 
         let op = self.evaluated[index].as_ref()?;
@@ -1220,7 +1222,7 @@ impl<'tcx> VnState<'_, 'tcx> {
         assert!(!value.may_have_provenance(self.tcx, op.layout.size));
 
         let const_ = Const::Val(value, op.layout.ty);
-        Some(ConstOperand { span: rustc_span::DUMMY_SP, user_ty: None, const_ })
+        Some(ConstOperand { span: DUMMY_SP, user_ty: None, const_ })
     }
 
     /// If there is a local which is assigned `index`, and its assignment strictly dominates `loc`,

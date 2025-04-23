@@ -15,7 +15,7 @@ use rustc_span::symbol::{sym, Ident, Symbol};
 use rustc_span::{Span, DUMMY_SP};
 use thin_vec::thin_vec;
 
-pub fn expand_assert<'cx>(
+pub(crate) fn expand_assert<'cx>(
     cx: &'cx mut ExtCtxt<'_>,
     span: Span,
     tts: TokenStream,
@@ -111,7 +111,7 @@ fn expr_if_not(
     cx.expr_if(span, cx.expr(span, ExprKind::Unary(UnOp::Not, cond)), then, els)
 }
 
-fn parse_assert<'a>(cx: &mut ExtCtxt<'a>, sp: Span, stream: TokenStream) -> PResult<'a, Assert> {
+fn parse_assert<'a>(cx: &ExtCtxt<'a>, sp: Span, stream: TokenStream) -> PResult<'a, Assert> {
     let mut parser = cx.new_parser_from_tts(stream);
 
     if parser.token == token::Eof {
@@ -151,7 +151,7 @@ fn parse_assert<'a>(cx: &mut ExtCtxt<'a>, sp: Span, stream: TokenStream) -> PRes
         };
 
     if parser.token != token::Eof {
-        return parser.unexpected();
+        parser.unexpected()?;
     }
 
     Ok(Assert { cond_expr, custom_message })

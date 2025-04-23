@@ -69,7 +69,8 @@ impl<'tcx> fmt::Display for BorrowData<'tcx> {
     fn fmt(&self, w: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.kind {
             mir::BorrowKind::Shared => "",
-            mir::BorrowKind::Fake => "fake ",
+            mir::BorrowKind::Fake(mir::FakeBorrowKind::Deep) => "fake ",
+            mir::BorrowKind::Fake(mir::FakeBorrowKind::Shallow) => "fake shallow ",
             mir::BorrowKind::Mut { kind: mir::MutBorrowKind::ClosureCapture } => "uniq ",
             // FIXME: differentiate `TwoPhaseBorrow`
             mir::BorrowKind::Mut {
@@ -159,7 +160,7 @@ impl<'tcx> BorrowSet<'tcx> {
     }
 
     pub(crate) fn indices(&self) -> impl Iterator<Item = BorrowIndex> {
-        BorrowIndex::from_usize(0)..BorrowIndex::from_usize(self.len())
+        BorrowIndex::ZERO..BorrowIndex::from_usize(self.len())
     }
 
     pub(crate) fn iter_enumerated(&self) -> impl Iterator<Item = (BorrowIndex, &BorrowData<'tcx>)> {

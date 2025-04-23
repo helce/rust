@@ -95,7 +95,7 @@ impl<T> Cursor<T> {
     /// # force_inference(&buff);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_const_unstable(feature = "const_io_structs", issue = "78812")]
+    #[rustc_const_stable(feature = "const_io_structs", since = "1.79.0")]
     pub const fn new(inner: T) -> Cursor<T> {
         Cursor { pos: 0, inner }
     }
@@ -132,7 +132,7 @@ impl<T> Cursor<T> {
     /// let reference = buff.get_ref();
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_const_unstable(feature = "const_io_structs", issue = "78812")]
+    #[rustc_const_stable(feature = "const_io_structs", since = "1.79.0")]
     pub const fn get_ref(&self) -> &T {
         &self.inner
     }
@@ -178,7 +178,7 @@ impl<T> Cursor<T> {
     /// assert_eq!(buff.position(), 1);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_const_unstable(feature = "const_io_structs", issue = "78812")]
+    #[rustc_const_stable(feature = "const_io_structs", since = "1.79.0")]
     pub const fn position(&self) -> u64 {
         self.pos
     }
@@ -354,6 +354,13 @@ where
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         let n = buf.len();
         Read::read_exact(&mut self.remaining_slice(), buf)?;
+        self.pos += n as u64;
+        Ok(())
+    }
+
+    fn read_buf_exact(&mut self, cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        let n = cursor.capacity();
+        Read::read_buf_exact(&mut self.remaining_slice(), cursor)?;
         self.pos += n as u64;
         Ok(())
     }

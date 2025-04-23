@@ -1,7 +1,7 @@
 #![doc(rust_logo)]
 #![feature(rustdoc_internals)]
 #![feature(array_windows)]
-#![feature(associated_type_bounds)]
+#![cfg_attr(bootstrap, feature(associated_type_bounds))]
 #![feature(associated_type_defaults)]
 #![feature(if_let_guard)]
 #![feature(let_chains)]
@@ -12,6 +12,7 @@
 #![feature(proc_macro_internals)]
 #![feature(proc_macro_span)]
 #![feature(try_blocks)]
+#![feature(yeet_expr)]
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(internal_features)]
 

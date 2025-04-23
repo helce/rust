@@ -1603,6 +1603,16 @@ a.tooltip:hover::after {
 	border-color: var(--settings-button-border-focus);
 }
 
+#settings-menu > a {
+	line-height: 0;
+	font-size: 0;
+}
+#settings-menu > a:before {
+	content: url('wheel-63255fc4502dca9a.svg');
+	width: 22px;
+	height: 22px;
+}
+
 #sidebar-button > a:before {
 	content: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22" \
 		fill="none" stroke="black">\
@@ -1617,17 +1627,26 @@ a.tooltip:hover::after {
 	color: var(--copy-path-button-color);
 	background: var(--main-background-color);
 	height: 34px;
+	width: 33px;
 	margin-left: 10px;
 	padding: 0;
 	padding-left: 2px;
 	border: 0;
-	width: 33px;
+	font-size: 0;
 }
-#copy-path > img {
+#copy-path::before {
 	filter: var(--copy-path-img-filter);
+	content: url('clipboard-24048e6d87f63d07.svg');
 }
-#copy-path:hover > img {
+#copy-path:hover::before {
 	filter: var(--copy-path-img-hover-filter);
+}
+#copy-path.clicked::before {
+	/* Checkmark <https://www.svgrepo.com/svg/335033/checkmark> */
+	content: url('data:image/svg+xml,<svg viewBox="-1 -1 23 23" xmlns="http://www.w3.org/2000/svg" \
+		fill="black" height="18px">\
+		<g><path d="M9 19.414l-6.707-6.707 1.414-1.414L9 16.586 20.293 5.293l1.414 1.414"></path>\
+		</g></svg>');
 }
 
 @keyframes rotating {
@@ -2315,8 +2334,14 @@ in src-script.js and main.js
 	tooling to ensure different themes all define all the variables. Do not
 	alter their formatting. */
 
+/*
+About `:root:not([data-theme])`: if for any reason the JS is enabled but cannot be loaded,
+`noscript` won't be enabled and the doc will have no color applied. To do around this, we
+add a selector check that if `data-theme` is not defined, then we apply the light theme
+by default.
+*/
 /* Begin theme: light */
-:root[data-theme="light"] {
+:root[data-theme="light"], :root:not([data-theme]) {
 	--main-background-color: white;
 	--main-color: black;
 	--settings-input-color: #2196f3;

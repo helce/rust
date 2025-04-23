@@ -7,7 +7,6 @@ use crate::hir::is_range_literal;
 use crate::method::probe;
 use crate::method::probe::{IsSuggestion, Mode, ProbeScope};
 use crate::rustc_middle::ty::Article;
-use crate::ty::TypeAndMut;
 use core::cmp::min;
 use core::iter;
 use hir::def_id::LocalDefId;
@@ -22,8 +21,9 @@ use rustc_hir::{
     CoroutineDesugaring, CoroutineKind, CoroutineSource, Expr, ExprKind, GenericBound, HirId, Node,
     Path, QPath, Stmt, StmtKind, TyKind, WherePredicate,
 };
-use rustc_hir_analysis::astconv::AstConv;
-use rustc_infer::traits::{self};
+use rustc_hir_analysis::collect::suggest_impl_trait;
+use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer;
+use rustc_infer::traits;
 use rustc_middle::lint::in_external_macro;
 use rustc_middle::middle::stability::EvalResult;
 use rustc_middle::ty::print::with_no_trimmed_paths;
@@ -71,7 +71,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expr: &'tcx hir::Expr<'tcx>,
         expected: Ty<'tcx>,
         found: Ty<'tcx>,
-        blk_id: hir::HirId,
+        blk_id: HirId,
     ) -> bool {
         let expr = expr.peel_drop_temps();
         let mut pointing_at_return_type = false;
@@ -290,7 +290,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expected_ty_expr: Option<&'tcx hir::Expr<'tcx>>,
     ) -> bool {
         let expr = expr.peel_blocks();
-        let methods = self.get_conversion_methods(expr.span, expected, found, expr.hir_id);
+        let methods =
+            self.get_conversion_methods_for_diagnostic(expr.span, expected, found, expr.hir_id);
 
         if let Some((suggestion, msg, applicability, verbose, annotation)) =
             self.suggest_deref_or_ref(expr, found, expected)
@@ -319,7 +320,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             );
                             expr_id = parent_id;
                         }
-                        Node::Local(local) => {
+                        Node::LetStmt(local) => {
                             if let Some(mut ty) = local.ty {
                                 while let Some(index) = tuple_indexes.pop() {
                                     match ty.kind {
@@ -810,23 +811,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 return true;
             }
             &hir::FnRetTy::DefaultReturn(span) if expected.is_unit() => {
-                if let Some(found) = found.make_suggestable(self.tcx, false) {
+                if let Some(found) = found.make_suggestable(self.tcx, false, None) {
                     err.subdiagnostic(
                         self.dcx(),
                         errors::AddReturnTypeSuggestion::Add { span, found: found.to_string() },
                     );
                     return true;
-                } else if let ty::Closure(_, args) = found.kind()
-                    // FIXME(compiler-errors): Get better at printing binders...
-                    && let closure = args.as_closure()
-                    && closure.sig().is_suggestable(self.tcx, false)
-                {
+                } else if let Some(sugg) = suggest_impl_trait(self, self.param_env, found) {
                     err.subdiagnostic(
                         self.dcx(),
-                        errors::AddReturnTypeSuggestion::Add {
-                            span,
-                            found: closure.print_as_impl_trait().to_string(),
-                        },
+                        errors::AddReturnTypeSuggestion::Add { span, found: sugg },
                     );
                     return true;
                 } else {
@@ -878,7 +872,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     // Only point to return type if the expected type is the return type, as if they
                     // are not, the expectation must have been caused by something else.
                     debug!("return type {:?}", hir_ty);
-                    let ty = self.astconv().ast_ty_to_ty(hir_ty);
+                    let ty = self.lowerer().lower_ty(hir_ty);
                     debug!("return type {:?}", ty);
                     debug!("expected type {:?}", expected);
                     let bound_vars = self.tcx.late_bound_vars(hir_ty.hir_id.owner.into());
@@ -890,7 +884,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             self.dcx(),
                             errors::ExpectedReturnTypeLabel::Other { span: hir_ty.span, expected },
                         );
-                        self.try_suggest_return_impl_trait(err, expected, ty, fn_id);
+                        self.try_suggest_return_impl_trait(err, expected, found, fn_id);
+                        self.note_caller_chooses_ty_for_ty_param(err, expected, found);
                         return true;
                     }
                 }
@@ -898,6 +893,23 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             _ => {}
         }
         false
+    }
+
+    fn note_caller_chooses_ty_for_ty_param(
+        &self,
+        diag: &mut Diag<'_>,
+        expected: Ty<'tcx>,
+        found: Ty<'tcx>,
+    ) {
+        if let ty::Param(expected_ty_as_param) = expected.kind() {
+            diag.subdiagnostic(
+                self.dcx(),
+                errors::NoteCallerChoosesTyForTyParam {
+                    ty_param_name: expected_ty_as_param.name,
+                    found_ty: found,
+                },
+            );
+        }
     }
 
     /// check whether the return type is a generic type with a trait bound
@@ -958,8 +970,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     bounded_ty,
                     ..
                 }) => {
-                    // FIXME: Maybe these calls to `ast_ty_to_ty` can be removed (and the ones below)
-                    let ty = self.astconv().ast_ty_to_ty(bounded_ty);
+                    // FIXME: Maybe these calls to `lower_ty` can be removed (and the ones below)
+                    let ty = self.lowerer().lower_ty(bounded_ty);
                     Some((ty, bounds))
                 }
                 _ => None,
@@ -997,7 +1009,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let all_bounds_str = all_matching_bounds_strs.join(" + ");
 
         let ty_param_used_in_fn_params = fn_parameters.iter().any(|param| {
-                let ty = self.astconv().ast_ty_to_ty( param);
+                let ty = self.lowerer().lower_ty( param);
                 matches!(ty.kind(), ty::Param(fn_param_ty_param) if expected_ty_as_param == fn_param_ty_param)
             });
 
@@ -1020,7 +1032,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         fn_decl: &hir::FnDecl<'tcx>,
         expected: Ty<'tcx>,
         found: Ty<'tcx>,
-        id: hir::HirId,
+        id: HirId,
         fn_id: LocalDefId,
     ) {
         if !expected.is_unit() {
@@ -1072,7 +1084,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let can_return = match fn_decl.output {
             hir::FnRetTy::Return(ty) => {
-                let ty = self.astconv().ast_ty_to_ty(ty);
+                let ty = self.lowerer().lower_ty(ty);
                 let bound_vars = self.tcx.late_bound_vars(self.tcx.local_def_id_to_hir_id(fn_id));
                 let ty = self
                     .tcx
@@ -1276,12 +1288,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 ty::TraitRef::new(self.tcx, into_def_id, [expr_ty, expected_ty]),
             ))
         {
-            let mut span = expr.span;
-            while expr.span.eq_ctxt(span)
-                && let Some(parent_callsite) = span.parent_callsite()
-            {
-                span = parent_callsite;
-            }
+            let span = expr.span.find_oldest_ancestor_in_same_ctxt();
 
             let mut sugg = if expr.precedence().order() >= PREC_POSTFIX {
                 vec![(span.shrink_to_hi(), ".into()".to_owned())]
@@ -1333,7 +1340,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         //                     ++++++++++
         // since the user probably just misunderstood how `let else`
         // and `&&` work together.
-        if let Some((_, hir::Node::Local(local))) = cond_parent
+        if let Some((_, hir::Node::LetStmt(local))) = cond_parent
             && let hir::PatKind::Path(qpath) | hir::PatKind::TupleStruct(qpath, _, _) =
                 &local.pat.kind
             && let hir::QPath::Resolved(None, path) = qpath
@@ -1481,7 +1488,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expected_ty: Ty<'tcx>,
     ) -> bool {
         // Expected type needs to be a raw pointer.
-        let ty::RawPtr(ty::TypeAndMut { mutbl, .. }) = expected_ty.kind() else {
+        let ty::RawPtr(_, mutbl) = expected_ty.kind() else {
             return false;
         };
 
@@ -1594,12 +1601,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
     }
 
-    fn is_loop(&self, id: hir::HirId) -> bool {
+    fn is_loop(&self, id: HirId) -> bool {
         let node = self.tcx.hir_node(id);
         matches!(node, Node::Expr(Expr { kind: ExprKind::Loop(..), .. }))
     }
 
-    fn is_local_statement(&self, id: hir::HirId) -> bool {
+    fn is_local_statement(&self, id: HirId) -> bool {
         let node = self.tcx.hir_node(id);
         matches!(node, Node::Stmt(Stmt { kind: StmtKind::Let(..), .. }))
     }
@@ -1733,7 +1740,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                 match self.tcx.parent_hir_node(*hir_id) {
                     // foo.clone()
-                    hir::Node::Local(hir::Local { init: Some(init), .. }) => {
+                    hir::Node::LetStmt(hir::LetStmt { init: Some(init), .. }) => {
                         self.note_type_is_not_clone_inner_expr(init)
                     }
                     // When `expr` is more complex like a tuple
@@ -1742,7 +1749,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         kind: hir::PatKind::Tuple(pats, ..),
                         ..
                     }) => {
-                        let hir::Node::Local(hir::Local { init: Some(init), .. }) =
+                        let hir::Node::LetStmt(hir::LetStmt { init: Some(init), .. }) =
                             self.tcx.parent_hir_node(*pat_hir_id)
                         else {
                             return expr;
@@ -1776,7 +1783,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     && let hir::Path { segments: [_], res: crate::Res::Local(binding), .. } =
                         call_expr_path
                     && let hir::Node::Pat(hir::Pat { hir_id, .. }) = self.tcx.hir_node(*binding)
-                    && let hir::Node::Local(hir::Local { init: Some(init), .. }) =
+                    && let hir::Node::LetStmt(hir::LetStmt { init: Some(init), .. }) =
                         self.tcx.parent_hir_node(*hir_id)
                     && let Expr {
                         kind: hir::ExprKind::Closure(hir::Closure { body: body_id, .. }),
@@ -1886,12 +1893,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             None => sugg.to_string(),
         };
 
-        err.span_suggestion_verbose(
-            expr.span.shrink_to_hi(),
-            msg,
-            sugg,
-            Applicability::HasPlaceholders,
-        );
+        let span = expr.span.find_oldest_ancestor_in_same_ctxt();
+        err.span_suggestion_verbose(span.shrink_to_hi(), msg, sugg, Applicability::HasPlaceholders);
         return true;
     }
 
@@ -2511,11 +2514,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     return make_sugg(sp, expr.span.lo());
                 }
             }
-            (
-                _,
-                &ty::RawPtr(TypeAndMut { ty: ty_b, mutbl: mutbl_b }),
-                &ty::Ref(_, ty_a, mutbl_a),
-            ) => {
+            (_, &ty::RawPtr(ty_b, mutbl_b), &ty::Ref(_, ty_a, mutbl_a)) => {
                 if let Some(steps) = self.deref_steps(ty_a, ty_b)
                     // Only suggest valid if dereferencing needed.
                     && steps > 0
@@ -3136,7 +3135,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let hir::Node::Pat(pat) = self.tcx.hir_node(hir_id) else {
             return;
         };
-        let hir::Node::Local(hir::Local { ty: None, init: Some(init), .. }) =
+        let hir::Node::LetStmt(hir::LetStmt { ty: None, init: Some(init), .. }) =
             self.tcx.parent_hir_node(pat.hir_id)
         else {
             return;

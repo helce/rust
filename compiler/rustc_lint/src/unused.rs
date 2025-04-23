@@ -295,7 +295,9 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                 ty::Alias(ty::Opaque | ty::Projection, ty::AliasTy { def_id: def, .. }) => {
                     elaborate(
                         cx.tcx,
-                        cx.tcx.explicit_item_bounds(def).instantiate_identity_iter_copied(),
+                        cx.tcx
+                            .explicit_item_super_predicates(def)
+                            .instantiate_identity_iter_copied(),
                     )
                     // We only care about self bounds for the impl-trait
                     .filter_only_self()
@@ -863,7 +865,9 @@ trait UnusedDelimLint {
                 (iter, UnusedDelimsCtx::ForIterExpr, true, None, Some(body.span.lo()), true)
             }
 
-            Match(ref head, _) if Self::LINT_EXPR_IN_PATTERN_MATCHING_CTX => {
+            Match(ref head, _, ast::MatchKind::Prefix)
+                if Self::LINT_EXPR_IN_PATTERN_MATCHING_CTX =>
+            {
                 let left = e.span.lo() + rustc_span::BytePos(5);
                 (head, UnusedDelimsCtx::MatchScrutineeExpr, true, Some(left), None, true)
             }
@@ -1052,7 +1056,7 @@ impl UnusedParens {
         avoid_mut: bool,
         keep_space: (bool, bool),
     ) {
-        use ast::{BindingAnnotation, PatKind};
+        use ast::{BindingMode, PatKind};
 
         if let PatKind::Paren(inner) = &value.kind {
             match inner.kind {
@@ -1064,16 +1068,20 @@ impl UnusedParens {
                 // Avoid `p0 | .. | pn` if we should.
                 PatKind::Or(..) if avoid_or => return,
                 // Avoid `mut x` and `mut x @ p` if we should:
-                PatKind::Ident(BindingAnnotation::MUT, ..) if avoid_mut => {
+                PatKind::Ident(BindingMode::MUT, ..) if avoid_mut => {
                     return;
                 }
                 // Otherwise proceed with linting.
                 _ => {}
             }
-            let spans = inner
-                .span
-                .find_ancestor_inside(value.span)
-                .map(|inner| (value.span.with_hi(inner.lo()), value.span.with_lo(inner.hi())));
+            let spans = if !value.span.from_expansion() {
+                inner
+                    .span
+                    .find_ancestor_inside(value.span)
+                    .map(|inner| (value.span.with_hi(inner.lo()), value.span.with_lo(inner.hi())))
+            } else {
+                None
+            };
             self.emit_unused_delims(cx, value.span, spans, "pattern", keep_space, false);
         }
     }
@@ -1131,7 +1139,7 @@ impl EarlyLintPass for UnusedParens {
                 }
                 return;
             }
-            ExprKind::Match(ref _expr, ref arm) => {
+            ExprKind::Match(ref _expr, ref arm, _) => {
                 for a in arm {
                     if let Some(body) = &a.body {
                         self.check_unused_delims_expr(
@@ -1181,7 +1189,7 @@ impl EarlyLintPass for UnusedParens {
                 self.check_unused_parens_pat(cx, &f.pat, false, false, keep_space);
             },
             // Avoid linting on `i @ (p0 | .. | pn)` and `box (p0 | .. | pn)`, #64106.
-            Ident(.., Some(p)) | Box(p) => self.check_unused_parens_pat(cx, p, true, false, keep_space),
+            Ident(.., Some(p)) | Box(p) | Deref(p) => self.check_unused_parens_pat(cx, p, true, false, keep_space),
             // Avoid linting on `&(mut x)` as `&mut x` has a different meaning, #55342.
             // Also avoid linting on `& mut? (p0 | .. | pn)`, #64106.
             Ref(p, m) => self.check_unused_parens_pat(cx, p, true, *m == Mutability::Not, keep_space),
@@ -1227,13 +1235,15 @@ impl EarlyLintPass for UnusedParens {
                     ast::TyKind::TraitObject(..) => {}
                     ast::TyKind::BareFn(b)
                         if self.with_self_ty_parens && b.generic_params.len() > 0 => {}
-                    ast::TyKind::ImplTrait(_, bounds) if bounds.len() > 1 => {}
+                    ast::TyKind::ImplTrait(_, bounds, _) if bounds.len() > 1 => {}
                     _ => {
-                        let spans = r
-                            .span
-                            .find_ancestor_inside(ty.span)
-                            .map(|r| (ty.span.with_hi(r.lo()), ty.span.with_lo(r.hi())));
-
+                        let spans = if !ty.span.from_expansion() {
+                            r.span
+                                .find_ancestor_inside(ty.span)
+                                .map(|r| (ty.span.with_hi(r.lo()), ty.span.with_lo(r.hi())))
+                        } else {
+                            None
+                        };
                         self.emit_unused_delims(cx, ty.span, spans, "type", (false, false), false);
                     }
                 }

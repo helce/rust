@@ -1,0 +1,76 @@
+warning: non-local `impl` definition, they should be avoided as they go against expectation
+  --> $DIR/weird-exprs.rs:10:5
+   |
+LL |     impl Uto for *mut Test {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this `impl` block outside the of the current constant expression `<unnameable>`
+   = note: an `impl` definition is non-local if it is nested inside an item and may impact type checking outside of that item. This can be the case if neither the trait or the self type are at the same nesting level as the `impl`
+   = note: one exception to the rule are anon-const (`const _: () = { ... }`) at top-level module and anon-const at the same nesting as the trait or type
+   = note: this lint may become deny-by-default in the edition 2024 and higher, see the tracking issue <https://github.com/rust-lang/rust/issues/120363>
+note: the lint level is defined here
+  --> $DIR/weird-exprs.rs:4:9
+   |
+LL | #![warn(non_local_definitions)]
+   |         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: non-local `impl` definition, they should be avoided as they go against expectation
+  --> $DIR/weird-exprs.rs:18:9
+   |
+LL |         impl Uto for Test {}
+   |         ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this `impl` block outside the of the current constant expression `<unnameable>`
+   = note: an `impl` definition is non-local if it is nested inside an item and may impact type checking outside of that item. This can be the case if neither the trait or the self type are at the same nesting level as the `impl`
+   = note: one exception to the rule are anon-const (`const _: () = { ... }`) at top-level module and anon-const at the same nesting as the trait or type
+   = note: this lint may become deny-by-default in the edition 2024 and higher, see the tracking issue <https://github.com/rust-lang/rust/issues/120363>
+
+warning: non-local `impl` definition, they should be avoided as they go against expectation
+  --> $DIR/weird-exprs.rs:27:9
+   |
+LL | /         impl Test {
+LL | |
+LL | |             fn bar() {}
+LL | |         }
+   | |_________^
+   |
+   = help: move this `impl` block outside the of the current constant expression `<unnameable>` and up 2 bodies
+   = note: an `impl` definition is non-local if it is nested inside an item and may impact type checking outside of that item. This can be the case if neither the trait or the self type are at the same nesting level as the `impl`
+   = note: one exception to the rule are anon-const (`const _: () = { ... }`) at top-level module and anon-const at the same nesting as the trait or type
+   = note: this lint may become deny-by-default in the edition 2024 and higher, see the tracking issue <https://github.com/rust-lang/rust/issues/120363>
+
+warning: non-local `impl` definition, they should be avoided as they go against expectation
+  --> $DIR/weird-exprs.rs:36:9
+   |
+LL |         impl Uto for &Test {}
+   |         ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this `impl` block outside the of the current constant expression `<unnameable>` and up 2 bodies
+   = note: an `impl` definition is non-local if it is nested inside an item and may impact type checking outside of that item. This can be the case if neither the trait or the self type are at the same nesting level as the `impl`
+   = note: one exception to the rule are anon-const (`const _: () = { ... }`) at top-level module and anon-const at the same nesting as the trait or type
+   = note: this lint may become deny-by-default in the edition 2024 and higher, see the tracking issue <https://github.com/rust-lang/rust/issues/120363>
+
+warning: non-local `impl` definition, they should be avoided as they go against expectation
+  --> $DIR/weird-exprs.rs:43:9
+   |
+LL |         impl Uto for &(Test,) {}
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this `impl` block outside the of the current constant expression `<unnameable>` and up 2 bodies
+   = note: an `impl` definition is non-local if it is nested inside an item and may impact type checking outside of that item. This can be the case if neither the trait or the self type are at the same nesting level as the `impl`
+   = note: one exception to the rule are anon-const (`const _: () = { ... }`) at top-level module and anon-const at the same nesting as the trait or type
+   = note: this lint may become deny-by-default in the edition 2024 and higher, see the tracking issue <https://github.com/rust-lang/rust/issues/120363>
+
+warning: non-local `impl` definition, they should be avoided as they go against expectation
+  --> $DIR/weird-exprs.rs:50:9
+   |
+LL |         impl Uto for &(Test,Test) {}
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this `impl` block outside the of the current constant expression `<unnameable>` and up 2 bodies
+   = note: an `impl` definition is non-local if it is nested inside an item and may impact type checking outside of that item. This can be the case if neither the trait or the self type are at the same nesting level as the `impl`
+   = note: one exception to the rule are anon-const (`const _: () = { ... }`) at top-level module and anon-const at the same nesting as the trait or type
+   = note: this lint may become deny-by-default in the edition 2024 and higher, see the tracking issue <https://github.com/rust-lang/rust/issues/120363>
+
+warning: 6 warnings emitted
+

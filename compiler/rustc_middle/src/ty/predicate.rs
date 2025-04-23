@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 use crate::ty::visit::TypeVisitableExt;
 use crate::ty::{
     self, AliasTy, Binder, DebruijnIndex, DebugWithInfcx, EarlyBinder, GenericArg, GenericArgs,
-    GenericArgsRef, ImplPolarity, Term, Ty, TyCtxt, TypeFlags, WithCachedTypeInfo,
+    GenericArgsRef, PredicatePolarity, Term, Ty, TyCtxt, TypeFlags, WithCachedTypeInfo,
 };
 
 pub type ClauseKind<'tcx> = IrClauseKind<TyCtxt<'tcx>>;
@@ -70,7 +70,7 @@ impl<'tcx> Predicate<'tcx> {
                     polarity,
                 })) => Some(PredicateKind::Clause(ClauseKind::Trait(TraitPredicate {
                     trait_ref,
-                    polarity: polarity.flip()?,
+                    polarity: polarity.flip(),
                 }))),
 
                 _ => None,
@@ -192,7 +192,7 @@ impl<'tcx> Clause<'tcx> {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Ord, Eq, Hash, TyEncodable, TyDecodable)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
 #[derive(HashStable, TypeFoldable, TypeVisitable, Lift)]
 pub enum ExistentialPredicate<'tcx> {
     /// E.g., `Iterator`.
@@ -336,7 +336,7 @@ impl<'tcx> ty::List<ty::PolyExistentialPredicate<'tcx>> {
 ///
 /// Trait references also appear in object types like `Foo<U>`, but in
 /// that case the `Self` parameter is absent from the generic parameters.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, TyDecodable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
 #[derive(HashStable, TypeFoldable, TypeVisitable, Lift)]
 pub struct TraitRef<'tcx> {
     pub def_id: DefId,
@@ -420,7 +420,7 @@ impl<'tcx> IntoDiagArg for TraitRef<'tcx> {
 /// ```
 /// The generic parameters don't include the erased `Self`, only trait
 /// type and lifetime parameters (`[X, Y]` and `['a, 'b]` above).
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, TyDecodable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
 #[derive(HashStable, TypeFoldable, TypeVisitable, Lift)]
 pub struct ExistentialTraitRef<'tcx> {
     pub def_id: DefId,
@@ -476,7 +476,7 @@ impl<'tcx> PolyExistentialTraitRef<'tcx> {
 }
 
 /// A `ProjectionPredicate` for an `ExistentialTraitRef`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, TyEncodable, TyDecodable)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, TyEncodable, TyDecodable)]
 #[derive(HashStable, TypeFoldable, TypeVisitable, Lift)]
 pub struct ExistentialProjection<'tcx> {
     pub def_id: DefId,
@@ -663,7 +663,7 @@ pub struct TraitPredicate<'tcx> {
     /// exist via a series of predicates.)
     ///
     /// If polarity is Reserved: that's a bug.
-    pub polarity: ImplPolarity,
+    pub polarity: PredicatePolarity,
 }
 
 pub type PolyTraitPredicate<'tcx> = ty::Binder<'tcx, TraitPredicate<'tcx>>;
@@ -693,7 +693,7 @@ impl<'tcx> PolyTraitPredicate<'tcx> {
     }
 
     #[inline]
-    pub fn polarity(self) -> ImplPolarity {
+    pub fn polarity(self) -> PredicatePolarity {
         self.skip_binder().polarity
     }
 }
@@ -907,7 +907,7 @@ impl<'tcx> ToPredicate<'tcx> for TraitRef<'tcx> {
 impl<'tcx> ToPredicate<'tcx, TraitPredicate<'tcx>> for TraitRef<'tcx> {
     #[inline(always)]
     fn to_predicate(self, _tcx: TyCtxt<'tcx>) -> TraitPredicate<'tcx> {
-        TraitPredicate { trait_ref: self, polarity: ImplPolarity::Positive }
+        TraitPredicate { trait_ref: self, polarity: PredicatePolarity::Positive }
     }
 }
 
@@ -940,7 +940,7 @@ impl<'tcx> ToPredicate<'tcx, PolyTraitPredicate<'tcx>> for Binder<'tcx, TraitRef
     fn to_predicate(self, _: TyCtxt<'tcx>) -> PolyTraitPredicate<'tcx> {
         self.map_bound(|trait_ref| TraitPredicate {
             trait_ref,
-            polarity: ty::ImplPolarity::Positive,
+            polarity: ty::PredicatePolarity::Positive,
         })
     }
 }

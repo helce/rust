@@ -1,3 +1,5 @@
+use crate::errors;
+use crate::util::expr_to_spanned_string;
 use parse::Position::ArgumentNamed;
 use rustc_ast::ptr::P;
 use rustc_ast::tokenstream::TokenStream;
@@ -10,13 +12,12 @@ use rustc_ast::{
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::{Applicability, Diag, MultiSpan, PResult, SingleLabelManySpans};
 use rustc_expand::base::*;
+use rustc_lint_defs::builtin::NAMED_ARGUMENTS_USED_POSITIONALLY;
+use rustc_lint_defs::{BufferedEarlyLint, BuiltinLintDiag, LintId};
 use rustc_parse::parser::Recovered;
 use rustc_parse_format as parse;
 use rustc_span::symbol::{Ident, Symbol};
 use rustc_span::{BytePos, ErrorGuaranteed, InnerSpan, Span};
-
-use rustc_lint_defs::builtin::NAMED_ARGUMENTS_USED_POSITIONALLY;
-use rustc_lint_defs::{BufferedEarlyLint, BuiltinLintDiag, LintId};
 
 // The format_args!() macro is expanded in three steps:
 //  1. First, `parse_args` will parse the `(literal, arg, arg, name=arg, name=arg)` syntax,
@@ -37,8 +38,6 @@ enum PositionUsedAs {
     Width,
 }
 use PositionUsedAs::*;
-
-use crate::errors;
 
 #[derive(Debug)]
 struct MacroInput {
@@ -65,7 +64,7 @@ struct MacroInput {
 /// ```text
 /// Ok((fmtstr, parsed arguments))
 /// ```
-fn parse_args<'a>(ecx: &mut ExtCtxt<'a>, sp: Span, tts: TokenStream) -> PResult<'a, MacroInput> {
+fn parse_args<'a>(ecx: &ExtCtxt<'a>, sp: Span, tts: TokenStream) -> PResult<'a, MacroInput> {
     let mut args = FormatArguments::new();
 
     let mut p = ecx.new_parser_from_tts(tts);
@@ -604,7 +603,7 @@ fn invalid_placeholder_type_error(
 }
 
 fn report_missing_placeholders(
-    ecx: &mut ExtCtxt<'_>,
+    ecx: &ExtCtxt<'_>,
     unused: Vec<(Span, bool)>,
     used: &[bool],
     args: &FormatArguments,
@@ -734,7 +733,7 @@ fn report_missing_placeholders(
 /// This function detects and reports unused format!() arguments that are
 /// redundant due to implicit captures (e.g. `format!("{x}", x)`).
 fn report_redundant_format_arguments<'a>(
-    ecx: &mut ExtCtxt<'a>,
+    ecx: &ExtCtxt<'a>,
     args: &FormatArguments,
     used: &[bool],
     placeholders: Vec<(Span, &str)>,
@@ -806,7 +805,7 @@ fn report_redundant_format_arguments<'a>(
 /// there are named arguments or numbered positional arguments in the
 /// format string.
 fn report_invalid_references(
-    ecx: &mut ExtCtxt<'_>,
+    ecx: &ExtCtxt<'_>,
     invalid_refs: &[(usize, Option<Span>, PositionUsedAs, FormatArgPositionKind)],
     template: &[FormatArgsPiece],
     fmt_span: Span,
@@ -1001,7 +1000,7 @@ fn expand_format_args_impl<'cx>(
     })
 }
 
-pub fn expand_format_args<'cx>(
+pub(crate) fn expand_format_args<'cx>(
     ecx: &'cx mut ExtCtxt<'_>,
     sp: Span,
     tts: TokenStream,
@@ -1009,7 +1008,7 @@ pub fn expand_format_args<'cx>(
     expand_format_args_impl(ecx, sp, tts, false)
 }
 
-pub fn expand_format_args_nl<'cx>(
+pub(crate) fn expand_format_args_nl<'cx>(
     ecx: &'cx mut ExtCtxt<'_>,
     sp: Span,
     tts: TokenStream,

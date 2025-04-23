@@ -528,12 +528,20 @@ fn copy_all_cgu_workproducts_to_incr_comp_cache_dir(
     for module in compiled_modules.modules.iter().filter(|m| m.kind == ModuleKind::Regular) {
         let mut files = Vec::new();
         if let Some(object_file_path) = &module.object {
-            files.push(("o", object_file_path.as_path()));
+            files.push((OutputType::Object.extension(), object_file_path.as_path()));
         }
         if let Some(dwarf_object_file_path) = &module.dwarf_object {
             files.push(("dwo", dwarf_object_file_path.as_path()));
         }
-
+        if let Some(path) = &module.assembly {
+            files.push((OutputType::Assembly.extension(), path.as_path()));
+        }
+        if let Some(path) = &module.llvm_ir {
+            files.push((OutputType::LlvmAssembly.extension(), path.as_path()));
+        }
+        if let Some(path) = &module.bytecode {
+            files.push((OutputType::Bitcode.extension(), path.as_path()));
+        }
         if let Some((id, product)) =
             copy_cgu_workproduct_to_incr_comp_cache_dir(sess, &module.name, files.as_slice())
         {
@@ -592,7 +600,7 @@ fn produce_final_output_artifacts(
                 .unwrap()
                 .to_owned();
 
-            if crate_output.outputs.contains_key(&output_type) {
+            if crate_output.outputs.contains_explicit_name(&output_type) {
                 // 2) Multiple codegen units, with `--emit foo=some_name`. We have
                 //    no good solution for this case, so warn the user.
                 sess.dcx().emit_warn(errors::IgnoringEmitPath { extension });
@@ -899,8 +907,6 @@ fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
     module: CachedModuleCodegen,
     module_config: &ModuleConfig,
 ) -> WorkItemResult<B> {
-    assert!(module_config.emit_obj != EmitObj::None);
-
     let incr_comp_session_dir = cgcx.incr_comp_session_dir.as_ref().unwrap();
 
     let load_from_incr_comp_dir = |output_path: PathBuf, saved_path: &str| {
@@ -920,12 +926,6 @@ fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
         }
     };
 
-    let object = load_from_incr_comp_dir(
-        cgcx.output_filenames.temp_path(OutputType::Object, Some(&module.name)),
-        module.source.saved_files.get("o").unwrap_or_else(|| {
-            cgcx.create_dcx().emit_fatal(errors::NoSavedObjectFile { cgu_name: &module.name })
-        }),
-    );
     let dwarf_object =
         module.source.saved_files.get("dwo").as_ref().and_then(|saved_dwarf_object_file| {
             let dwarf_obj_out = cgcx
@@ -937,12 +937,33 @@ fn execute_copy_from_cache_work_item<B: ExtraBackendMethods>(
             load_from_incr_comp_dir(dwarf_obj_out, saved_dwarf_object_file)
         });
 
+    let load_from_incr_cache = |perform, output_type: OutputType| {
+        if perform {
+            let saved_file = module.source.saved_files.get(output_type.extension())?;
+            let output_path = cgcx.output_filenames.temp_path(output_type, Some(&module.name));
+            load_from_incr_comp_dir(output_path, &saved_file)
+        } else {
+            None
+        }
+    };
+
+    let should_emit_obj = module_config.emit_obj != EmitObj::None;
+    let assembly = load_from_incr_cache(module_config.emit_asm, OutputType::Assembly);
+    let llvm_ir = load_from_incr_cache(module_config.emit_ir, OutputType::LlvmAssembly);
+    let bytecode = load_from_incr_cache(module_config.emit_bc, OutputType::Bitcode);
+    let object = load_from_incr_cache(should_emit_obj, OutputType::Object);
+    if should_emit_obj && object.is_none() {
+        cgcx.create_dcx().emit_fatal(errors::NoSavedObjectFile { cgu_name: &module.name })
+    }
+
     WorkItemResult::Finished(CompiledModule {
         name: module.name,
         kind: ModuleKind::Regular,
         object,
         dwarf_object,
-        bytecode: None,
+        bytecode,
+        assembly,
+        llvm_ir,
     })
 }
 

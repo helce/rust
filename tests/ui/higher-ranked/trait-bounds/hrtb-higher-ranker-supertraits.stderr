@@ -1,5 +1,5 @@
 error[E0277]: the trait bound `for<'tcx> F: Foo<'tcx>` is not satisfied
-  --> $DIR/hrtb-higher-ranker-supertraits.rs:18:26
+  --> $DIR/hrtb-higher-ranker-supertraits.rs:14:26
    |
 LL |     want_foo_for_any_tcx(f);
    |     -------------------- ^ the trait `for<'tcx> Foo<'tcx>` is not implemented for `F`
@@ -7,19 +7,17 @@ LL |     want_foo_for_any_tcx(f);
    |     required by a bound introduced by this call
    |
 note: required by a bound in `want_foo_for_any_tcx`
-  --> $DIR/hrtb-higher-ranker-supertraits.rs:22:15
+  --> $DIR/hrtb-higher-ranker-supertraits.rs:18:28
    |
-LL | fn want_foo_for_any_tcx<F>(f: &F)
-   |    -------------------- required by a bound in this function
-LL |     where F : for<'tcx> Foo<'tcx>
-   |               ^^^^^^^^^^^^^^^^^^^ required by this bound in `want_foo_for_any_tcx`
+LL | fn want_foo_for_any_tcx<F: for<'tcx> Foo<'tcx>>(f: &F) {
+   |                            ^^^^^^^^^^^^^^^^^^^ required by this bound in `want_foo_for_any_tcx`
 help: consider further restricting this bound
    |
-LL |     where F : Foo<'x> + for<'tcx> Foo<'tcx>
-   |                       +++++++++++++++++++++
+LL | fn want_foo_for_some_tcx<'x, F: Foo<'x> + for<'tcx> Foo<'tcx>>(f: &'x F) {
+   |                                         +++++++++++++++++++++
 
 error[E0277]: the trait bound `for<'ccx> B: Bar<'ccx>` is not satisfied
-  --> $DIR/hrtb-higher-ranker-supertraits.rs:35:26
+  --> $DIR/hrtb-higher-ranker-supertraits.rs:28:26
    |
 LL |     want_bar_for_any_ccx(b);
    |     -------------------- ^ the trait `for<'ccx> Bar<'ccx>` is not implemented for `B`
@@ -27,42 +25,15 @@ LL |     want_bar_for_any_ccx(b);
    |     required by a bound introduced by this call
    |
 note: required by a bound in `want_bar_for_any_ccx`
-  --> $DIR/hrtb-higher-ranker-supertraits.rs:39:15
+  --> $DIR/hrtb-higher-ranker-supertraits.rs:32:28
    |
-LL | fn want_bar_for_any_ccx<B>(b: &B)
-   |    -------------------- required by a bound in this function
-LL |     where B : for<'ccx> Bar<'ccx>
-   |               ^^^^^^^^^^^^^^^^^^^ required by this bound in `want_bar_for_any_ccx`
+LL | fn want_bar_for_any_ccx<B: for<'ccx> Bar<'ccx>>(b: &B) {
+   |                            ^^^^^^^^^^^^^^^^^^^ required by this bound in `want_bar_for_any_ccx`
 help: consider further restricting this bound
    |
-LL |     where B : Bar<'x> + for<'ccx> Bar<'ccx>
-   |                       +++++++++++++++++++++
+LL | fn want_bar_for_some_ccx<'x, B: Bar<'x> + for<'ccx> Bar<'ccx>>(b: &B) {
+   |                                         +++++++++++++++++++++
 
-warning: function cannot return without recursing
-  --> $DIR/hrtb-higher-ranker-supertraits.rs:21:1
-   |
-LL | / fn want_foo_for_any_tcx<F>(f: &F)
-LL | |     where F : for<'tcx> Foo<'tcx>
-   | |_________________________________^ cannot return without recursing
-...
-LL |       want_foo_for_any_tcx(f);
-   |       ----------------------- recursive call site
-   |
-   = help: a `loop` may express intention better if this is on purpose
-   = note: `#[warn(unconditional_recursion)]` on by default
-
-warning: function cannot return without recursing
-  --> $DIR/hrtb-higher-ranker-supertraits.rs:38:1
-   |
-LL | / fn want_bar_for_any_ccx<B>(b: &B)
-LL | |     where B : for<'ccx> Bar<'ccx>
-   | |_________________________________^ cannot return without recursing
-...
-LL |       want_bar_for_any_ccx(b);
-   |       ----------------------- recursive call site
-   |
-   = help: a `loop` may express intention better if this is on purpose
-
-error: aborting due to 2 previous errors; 2 warnings emitted
+error: aborting due to 2 previous errors
 
 For more information about this error, try `rustc --explain E0277`.

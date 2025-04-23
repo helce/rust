@@ -741,7 +741,7 @@ impl<'tcx> LateContext<'tcx> {
                 .filter(|typeck_results| typeck_results.hir_owner == id.owner)
                 .or_else(|| {
                     self.tcx
-                        .has_typeck_results(id.owner.to_def_id())
+                        .has_typeck_results(id.owner.def_id)
                         .then(|| self.tcx.typeck(id.owner.def_id))
                 })
                 .and_then(|typeck_results| typeck_results.type_dependent_def(id))
@@ -937,7 +937,7 @@ impl<'tcx> LateContext<'tcx> {
             }
             && let Some(init) = match parent_node {
                 hir::Node::Expr(expr) => Some(expr),
-                hir::Node::Local(hir::Local { init, .. }) => *init,
+                hir::Node::LetStmt(hir::LetStmt { init, .. }) => *init,
                 _ => None,
             }
         {
@@ -982,7 +982,7 @@ impl<'tcx> LateContext<'tcx> {
             }
             && let Some(init) = match parent_node {
                 hir::Node::Expr(expr) => Some(expr),
-                hir::Node::Local(hir::Local { init, .. }) => *init,
+                hir::Node::LetStmt(hir::LetStmt { init, .. }) => *init,
                 hir::Node::Item(item) => match item.kind {
                     hir::ItemKind::Const(.., body_id) | hir::ItemKind::Static(.., body_id) => {
                         Some(self.tcx.hir().body(body_id).value)

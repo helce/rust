@@ -13,9 +13,10 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use crate::core::build_steps::llvm;
 use crate::core::build_steps::tool::{self, SourceType};
-use crate::core::build_steps::{check, clean, compile, dist, doc, install, run, setup, test};
+use crate::core::build_steps::{
+    check, clean, clippy, compile, dist, doc, install, llvm, run, setup, test, vendor,
+};
 use crate::core::config::flags::{Color, Subcommand};
 use crate::core::config::{DryRun, SplitDebuginfo, TargetSelection};
 use crate::prepare_behaviour_dump_dir;
@@ -34,13 +35,34 @@ use once_cell::sync::Lazy;
 #[cfg(test)]
 mod tests;
 
+/// Builds and performs different [`Self::kind`]s of stuff and actions, taking
+/// into account build configuration from e.g. config.toml.
 pub struct Builder<'a> {
+    /// Build configuration from e.g. config.toml.
     pub build: &'a Build,
+
+    /// The stage to use. Either implicitly determined based on subcommand, or
+    /// explicitly specified with `--stage N`. Normally this is the stage we
+    /// use, but sometimes we want to run steps with a lower stage than this.
     pub top_stage: u32,
+
+    /// What to build or what action to perform.
     pub kind: Kind,
+
+    /// A cache of outputs of [`Step`]s so we can avoid running steps we already
+    /// ran.
     cache: Cache,
+
+    /// A stack of [`Step`]s to run before we can run this builder. The output
+    /// of steps is cached in [`Self::cache`].
     stack: RefCell<Vec<Box<dyn Any>>>,
+
+    /// The total amount of time we spent running [`Step`]s in [`Self::stack`].
     time_spent_on_dependencies: Cell<Duration>,
+
+    /// The paths passed on the command line. Used by steps to figure out what
+    /// to do. For example: with `./x check foo bar` we get `paths=["foo",
+    /// "bar"]`.
     pub paths: Vec<PathBuf>,
 }
 
@@ -132,8 +154,7 @@ impl RunConfig<'_> {
             Alias::Compiler => self.builder.in_tree_crates("rustc-main", Some(self.target)),
         };
 
-        let crate_names = crates.into_iter().map(|krate| krate.name.to_string()).collect();
-        crate_names
+        crates.into_iter().map(|krate| krate.name.to_string()).collect()
     }
 }
 
@@ -323,16 +344,13 @@ const PATH_REMAP: &[(&str, &[&str])] = &[
 fn remap_paths(paths: &mut Vec<&Path>) {
     let mut remove = vec![];
     let mut add = vec![];
-    for (i, path) in paths
-        .iter()
-        .enumerate()
-        .filter_map(|(i, path)| if let Some(s) = path.to_str() { Some((i, s)) } else { None })
+    for (i, path) in paths.iter().enumerate().filter_map(|(i, path)| path.to_str().map(|s| (i, s)))
     {
         for &(search, replace) in PATH_REMAP {
             // Remove leading and trailing slashes so `tests/` and `tests` are equivalent
             if path.trim_matches(std::path::is_separator) == search {
                 remove.push(i);
-                add.extend(replace.into_iter().map(Path::new));
+                add.extend(replace.iter().map(Path::new));
                 break;
             }
         }
@@ -554,29 +572,7 @@ impl<'a> ShouldRun<'a> {
     ///
     /// [`path`]: ShouldRun::path
     pub fn paths(mut self, paths: &[&str]) -> Self {
-        static SUBMODULES_PATHS: OnceLock<Vec<String>> = OnceLock::new();
-
-        let init_submodules_paths = |src: &PathBuf| {
-            let file = File::open(src.join(".gitmodules")).unwrap();
-
-            let mut submodules_paths = vec![];
-            for line in BufReader::new(file).lines() {
-                if let Ok(line) = line {
-                    let line = line.trim();
-
-                    if line.starts_with("path") {
-                        let actual_path =
-                            line.split(' ').last().expect("Couldn't get value of path");
-                        submodules_paths.push(actual_path.to_owned());
-                    }
-                }
-            }
-
-            submodules_paths
-        };
-
-        let submodules_paths =
-            SUBMODULES_PATHS.get_or_init(|| init_submodules_paths(&self.builder.src));
+        let submodules_paths = self.builder.get_all_submodules();
 
         self.paths.insert(PathSet::Set(
             paths
@@ -653,6 +649,7 @@ pub enum Kind {
     Format,
     #[value(alias = "t")]
     Test,
+    Miri,
     Bench,
     #[value(alias = "d")]
     Doc,
@@ -663,30 +660,10 @@ pub enum Kind {
     Run,
     Setup,
     Suggest,
+    Vendor,
 }
 
 impl Kind {
-    pub fn parse(string: &str) -> Option<Kind> {
-        // these strings, including the one-letter aliases, must match the x.py help text
-        Some(match string {
-            "build" | "b" => Kind::Build,
-            "check" | "c" => Kind::Check,
-            "clippy" => Kind::Clippy,
-            "fix" => Kind::Fix,
-            "fmt" => Kind::Format,
-            "test" | "t" => Kind::Test,
-            "bench" => Kind::Bench,
-            "doc" | "d" => Kind::Doc,
-            "clean" => Kind::Clean,
-            "dist" => Kind::Dist,
-            "install" => Kind::Install,
-            "run" | "r" => Kind::Run,
-            "setup" => Kind::Setup,
-            "suggest" => Kind::Suggest,
-            _ => return None,
-        })
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
             Kind::Build => "build",
@@ -695,6 +672,7 @@ impl Kind {
             Kind::Fix => "fix",
             Kind::Format => "fmt",
             Kind::Test => "test",
+            Kind::Miri => "miri",
             Kind::Bench => "bench",
             Kind::Doc => "doc",
             Kind::Clean => "clean",
@@ -703,6 +681,7 @@ impl Kind {
             Kind::Run => "run",
             Kind::Setup => "setup",
             Kind::Suggest => "suggest",
+            Kind::Vendor => "vendor",
         }
     }
 
@@ -713,6 +692,7 @@ impl Kind {
             Kind::Doc => "Documenting",
             Kind::Run => "Running",
             Kind::Suggest => "Suggesting",
+            Kind::Clippy => "Linting",
             _ => {
                 let title_letter = self.as_str()[0..1].to_ascii_uppercase();
                 return format!("{title_letter}{}ing", &self.as_str()[1..]);
@@ -767,7 +747,35 @@ impl<'a> Builder<'a> {
                 tool::CoverageDump,
                 tool::LlvmBitcodeLinker
             ),
-            Kind::Check | Kind::Clippy | Kind::Fix => describe!(
+            Kind::Clippy => describe!(
+                clippy::Std,
+                clippy::Rustc,
+                clippy::Bootstrap,
+                clippy::BuildHelper,
+                clippy::BuildManifest,
+                clippy::CargoMiri,
+                clippy::Clippy,
+                clippy::CollectLicenseMetadata,
+                clippy::Compiletest,
+                clippy::CoverageDump,
+                clippy::Jsondocck,
+                clippy::Jsondoclint,
+                clippy::LintDocs,
+                clippy::LlvmBitcodeLinker,
+                clippy::Miri,
+                clippy::MiroptTestTools,
+                clippy::OptDist,
+                clippy::RemoteTestClient,
+                clippy::RemoteTestServer,
+                clippy::Rls,
+                clippy::RustAnalyzer,
+                clippy::RustDemangler,
+                clippy::Rustdoc,
+                clippy::Rustfmt,
+                clippy::RustInstaller,
+                clippy::Tidy,
+            ),
+            Kind::Check | Kind::Fix => describe!(
                 check::Std,
                 check::Rustc,
                 check::Rustdoc,
@@ -786,6 +794,7 @@ impl<'a> Builder<'a> {
                 test::ExpandYamlAnchors,
                 test::Tidy,
                 test::Ui,
+                test::Crashes,
                 test::RunPassValgrind,
                 test::Coverage,
                 test::CoverageMap,
@@ -828,9 +837,11 @@ impl<'a> Builder<'a> {
                 test::EditionGuide,
                 test::Rustfmt,
                 test::Miri,
+                test::CargoMiri,
                 test::Clippy,
                 test::RustDemangler,
                 test::CompiletestTest,
+                test::CrateRunMakeSupport,
                 test::RustdocJSStd,
                 test::RustdocJSNotStd,
                 test::RustdocGUI,
@@ -844,6 +855,7 @@ impl<'a> Builder<'a> {
                 // Run run-make last, since these won't pass without make on Windows
                 test::RunMake,
             ),
+            Kind::Miri => describe!(test::Crate),
             Kind::Bench => describe!(test::Crate, test::CrateLibrustc),
             Kind::Doc => describe!(
                 doc::UnstableBook,
@@ -891,6 +903,7 @@ impl<'a> Builder<'a> {
                 dist::Clippy,
                 dist::Miri,
                 dist::LlvmTools,
+                dist::LlvmBitcodeLinker,
                 dist::RustDev,
                 dist::Bootstrap,
                 dist::Extended,
@@ -932,6 +945,7 @@ impl<'a> Builder<'a> {
             ),
             Kind::Setup => describe!(setup::Profile, setup::Hook, setup::Link, setup::Vscode),
             Kind::Clean => describe!(clean::CleanAll, clean::Rustc, clean::Std),
+            Kind::Vendor => describe!(vendor::Vendor),
             // special-cased in Build::build()
             Kind::Format | Kind::Suggest => vec![],
         }
@@ -992,6 +1006,7 @@ impl<'a> Builder<'a> {
             Subcommand::Fix => (Kind::Fix, &paths[..]),
             Subcommand::Doc { .. } => (Kind::Doc, &paths[..]),
             Subcommand::Test { .. } => (Kind::Test, &paths[..]),
+            Subcommand::Miri { .. } => (Kind::Miri, &paths[..]),
             Subcommand::Bench { .. } => (Kind::Bench, &paths[..]),
             Subcommand::Dist => (Kind::Dist, &paths[..]),
             Subcommand::Install => (Kind::Install, &paths[..]),
@@ -1003,6 +1018,7 @@ impl<'a> Builder<'a> {
                 Kind::Setup,
                 path.as_ref().map_or([].as_slice(), |path| std::slice::from_ref(path)),
             ),
+            Subcommand::Vendor { .. } => (Kind::Vendor, &paths[..]),
         };
 
         Self::new_internal(build, kind, paths.to_owned())
@@ -1031,10 +1047,10 @@ impl<'a> Builder<'a> {
         StepDescription::run(v, self, paths);
     }
 
-    /// Obtain a compiler at a given stage and for a given host. Explicitly does
-    /// not take `Compiler` since all `Compiler` instances are meant to be
-    /// obtained through this function, since it ensures that they are valid
-    /// (i.e., built and assembled).
+    /// Obtain a compiler at a given stage and for a given host (i.e., this is the target that the
+    /// compiler will run on, *not* the target it will build code for). Explicitly does not take
+    /// `Compiler` since all `Compiler` instances are meant to be obtained through this function,
+    /// since it ensures that they are valid (i.e., built and assembled).
     pub fn compiler(&self, stage: u32, host: TargetSelection) -> Compiler {
         self.ensure(compile::Assemble { target_compiler: Compiler { stage, host } })
     }
@@ -1216,20 +1232,11 @@ impl<'a> Builder<'a> {
     }
 
     pub fn cargo_clippy_cmd(&self, run_compiler: Compiler) -> Command {
-        let initial_sysroot_bin = self.initial_rustc.parent().unwrap();
-        // Set PATH to include the sysroot bin dir so clippy can find cargo.
-        // FIXME: once rust-clippy#11944 lands on beta, set `CARGO` directly instead.
-        let path = t!(env::join_paths(
-            // The sysroot comes first in PATH to avoid using rustup's cargo.
-            std::iter::once(PathBuf::from(initial_sysroot_bin))
-                .chain(env::split_paths(&t!(env::var("PATH"))))
-        ));
-
         if run_compiler.stage == 0 {
             // `ensure(Clippy { stage: 0 })` *builds* clippy with stage0, it doesn't use the beta clippy.
             let cargo_clippy = self.build.config.download_clippy();
             let mut cmd = Command::new(cargo_clippy);
-            cmd.env("PATH", &path);
+            cmd.env("CARGO", &self.initial_cargo);
             return cmd;
         }
 
@@ -1249,7 +1256,38 @@ impl<'a> Builder<'a> {
 
         let mut cmd = Command::new(cargo_clippy);
         cmd.env(helpers::dylib_path_var(), env::join_paths(&dylib_path).unwrap());
-        cmd.env("PATH", path);
+        cmd.env("CARGO", &self.initial_cargo);
+        cmd
+    }
+
+    pub fn cargo_miri_cmd(&self, run_compiler: Compiler) -> Command {
+        assert!(run_compiler.stage > 0, "miri can not be invoked at stage 0");
+        let build_compiler = self.compiler(run_compiler.stage - 1, self.build.build);
+
+        // Prepare the tools
+        let miri = self.ensure(tool::Miri {
+            compiler: build_compiler,
+            target: self.build.build,
+            extra_features: Vec::new(),
+        });
+        let cargo_miri = self.ensure(tool::CargoMiri {
+            compiler: build_compiler,
+            target: self.build.build,
+            extra_features: Vec::new(),
+        });
+        // Invoke cargo-miri, make sure it can find miri and cargo.
+        let mut cmd = Command::new(cargo_miri);
+        cmd.env("MIRI", &miri);
+        cmd.env("CARGO", &self.initial_cargo);
+        // Need to add the `run_compiler` libs. Those are the libs produces *by* `build_compiler`,
+        // so they match the Miri we just built. However this means they are actually living one
+        // stage up, i.e. we are running `stage0-tools-bin/miri` with the libraries in `stage1/lib`.
+        // This is an unfortunate off-by-1 caused (possibly) by the fact that Miri doesn't have an
+        // "assemble" step like rustc does that would cross the stage boundary. We can't use
+        // `add_rustc_lib_path` as that's a NOP on Windows but we do need these libraries added to
+        // the PATH due to the stage mismatch.
+        // Also see https://github.com/rust-lang/rust/pull/123192#issuecomment-2028901503.
+        add_dylib_path(self.rustc_lib_paths(run_compiler), &mut cmd);
         cmd
     }
 
@@ -1294,20 +1332,30 @@ impl<'a> Builder<'a> {
         compiler: Compiler,
         mode: Mode,
         target: TargetSelection,
-        cmd: &str,
+        cmd: &str, // FIXME make this properly typed
     ) -> Command {
-        let mut cargo = if cmd == "clippy" {
-            self.cargo_clippy_cmd(compiler)
+        let mut cargo;
+        if cmd == "clippy" {
+            cargo = self.cargo_clippy_cmd(compiler);
+            cargo.arg(cmd);
+        } else if let Some(subcmd) = cmd.strip_prefix("miri") {
+            // Command must be "miri-X".
+            let subcmd = subcmd
+                .strip_prefix('-')
+                .unwrap_or_else(|| panic!("expected `miri-$subcommand`, but got {}", cmd));
+            cargo = self.cargo_miri_cmd(compiler);
+            cargo.arg("miri").arg(subcmd);
         } else {
-            Command::new(&self.initial_cargo)
-        };
+            cargo = Command::new(&self.initial_cargo);
+            cargo.arg(cmd);
+        }
 
         // Run cargo from the source root so it can find .cargo/config.
         // This matters when using vendoring and the working directory is outside the repository.
         cargo.current_dir(&self.src);
 
         let out_dir = self.stage_out(compiler, mode);
-        cargo.env("CARGO_TARGET_DIR", &out_dir).arg(cmd);
+        cargo.env("CARGO_TARGET_DIR", &out_dir);
 
         // Found with `rg "init_env_logger\("`. If anyone uses `init_env_logger`
         // from out of tree it shouldn't matter, since x.py is only used for
@@ -1337,7 +1385,8 @@ impl<'a> Builder<'a> {
 
         if self.config.rust_optimize.is_release() {
             // FIXME: cargo bench/install do not accept `--release`
-            if cmd != "bench" && cmd != "install" {
+            // and miri doesn't want it
+            if cmd != "bench" && cmd != "install" && !cmd.starts_with("miri-") {
                 cargo.arg("--release");
             }
         }
@@ -1353,14 +1402,15 @@ impl<'a> Builder<'a> {
     /// Cargo. This cargo will be configured to use `compiler` as the actual
     /// rustc compiler, its output will be scoped by `mode`'s output directory,
     /// it will pass the `--target` flag for the specified `target`, and will be
-    /// executing the Cargo command `cmd`.
+    /// executing the Cargo command `cmd`. `cmd` can be `miri-cmd` for commands
+    /// to be run with Miri.
     fn cargo(
         &self,
         compiler: Compiler,
         mode: Mode,
         source_type: SourceType,
         target: TargetSelection,
-        cmd: &str,
+        cmd: &str, // FIXME make this properly typed
     ) -> Cargo {
         let mut cargo = self.bare_cargo(compiler, mode, target, cmd);
         let out_dir = self.stage_out(compiler, mode);
@@ -1411,7 +1461,7 @@ impl<'a> Builder<'a> {
             // rustc_llvm. But if LLVM is stale, that'll be a tiny amount
             // of work comparatively, and we'd likely need to rebuild it anyway,
             // so that's okay.
-            if crate::core::build_steps::llvm::prebuilt_llvm_config(self, target).is_err() {
+            if crate::core::build_steps::llvm::prebuilt_llvm_config(self, target).should_build() {
                 cargo.env("RUST_CHECK", "1");
             }
         }
@@ -1513,7 +1563,7 @@ impl<'a> Builder<'a> {
         // `rustflags` without `cargo` making it required.
         rustflags.arg("-Zunstable-options");
         for (restricted_mode, name, values) in EXTRA_CHECK_CFGS {
-            if *restricted_mode == None || *restricted_mode == Some(mode) {
+            if restricted_mode.is_none() || *restricted_mode == Some(mode) {
                 rustflags.arg(&check_cfg_arg(name, *values));
             }
         }
@@ -1671,7 +1721,8 @@ impl<'a> Builder<'a> {
             .env("RUSTDOC", self.bootstrap_out.join("rustdoc"))
             .env(
                 "RUSTDOC_REAL",
-                if cmd == "doc" || cmd == "rustdoc" || (cmd == "test" && want_rustdoc) {
+                // Make sure to handle both `test` and `miri-test` commands.
+                if cmd == "doc" || cmd == "rustdoc" || (cmd.ends_with("test") && want_rustdoc) {
                     self.rustdoc(compiler)
                 } else {
                     PathBuf::from("/path/to/nowhere/rustdoc/not/required")
@@ -1692,6 +1743,15 @@ impl<'a> Builder<'a> {
         // sccache) before bootstrap overrode it. Respect that variable.
         if let Some(existing_wrapper) = env::var_os("RUSTC_WRAPPER") {
             cargo.env("RUSTC_WRAPPER_REAL", existing_wrapper);
+        }
+
+        // If this is for `miri-test`, prepare the sysroots.
+        if cmd == "miri-test" {
+            self.ensure(compile::Std::new(compiler, compiler.host));
+            let host_sysroot = self.sysroot(compiler);
+            let miri_sysroot = test::Miri::build_miri_sysroot(self, compiler, target);
+            cargo.env("MIRI_SYSROOT", &miri_sysroot);
+            cargo.env("MIRI_HOST_SYSROOT", &host_sysroot);
         }
 
         cargo.env(profile_var("STRIP"), self.config.rust_strip.to_string());
@@ -2065,14 +2125,29 @@ impl<'a> Builder<'a> {
             // break when incremental compilation is enabled. So this overrides the "no inlining
             // during incremental builds" heuristic for the standard library.
             rustflags.arg("-Zinline-mir");
+
+            // FIXME: always pass this after the next `#[cfg(bootstrap)]` update.
+            if compiler.stage != 0 {
+                // Similarly, we need to keep debug info for functions inlined into other std functions,
+                // even if we're not going to output debuginfo for the crate we're currently building,
+                // so that it'll be available when downstream consumers of std try to use it.
+                rustflags.arg("-Zinline-mir-preserve-debug");
+            }
         }
 
-        // set rustc args passed from command line
-        let rustc_args =
-            self.config.cmd.rustc_args().iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        if !rustc_args.is_empty() {
-            cargo.env("RUSTFLAGS", &rustc_args.join(" "));
+        if self.config.rustc_parallel
+            && matches!(mode, Mode::ToolRustc | Mode::Rustc | Mode::Codegen)
+        {
+            // keep in sync with `bootstrap/lib.rs:Build::rustc_features`
+            // `cfg` option for rustc, `features` option for cargo, for conditional compilation
+            rustflags.arg("--cfg=parallel_compiler");
+            rustdocflags.arg("--cfg=parallel_compiler");
         }
+
+        // Pass the value of `--rustc-args` from test command. If it's not a test command, this won't set anything.
+        self.config.cmd.rustc_args().iter().for_each(|v| {
+            rustflags.arg(v);
+        });
 
         Cargo {
             command: cargo,
@@ -2149,6 +2224,28 @@ impl<'a> Builder<'a> {
         self.verbose_than(1, || println!("{}< {:?}", "  ".repeat(self.stack.borrow().len()), step));
         self.cache.put(step, out.clone());
         out
+    }
+
+    /// Return paths of all submodules.
+    pub fn get_all_submodules(&self) -> &[String] {
+        static SUBMODULES_PATHS: OnceLock<Vec<String>> = OnceLock::new();
+
+        let init_submodules_paths = |src: &PathBuf| {
+            let file = File::open(src.join(".gitmodules")).unwrap();
+
+            let mut submodules_paths = vec![];
+            for line in BufReader::new(file).lines().map_while(Result::ok) {
+                let line = line.trim();
+                if line.starts_with("path") {
+                    let actual_path = line.split(' ').last().expect("Couldn't get value of path");
+                    submodules_paths.push(actual_path.to_owned());
+                }
+            }
+
+            submodules_paths
+        };
+
+        SUBMODULES_PATHS.get_or_init(|| init_submodules_paths(&self.src))
     }
 
     /// Ensure that a given step is built *only if it's supposed to be built by default*, returning
@@ -2300,7 +2397,7 @@ impl Cargo {
         mode: Mode,
         source_type: SourceType,
         target: TargetSelection,
-        cmd: &str,
+        cmd: &str, // FIXME make this properly typed
     ) -> Cargo {
         let mut cargo = builder.cargo(compiler, mode, source_type, target, cmd);
         cargo.configure_linker(builder);
@@ -2314,7 +2411,7 @@ impl Cargo {
         mode: Mode,
         source_type: SourceType,
         target: TargetSelection,
-        cmd: &str,
+        cmd: &str, // FIXME make this properly typed
     ) -> Cargo {
         builder.cargo(compiler, mode, source_type, target, cmd)
     }

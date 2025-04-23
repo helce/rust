@@ -5,6 +5,7 @@ use rustc_codegen_ssa::traits::CodegenBackend;
 #[cfg(parallel_compiler)]
 use rustc_data_structures::sync;
 use rustc_metadata::{load_symbol_from_dylib, DylibError};
+use rustc_middle::ty::CurrentGcx;
 use rustc_parse::validate_attr;
 use rustc_session as session;
 use rustc_session::config::{Cfg, OutFileName, OutputFilenames, OutputTypes};
@@ -13,6 +14,7 @@ use rustc_session::lint::{self, BuiltinLintDiag, LintBuffer};
 use rustc_session::{filesearch, Session};
 use rustc_span::edit_distance::find_best_match_for_name;
 use rustc_span::edition::Edition;
+use rustc_span::source_map::SourceMapInputs;
 use rustc_span::symbol::sym;
 use rustc_target::spec::Target;
 use session::output::{categorize_crate_type, CRATE_TYPES};
@@ -48,16 +50,25 @@ pub fn add_configuration(cfg: &mut Cfg, sess: &mut Session, codegen_backend: &dy
     }
 }
 
-const STACK_SIZE: usize = 8 * 1024 * 1024;
+pub static STACK_SIZE: OnceLock<usize> = OnceLock::new();
+pub const DEFAULT_STACK_SIZE: usize = 8 * 1024 * 1024;
 
-fn get_stack_size() -> Option<usize> {
-    // FIXME: Hacks on hacks. If the env is trying to override the stack size
-    // then *don't* set it explicitly.
-    env::var_os("RUST_MIN_STACK").is_none().then_some(STACK_SIZE)
+fn init_stack_size() -> usize {
+    // Obey the environment setting or default
+    *STACK_SIZE.get_or_init(|| {
+        env::var_os("RUST_MIN_STACK")
+            .map(|os_str| os_str.to_string_lossy().into_owned())
+            // ignore if it is set to nothing
+            .filter(|s| s.trim() != "")
+            .map(|s| s.trim().parse::<usize>().unwrap())
+            // otherwise pick a consistent default
+            .unwrap_or(DEFAULT_STACK_SIZE)
+    })
 }
 
-pub(crate) fn run_in_thread_with_globals<F: FnOnce() -> R + Send, R: Send>(
+fn run_in_thread_with_globals<F: FnOnce(CurrentGcx) -> R + Send, R: Send>(
     edition: Edition,
+    sm_inputs: SourceMapInputs,
     f: F,
 ) -> R {
     // The "thread pool" is a single spawned thread in the non-parallel
@@ -66,10 +77,7 @@ pub(crate) fn run_in_thread_with_globals<F: FnOnce() -> R + Send, R: Send>(
     // the parallel compiler, in particular to ensure there is no accidental
     // sharing of data between the main thread and the compilation thread
     // (which might cause problems for the parallel compiler).
-    let mut builder = thread::Builder::new().name("rustc".to_string());
-    if let Some(size) = get_stack_size() {
-        builder = builder.stack_size(size);
-    }
+    let builder = thread::Builder::new().name("rustc".to_string()).stack_size(init_stack_size());
 
     // We build the session globals and run `f` on the spawned thread, because
     // `SessionGlobals` does not impl `Send` in the non-parallel compiler.
@@ -77,7 +85,11 @@ pub(crate) fn run_in_thread_with_globals<F: FnOnce() -> R + Send, R: Send>(
         // `unwrap` is ok here because `spawn_scoped` only panics if the thread
         // name contains null bytes.
         let r = builder
-            .spawn_scoped(s, move || rustc_span::create_session_globals_then(edition, f))
+            .spawn_scoped(s, move || {
+                rustc_span::create_session_globals_then(edition, Some(sm_inputs), || {
+                    f(CurrentGcx::new())
+                })
+            })
             .unwrap()
             .join();
 
@@ -89,18 +101,20 @@ pub(crate) fn run_in_thread_with_globals<F: FnOnce() -> R + Send, R: Send>(
 }
 
 #[cfg(not(parallel_compiler))]
-pub(crate) fn run_in_thread_pool_with_globals<F: FnOnce() -> R + Send, R: Send>(
+pub(crate) fn run_in_thread_pool_with_globals<F: FnOnce(CurrentGcx) -> R + Send, R: Send>(
     edition: Edition,
     _threads: usize,
+    sm_inputs: SourceMapInputs,
     f: F,
 ) -> R {
-    run_in_thread_with_globals(edition, f)
+    run_in_thread_with_globals(edition, sm_inputs, f)
 }
 
 #[cfg(parallel_compiler)]
-pub(crate) fn run_in_thread_pool_with_globals<F: FnOnce() -> R + Send, R: Send>(
+pub(crate) fn run_in_thread_pool_with_globals<F: FnOnce(CurrentGcx) -> R + Send, R: Send>(
     edition: Edition,
     threads: usize,
+    sm_inputs: SourceMapInputs,
     f: F,
 ) -> R {
     use rustc_data_structures::{defer, jobserver, sync::FromDyn};
@@ -112,24 +126,34 @@ pub(crate) fn run_in_thread_pool_with_globals<F: FnOnce() -> R + Send, R: Send>(
     let registry = sync::Registry::new(std::num::NonZero::new(threads).unwrap());
 
     if !sync::is_dyn_thread_safe() {
-        return run_in_thread_with_globals(edition, || {
+        return run_in_thread_with_globals(edition, sm_inputs, |current_gcx| {
             // Register the thread for use with the `WorkerLocal` type.
             registry.register();
 
-            f()
+            f(current_gcx)
         });
     }
 
-    let mut builder = rayon::ThreadPoolBuilder::new()
+    let current_gcx = FromDyn::from(CurrentGcx::new());
+    let current_gcx2 = current_gcx.clone();
+
+    let builder = rayon::ThreadPoolBuilder::new()
         .thread_name(|_| "rustc".to_string())
         .acquire_thread_handler(jobserver::acquire_thread)
         .release_thread_handler(jobserver::release_thread)
         .num_threads(threads)
-        .deadlock_handler(|| {
+        .deadlock_handler(move || {
             // On deadlock, creates a new thread and forwards information in thread
             // locals to it. The new thread runs the deadlock handler.
-            let query_map =
-                FromDyn::from(tls::with(|tcx| QueryCtxt::new(tcx).collect_active_jobs()));
+
+            // Get a `GlobalCtxt` reference from `CurrentGcx` as we cannot rely on having a
+            // `TyCtxt` TLS reference here.
+            let query_map = current_gcx2.access(|gcx| {
+                tls::enter_context(&tls::ImplicitCtxt::new(gcx), || {
+                    tls::with(|tcx| QueryCtxt::new(tcx).collect_active_jobs())
+                })
+            });
+            let query_map = FromDyn::from(query_map);
             let registry = rayon_core::Registry::current();
             thread::Builder::new()
                 .name("rustc query cycle handler".to_string())
@@ -144,16 +168,14 @@ pub(crate) fn run_in_thread_pool_with_globals<F: FnOnce() -> R + Send, R: Send>(
                     on_panic.disable();
                 })
                 .unwrap();
-        });
-    if let Some(size) = get_stack_size() {
-        builder = builder.stack_size(size);
-    }
+        })
+        .stack_size(init_stack_size());
 
     // We create the session globals on the main thread, then create the thread
     // pool. Upon creation, each worker thread created gets a copy of the
     // session globals in TLS. This is possible because `SessionGlobals` impls
     // `Send` in the parallel compiler.
-    rustc_span::create_session_globals_then(edition, || {
+    rustc_span::create_session_globals_then(edition, Some(sm_inputs), || {
         rustc_span::with_session_globals(|session_globals| {
             let session_globals = FromDyn::from(session_globals);
             builder
@@ -168,7 +190,7 @@ pub(crate) fn run_in_thread_pool_with_globals<F: FnOnce() -> R + Send, R: Send>(
                         })
                     },
                     // Run `f` on the first thread in the thread pool.
-                    move |pool: &rayon::ThreadPool| pool.install(f),
+                    move |pool: &rayon::ThreadPool| pool.install(|| f(current_gcx.into_inner())),
                 )
                 .unwrap()
         })

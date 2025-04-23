@@ -6,9 +6,10 @@ use std::assert_matches::assert_matches;
 use either::{Either, Left, Right};
 
 use rustc_hir::def::Namespace;
+use rustc_middle::mir::interpret::ScalarSizeMismatch;
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::print::{FmtPrinter, PrettyPrinter};
-use rustc_middle::ty::{ConstInt, Ty, TyCtxt};
+use rustc_middle::ty::{ConstInt, ScalarInt, Ty, TyCtxt};
 use rustc_middle::{mir, ty};
 use rustc_target::abi::{self, Abi, HasDataLayout, Size};
 
@@ -211,6 +212,12 @@ impl<'tcx, Prov: Provenance> ImmTy<'tcx, Prov> {
     }
 
     #[inline]
+    pub fn from_scalar_int(s: ScalarInt, layout: TyAndLayout<'tcx>) -> Self {
+        assert_eq!(s.size(), layout.size);
+        Self::from_scalar(Scalar::from(s), layout)
+    }
+
+    #[inline]
     pub fn try_from_uint(i: impl Into<u128>, layout: TyAndLayout<'tcx>) -> Option<Self> {
         Some(Self::from_scalar(Scalar::try_from_uint(i, layout.size)?, layout))
     }
@@ -223,7 +230,6 @@ impl<'tcx, Prov: Provenance> ImmTy<'tcx, Prov> {
     pub fn try_from_int(i: impl Into<i128>, layout: TyAndLayout<'tcx>) -> Option<Self> {
         Some(Self::from_scalar(Scalar::try_from_int(i, layout.size)?, layout))
     }
-
     #[inline]
     pub fn from_int(i: impl Into<i128>, layout: TyAndLayout<'tcx>) -> Self {
         Self::from_scalar(Scalar::from_int(i, layout.size), layout)
@@ -233,6 +239,27 @@ impl<'tcx, Prov: Provenance> ImmTy<'tcx, Prov> {
     pub fn from_bool(b: bool, tcx: TyCtxt<'tcx>) -> Self {
         let layout = tcx.layout_of(ty::ParamEnv::reveal_all().and(tcx.types.bool)).unwrap();
         Self::from_scalar(Scalar::from_bool(b), layout)
+    }
+
+    #[inline]
+    pub fn from_ordering(c: std::cmp::Ordering, tcx: TyCtxt<'tcx>) -> Self {
+        let ty = tcx.ty_ordering_enum(None);
+        let layout = tcx.layout_of(ty::ParamEnv::reveal_all().and(ty)).unwrap();
+        Self::from_scalar(Scalar::from_i8(c as i8), layout)
+    }
+
+    /// Return the immediate as a `ScalarInt`. Ensures that it has the size that the layout of the
+    /// immediate indicates.
+    #[inline]
+    pub fn to_scalar_int(&self) -> InterpResult<'tcx, ScalarInt> {
+        let s = self.to_scalar().to_scalar_int()?;
+        if s.size() != self.layout.size {
+            throw_ub!(ScalarSizeMismatch(ScalarSizeMismatch {
+                target_size: self.layout.size.bytes(),
+                data_size: s.size().bytes(),
+            }));
+        }
+        Ok(s)
     }
 
     #[inline]
@@ -741,7 +768,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 // * During ConstProp, with `TooGeneric` or since the `required_consts` were not all
                 //   checked yet.
                 // * During CTFE, since promoteds in `const`/`static` initializer bodies can fail.
-                self.eval_mir_constant(&c, Some(constant.span), layout)?
+                self.eval_mir_constant(&c, constant.span, layout)?
             }
         };
         trace!("{:?}: {:?}", mir_op, op);
@@ -757,7 +784,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         // Other cases need layout.
         let adjust_scalar = |scalar| -> InterpResult<'tcx, _> {
             Ok(match scalar {
-                Scalar::Ptr(ptr, size) => Scalar::Ptr(self.global_base_pointer(ptr)?, size),
+                Scalar::Ptr(ptr, size) => Scalar::Ptr(self.global_root_pointer(ptr)?, size),
                 Scalar::Int(int) => Scalar::Int(int),
             })
         };
@@ -765,7 +792,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         let imm = match val_val {
             mir::ConstValue::Indirect { alloc_id, offset } => {
                 // This is const data, no mutation allowed.
-                let ptr = self.global_base_pointer(Pointer::new(
+                let ptr = self.global_root_pointer(Pointer::new(
                     CtfeProvenance::from(alloc_id).as_immutable(),
                     offset,
                 ))?;
@@ -777,7 +804,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 // This is const data, no mutation allowed.
                 let alloc_id = self.tcx.reserve_and_set_memory_alloc(data);
                 let ptr = Pointer::new(CtfeProvenance::from(alloc_id).as_immutable(), Size::ZERO);
-                Immediate::new_slice(self.global_base_pointer(ptr)?.into(), meta, self)
+                Immediate::new_slice(self.global_root_pointer(ptr)?.into(), meta, self)
             }
         };
         Ok(OpTy { op: Operand::Immediate(imm), layout })
@@ -785,7 +812,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 }
 
 // Some nodes are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 mod size_asserts {
     use super::*;
     use rustc_data_structures::static_assert_size;

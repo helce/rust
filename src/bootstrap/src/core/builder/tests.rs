@@ -1,6 +1,6 @@
 use super::*;
 use crate::core::build_steps::doc::DocumentationFormat;
-use crate::core::config::{Config, DryRun, TargetSelection};
+use crate::core::config::Config;
 use std::thread;
 
 fn configure(cmd: &str, host: &[&str], target: &[&str]) -> Config {
@@ -75,7 +75,7 @@ macro_rules! doc_std {
             $stage,
             TargetSelection::from_user(stringify!($target)),
             &builder,
-            DocumentationFormat::HTML,
+            DocumentationFormat::Html,
         )
     }};
 }
@@ -599,7 +599,6 @@ mod dist {
             pass: None,
             run: None,
             only_modified: false,
-            skip: vec![],
             extra_checks: None,
         };
 
@@ -664,7 +663,6 @@ mod dist {
             no_fail_fast: false,
             doc: true,
             no_doc: false,
-            skip: vec![],
             bless: false,
             force_rerun: false,
             compare_mode: None,

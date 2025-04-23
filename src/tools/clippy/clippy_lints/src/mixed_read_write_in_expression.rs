@@ -1,7 +1,7 @@
 use clippy_utils::diagnostics::{span_lint, span_lint_and_note};
 use clippy_utils::{get_parent_expr, path_to_local, path_to_local_id};
 use rustc_hir::intravisit::{walk_expr, Visitor};
-use rustc_hir::{BinOpKind, Block, Expr, ExprKind, HirId, Local, Node, Stmt, StmtKind};
+use rustc_hir::{BinOpKind, Block, Expr, ExprKind, HirId, LetStmt, Node, Stmt, StmtKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty;
 use rustc_session::declare_lint_pass;
@@ -98,7 +98,7 @@ impl<'tcx> LateLintPass<'tcx> for EvalOrderDependence {
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'_>) {
         match stmt.kind {
             StmtKind::Let(local) => {
-                if let Local { init: Some(e), .. } = local {
+                if let LetStmt { init: Some(e), .. } = local {
                     DivergenceVisitor { cx }.visit_expr(e);
                 }
             },
@@ -325,7 +325,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ReadVisitor<'a, 'tcx> {
                     self.cx,
                     MIXED_READ_WRITE_IN_EXPRESSION,
                     expr.span,
-                    &format!("unsequenced read of `{}`", self.cx.tcx.hir().name(self.var)),
+                    format!("unsequenced read of `{}`", self.cx.tcx.hir().name(self.var)),
                     Some(self.write_expr.span),
                     "whether read occurs before this write depends on evaluation order",
                 );

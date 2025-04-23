@@ -9,7 +9,6 @@
 use crate::cmp::Ordering::{self, Equal, Greater, Less};
 use crate::fmt;
 use crate::hint;
-use crate::intrinsics::assert_unsafe_precondition;
 use crate::intrinsics::exact_div;
 use crate::mem::{self, SizedTypeProperties};
 use crate::num::NonZero;
@@ -17,6 +16,7 @@ use crate::ops::{Bound, OneSidedRange, Range, RangeBounds};
 use crate::ptr;
 use crate::simd::{self, Simd};
 use crate::slice;
+use crate::ub_checks::assert_unsafe_precondition;
 
 #[unstable(
     feature = "slice_internals",
@@ -1944,8 +1944,6 @@ impl<T> [T] {
     /// # Examples
     ///
     /// ```
-    /// #![feature(slice_split_at_unchecked)]
-    ///
     /// let v = [1, 2, 3, 4, 5, 6];
     ///
     /// unsafe {
@@ -1966,7 +1964,7 @@ impl<T> [T] {
     ///     assert_eq!(right, []);
     /// }
     /// ```
-    #[unstable(feature = "slice_split_at_unchecked", reason = "new API", issue = "76014")]
+    #[stable(feature = "slice_split_at_unchecked", since = "1.79.0")]
     #[rustc_const_stable(feature = "const_slice_split_at_unchecked", since = "1.77.0")]
     #[inline]
     #[must_use]
@@ -2008,8 +2006,6 @@ impl<T> [T] {
     /// # Examples
     ///
     /// ```
-    /// #![feature(slice_split_at_unchecked)]
-    ///
     /// let mut v = [1, 0, 3, 0, 5, 6];
     /// // scoped to restrict the lifetime of the borrows
     /// unsafe {
@@ -2021,7 +2017,7 @@ impl<T> [T] {
     /// }
     /// assert_eq!(v, [1, 2, 3, 4, 5, 6]);
     /// ```
-    #[unstable(feature = "slice_split_at_unchecked", reason = "new API", issue = "76014")]
+    #[stable(feature = "slice_split_at_unchecked", since = "1.79.0")]
     #[rustc_const_unstable(feature = "const_slice_split_at_mut", issue = "101804")]
     #[inline]
     #[must_use]
@@ -2728,8 +2724,10 @@ impl<T> [T] {
     /// ```
     /// let mut s = vec![0, 1, 1, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55];
     /// let num = 42;
-    /// let idx = s.partition_point(|&x| x < num);
-    /// // The above is equivalent to `let idx = s.binary_search(&num).unwrap_or_else(|x| x);`
+    /// let idx = s.partition_point(|&x| x <= num);
+    /// // If `num` is unique, `s.partition_point(|&x| x < num)` (with `<`) is equivalent to
+    /// // `s.binary_search(&num).unwrap_or_else(|x| x)`, but using `<=` will allow `insert`
+    /// // to shift less elements.
     /// s.insert(idx, num);
     /// assert_eq!(s, [0, 1, 1, 1, 1, 2, 3, 5, 8, 13, 21, 34, 42, 55]);
     /// ```
@@ -4179,7 +4177,7 @@ impl<T> [T] {
     /// ```
     /// let mut s = vec![0, 1, 1, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55];
     /// let num = 42;
-    /// let idx = s.partition_point(|&x| x < num);
+    /// let idx = s.partition_point(|&x| x <= num);
     /// s.insert(idx, num);
     /// assert_eq!(s, [0, 1, 1, 1, 1, 2, 3, 5, 8, 13, 21, 34, 42, 55]);
     /// ```

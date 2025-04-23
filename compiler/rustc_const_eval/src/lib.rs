@@ -11,7 +11,6 @@ Rust MIR: a lowered representation of Rust.
 #![feature(assert_matches)]
 #![feature(box_patterns)]
 #![feature(decl_macro)]
-#![feature(generic_nonzero)]
 #![feature(let_chains)]
 #![feature(slice_ptr_get)]
 #![feature(strict_provenance)]
@@ -32,6 +31,8 @@ pub mod interpret;
 pub mod transform;
 pub mod util;
 
+use std::sync::atomic::AtomicBool;
+
 pub use errors::ReportErrorExt;
 
 use rustc_middle::{ty, util::Providers};
@@ -40,6 +41,7 @@ rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
 pub fn provide(providers: &mut Providers) {
     const_eval::provide(providers);
+    providers.tag_for_variant = const_eval::tag_for_variant_provider;
     providers.eval_to_const_value_raw = const_eval::eval_to_const_value_raw_provider;
     providers.eval_to_allocation_raw = const_eval::eval_to_allocation_raw_provider;
     providers.eval_static_initializer = const_eval::eval_static_initializer_provider;
@@ -57,3 +59,8 @@ pub fn provide(providers: &mut Providers) {
         util::check_validity_requirement(tcx, init_kind, param_env_and_ty)
     };
 }
+
+/// `rustc_driver::main` installs a handler that will set this to `true` if
+/// the compiler has been sent a request to shut down, such as by a Ctrl-C.
+/// This static lives here because it is only read by the interpreter.
+pub static CTRL_C_RECEIVED: AtomicBool = AtomicBool::new(false);

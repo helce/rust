@@ -1,7 +1,7 @@
 use rustc_data_structures::captures::Captures;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir::coverage::{CounterId, CoverageKind};
-use rustc_middle::mir::{Body, Coverage, CoverageIdsInfo, Statement, StatementKind};
+use rustc_middle::mir::{Body, CoverageIdsInfo, Statement, StatementKind};
 use rustc_middle::query::TyCtxtAt;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_middle::util::Providers;
@@ -54,24 +54,32 @@ fn coverage_ids_info<'tcx>(
     let mir_body = tcx.instance_mir(instance_def);
 
     let max_counter_id = all_coverage_in_mir_body(mir_body)
-        .filter_map(|coverage| match coverage.kind {
+        .filter_map(|kind| match *kind {
             CoverageKind::CounterIncrement { id } => Some(id),
             _ => None,
         })
         .max()
-        .unwrap_or(CounterId::START);
+        .unwrap_or(CounterId::ZERO);
 
-    CoverageIdsInfo { max_counter_id }
+    let mcdc_bitmap_bytes = mir_body
+        .coverage_branch_info
+        .as_deref()
+        .map(|info| {
+            info.mcdc_decision_spans
+                .iter()
+                .fold(0, |acc, decision| acc + (1_u32 << decision.conditions_num).div_ceil(8))
+        })
+        .unwrap_or_default();
+
+    CoverageIdsInfo { max_counter_id, mcdc_bitmap_bytes }
 }
 
 fn all_coverage_in_mir_body<'a, 'tcx>(
     body: &'a Body<'tcx>,
-) -> impl Iterator<Item = &'a Coverage> + Captures<'tcx> {
+) -> impl Iterator<Item = &'a CoverageKind> + Captures<'tcx> {
     body.basic_blocks.iter().flat_map(|bb_data| &bb_data.statements).filter_map(|statement| {
         match statement.kind {
-            StatementKind::Coverage(box ref coverage) if !is_inlined(body, statement) => {
-                Some(coverage)
-            }
+            StatementKind::Coverage(ref kind) if !is_inlined(body, statement) => Some(kind),
             _ => None,
         }
     })

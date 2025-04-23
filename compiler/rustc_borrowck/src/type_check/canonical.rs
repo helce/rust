@@ -39,6 +39,12 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
 
         let TypeOpOutput { output, constraints, error_info } =
             op.fully_perform(self.infcx, locations.span(self.body))?;
+        if cfg!(debug_assertions) {
+            let data = self.infcx.take_and_reset_region_constraints();
+            if !data.is_empty() {
+                panic!("leftover region constraints: {data:#?}");
+            }
+        }
 
         debug!(?output, ?constraints);
 
@@ -61,7 +67,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         Ok(output)
     }
 
-    pub(super) fn instantiate_canonical_with_fresh_inference_vars<T>(
+    pub(super) fn instantiate_canonical<T>(
         &mut self,
         span: Span,
         canonical: &Canonical<'tcx, T>,
@@ -69,8 +75,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
     where
         T: TypeFoldable<TyCtxt<'tcx>>,
     {
-        let (instantiated, _) =
-            self.infcx.instantiate_canonical_with_fresh_inference_vars(span, canonical);
+        let (instantiated, _) = self.infcx.instantiate_canonical(span, canonical);
         instantiated
     }
 
@@ -83,7 +88,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
     ) {
         self.prove_predicate(
             ty::Binder::dummy(ty::PredicateKind::Clause(ty::ClauseKind::Trait(
-                ty::TraitPredicate { trait_ref, polarity: ty::ImplPolarity::Positive },
+                ty::TraitPredicate { trait_ref, polarity: ty::PredicatePolarity::Positive },
             ))),
             locations,
             category,

@@ -314,7 +314,7 @@ rustc_index::newtype_index! {
 }
 
 impl UniverseIndex {
-    pub const ROOT: UniverseIndex = UniverseIndex::from_u32(0);
+    pub const ROOT: UniverseIndex = UniverseIndex::ZERO;
 
     /// Returns the "next" universe index in order -- this new index
     /// is considered to extend all previous universes. This
@@ -345,6 +345,11 @@ impl UniverseIndex {
     /// those in `other` (`self < other`).
     pub fn cannot_name(self, other: UniverseIndex) -> bool {
         self < other
+    }
+
+    /// Returns `true` if `self` is the root universe, otherwise false.
+    pub fn is_root(self) -> bool {
+        self == Self::ROOT
     }
 }
 

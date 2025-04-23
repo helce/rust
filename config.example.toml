@@ -50,7 +50,7 @@
 #
 # Note that many of the LLVM options are not currently supported for
 # downloading. Currently only the "assertions" option can be toggled.
-#download-ci-llvm = if rust.channel == "dev" { "if-unchanged" } else { false }
+#download-ci-llvm = if rust.channel == "dev" || rust.download-rustc != false { "if-unchanged" } else { false }
 
 # Indicates whether the LLVM build is a Release or Debug build
 #optimize = true
@@ -302,7 +302,7 @@
 
 # Set the bootstrap/download cache path. It is useful when building rust
 # repeatedly in a CI invironment.
-# bootstrap-cache-path = /shared/cache
+#bootstrap-cache-path = /path/to/shared/cache
 
 # Enable a build of the extended Rust tool set which is not only the compiler
 # but also tools such as Cargo. This will also produce "combined installers"
@@ -517,11 +517,8 @@
 #overflow-checks-std = rust.overflow-checks (boolean)
 
 # Debuginfo level for most of Rust code, corresponds to the `-C debuginfo=N` option of `rustc`.
-# `0` - no debug info
-# `1` - line tables only - sufficient to generate backtraces that include line
-#       information and inlined functions, set breakpoints at source code
-#       locations, and step through execution in a debugger.
-# `2` - full debug info with variable and type information
+# See https://doc.rust-lang.org/rustc/codegen-options/index.html#debuginfo for available options.
+#
 # Can be overridden for specific subsets of Rust code (rustc, std or tools).
 # Debuginfo for tests run with compiletest is not controlled by this option
 # and needs to be enabled separately with `debuginfo-level-tests`.
@@ -915,6 +912,6 @@
 # Available options: fast, balanced, best
 #compression-profile = "fast"
 
-# Copy the linker, DLLs, and various libraries from MinGW into the rustc toolchain.
+# Copy the linker, DLLs, and various libraries from MinGW into the Rust toolchain.
 # Only applies when the host or target is pc-windows-gnu.
 #include-mingw-linker = true

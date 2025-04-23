@@ -822,15 +822,13 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         self.stack_mut().push(frame);
 
         // Make sure all the constants required by this frame evaluate successfully (post-monomorphization check).
-        if M::POST_MONO_CHECKS {
-            for &const_ in &body.required_consts {
-                let c = self
-                    .instantiate_from_current_frame_and_normalize_erasing_regions(const_.const_)?;
-                c.eval(*self.tcx, self.param_env, Some(const_.span)).map_err(|err| {
-                    err.emit_note(*self.tcx);
-                    err
-                })?;
-            }
+        for &const_ in &body.required_consts {
+            let c =
+                self.instantiate_from_current_frame_and_normalize_erasing_regions(const_.const_)?;
+            c.eval(*self.tcx, self.param_env, const_.span).map_err(|err| {
+                err.emit_note(*self.tcx);
+                err
+            })?;
         }
 
         // done
@@ -1034,8 +1032,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
     ) -> InterpResult<'tcx> {
         trace!("{:?} is now live", local);
 
-        // We avoid `ty.is_trivially_sized` since that (a) cannot assume WF, so it recurses through
-        // all fields of a tuple, and (b) does something expensive for ADTs.
+        // We avoid `ty.is_trivially_sized` since that does something expensive for ADTs.
         fn is_very_trivially_sized(ty: Ty<'_>) -> bool {
             match ty.kind() {
                 ty::Infer(ty::IntVar(_) | ty::FloatVar(_))
@@ -1054,11 +1051,14 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 | ty::Closure(..)
                 | ty::CoroutineClosure(..)
                 | ty::Never
-                | ty::Error(_) => true,
+                | ty::Error(_)
+                | ty::Dynamic(_, _, ty::DynStar) => true,
 
-                ty::Str | ty::Slice(_) | ty::Dynamic(..) | ty::Foreign(..) => false,
+                ty::Str | ty::Slice(_) | ty::Dynamic(_, _, ty::Dyn) | ty::Foreign(..) => false,
 
                 ty::Tuple(tys) => tys.last().iter().all(|ty| is_very_trivially_sized(**ty)),
+
+                ty::Pat(ty, ..) => is_very_trivially_sized(*ty),
 
                 // We don't want to do any queries, so there is not much we can do with ADTs.
                 ty::Adt(..) => false,
@@ -1174,13 +1174,15 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
     pub fn eval_mir_constant(
         &self,
         val: &mir::Const<'tcx>,
-        span: Option<Span>,
+        span: Span,
         layout: Option<TyAndLayout<'tcx>>,
     ) -> InterpResult<'tcx, OpTy<'tcx, M::Provenance>> {
         M::eval_mir_constant(self, *val, span, layout, |ecx, val, span, layout| {
             let const_val = val.eval(*ecx.tcx, ecx.param_env, span).map_err(|err| {
-                // FIXME: somehow this is reachable even when POST_MONO_CHECKS is on.
-                // Are we not always populating `required_consts`?
+                if M::ALL_CONSTS_ARE_PRECHECKED && !matches!(err, ErrorHandled::TooGeneric(..)) {
+                    // Looks like the const is not captued by `required_consts`, that's bad.
+                    bug!("interpret const eval failure of {val:?} which is not in required_consts");
+                }
                 err.emit_note(*ecx.tcx);
                 err
             })?;

@@ -18,7 +18,7 @@ use rustc_middle::mir::interpret::{ErrorHandled, EvalToValTreeResult, GlobalId};
 use rustc_middle::ty::adjustment::Adjust;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_session::impl_lint_pass;
-use rustc_span::{sym, InnerSpan, Span};
+use rustc_span::{sym, InnerSpan, Span, DUMMY_SP};
 use rustc_target::abi::VariantIdx;
 
 // FIXME: this is a correctness problem but there's no suitable
@@ -285,19 +285,19 @@ impl NonCopyConst {
         let def_id = body_id.hir_id.owner.to_def_id();
         let args = ty::GenericArgs::identity_for_item(cx.tcx, def_id);
         let instance = ty::Instance::new(def_id, args);
-        let cid = rustc_middle::mir::interpret::GlobalId {
+        let cid = GlobalId {
             instance,
             promoted: None,
         };
         let param_env = cx.tcx.param_env(def_id).with_reveal_all_normalized(cx.tcx);
-        let result = cx.tcx.const_eval_global_id_for_typeck(param_env, cid, None);
+        let result = cx.tcx.const_eval_global_id_for_typeck(param_env, cid, DUMMY_SP);
         self.is_value_unfrozen_raw(cx, result, ty)
     }
 
     fn is_value_unfrozen_expr<'tcx>(&self, cx: &LateContext<'tcx>, hir_id: HirId, def_id: DefId, ty: Ty<'tcx>) -> bool {
         let args = cx.typeck_results().node_args(hir_id);
 
-        let result = Self::const_eval_resolve(cx.tcx, cx.param_env, ty::UnevaluatedConst::new(def_id, args), None);
+        let result = Self::const_eval_resolve(cx.tcx, cx.param_env, ty::UnevaluatedConst::new(def_id, args), DUMMY_SP);
         self.is_value_unfrozen_raw(cx, result, ty)
     }
 
@@ -305,7 +305,7 @@ impl NonCopyConst {
         tcx: TyCtxt<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
         ct: ty::UnevaluatedConst<'tcx>,
-        span: Option<Span>,
+        span: Span,
     ) -> EvalToValTreeResult<'tcx> {
         match ty::Instance::resolve(tcx, param_env, ct.def, ct.args) {
             Ok(Some(instance)) => {
@@ -315,8 +315,8 @@ impl NonCopyConst {
                 };
                 tcx.const_eval_global_id_for_typeck(param_env, cid, span)
             },
-            Ok(None) => Err(ErrorHandled::TooGeneric(span.unwrap_or(rustc_span::DUMMY_SP))),
-            Err(err) => Err(ErrorHandled::Reported(err.into(), span.unwrap_or(rustc_span::DUMMY_SP))),
+            Ok(None) => Err(ErrorHandled::TooGeneric(span)),
+            Err(err) => Err(ErrorHandled::Reported(err.into(), span)),
         }
     }
 }
@@ -527,7 +527,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
     }
 }
 
-fn ignored_macro(cx: &LateContext<'_>, it: &rustc_hir::Item<'_>) -> bool {
+fn ignored_macro(cx: &LateContext<'_>, it: &Item<'_>) -> bool {
     macro_backtrace(it.span).any(|macro_call| {
         matches!(
             cx.tcx.get_diagnostic_name(macro_call.def_id),

@@ -12,7 +12,7 @@ mod vec_box;
 use rustc_hir as hir;
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{
-    Body, FnDecl, FnRetTy, GenericArg, ImplItem, ImplItemKind, Item, ItemKind, Local, MutTy, QPath, TraitItem,
+    Body, FnDecl, FnRetTy, GenericArg, ImplItem, ImplItemKind, Item, ItemKind, LetStmt, MutTy, QPath, TraitItem,
     TraitItemKind, TyKind,
 };
 use rustc_lint::{LateContext, LateLintPass};
@@ -392,6 +392,10 @@ impl<'tcx> LateLintPass<'tcx> for Types {
     }
 
     fn check_field_def(&mut self, cx: &LateContext<'tcx>, field: &hir::FieldDef<'tcx>) {
+        if field.span.from_expansion() {
+            return;
+        }
+
         let is_exported = cx.effective_visibilities.is_exported(field.def_id);
 
         self.check_ty(
@@ -421,7 +425,7 @@ impl<'tcx> LateLintPass<'tcx> for Types {
         }
     }
 
-    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &Local<'tcx>) {
+    fn check_local(&mut self, cx: &LateContext<'tcx>, local: &LetStmt<'tcx>) {
         if let Some(ty) = local.ty {
             self.check_ty(
                 cx,

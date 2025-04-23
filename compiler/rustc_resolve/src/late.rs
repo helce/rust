@@ -6,8 +6,7 @@
 //! If you wonder why there's no `early.rs`, that's because it's split into three files -
 //! `build_reduced_graph.rs`, `macros.rs` and `imports.rs`.
 
-use crate::errors::ImportsCannotReferTo;
-use crate::{path_names_to_string, rustdoc, BindingError, Finalize, LexicalScopeBinding};
+use crate::{errors, path_names_to_string, rustdoc, BindingError, Finalize, LexicalScopeBinding};
 use crate::{BindingKey, Used};
 use crate::{Module, ModuleOrUniformRoot, NameBinding, ParentScope, PathResult};
 use crate::{ResolutionError, Resolver, Segment, UseError};
@@ -16,14 +15,13 @@ use rustc_ast::ptr::P;
 use rustc_ast::visit::{walk_list, AssocCtxt, BoundKind, FnCtxt, FnKind, Visitor};
 use rustc_ast::*;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
-use rustc_errors::{
-    codes::*, struct_span_code_err, Applicability, DiagArgValue, IntoDiagArg, StashKey,
-};
+use rustc_errors::{codes::*, Applicability, DiagArgValue, IntoDiagArg, StashKey};
 use rustc_hir::def::Namespace::{self, *};
 use rustc_hir::def::{self, CtorKind, DefKind, LifetimeRes, NonMacroAttrKind, PartialRes, PerNS};
 use rustc_hir::def_id::{DefId, LocalDefId, CRATE_DEF_ID, LOCAL_CRATE};
-use rustc_hir::{PrimTy, TraitCandidate};
+use rustc_hir::{MissingLifetimeKind, PrimTy, TraitCandidate};
 use rustc_middle::middle::resolve_bound_vars::Set1;
+use rustc_middle::ty::DelegationFnSig;
 use rustc_middle::{bug, span_bug};
 use rustc_session::config::{CrateType, ResolveDocLinks};
 use rustc_session::lint;
@@ -44,14 +42,12 @@ type Res = def::Res<NodeId>;
 
 type IdentMap<T> = FxHashMap<Ident, T>;
 
-use diagnostics::{
-    ElisionFnParameter, LifetimeElisionCandidate, MissingLifetime, MissingLifetimeKind,
-};
+use diagnostics::{ElisionFnParameter, LifetimeElisionCandidate, MissingLifetime};
 
 #[derive(Copy, Clone, Debug)]
 struct BindingInfo {
     span: Span,
-    annotation: BindingAnnotation,
+    annotation: BindingMode,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -798,7 +794,7 @@ impl<'a: 'ast, 'ast, 'tcx> Visitor<'ast> for LateResolutionVisitor<'a, '_, 'ast,
                 self.r.record_partial_res(ty.id, PartialRes::new(res));
                 visit::walk_ty(self, ty)
             }
-            TyKind::ImplTrait(node_id, _) => {
+            TyKind::ImplTrait(node_id, _, _) => {
                 let candidates = self.lifetime_elision_candidates.take();
                 visit::walk_ty(self, ty);
                 self.record_lifetime_params_for_impl_trait(*node_id);
@@ -890,7 +886,7 @@ impl<'a: 'ast, 'ast, 'tcx> Visitor<'ast> for LateResolutionVisitor<'a, '_, 'ast,
                         kind: LifetimeBinderKind::Item,
                         span: generics.span,
                     },
-                    |this| visit::walk_foreign_item(this, foreign_item),
+                    |this| visit::walk_item(this, foreign_item),
                 );
             }
             ForeignItemKind::Fn(box Fn { ref generics, .. }) => {
@@ -902,13 +898,11 @@ impl<'a: 'ast, 'ast, 'tcx> Visitor<'ast> for LateResolutionVisitor<'a, '_, 'ast,
                         kind: LifetimeBinderKind::Function,
                         span: generics.span,
                     },
-                    |this| visit::walk_foreign_item(this, foreign_item),
+                    |this| visit::walk_item(this, foreign_item),
                 );
             }
             ForeignItemKind::Static(..) => {
-                self.with_static_rib(def_kind, |this| {
-                    visit::walk_foreign_item(this, foreign_item);
-                });
+                self.with_static_rib(def_kind, |this| visit::walk_item(this, foreign_item))
             }
             ForeignItemKind::MacCall(..) => {
                 panic!("unexpanded macro in resolve!")
@@ -1052,8 +1046,37 @@ impl<'a: 'ast, 'ast, 'tcx> Visitor<'ast> for LateResolutionVisitor<'a, '_, 'ast,
         });
         self.diag_metadata.current_function = previous_value;
     }
+
     fn visit_lifetime(&mut self, lifetime: &'ast Lifetime, use_ctxt: visit::LifetimeCtxt) {
         self.resolve_lifetime(lifetime, use_ctxt)
+    }
+
+    fn visit_precise_capturing_arg(&mut self, arg: &'ast PreciseCapturingArg) {
+        match arg {
+            // Lower the lifetime regularly; we'll resolve the lifetime and check
+            // it's a parameter later on in HIR lowering.
+            PreciseCapturingArg::Lifetime(_) => {}
+
+            PreciseCapturingArg::Arg(path, id) => {
+                // we want `impl use<C>` to try to resolve `C` as both a type parameter or
+                // a const parameter. Since the resolver specifically doesn't allow having
+                // two generic params with the same name, even if they're a different namespace,
+                // it doesn't really matter which we try resolving first, but just like
+                // `Ty::Param` we just fall back to the value namespace only if it's missing
+                // from the type namespace.
+                let mut check_ns = |ns| {
+                    self.maybe_resolve_ident_in_lexical_scope(path.segments[0].ident, ns).is_some()
+                };
+                // Like `Ty::Param`, we try resolving this as both a const and a type.
+                if !check_ns(TypeNS) && check_ns(ValueNS) {
+                    self.smart_resolve_path(*id, &None, path, PathSource::Expr(None));
+                } else {
+                    self.smart_resolve_path(*id, &None, path, PathSource::Type);
+                }
+            }
+        }
+
+        visit::walk_precise_capturing_arg(self, arg)
     }
 
     fn visit_generics(&mut self, generics: &'ast Generics) {
@@ -1637,22 +1660,16 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
     fn resolve_anonymous_lifetime(&mut self, lifetime: &Lifetime, elided: bool) {
         debug_assert_eq!(lifetime.ident.name, kw::UnderscoreLifetime);
 
-        let missing_lifetime = MissingLifetime {
-            id: lifetime.id,
-            span: lifetime.ident.span,
-            kind: if elided {
-                MissingLifetimeKind::Ampersand
-            } else {
-                MissingLifetimeKind::Underscore
-            },
-            count: 1,
-        };
+        let kind =
+            if elided { MissingLifetimeKind::Ampersand } else { MissingLifetimeKind::Underscore };
+        let missing_lifetime =
+            MissingLifetime { id: lifetime.id, span: lifetime.ident.span, kind, count: 1 };
         let elision_candidate = LifetimeElisionCandidate::Missing(missing_lifetime);
         for (i, rib) in self.lifetime_ribs.iter().enumerate().rev() {
             debug!(?rib.kind);
             match rib.kind {
                 LifetimeRibKind::AnonymousCreateParameter { binder, .. } => {
-                    let res = self.create_fresh_lifetime(lifetime.ident, binder);
+                    let res = self.create_fresh_lifetime(lifetime.ident, binder, kind);
                     self.record_lifetime_res(lifetime.id, res, elision_candidate);
                     return;
                 }
@@ -1674,18 +1691,8 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
                     );
                 }
                 LifetimeRibKind::AnonymousReportError => {
-                    let (msg, note) = if elided {
-                        (
-                            "`&` without an explicit lifetime name cannot be used here",
-                            "explicit lifetime name needed here",
-                        )
-                    } else {
-                        ("`'_` cannot be used here", "`'_` is a reserved lifetime name")
-                    };
-                    let mut diag =
-                        struct_span_code_err!(self.r.dcx(), lifetime.ident.span, E0637, "{}", msg,);
-                    diag.span_label(lifetime.ident.span, note);
                     if elided {
+                        let mut suggestion = None;
                         for rib in self.lifetime_ribs[i..].iter().rev() {
                             if let LifetimeRibKind::Generics {
                                 span,
@@ -1693,19 +1700,23 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
                                 ..
                             } = &rib.kind
                             {
-                                diag.multipart_suggestion(
-                                    "consider introducing a higher-ranked lifetime here",
-                                    vec![
-                                        (span.shrink_to_lo(), "for<'a> ".into()),
-                                        (lifetime.ident.span.shrink_to_hi(), "'a ".into()),
-                                    ],
-                                    Applicability::MachineApplicable,
-                                );
+                                suggestion =
+                                    Some(errors::ElidedAnonymousLivetimeReportErrorSuggestion {
+                                        lo: span.shrink_to_lo(),
+                                        hi: lifetime.ident.span.shrink_to_hi(),
+                                    });
                                 break;
                             }
                         }
-                    }
-                    diag.emit();
+                        self.r.dcx().emit_err(errors::ElidedAnonymousLivetimeReportError {
+                            span: lifetime.ident.span,
+                            suggestion,
+                        });
+                    } else {
+                        self.r.dcx().emit_err(errors::ExplicitAnonymousLivetimeReportError {
+                            span: lifetime.ident.span,
+                        });
+                    };
                     self.record_lifetime_res(lifetime.id, LifetimeRes::Error, elision_candidate);
                     return;
                 }
@@ -1744,13 +1755,18 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
     }
 
     #[instrument(level = "debug", skip(self))]
-    fn create_fresh_lifetime(&mut self, ident: Ident, binder: NodeId) -> LifetimeRes {
+    fn create_fresh_lifetime(
+        &mut self,
+        ident: Ident,
+        binder: NodeId,
+        kind: MissingLifetimeKind,
+    ) -> LifetimeRes {
         debug_assert_eq!(ident.name, kw::UnderscoreLifetime);
         debug!(?ident.span);
 
         // Leave the responsibility to create the `LocalDefId` to lowering.
         let param = self.r.next_node_id();
-        let res = LifetimeRes::Fresh { param, binder };
+        let res = LifetimeRes::Fresh { param, binder, kind };
         self.record_lifetime_param(param, res);
 
         // Record the created lifetime parameter so lowering can pick it up and add it to HIR.
@@ -1844,14 +1860,15 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
             };
             let ident = Ident::new(kw::UnderscoreLifetime, elided_lifetime_span);
 
+            let kind = if segment.has_generic_args {
+                MissingLifetimeKind::Comma
+            } else {
+                MissingLifetimeKind::Brackets
+            };
             let missing_lifetime = MissingLifetime {
                 id: node_ids.start,
                 span: elided_lifetime_span,
-                kind: if segment.has_generic_args {
-                    MissingLifetimeKind::Comma
-                } else {
-                    MissingLifetimeKind::Brackets
-                },
+                kind,
                 count: expected_lifetimes,
             };
             let mut should_lint = true;
@@ -1866,21 +1883,17 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
                     LifetimeRibKind::AnonymousCreateParameter { report_in_path: true, .. }
                     | LifetimeRibKind::AnonymousWarn(_) => {
                         let sess = self.r.tcx.sess;
-                        let mut err = struct_span_code_err!(
-                            sess.dcx(),
-                            path_span,
-                            E0726,
-                            "implicit elided lifetime not allowed here"
-                        );
-                        rustc_errors::add_elided_lifetime_in_path_suggestion(
+                        let subdiag = rustc_errors::elided_lifetime_in_path_suggestion(
                             sess.source_map(),
-                            &mut err,
                             expected_lifetimes,
                             path_span,
                             !segment.has_generic_args,
                             elided_lifetime_span,
                         );
-                        err.emit();
+                        self.r.dcx().emit_err(errors::ImplicitElidedLifetimeNotAllowedHere {
+                            span: path_span,
+                            subdiag,
+                        });
                         should_lint = false;
 
                         for id in node_ids {
@@ -1897,7 +1910,7 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
                         // Group all suggestions into the first record.
                         let mut candidate = LifetimeElisionCandidate::Missing(missing_lifetime);
                         for id in node_ids {
-                            let res = self.create_fresh_lifetime(ident, binder);
+                            let res = self.create_fresh_lifetime(ident, binder, kind);
                             self.record_lifetime_res(
                                 id,
                                 res,
@@ -2315,7 +2328,7 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
             let report_error = |this: &Self, ns| {
                 if this.should_report_errs() {
                     let what = if ns == TypeNS { "type parameters" } else { "local variables" };
-                    this.r.dcx().emit_err(ImportsCannotReferTo { span: ident.span, what });
+                    this.r.dcx().emit_err(errors::ImportsCannotReferTo { span: ident.span, what });
                 }
             };
 
@@ -2533,7 +2546,17 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
             }
 
             ItemKind::Delegation(ref delegation) => {
-                self.resolve_delegation(delegation);
+                let span = delegation.path.segments.last().unwrap().ident.span;
+                self.with_generic_param_rib(
+                    &[],
+                    RibKind::Item(HasGenericParams::Yes(span), def_kind),
+                    LifetimeRibKind::Generics {
+                        binder: item.id,
+                        kind: LifetimeBinderKind::Function,
+                        span,
+                    },
+                    |this| this.resolve_delegation(delegation),
+                );
             }
 
             ItemKind::ExternCrate(..) => {}
@@ -2625,29 +2648,19 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
             }
 
             if param.ident.name == kw::UnderscoreLifetime {
-                struct_span_code_err!(
-                    self.r.dcx(),
-                    param.ident.span,
-                    E0637,
-                    "`'_` cannot be used here"
-                )
-                .with_span_label(param.ident.span, "`'_` is a reserved lifetime name")
-                .emit();
+                self.r
+                    .dcx()
+                    .emit_err(errors::UnderscoreLifetimeIsReserved { span: param.ident.span });
                 // Record lifetime res, so lowering knows there is something fishy.
                 self.record_lifetime_param(param.id, LifetimeRes::Error);
                 continue;
             }
 
             if param.ident.name == kw::StaticLifetime {
-                struct_span_code_err!(
-                    self.r.dcx(),
-                    param.ident.span,
-                    E0262,
-                    "invalid lifetime parameter name: `{}`",
-                    param.ident,
-                )
-                .with_span_label(param.ident.span, "'static is a reserved lifetime name")
-                .emit();
+                self.r.dcx().emit_err(errors::StaticLifetimeIsReserved {
+                    span: param.ident.span,
+                    lifetime: param.ident,
+                });
                 // Record lifetime res, so lowering knows there is something fishy.
                 self.record_lifetime_param(param.id, LifetimeRes::Error);
                 continue;
@@ -2821,7 +2834,16 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
                     walk_assoc_item(self, generics, LifetimeBinderKind::Function, item);
                 }
                 AssocItemKind::Delegation(delegation) => {
-                    self.resolve_delegation(delegation);
+                    self.with_generic_param_rib(
+                        &[],
+                        RibKind::AssocItem,
+                        LifetimeRibKind::Generics {
+                            binder: item.id,
+                            kind: LifetimeBinderKind::Function,
+                            span: delegation.path.segments.last().unwrap().ident.span,
+                        },
+                        |this| this.resolve_delegation(delegation),
+                    );
                 }
                 AssocItemKind::Type(box TyAlias { generics, .. }) => self
                     .with_lifetime_rib(LifetimeRibKind::AnonymousReportError, |this| {
@@ -3071,16 +3093,28 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
             }
             AssocItemKind::Delegation(box delegation) => {
                 debug!("resolve_implementation AssocItemKind::Delegation");
-                self.check_trait_item(
-                    item.id,
-                    item.ident,
-                    &item.kind,
-                    ValueNS,
-                    item.span,
-                    seen_trait_items,
-                    |i, s, c| MethodNotMemberOfTrait(i, s, c),
+                self.with_generic_param_rib(
+                    &[],
+                    RibKind::AssocItem,
+                    LifetimeRibKind::Generics {
+                        binder: item.id,
+                        kind: LifetimeBinderKind::Function,
+                        span: delegation.path.segments.last().unwrap().ident.span,
+                    },
+                    |this| {
+                        this.check_trait_item(
+                            item.id,
+                            item.ident,
+                            &item.kind,
+                            ValueNS,
+                            item.span,
+                            seen_trait_items,
+                            |i, s, c| MethodNotMemberOfTrait(i, s, c),
+                        );
+
+                        this.resolve_delegation(delegation)
+                    },
                 );
-                self.resolve_delegation(delegation);
             }
             AssocItemKind::MacCall(_) => {
                 panic!("unexpanded macro in resolve!")
@@ -3618,14 +3652,14 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
     fn try_resolve_as_non_binding(
         &mut self,
         pat_src: PatternSource,
-        ann: BindingAnnotation,
+        ann: BindingMode,
         ident: Ident,
         has_sub: bool,
     ) -> Option<Res> {
         // An immutable (no `mut`) by-value (no `ref`) binding pattern without
         // a sub pattern (no `@ $pat`) is syntactically ambiguous as it could
         // also be interpreted as a path to e.g. a constant, variant, etc.
-        let is_syntactic_ambiguity = !has_sub && ann == BindingAnnotation::NONE;
+        let is_syntactic_ambiguity = !has_sub && ann == BindingMode::NONE;
 
         let ls_binding = self.maybe_resolve_ident_in_lexical_scope(ident, ValueNS)?;
         let (res, binding) = match ls_binding {
@@ -4672,7 +4706,9 @@ impl<'a: 'ast, 'b, 'ast, 'tcx> LateResolutionVisitor<'a, 'b, 'ast, 'tcx> {
             return;
         }
 
-        if path.iter().any(|seg| seg.ident.span.from_expansion()) {
+        if finalize.path_span.from_expansion()
+            || path.iter().any(|seg| seg.ident.span.from_expansion())
+        {
             return;
         }
 
@@ -4712,12 +4748,13 @@ struct ItemInfoCollector<'a, 'b, 'tcx> {
 
 impl ItemInfoCollector<'_, '_, '_> {
     fn collect_fn_info(&mut self, sig: &FnSig, id: NodeId) {
-        let def_id = self.r.local_def_id(id);
-        self.r.fn_parameter_counts.insert(def_id, sig.decl.inputs.len());
-
-        if sig.decl.has_self() {
-            self.r.has_self.insert(def_id);
-        }
+        let sig = DelegationFnSig {
+            header: sig.header,
+            param_count: sig.decl.inputs.len(),
+            has_self: sig.decl.has_self(),
+            c_variadic: sig.decl.c_variadic(),
+        };
+        self.r.delegation_fn_sigs.insert(self.r.local_def_id(id), sig);
     }
 }
 

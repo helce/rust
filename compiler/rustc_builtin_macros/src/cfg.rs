@@ -11,7 +11,7 @@ use rustc_errors::PResult;
 use rustc_expand::base::{DummyResult, ExpandResult, ExtCtxt, MacEager, MacroExpanderResult};
 use rustc_span::Span;
 
-pub fn expand_cfg(
+pub(crate) fn expand_cfg(
     cx: &mut ExtCtxt<'_>,
     sp: Span,
     tts: TokenStream,
@@ -35,7 +35,7 @@ pub fn expand_cfg(
     })
 }
 
-fn parse_cfg<'a>(cx: &mut ExtCtxt<'a>, span: Span, tts: TokenStream) -> PResult<'a, ast::MetaItem> {
+fn parse_cfg<'a>(cx: &ExtCtxt<'a>, span: Span, tts: TokenStream) -> PResult<'a, ast::MetaItem> {
     let mut p = cx.new_parser_from_tts(tts);
 
     if p.token == token::Eof {

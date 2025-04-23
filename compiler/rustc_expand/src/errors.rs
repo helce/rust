@@ -153,29 +153,6 @@ pub(crate) struct HelperAttributeNameInvalid {
 }
 
 #[derive(Diagnostic)]
-#[diag(expand_expected_comma_in_list)]
-pub(crate) struct ExpectedCommaInList {
-    #[primary_span]
-    pub span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(expand_only_one_argument)]
-pub(crate) struct OnlyOneArgument<'a> {
-    #[primary_span]
-    pub span: Span,
-    pub name: &'a str,
-}
-
-#[derive(Diagnostic)]
-#[diag(expand_takes_no_arguments)]
-pub(crate) struct TakesNoArguments<'a> {
-    #[primary_span]
-    pub span: Span,
-    pub name: &'a str,
-}
-
-#[derive(Diagnostic)]
 #[diag(expand_feature_removed, code = E0557)]
 pub(crate) struct FeatureRemoved<'a> {
     #[primary_span]
@@ -447,4 +424,12 @@ pub struct InvalidFragmentSpecifier {
     pub span: Span,
     pub fragment: Ident,
     pub help: String,
+}
+
+#[derive(Diagnostic)]
+#[diag(expand_expected_paren_or_brace)]
+pub struct ExpectedParenOrBrace<'a> {
+    #[primary_span]
+    pub span: Span,
+    pub token: Cow<'a, str>,
 }

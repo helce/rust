@@ -13,7 +13,7 @@ use rustc_middle::mir::interpret::{
     Provenance,
 };
 use rustc_middle::mir::visit::Visitor;
-use rustc_middle::mir::{self, *};
+use rustc_middle::mir::*;
 use rustc_target::abi::Size;
 
 const INDENT: &str = "    ";
@@ -126,7 +126,7 @@ fn dump_matched_mir_node<'tcx, F>(
             Some(promoted) => write!(file, "::{promoted:?}`")?,
         }
         writeln!(file, " {disambiguator} {pass_name}")?;
-        if let Some(ref layout) = body.coroutine_layout() {
+        if let Some(ref layout) = body.coroutine_layout_raw() {
             writeln!(file, "/* coroutine_layout = {layout:#?} */")?;
         }
         writeln!(file)?;
@@ -177,6 +177,17 @@ fn dump_path<'tcx>(
     // to get unique file names.
     let shim_disambiguator = match source.instance {
         ty::InstanceDef::DropGlue(_, Some(ty)) => {
+            // Unfortunately, pretty-printed typed are not very filename-friendly.
+            // We dome some filtering.
+            let mut s = ".".to_owned();
+            s.extend(ty.to_string().chars().filter_map(|c| match c {
+                ' ' => None,
+                ':' | '<' | '>' => Some('_'),
+                c => Some(c),
+            }));
+            s
+        }
+        ty::InstanceDef::AsyncDropGlueCtorShim(_, Some(ty)) => {
             // Unfortunately, pretty-printed typed are not very filename-friendly.
             // We dome some filtering.
             let mut s = ".".to_owned();
@@ -475,7 +486,8 @@ fn write_coverage_branch_info(
     branch_info: &coverage::BranchInfo,
     w: &mut dyn io::Write,
 ) -> io::Result<()> {
-    let coverage::BranchInfo { branch_spans, .. } = branch_info;
+    let coverage::BranchInfo { branch_spans, mcdc_branch_spans, mcdc_decision_spans, .. } =
+        branch_info;
 
     for coverage::BranchSpan { span, true_marker, false_marker } in branch_spans {
         writeln!(
@@ -483,7 +495,26 @@ fn write_coverage_branch_info(
             "{INDENT}coverage branch {{ true: {true_marker:?}, false: {false_marker:?} }} => {span:?}",
         )?;
     }
-    if !branch_spans.is_empty() {
+
+    for coverage::MCDCBranchSpan { span, condition_info, true_marker, false_marker } in
+        mcdc_branch_spans
+    {
+        writeln!(
+            w,
+            "{INDENT}coverage mcdc branch {{ condition_id: {:?}, true: {true_marker:?}, false: {false_marker:?} }} => {span:?}",
+            condition_info.map(|info| info.condition_id)
+        )?;
+    }
+
+    for coverage::MCDCDecisionSpan { span, conditions_num, end_markers } in mcdc_decision_spans {
+        writeln!(
+            w,
+            "{INDENT}coverage mcdc decision {{ conditions_num: {conditions_num:?}, end: {end_markers:?} }} => {span:?}"
+        )?;
+    }
+
+    if !branch_spans.is_empty() || !mcdc_branch_spans.is_empty() || !mcdc_decision_spans.is_empty()
+    {
         writeln!(w)?;
     }
 
@@ -711,7 +742,7 @@ impl Debug for Statement<'_> {
             AscribeUserType(box (ref place, ref c_ty), ref variance) => {
                 write!(fmt, "AscribeUserType({place:?}, {variance:?}, {c_ty:?})")
             }
-            Coverage(box mir::Coverage { ref kind }) => write!(fmt, "Coverage::{kind:?}"),
+            Coverage(ref kind) => write!(fmt, "Coverage::{kind:?}"),
             Intrinsic(box ref intrinsic) => write!(fmt, "{intrinsic}"),
             ConstEvalCounter => write!(fmt, "ConstEvalCounter"),
             Nop => write!(fmt, "nop"),
@@ -944,7 +975,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                     NullOp::SizeOf => write!(fmt, "SizeOf({t})"),
                     NullOp::AlignOf => write!(fmt, "AlignOf({t})"),
                     NullOp::OffsetOf(fields) => write!(fmt, "OffsetOf({t}, {fields:?})"),
-                    NullOp::UbCheck(kind) => write!(fmt, "UbCheck({kind:?})"),
+                    NullOp::UbChecks => write!(fmt, "UbChecks()"),
                 }
             }
             ThreadLocalRef(did) => ty::tls::with(|tcx| {
@@ -954,7 +985,8 @@ impl<'tcx> Debug for Rvalue<'tcx> {
             Ref(region, borrow_kind, ref place) => {
                 let kind_str = match borrow_kind {
                     BorrowKind::Shared => "",
-                    BorrowKind::Fake => "fake ",
+                    BorrowKind::Fake(FakeBorrowKind::Deep) => "fake ",
+                    BorrowKind::Fake(FakeBorrowKind::Shallow) => "fake shallow ",
                     BorrowKind::Mut { .. } => "mut ",
                 };
 
@@ -978,12 +1010,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
             CopyForDeref(ref place) => write!(fmt, "deref_copy {place:#?}"),
 
             AddressOf(mutability, ref place) => {
-                let kind_str = match mutability {
-                    Mutability::Mut => "mut",
-                    Mutability::Not => "const",
-                };
-
-                write!(fmt, "&raw {kind_str} {place:?}")
+                write!(fmt, "&raw {mut_str} {place:?}", mut_str = mutability.ptr_str())
             }
 
             Aggregate(ref kind, ref places) => {
@@ -1079,6 +1106,15 @@ impl<'tcx> Debug for Rvalue<'tcx> {
 
                         struct_fmt.finish()
                     }),
+
+                    AggregateKind::RawPtr(pointee_ty, mutability) => {
+                        let kind_str = match mutability {
+                            Mutability::Mut => "mut",
+                            Mutability::Not => "const",
+                        };
+                        with_no_trimmed_paths!(write!(fmt, "*{kind_str} {pointee_ty} from "))?;
+                        fmt_tuple(fmt, "")
+                    }
                 }
             }
 

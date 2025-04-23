@@ -32,7 +32,7 @@ impl<T> ExpectedFound<T> {
 pub enum TypeError<'tcx> {
     Mismatch,
     ConstnessMismatch(ExpectedFound<ty::BoundConstness>),
-    PolarityMismatch(ExpectedFound<ty::ImplPolarity>),
+    PolarityMismatch(ExpectedFound<ty::PredicatePolarity>),
     UnsafetyMismatch(ExpectedFound<hir::Unsafety>),
     AbiMismatch(ExpectedFound<abi::Abi>),
     Mutability,
@@ -285,8 +285,9 @@ impl<'tcx> Ty<'tcx> {
             ty::Adt(def, _) => def.descr().into(),
             ty::Foreign(_) => "extern type".into(),
             ty::Array(..) => "array".into(),
+            ty::Pat(..) => "pattern type".into(),
             ty::Slice(_) => "slice".into(),
-            ty::RawPtr(_) => "raw pointer".into(),
+            ty::RawPtr(_, _) => "raw pointer".into(),
             ty::Ref(.., mutbl) => match mutbl {
                 hir::Mutability::Mut => "mutable reference",
                 _ => "reference",

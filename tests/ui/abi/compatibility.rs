@@ -67,7 +67,6 @@
 //@[e2k] compile-flags: --target e2k-unknown-linux-gnu
 //@[e2k] needs-llvm-components: elbrus
 #![feature(rustc_attrs, unsized_fn_params, transparent_unions)]
-#![cfg_attr(host, feature(generic_nonzero))]
 #![cfg_attr(not(host), feature(no_core, lang_items), no_std, no_core)]
 #![allow(unused, improper_ctypes_definitions, internal_features)]
 

@@ -1,4 +1,4 @@
-use crate::traits::{check_args_compatible, specialization_graph};
+use crate::traits::specialization_graph;
 
 use super::assembly::structural_traits::AsyncCallableRelevantTypes;
 use super::assembly::{self, structural_traits, Candidate};
@@ -7,6 +7,7 @@ use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_hir::LangItem;
 use rustc_infer::traits::query::NoSolution;
+use rustc_infer::traits::solve::inspect::ProbeKind;
 use rustc_infer::traits::specialization_graph::LeafDef;
 use rustc_infer::traits::Reveal;
 use rustc_middle::traits::solve::{
@@ -30,33 +31,47 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
         &mut self,
         goal: Goal<'tcx, NormalizesTo<'tcx>>,
     ) -> QueryResult<'tcx> {
+        self.set_is_normalizes_to_goal();
+        debug_assert!(self.term_is_fully_unconstrained(goal));
+        let normalize_result = self
+            .probe(|&result| ProbeKind::TryNormalizeNonRigid { result })
+            .enter(|this| this.normalize_at_least_one_step(goal));
+
+        match normalize_result {
+            Ok(res) => Ok(res),
+            Err(NoSolution) => {
+                let Goal { param_env, predicate: NormalizesTo { alias, term } } = goal;
+                if alias.opt_kind(self.tcx()).is_some() {
+                    self.relate_rigid_alias_non_alias(
+                        param_env,
+                        alias,
+                        ty::Variance::Invariant,
+                        term,
+                    )?;
+                    self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+                } else {
+                    // FIXME(generic_const_exprs): we currently do not support rigid
+                    // unevaluated constants.
+                    Err(NoSolution)
+                }
+            }
+        }
+    }
+
+    /// Normalize the given alias by at least one step. If the alias is rigid, this
+    /// returns `NoSolution`.
+    #[instrument(level = "debug", skip(self), ret)]
+    fn normalize_at_least_one_step(
+        &mut self,
+        goal: Goal<'tcx, NormalizesTo<'tcx>>,
+    ) -> QueryResult<'tcx> {
         let def_id = goal.predicate.def_id();
         match self.tcx().def_kind(def_id) {
             DefKind::AssocTy | DefKind::AssocConst => {
                 match self.tcx().associated_item(def_id).container {
                     ty::AssocItemContainer::TraitContainer => {
-                        // To only compute normalization once for each projection we only
-                        // assemble normalization candidates if the expected term is an
-                        // unconstrained inference variable.
-                        //
-                        // Why: For better cache hits, since if we have an unconstrained RHS then
-                        // there are only as many cache keys as there are (canonicalized) alias
-                        // types in each normalizes-to goal. This also weakens inference in a
-                        // forwards-compatible way so we don't use the value of the RHS term to
-                        // affect candidate assembly for projections.
-                        //
-                        // E.g. for `<T as Trait>::Assoc == u32` we recursively compute the goal
-                        // `exists<U> <T as Trait>::Assoc == U` and then take the resulting type for
-                        // `U` and equate it with `u32`. This means that we don't need a separate
-                        // projection cache in the solver, since we're piggybacking off of regular
-                        // goal caching.
-                        if self.term_is_fully_unconstrained(goal) {
-                            let candidates = self.assemble_and_evaluate_candidates(goal);
-                            self.merge_candidates(candidates)
-                        } else {
-                            self.set_normalizes_to_hack_goal(goal);
-                            self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
-                        }
+                        let candidates = self.assemble_and_evaluate_candidates(goal);
+                        self.merge_candidates(candidates)
                     }
                     ty::AssocItemContainer::ImplContainer => {
                         self.normalize_inherent_associated_type(goal)
@@ -64,37 +79,23 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
                 }
             }
             DefKind::AnonConst => self.normalize_anon_const(goal),
-            DefKind::OpaqueTy => self.normalize_opaque_type(goal),
             DefKind::TyAlias => self.normalize_weak_type(goal),
-            kind => bug!("unknown DefKind {} in projection goal: {goal:#?}", kind.descr(def_id)),
+            DefKind::OpaqueTy => self.normalize_opaque_type(goal),
+            kind => bug!("unknown DefKind {} in normalizes-to goal: {goal:#?}", kind.descr(def_id)),
         }
     }
 
-    /// When normalizing an associated item, constrain the result to `term`.
+    /// When normalizing an associated item, constrain the expected term to `term`.
     ///
-    /// While `NormalizesTo` goals have the normalized-to term as an argument,
-    /// this argument is always fully unconstrained for associated items.
-    /// It is therefore appropriate to instead think of these `NormalizesTo` goals
-    /// as function returning a term after normalizing.
-    ///
-    /// When equating an inference variable and an alias, we tend to emit `alias-relate`
-    /// goals and only actually instantiate the inference variable with an alias if the
-    /// alias is rigid. However, this means that constraining the expected term of
-    /// such goals ends up fully structurally normalizing the resulting type instead of
-    /// only by one step. To avoid this we instead use structural equality here, resulting
-    /// in each `NormalizesTo` only projects by a single step.
-    ///
-    /// Not doing so, currently causes issues because trying to normalize an opaque type
-    /// during alias-relate doesn't actually constrain the opaque if the concrete type
-    /// is an inference variable. This means that `NormalizesTo` for associated types
-    /// normalizing to an opaque type always resulted in ambiguity, breaking tests e.g.
-    /// tests/ui/type-alias-impl-trait/issue-78450.rs.
+    /// We know `term` to always be a fully unconstrained inference variable, so
+    /// `eq` should never fail here. However, in case `term` contains aliases, we
+    /// emit nested `AliasRelate` goals to structurally normalize the alias.
     pub fn instantiate_normalizes_to_term(
         &mut self,
         goal: Goal<'tcx, NormalizesTo<'tcx>>,
         term: ty::Term<'tcx>,
     ) {
-        self.eq_structurally_relating_aliases(goal.param_env, goal.predicate.term, term)
+        self.eq(goal.param_env, goal.predicate.term, term)
             .expect("expected goal term to be fully unconstrained");
     }
 }
@@ -261,7 +262,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for NormalizesTo<'tcx> {
                 assoc_def.defining_node,
             );
 
-            if !check_args_compatible(tcx, assoc_def.item, args) {
+            if !tcx.check_args_compatible(assoc_def.item.def_id, args) {
                 return error_response(
                     ecx,
                     "associated item has mismatched generic item arguments",
@@ -428,7 +429,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for NormalizesTo<'tcx> {
                             ),
                             output_coroutine_ty.into(),
                         ),
-                        sym::CallMutFuture | sym::CallFuture => (
+                        sym::CallRefFuture => (
                             ty::AliasTy::new(
                                 tcx,
                                 goal.predicate.def_id(),
@@ -486,6 +487,11 @@ impl<'tcx> assembly::GoalKind<'tcx> for NormalizesTo<'tcx> {
             bug!();
         };
 
+        // Bail if the upvars haven't been constrained.
+        if tupled_upvars_ty.expect_ty().is_ty_var() {
+            return ecx.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS);
+        }
+
         let Some(closure_kind) = closure_fn_kind_ty.expect_ty().to_opt_closure_kind() else {
             // We don't need to worry about the self type being an infer var.
             return Err(NoSolution);
@@ -532,6 +538,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for NormalizesTo<'tcx> {
                 | ty::Uint(..)
                 | ty::Float(..)
                 | ty::Array(..)
+                | ty::Pat(..)
                 | ty::RawPtr(..)
                 | ty::Ref(..)
                 | ty::FnDef(..)
@@ -661,6 +668,13 @@ impl<'tcx> assembly::GoalKind<'tcx> for NormalizesTo<'tcx> {
         )
     }
 
+    fn consider_builtin_fused_iterator_candidate(
+        _ecx: &mut EvalCtxt<'_, 'tcx>,
+        goal: Goal<'tcx, Self>,
+    ) -> QueryResult<'tcx> {
+        bug!("`FusedIterator` does not have an associated type: {:?}", goal);
+    }
+
     fn consider_builtin_async_iterator_candidate(
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
@@ -760,6 +774,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for NormalizesTo<'tcx> {
             | ty::Uint(..)
             | ty::Float(..)
             | ty::Array(..)
+            | ty::Pat(..)
             | ty::RawPtr(..)
             | ty::Ref(..)
             | ty::FnDef(..)
@@ -795,6 +810,59 @@ impl<'tcx> assembly::GoalKind<'tcx> for NormalizesTo<'tcx> {
 
         ecx.probe_misc_candidate("builtin discriminant kind").enter(|ecx| {
             ecx.instantiate_normalizes_to_term(goal, discriminant_ty.into());
+            ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+        })
+    }
+
+    fn consider_builtin_async_destruct_candidate(
+        ecx: &mut EvalCtxt<'_, 'tcx>,
+        goal: Goal<'tcx, Self>,
+    ) -> QueryResult<'tcx> {
+        let self_ty = goal.predicate.self_ty();
+        let async_destructor_ty = match *self_ty.kind() {
+            ty::Bool
+            | ty::Char
+            | ty::Int(..)
+            | ty::Uint(..)
+            | ty::Float(..)
+            | ty::Array(..)
+            | ty::RawPtr(..)
+            | ty::Ref(..)
+            | ty::FnDef(..)
+            | ty::FnPtr(..)
+            | ty::Closure(..)
+            | ty::CoroutineClosure(..)
+            | ty::Infer(ty::IntVar(..) | ty::FloatVar(..))
+            | ty::Never
+            | ty::Adt(_, _)
+            | ty::Str
+            | ty::Slice(_)
+            | ty::Tuple(_)
+            | ty::Error(_) => self_ty.async_destructor_ty(ecx.tcx(), goal.param_env),
+
+            // We do not call `Ty::async_destructor_ty` on alias, param, or placeholder
+            // types, which return `<self_ty as AsyncDestruct>::AsyncDestructor`
+            // (or ICE in the case of placeholders). Projecting a type to itself
+            // is never really productive.
+            ty::Alias(_, _) | ty::Param(_) | ty::Placeholder(..) => {
+                return Err(NoSolution);
+            }
+
+            ty::Infer(ty::TyVar(_) | ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_))
+            | ty::Foreign(..)
+            | ty::Bound(..) => bug!(
+                "unexpected self ty `{:?}` when normalizing `<T as AsyncDestruct>::AsyncDestructor`",
+                goal.predicate.self_ty()
+            ),
+
+            ty::Pat(..) | ty::Dynamic(..) | ty::Coroutine(..) | ty::CoroutineWitness(..) => bug!(
+                "`consider_builtin_async_destruct_candidate` is not yet implemented for type: {self_ty:?}"
+            ),
+        };
+
+        ecx.probe_misc_candidate("builtin async destruct").enter(|ecx| {
+            ecx.eq(goal.param_env, goal.predicate.term, async_destructor_ty.into())
+                .expect("expected goal term to be fully unconstrained");
             ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
         })
     }

@@ -13,10 +13,10 @@ use rustc_codegen_ssa::traits::{
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_llvm::RustString;
 use rustc_middle::bug;
-use rustc_middle::mir::coverage::CoverageKind;
-use rustc_middle::mir::Coverage;
+use rustc_middle::mir::coverage::{CoverageKind, FunctionCoverageInfo};
 use rustc_middle::ty::layout::HasTyCtxt;
 use rustc_middle::ty::Instance;
+use rustc_target::abi::Align;
 
 use std::cell::RefCell;
 
@@ -24,14 +24,13 @@ pub(crate) mod ffi;
 pub(crate) mod map_data;
 pub mod mapgen;
 
-const VAR_ALIGN_BYTES: usize = 8;
-
 /// A context object for maintaining all state needed by the coverageinfo module.
 pub struct CrateCoverageContext<'ll, 'tcx> {
     /// Coverage data for each instrumented function identified by DefId.
     pub(crate) function_coverage_map:
         RefCell<FxIndexMap<Instance<'tcx>, FunctionCoverageCollector<'tcx>>>,
     pub(crate) pgo_func_name_var_map: RefCell<FxHashMap<Instance<'tcx>, &'ll llvm::Value>>,
+    pub(crate) mcdc_condition_bitmap_map: RefCell<FxHashMap<Instance<'tcx>, &'ll llvm::Value>>,
 }
 
 impl<'ll, 'tcx> CrateCoverageContext<'ll, 'tcx> {
@@ -39,6 +38,7 @@ impl<'ll, 'tcx> CrateCoverageContext<'ll, 'tcx> {
         Self {
             function_coverage_map: Default::default(),
             pgo_func_name_var_map: Default::default(),
+            mcdc_condition_bitmap_map: Default::default(),
         }
     }
 
@@ -46,6 +46,12 @@ impl<'ll, 'tcx> CrateCoverageContext<'ll, 'tcx> {
         &self,
     ) -> FxIndexMap<Instance<'tcx>, FunctionCoverageCollector<'tcx>> {
         self.function_coverage_map.replace(FxIndexMap::default())
+    }
+
+    /// LLVM use a temp value to record evaluated mcdc test vector of each decision, which is called condition bitmap.
+    /// This value is named `mcdc.addr` (same as clang) and is a 32-bit integer.
+    fn try_get_mcdc_condition_bitmap(&self, instance: &Instance<'tcx>) -> Option<&'ll llvm::Value> {
+        self.mcdc_condition_bitmap_map.borrow().get(instance).copied()
     }
 }
 
@@ -75,7 +81,7 @@ impl<'ll, 'tcx> CodegenCx<'ll, 'tcx> {
 
 impl<'tcx> CoverageInfoBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
     #[instrument(level = "debug", skip(self))]
-    fn add_coverage(&mut self, instance: Instance<'tcx>, coverage: &Coverage) {
+    fn add_coverage(&mut self, instance: Instance<'tcx>, kind: &CoverageKind) {
         // Our caller should have already taken care of inlining subtleties,
         // so we can assume that counter/expression IDs in this coverage
         // statement are meaningful for the given instance.
@@ -85,14 +91,6 @@ impl<'tcx> CoverageInfoBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
 
         let bx = self;
 
-        match coverage.kind {
-            // Marker statements have no effect during codegen,
-            // so return early and don't create `func_coverage`.
-            CoverageKind::SpanMarker | CoverageKind::BlockMarker { .. } => return,
-            // Match exhaustively to ensure that newly-added kinds are classified correctly.
-            CoverageKind::CounterIncrement { .. } | CoverageKind::ExpressionUsed { .. } => {}
-        }
-
         let Some(function_coverage_info) =
             bx.tcx.instance_mir(instance.def).function_coverage_info.as_deref()
         else {
@@ -100,16 +98,19 @@ impl<'tcx> CoverageInfoBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
             return;
         };
 
+        if function_coverage_info.mcdc_bitmap_bytes > 0 {
+            ensure_mcdc_parameters(bx, instance, function_coverage_info);
+        }
+
         let Some(coverage_context) = bx.coverage_context() else { return };
         let mut coverage_map = coverage_context.function_coverage_map.borrow_mut();
         let func_coverage = coverage_map
             .entry(instance)
             .or_insert_with(|| FunctionCoverageCollector::new(instance, function_coverage_info));
 
-        let Coverage { kind } = coverage;
         match *kind {
             CoverageKind::SpanMarker | CoverageKind::BlockMarker { .. } => unreachable!(
-                "unexpected marker statement {kind:?} should have caused an early return"
+                "marker statement {kind:?} should have been removed by CleanupPostBorrowck"
             ),
             CoverageKind::CounterIncrement { id } => {
                 func_coverage.mark_counter_id_seen(id);
@@ -142,8 +143,64 @@ impl<'tcx> CoverageInfoBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
             CoverageKind::ExpressionUsed { id } => {
                 func_coverage.mark_expression_id_seen(id);
             }
+            CoverageKind::CondBitmapUpdate { id, value, .. } => {
+                drop(coverage_map);
+                assert_ne!(
+                    id.as_u32(),
+                    0,
+                    "ConditionId of evaluated conditions should never be zero"
+                );
+                let cond_bitmap = coverage_context
+                    .try_get_mcdc_condition_bitmap(&instance)
+                    .expect("mcdc cond bitmap should have been allocated for updating");
+                let cond_loc = bx.const_i32(id.as_u32() as i32 - 1);
+                let bool_value = bx.const_bool(value);
+                let fn_name = bx.get_pgo_func_name_var(instance);
+                let hash = bx.const_u64(function_coverage_info.function_source_hash);
+                bx.mcdc_condbitmap_update(fn_name, hash, cond_loc, cond_bitmap, bool_value);
+            }
+            CoverageKind::TestVectorBitmapUpdate { bitmap_idx } => {
+                drop(coverage_map);
+                let cond_bitmap = coverage_context
+                                    .try_get_mcdc_condition_bitmap(&instance)
+                                    .expect("mcdc cond bitmap should have been allocated for merging into the global bitmap");
+                let bitmap_bytes = bx.tcx().coverage_ids_info(instance.def).mcdc_bitmap_bytes;
+                assert!(bitmap_idx < bitmap_bytes, "bitmap index of the decision out of range");
+                assert!(
+                    bitmap_bytes <= function_coverage_info.mcdc_bitmap_bytes,
+                    "bitmap length disagreement: query says {bitmap_bytes} but function info only has {}",
+                    function_coverage_info.mcdc_bitmap_bytes
+                );
+
+                let fn_name = bx.get_pgo_func_name_var(instance);
+                let hash = bx.const_u64(function_coverage_info.function_source_hash);
+                let bitmap_bytes = bx.const_u32(bitmap_bytes);
+                let bitmap_index = bx.const_u32(bitmap_idx);
+                bx.mcdc_tvbitmap_update(fn_name, hash, bitmap_bytes, bitmap_index, cond_bitmap);
+            }
         }
     }
+}
+
+fn ensure_mcdc_parameters<'ll, 'tcx>(
+    bx: &mut Builder<'_, 'll, 'tcx>,
+    instance: Instance<'tcx>,
+    function_coverage_info: &FunctionCoverageInfo,
+) {
+    let Some(cx) = bx.coverage_context() else { return };
+    if cx.mcdc_condition_bitmap_map.borrow().contains_key(&instance) {
+        return;
+    }
+
+    let fn_name = bx.get_pgo_func_name_var(instance);
+    let hash = bx.const_u64(function_coverage_info.function_source_hash);
+    let bitmap_bytes = bx.const_u32(function_coverage_info.mcdc_bitmap_bytes);
+    let cond_bitmap = bx.mcdc_parameters(fn_name, hash, bitmap_bytes);
+    bx.coverage_context()
+        .expect("already checked above")
+        .mcdc_condition_bitmap_map
+        .borrow_mut()
+        .insert(instance, cond_bitmap);
 }
 
 /// Calls llvm::createPGOFuncNameVar() with the given function instance's
@@ -235,7 +292,8 @@ pub(crate) fn save_cov_data_to_mod<'ll, 'tcx>(
     llvm::set_global_constant(llglobal, true);
     llvm::set_linkage(llglobal, llvm::Linkage::PrivateLinkage);
     llvm::set_section(llglobal, &covmap_section_name);
-    llvm::set_alignment(llglobal, VAR_ALIGN_BYTES);
+    // LLVM's coverage mapping format specifies 8-byte alignment for items in this section.
+    llvm::set_alignment(llglobal, Align::EIGHT);
     cx.add_used_global(llglobal);
 }
 
@@ -265,7 +323,8 @@ pub(crate) fn save_func_record_to_mod<'ll, 'tcx>(
     llvm::set_linkage(llglobal, llvm::Linkage::LinkOnceODRLinkage);
     llvm::set_visibility(llglobal, llvm::Visibility::Hidden);
     llvm::set_section(llglobal, covfun_section_name);
-    llvm::set_alignment(llglobal, VAR_ALIGN_BYTES);
+    // LLVM's coverage mapping format specifies 8-byte alignment for items in this section.
+    llvm::set_alignment(llglobal, Align::EIGHT);
     llvm::set_comdat(cx.llmod, llglobal, &func_record_var_name);
     cx.add_used_global(llglobal);
 }

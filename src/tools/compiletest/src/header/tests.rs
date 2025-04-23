@@ -537,15 +537,9 @@ fn wasm_special() {
         ("wasm32-wasi", "wasm32", true),
         ("wasm32-wasi", "wasm32-bare", false),
         ("wasm32-wasi", "wasi", true),
-        // NB: the wasm32-wasip1 target is new so this isn't tested for
-        // the bootstrap compiler.
-        #[cfg(not(bootstrap))]
         ("wasm32-wasip1", "emscripten", false),
-        #[cfg(not(bootstrap))]
         ("wasm32-wasip1", "wasm32", true),
-        #[cfg(not(bootstrap))]
         ("wasm32-wasip1", "wasm32-bare", false),
-        #[cfg(not(bootstrap))]
         ("wasm32-wasip1", "wasi", true),
         ("wasm64-unknown-unknown", "emscripten", false),
         ("wasm64-unknown-unknown", "wasm32", false),
@@ -604,11 +598,8 @@ fn threads_support() {
         ("aarch64-apple-darwin", true),
         ("wasm32-unknown-unknown", false),
         ("wasm64-unknown-unknown", false),
-        #[cfg(not(bootstrap))]
         ("wasm32-wasip1", false),
-        #[cfg(not(bootstrap))]
         ("wasm32-wasip1-threads", true),
-        ("wasm32-wasi-preview1-threads", true),
     ];
     for (target, has_threads) in threads {
         let config = cfg().target(target).build();
@@ -674,5 +665,26 @@ fn test_non_rs_unknown_directive_not_checked() {
         Path::new("a.Makefile"),
         include_bytes!("./test-auxillary/not_rs.Makefile"),
     );
+    assert!(!poisoned);
+}
+
+#[test]
+fn test_trailing_directive() {
+    let mut poisoned = false;
+    run_path(&mut poisoned, Path::new("a.rs"), b"//@ only-x86 only-arm");
+    assert!(poisoned);
+}
+
+#[test]
+fn test_trailing_directive_with_comment() {
+    let mut poisoned = false;
+    run_path(&mut poisoned, Path::new("a.rs"), b"//@ only-x86   only-arm with comment");
+    assert!(poisoned);
+}
+
+#[test]
+fn test_not_trailing_directive() {
+    let mut poisoned = false;
+    run_path(&mut poisoned, Path::new("a.rs"), b"//@ revisions: incremental");
     assert!(!poisoned);
 }

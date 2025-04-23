@@ -14,7 +14,7 @@ use rustc_middle::traits::solve::{
     CandidateSource, CanonicalResponse, Certainty, Goal, QueryResult,
 };
 use rustc_middle::traits::{BuiltinImplSource, Reveal};
-use rustc_middle::ty::fast_reject::{DeepRejectCtxt, TreatParams, TreatProjections};
+use rustc_middle::ty::fast_reject::{DeepRejectCtxt, TreatParams};
 use rustc_middle::ty::{self, ToPredicate, Ty, TyCtxt};
 use rustc_middle::ty::{TraitPredicate, TypeVisitableExt};
 use rustc_span::{ErrorGuaranteed, DUMMY_SP};
@@ -55,17 +55,23 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         // An upper bound of the certainty of this goal, used to lower the certainty
         // of reservation impl to ambiguous during coherence.
         let impl_polarity = impl_trait_header.polarity;
-        let maximal_certainty = match impl_polarity {
-            ty::ImplPolarity::Positive | ty::ImplPolarity::Negative => {
-                match impl_polarity == goal.predicate.polarity {
-                    true => Certainty::Yes,
-                    false => return Err(NoSolution),
-                }
-            }
-            ty::ImplPolarity::Reservation => match ecx.solver_mode() {
-                SolverMode::Normal => return Err(NoSolution),
+        let maximal_certainty = match (impl_polarity, goal.predicate.polarity) {
+            // In intercrate mode, this is ambiguous. But outside of intercrate,
+            // it's not a real impl.
+            (ty::ImplPolarity::Reservation, _) => match ecx.solver_mode() {
                 SolverMode::Coherence => Certainty::AMBIGUOUS,
+                SolverMode::Normal => return Err(NoSolution),
             },
+
+            // Impl matches polarity
+            (ty::ImplPolarity::Positive, ty::PredicatePolarity::Positive)
+            | (ty::ImplPolarity::Negative, ty::PredicatePolarity::Negative) => Certainty::Yes,
+
+            // Impl doesn't match polarity
+            (ty::ImplPolarity::Positive, ty::PredicatePolarity::Negative)
+            | (ty::ImplPolarity::Negative, ty::PredicatePolarity::Positive) => {
+                return Err(NoSolution);
+            }
         };
 
         ecx.probe_trait_candidate(CandidateSource::Impl(impl_def_id)).enter(|ecx| {
@@ -123,7 +129,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -149,10 +155,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         if let ty::Alias(ty::Opaque, opaque_ty) = goal.predicate.self_ty().kind() {
             if matches!(goal.param_env.reveal(), Reveal::All)
                 || matches!(ecx.solver_mode(), SolverMode::Coherence)
-                || opaque_ty
-                    .def_id
-                    .as_local()
-                    .is_some_and(|def_id| ecx.can_define_opaque_ty(def_id))
+                || ecx.can_define_opaque_ty(opaque_ty.def_id)
             {
                 return Err(NoSolution);
             }
@@ -168,7 +171,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -191,7 +194,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -205,7 +208,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -219,7 +222,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -251,7 +254,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         let self_ty = goal.predicate.self_ty();
         match goal.predicate.polarity {
             // impl FnPtr for FnPtr {}
-            ty::ImplPolarity::Positive => {
+            ty::PredicatePolarity::Positive => {
                 if self_ty.is_fn_ptr() {
                     ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
                 } else {
@@ -259,7 +262,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
                 }
             }
             //  impl !FnPtr for T where T != FnPtr && T is rigid {}
-            ty::ImplPolarity::Negative => {
+            ty::PredicatePolarity::Negative => {
                 // If a type is rigid and not a fn ptr, then we know for certain
                 // that it does *not* implement `FnPtr`.
                 if !self_ty.is_fn_ptr() && self_ty.is_known_rigid() {
@@ -267,10 +270,6 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
                 } else {
                     Err(NoSolution)
                 }
-            }
-            // FIXME: Goal polarity should be split from impl polarity
-            ty::ImplPolarity::Reservation => {
-                bug!("we never expect a `Reservation` polarity in a trait goal")
             }
         }
     }
@@ -280,7 +279,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         goal: Goal<'tcx, Self>,
         goal_kind: ty::ClosureKind,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -316,7 +315,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         goal: Goal<'tcx, Self>,
         goal_kind: ty::ClosureKind,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -386,7 +385,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -401,7 +400,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -412,7 +411,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -436,7 +435,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -456,11 +455,33 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
     }
 
+    fn consider_builtin_fused_iterator_candidate(
+        ecx: &mut EvalCtxt<'_, 'tcx>,
+        goal: Goal<'tcx, Self>,
+    ) -> QueryResult<'tcx> {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
+            return Err(NoSolution);
+        }
+
+        let ty::Coroutine(def_id, _) = *goal.predicate.self_ty().kind() else {
+            return Err(NoSolution);
+        };
+
+        // Coroutines are not iterators unless they come from `gen` desugaring
+        let tcx = ecx.tcx();
+        if !tcx.coroutine_is_gen(def_id) {
+            return Err(NoSolution);
+        }
+
+        // Gen coroutines unconditionally implement `FusedIterator`
+        ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+    }
+
     fn consider_builtin_async_iterator_candidate(
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -484,7 +505,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -515,7 +536,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -523,11 +544,23 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
     }
 
+    fn consider_builtin_async_destruct_candidate(
+        ecx: &mut EvalCtxt<'_, 'tcx>,
+        goal: Goal<'tcx, Self>,
+    ) -> QueryResult<'tcx> {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
+            return Err(NoSolution);
+        }
+
+        // `AsyncDestruct` is automatically implemented for every type.
+        ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+    }
+
     fn consider_builtin_destruct_candidate(
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -542,7 +575,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> QueryResult<'tcx> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
         }
 
@@ -579,7 +612,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
         ecx: &mut EvalCtxt<'_, 'tcx>,
         goal: Goal<'tcx, Self>,
     ) -> Vec<(CanonicalResponse<'tcx>, BuiltinImplSource)> {
-        if goal.predicate.polarity != ty::ImplPolarity::Positive {
+        if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return vec![];
         }
 
@@ -1012,6 +1045,12 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
                 }
             }
 
+            // If we still have an alias here, it must be rigid. For opaques, it's always
+            // okay to consider auto traits because that'll reveal its hidden type. For
+            // non-opaque aliases, we will not assemble any candidates since there's no way
+            // to further look into its type.
+            ty::Alias(..) => None,
+
             // For rigid types, any possible implementation that could apply to
             // the type (even if after unification and processing nested goals
             // it does not hold) will disqualify the built-in auto impl.
@@ -1027,8 +1066,9 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
             | ty::Float(_)
             | ty::Str
             | ty::Array(_, _)
+            | ty::Pat(_, _)
             | ty::Slice(_)
-            | ty::RawPtr(_)
+            | ty::RawPtr(_, _)
             | ty::Ref(_, _, _)
             | ty::FnDef(_, _)
             | ty::FnPtr(_)
@@ -1038,15 +1078,11 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
             | ty::CoroutineWitness(..)
             | ty::Never
             | ty::Tuple(_)
-            | ty::Adt(_, _)
-            // FIXME: Handling opaques here is kinda sus. Especially because we
-            // simplify them to SimplifiedType::Placeholder.
-            | ty::Alias(ty::Opaque, _) => {
+            | ty::Adt(_, _) => {
                 let mut disqualifying_impl = None;
-                self.tcx().for_each_relevant_impl_treating_projections(
+                self.tcx().for_each_relevant_impl(
                     goal.predicate.def_id(),
                     goal.predicate.self_ty(),
-                    TreatProjections::NextSolverLookup,
                     |impl_def_id| {
                         disqualifying_impl = Some(impl_def_id);
                     },

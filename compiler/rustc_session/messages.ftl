@@ -24,6 +24,9 @@ session_feature_diagnostic_for_issue =
 session_feature_diagnostic_help =
     add `#![feature({$feature})]` to the crate attributes to enable
 
+session_feature_diagnostic_suggestion =
+    add `#![feature({$feature})]` to the crate attributes to enable
+
 session_feature_suggest_upgrade_compiler =
     this compiler was built on {$date}; consider upgrading it if it is out of date
 
@@ -92,6 +95,8 @@ session_sanitizer_cfi_normalize_integers_requires_cfi = `-Zsanitizer-cfi-normali
 session_sanitizer_cfi_requires_lto = `-Zsanitizer=cfi` requires `-Clto` or `-Clinker-plugin-lto`
 
 session_sanitizer_cfi_requires_single_codegen_unit = `-Zsanitizer=cfi` with `-Clto` requires `-Ccodegen-units=1`
+
+session_sanitizer_kcfi_requires_panic_abort = `-Z sanitizer=kcfi` requires `-C panic=abort`
 
 session_sanitizer_not_supported = {$us} sanitizer is not supported for this target
 

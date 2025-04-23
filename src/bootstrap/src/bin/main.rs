@@ -15,7 +15,8 @@ use std::{
 };
 
 use bootstrap::{
-    find_recent_config_change_ids, t, Build, Config, Subcommand, CONFIG_CHANGE_HISTORY,
+    find_recent_config_change_ids, human_readable_changes, t, Build, Config, Subcommand,
+    CONFIG_CHANGE_HISTORY,
 };
 
 fn main() {
@@ -36,6 +37,7 @@ fn main() {
 
         build_lock = fd_lock::RwLock::new(t!(fs::OpenOptions::new()
             .write(true)
+            .truncate(true)
             .create(true)
             .open(&lock_path)));
         _build_lock_guard = match build_lock.try_write() {
@@ -130,10 +132,6 @@ fn main() {
 fn check_version(config: &Config) -> Option<String> {
     let mut msg = String::new();
 
-    if config.changelog_seen.is_some() {
-        msg.push_str("WARNING: The use of `changelog-seen` is deprecated. Please refer to `change-id` option in `config.example.toml` instead.\n");
-    }
-
     let latest_change_id = CONFIG_CHANGE_HISTORY.last().unwrap().change_id;
     let warned_id_path = config.out.join("bootstrap").join(".last-warned-change-id");
 
@@ -146,8 +144,8 @@ fn check_version(config: &Config) -> Option<String> {
         // then use the one from the config.toml. This way we never show the same warnings
         // more than once.
         if let Ok(t) = fs::read_to_string(&warned_id_path) {
-            let last_warned_id =
-                usize::from_str(&t).expect(&format!("{} is corrupted.", warned_id_path.display()));
+            let last_warned_id = usize::from_str(&t)
+                .unwrap_or_else(|_| panic!("{} is corrupted.", warned_id_path.display()));
 
             // We only use the last_warned_id if it exists in `CONFIG_CHANGE_HISTORY`.
             // Otherwise, we may retrieve all the changes if it's not the highest value.
@@ -164,14 +162,7 @@ fn check_version(config: &Config) -> Option<String> {
         }
 
         msg.push_str("There have been changes to x.py since you last updated:\n");
-
-        for change in changes {
-            msg.push_str(&format!("  [{}] {}\n", change.severity, change.summary));
-            msg.push_str(&format!(
-                "    - PR Link https://github.com/rust-lang/rust/pull/{}\n",
-                change.change_id
-            ));
-        }
+        msg.push_str(&human_readable_changes(&changes));
 
         msg.push_str("NOTE: to silence this warning, ");
         msg.push_str(&format!(

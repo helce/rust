@@ -38,6 +38,7 @@ declare_lint_pass! {
         DEPRECATED_CFG_ATTR_CRATE_TYPE_NAME,
         DEPRECATED_IN_FUTURE,
         DEPRECATED_WHERE_CLAUSE_LOCATION,
+        DEREFERENCING_MUT_BINDING,
         DUPLICATE_MACRO_ATTRIBUTES,
         ELIDED_LIFETIMES_IN_ASSOCIATED_CONSTANT,
         ELIDED_LIFETIMES_IN_PATHS,
@@ -79,7 +80,9 @@ declare_lint_pass! {
         PROC_MACRO_BACK_COMPAT,
         PROC_MACRO_DERIVE_RESOLUTION_FALLBACK,
         PUB_USE_OF_PRIVATE_EXTERN_CRATE,
-        REFINING_IMPL_TRAIT,
+        REDUNDANT_LIFETIMES,
+        REFINING_IMPL_TRAIT_INTERNAL,
+        REFINING_IMPL_TRAIT_REACHABLE,
         RENAMED_AND_REMOVED_LINTS,
         REPR_TRANSPARENT_EXTERNAL_PRIVATE_FIELDS,
         RUST_2021_INCOMPATIBLE_CLOSURE_CAPTURES,
@@ -130,6 +133,7 @@ declare_lint_pass! {
         UNUSED_VARIABLES,
         USELESS_DEPRECATED,
         WARNINGS,
+        WASM_C_ABI,
         WHERE_CLAUSES_OBJECT_SAFETY,
         WRITES_THROUGH_IMMUTABLE_POINTER,
         // tidy-alphabetical-end
@@ -1625,6 +1629,42 @@ declare_lint! {
 }
 
 declare_lint! {
+    /// The `dereferencing_mut_binding` lint detects a `mut x` pattern that resets the binding mode,
+    /// as this behavior will change in rust 2024.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// # #![warn(dereferencing_mut_binding)]
+    /// let x = Some(123u32);
+    /// let _y = match &x {
+    ///     Some(mut x) => {
+    ///         x += 1;
+    ///         x
+    ///     }
+    ///     None => 0,
+    /// };
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Without the `mut`, `x` would have type `&u32`. Pre-2024, adding `mut` makes `x` have type
+    /// `u32`, which was deemed surprising. After edition 2024, adding `mut` will not change the
+    /// type of `x`. This lint warns users of editions before 2024 to update their code.
+    pub DEREFERENCING_MUT_BINDING,
+    Allow,
+    "detects `mut x` bindings that change the type of `x`",
+    @feature_gate = sym::mut_preserve_binding_mode_2024;
+    // FIXME uncomment below upon stabilization
+    /*@future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::EditionSemanticsChange(Edition::Edition2024),
+        reference: "123076",
+    };*/
+}
+
+declare_lint! {
     /// The `unconditional_recursion` lint detects functions that cannot
     /// return without calling themselves.
     ///
@@ -1703,6 +1743,33 @@ declare_lint! {
     pub UNUSED_LIFETIMES,
     Allow,
     "detects lifetime parameters that are never used"
+}
+
+declare_lint! {
+    /// The `redundant_lifetimes` lint detects lifetime parameters that are
+    /// redundant because they are equal to another named lifetime.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,compile_fail
+    /// #[deny(redundant_lifetimes)]
+    ///
+    /// // `'a = 'static`, so all usages of `'a` can be replaced with `'static`
+    /// pub fn bar<'a: 'static>() {}
+    ///
+    /// // `'a = 'b`, so all usages of `'b` can be replaced with `'a`
+    /// pub fn bar<'a: 'b, 'b: 'a>() {}
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Unused lifetime parameters may signal a mistake or unfinished code.
+    /// Consider removing the parameter.
+    pub REDUNDANT_LIFETIMES,
+    Allow,
+    "detects lifetime parameters that are redundant because they are equal to some other named lifetime"
 }
 
 declare_lint! {
@@ -2747,7 +2814,7 @@ declare_lint! {
     /// memory the pointer is allowed to read/write. Casting an integer, which
     /// doesn't have provenance, to a pointer requires the compiler to assign
     /// (guess) provenance. The compiler assigns "all exposed valid" (see the
-    /// docs of [`ptr::from_exposed_addr`] for more information about this
+    /// docs of [`ptr::with_exposed_provenance`] for more information about this
     /// "exposing"). This penalizes the optimiser and is not well suited for
     /// dynamic analysis/dynamic program verification (e.g. Miri or CHERI
     /// platforms).
@@ -2755,11 +2822,11 @@ declare_lint! {
     /// It is much better to use [`ptr::with_addr`] instead to specify the
     /// provenance you want. If using this function is not possible because the
     /// code relies on exposed provenance then there is as an escape hatch
-    /// [`ptr::from_exposed_addr`].
+    /// [`ptr::with_exposed_provenance`].
     ///
     /// [issue #95228]: https://github.com/rust-lang/rust/issues/95228
     /// [`ptr::with_addr`]: https://doc.rust-lang.org/core/primitive.pointer.html#method.with_addr
-    /// [`ptr::from_exposed_addr`]: https://doc.rust-lang.org/core/ptr/fn.from_exposed_addr.html
+    /// [`ptr::with_exposed_provenance`]: https://doc.rust-lang.org/core/ptr/fn.with_exposed_provenance.html
     pub FUZZY_PROVENANCE_CASTS,
     Allow,
     "a fuzzy integer to pointer cast is used",
@@ -2795,17 +2862,17 @@ declare_lint! {
     /// Since this cast is lossy, it is considered good style to use the
     /// [`ptr::addr`] method instead, which has a similar effect, but doesn't
     /// "expose" the pointer provenance. This improves optimisation potential.
-    /// See the docs of [`ptr::addr`] and [`ptr::expose_addr`] for more information
+    /// See the docs of [`ptr::addr`] and [`ptr::expose_provenance`] for more information
     /// about exposing pointer provenance.
     ///
     /// If your code can't comply with strict provenance and needs to expose
-    /// the provenance, then there is [`ptr::expose_addr`] as an escape hatch,
+    /// the provenance, then there is [`ptr::expose_provenance`] as an escape hatch,
     /// which preserves the behaviour of `as usize` casts while being explicit
     /// about the semantics.
     ///
     /// [issue #95228]: https://github.com/rust-lang/rust/issues/95228
     /// [`ptr::addr`]: https://doc.rust-lang.org/core/primitive.pointer.html#method.addr
-    /// [`ptr::expose_addr`]: https://doc.rust-lang.org/core/primitive.pointer.html#method.expose_addr
+    /// [`ptr::expose_provenance`]: https://doc.rust-lang.org/core/primitive.pointer.html#method.expose_provenance
     pub LOSSY_PROVENANCE_CASTS,
     Allow,
     "a lossy pointer to integer cast is used",
@@ -4309,7 +4376,6 @@ declare_lint! {
     /// ### Example
     ///
     /// ```rust,compile_fail
-    /// # #![feature(type_privacy_lints)]
     /// # #![allow(unused)]
     /// #![deny(unnameable_types)]
     /// mod m {
@@ -4326,10 +4392,14 @@ declare_lint! {
     ///
     /// It is often expected that if you can obtain an object of type `T`, then
     /// you can name the type `T` as well, this lint attempts to enforce this rule.
+    /// The recommended action is to either reexport the type properly to make it nameable,
+    /// or document that users are not supposed to be able to name it for one reason or another.
+    ///
+    /// Besides types, this lint applies to traits because traits can also leak through signatures,
+    /// and you may obtain objects of their `dyn Trait` or `impl Trait` types.
     pub UNNAMEABLE_TYPES,
     Allow,
     "effective visibility of a type is larger than the area in which it can be named",
-    @feature_gate = sym::type_privacy_lints;
 }
 
 declare_lint! {
@@ -4401,8 +4471,10 @@ declare_lint! {
 }
 
 declare_lint! {
-    /// The `refining_impl_trait` lint detects usages of return-position impl
-    /// traits in trait signatures which are refined by implementations.
+    /// The `refining_impl_trait_reachable` lint detects `impl Trait` return
+    /// types in method signatures that are refined by a publically reachable
+    /// trait implementation, meaning the implementation adds information about
+    /// the return type that is not present in the trait.
     ///
     /// ### Example
     ///
@@ -4424,7 +4496,7 @@ declare_lint! {
     /// fn main() {
     ///     // users can observe that the return type of
     ///     // `<&str as AsDisplay>::as_display()` is `&str`.
-    ///     let x: &str = "".as_display();
+    ///     let _x: &str = "".as_display();
     /// }
     /// ```
     ///
@@ -4432,13 +4504,80 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// Return-position impl trait in traits (RPITITs) desugar to associated types,
-    /// and callers of methods for types where the implementation is known are
+    /// Callers of methods for types where the implementation is known are
     /// able to observe the types written in the impl signature. This may be
-    /// intended behavior, but may also pose a semver hazard for authors of libraries
-    /// who do not wish to make stronger guarantees about the types than what is
-    /// written in the trait signature.
-    pub REFINING_IMPL_TRAIT,
+    /// intended behavior, but may also lead to implementation details being
+    /// revealed unintentionally. In particular, it may pose a semver hazard
+    /// for authors of libraries who do not wish to make stronger guarantees
+    /// about the types than what is written in the trait signature.
+    ///
+    /// `refining_impl_trait` is a lint group composed of two lints:
+    ///
+    /// * `refining_impl_trait_reachable`, for refinements that are publically
+    ///   reachable outside a crate, and
+    /// * `refining_impl_trait_internal`, for refinements that are only visible
+    ///    within a crate.
+    ///
+    /// We are seeking feedback on each of these lints; see issue
+    /// [#121718](https://github.com/rust-lang/rust/issues/121718) for more
+    /// information.
+    pub REFINING_IMPL_TRAIT_REACHABLE,
+    Warn,
+    "impl trait in impl method signature does not match trait method signature",
+}
+
+declare_lint! {
+    /// The `refining_impl_trait_internal` lint detects `impl Trait` return
+    /// types in method signatures that are refined by a trait implementation,
+    /// meaning the implementation adds information about the return type that
+    /// is not present in the trait.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,compile_fail
+    /// #![deny(refining_impl_trait)]
+    ///
+    /// use std::fmt::Display;
+    ///
+    /// trait AsDisplay {
+    ///     fn as_display(&self) -> impl Display;
+    /// }
+    ///
+    /// impl<'s> AsDisplay for &'s str {
+    ///     fn as_display(&self) -> Self {
+    ///         *self
+    ///     }
+    /// }
+    ///
+    /// fn main() {
+    ///     // users can observe that the return type of
+    ///     // `<&str as AsDisplay>::as_display()` is `&str`.
+    ///     let _x: &str = "".as_display();
+    /// }
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Callers of methods for types where the implementation is known are
+    /// able to observe the types written in the impl signature. This may be
+    /// intended behavior, but may also lead to implementation details being
+    /// revealed unintentionally. In particular, it may pose a semver hazard
+    /// for authors of libraries who do not wish to make stronger guarantees
+    /// about the types than what is written in the trait signature.
+    ///
+    /// `refining_impl_trait` is a lint group composed of two lints:
+    ///
+    /// * `refining_impl_trait_reachable`, for refinements that are publically
+    ///   reachable outside a crate, and
+    /// * `refining_impl_trait_internal`, for refinements that are only visible
+    ///    within a crate.
+    ///
+    /// We are seeking feedback on each of these lints; see issue
+    /// [#121718](https://github.com/rust-lang/rust/issues/121718) for more
+    /// information.
+    pub REFINING_IMPL_TRAIT_INTERNAL,
     Warn,
     "impl trait in impl method signature does not match trait method signature",
 }
@@ -4563,4 +4702,42 @@ declare_lint! {
         reason: FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps,
         reference: "issue #120192 <https://github.com/rust-lang/rust/issues/120192>",
     };
+}
+
+declare_lint! {
+    /// The `wasm_c_abi` lint detects crate dependencies that are incompatible
+    /// with future versions of Rust that will emit spec-compliant C ABI.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore (needs extern crate)
+    /// #![deny(wasm_c_abi)]
+    /// ```
+    ///
+    /// This will produce:
+    ///
+    /// ```text
+    /// error: the following packages contain code that will be rejected by a future version of Rust: wasm-bindgen v0.2.87
+    ///   |
+    /// note: the lint level is defined here
+    ///  --> src/lib.rs:1:9
+    ///   |
+    /// 1 | #![deny(wasm_c_abi)]
+    ///   |         ^^^^^^^^^^
+    /// ```
+    ///
+    /// ### Explanation
+    ///
+    /// Rust has historically emitted non-spec-compliant C ABI. This has caused
+    /// incompatibilities between other compilers and Wasm targets. In a future
+    /// version of Rust this will be fixed and therefore dependencies relying
+    /// on the non-spec-compliant C ABI will stop functioning.
+    pub WASM_C_ABI,
+    Warn,
+    "detects dependencies that are incompatible with the Wasm C ABI",
+    @future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::FutureReleaseErrorReportInDeps,
+        reference: "issue #71871 <https://github.com/rust-lang/rust/issues/71871>",
+    };
+    crate_level_only
 }

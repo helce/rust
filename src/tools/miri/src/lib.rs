@@ -1,7 +1,7 @@
 #![feature(rustc_private)]
 #![feature(cell_update)]
+#![feature(const_option)]
 #![feature(float_gamma)]
-#![feature(generic_nonzero)]
 #![feature(map_try_insert)]
 #![feature(never_type)]
 #![feature(try_blocks)]
@@ -114,7 +114,9 @@ pub use crate::concurrency::{
     data_race::{AtomicFenceOrd, AtomicReadOrd, AtomicRwOrd, AtomicWriteOrd, EvalContextExt as _},
     init_once::{EvalContextExt as _, InitOnceId},
     sync::{CondvarId, EvalContextExt as _, MutexId, RwLockId, SyncId},
-    thread::{EvalContextExt as _, StackEmptyCallback, ThreadId, ThreadManager, Time},
+    thread::{
+        BlockReason, CallbackTime, EvalContextExt as _, StackEmptyCallback, ThreadId, ThreadManager,
+    },
 };
 pub use crate::diagnostics::{
     report_error, EvalContextExt as _, NonHaltingDiagnostic, TerminationInfo,
@@ -124,7 +126,7 @@ pub use crate::eval::{
 };
 pub use crate::helpers::{AccessKind, EvalContextExt as _};
 pub use crate::machine::{
-    AllocExtra, FrameExtra, MiriInterpCx, MiriInterpCxExt, MiriMachine, MiriMemoryKind,
+    AllocExtra, FrameExtra, MemoryKind, MiriInterpCx, MiriInterpCxExt, MiriMachine, MiriMemoryKind,
     PrimitiveLayouts, Provenance, ProvenanceExtra,
 };
 pub use crate::mono_hash_map::MonoHashMap;

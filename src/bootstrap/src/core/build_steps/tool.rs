@@ -36,8 +36,9 @@ struct ToolBuild {
 
 impl Builder<'_> {
     #[track_caller]
-    fn msg_tool(
+    pub(crate) fn msg_tool(
         &self,
+        kind: Kind,
         mode: Mode,
         tool: &str,
         build_stage: u32,
@@ -47,7 +48,7 @@ impl Builder<'_> {
         match mode {
             // depends on compiler stage, different to host compiler
             Mode::ToolRustc => self.msg_sysroot_tool(
-                Kind::Build,
+                kind,
                 build_stage,
                 format_args!("tool {tool}"),
                 *host,
@@ -100,6 +101,7 @@ impl Step for ToolBuild {
             cargo.allow_features(self.allow_features);
         }
         let _guard = builder.msg_tool(
+            Kind::Build,
             self.mode,
             self.tool,
             self.compiler.stage,
@@ -133,6 +135,7 @@ impl Step for ToolBuild {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // FIXME: reduce the number of args and remove this.
 pub fn prepare_tool_cargo(
     builder: &Builder<'_>,
     compiler: Compiler,
@@ -469,7 +472,7 @@ impl Step for Rustdoc {
             features.push("jemalloc".to_string());
         }
 
-        let mut cargo = prepare_tool_cargo(
+        let cargo = prepare_tool_cargo(
             builder,
             build_compiler,
             Mode::ToolRustc,
@@ -480,11 +483,8 @@ impl Step for Rustdoc {
             features.as_slice(),
         );
 
-        if builder.config.rustc_parallel {
-            cargo.rustflag("--cfg=parallel_compiler");
-        }
-
         let _guard = builder.msg_tool(
+            Kind::Build,
             Mode::ToolRustc,
             "rustdoc",
             build_compiler.stage,
@@ -546,7 +546,7 @@ impl Step for Cargo {
     }
 
     fn run(self, builder: &Builder<'_>) -> PathBuf {
-        let cargo_bin_path = builder.ensure(ToolBuild {
+        builder.ensure(ToolBuild {
             compiler: self.compiler,
             target: self.target,
             tool: "cargo",
@@ -555,8 +555,7 @@ impl Step for Cargo {
             source_type: SourceType::Submodule,
             extra_features: Vec::new(),
             allow_features: "",
-        });
-        cargo_bin_path
+        })
     }
 }
 
@@ -574,7 +573,7 @@ impl Step for LldWrapper {
     }
 
     fn run(self, builder: &Builder<'_>) -> PathBuf {
-        let src_exe = builder.ensure(ToolBuild {
+        builder.ensure(ToolBuild {
             compiler: self.compiler,
             target: self.target,
             tool: "lld-wrapper",
@@ -583,9 +582,7 @@ impl Step for LldWrapper {
             source_type: SourceType::InTree,
             extra_features: Vec::new(),
             allow_features: "",
-        });
-
-        src_exe
+        })
     }
 }
 
@@ -692,6 +689,77 @@ impl Step for RustAnalyzerProcMacroSrv {
     }
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct LlvmBitcodeLinker {
+    pub compiler: Compiler,
+    pub target: TargetSelection,
+    pub extra_features: Vec<String>,
+}
+
+impl Step for LlvmBitcodeLinker {
+    type Output = PathBuf;
+    const DEFAULT: bool = true;
+    const ONLY_HOSTS: bool = true;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        let builder = run.builder;
+        run.path("src/tools/llvm-bitcode-linker").default_condition(
+            builder.config.extended
+                && builder
+                    .config
+                    .tools
+                    .as_ref()
+                    .map_or(builder.build.unstable_features(), |tools| {
+                        tools.iter().any(|tool| tool == "llvm-bitcode-linker")
+                    }),
+        )
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(LlvmBitcodeLinker {
+            compiler: run.builder.compiler(run.builder.top_stage, run.builder.config.build),
+            extra_features: Vec::new(),
+            target: run.target,
+        });
+    }
+
+    fn run(self, builder: &Builder<'_>) -> PathBuf {
+        let bin_name = "llvm-bitcode-linker";
+
+        builder.ensure(compile::Std::new(self.compiler, self.compiler.host));
+        builder.ensure(compile::Rustc::new(self.compiler, self.target));
+
+        let cargo = prepare_tool_cargo(
+            builder,
+            self.compiler,
+            Mode::ToolRustc,
+            self.target,
+            "build",
+            "src/tools/llvm-bitcode-linker",
+            SourceType::InTree,
+            &self.extra_features,
+        );
+
+        builder.run(&mut cargo.into());
+
+        let tool_out = builder
+            .cargo_out(self.compiler, Mode::ToolRustc, self.target)
+            .join(exe(bin_name, self.compiler.host));
+
+        if self.compiler.stage > 0 {
+            let bindir_self_contained = builder
+                .sysroot(self.compiler)
+                .join(format!("lib/rustlib/{}/bin/self-contained", self.target.triple));
+            t!(fs::create_dir_all(&bindir_self_contained));
+            let bin_destination = bindir_self_contained.join(exe(bin_name, self.compiler.host));
+            builder.copy_link(&tool_out, &bin_destination);
+            bin_destination
+        } else {
+            tool_out
+        }
+    }
+}
+
 macro_rules! tool_extended {
     (($sel:ident, $builder:ident),
        $($name:ident,
@@ -795,7 +863,6 @@ tool_extended!((self, builder),
     Rls, "src/tools/rls", "rls", stable=true, tool_std=true;
     RustDemangler, "src/tools/rust-demangler", "rust-demangler", stable=false, tool_std=true;
     Rustfmt, "src/tools/rustfmt", "rustfmt", stable=true, add_bins_to_sysroot = ["rustfmt", "cargo-fmt"];
-    LlvmBitcodeLinker, "src/tools/llvm-bitcode-linker", "llvm-bitcode-linker", stable=false, add_bins_to_sysroot = ["llvm-bitcode-linker"];
 );
 
 impl<'a> Builder<'a> {

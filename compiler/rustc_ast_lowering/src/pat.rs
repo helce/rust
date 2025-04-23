@@ -91,6 +91,9 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     PatKind::Box(inner) => {
                         break hir::PatKind::Box(self.lower_pat(inner));
                     }
+                    PatKind::Deref(inner) => {
+                        break hir::PatKind::Deref(self.lower_pat(inner));
+                    }
                     PatKind::Ref(inner, mutbl) => {
                         break hir::PatKind::Ref(self.lower_pat(inner), *mutbl);
                     }
@@ -240,7 +243,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     fn lower_pat_ident(
         &mut self,
         p: &Pat,
-        annotation: BindingAnnotation,
+        annotation: BindingMode,
         ident: Ident,
         lower_sub: impl FnOnce(&mut Self) -> Option<&'hir hir::Pat<'hir>>,
     ) -> hir::PatKind<'hir> {

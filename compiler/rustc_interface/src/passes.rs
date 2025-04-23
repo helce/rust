@@ -170,7 +170,9 @@ fn configure_and_expand(
         let mut old_path = OsString::new();
         if cfg!(windows) {
             old_path = env::var_os("PATH").unwrap_or(old_path);
-            let mut new_path = sess.host_filesearch(PathKind::All).search_path_dirs();
+            let mut new_path = Vec::from_iter(
+                sess.host_filesearch(PathKind::All).search_paths().map(|p| p.dir.clone()),
+            );
             for path in env::split_paths(&old_path) {
                 if !new_path.contains(&path) {
                     new_path.push(path);
@@ -680,23 +682,21 @@ pub fn create_global_ctxt<'tcx>(
                     incremental,
                 ),
                 providers.hooks,
+                compiler.current_gcx.clone(),
             )
         })
     })
 }
 
-/// Runs the type-checking, region checking and other miscellaneous analysis
-/// passes on the crate.
-fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
+/// Runs all analyses that we guarantee to run, even if errors were reported in earlier analyses.
+/// This function never fails.
+fn run_required_analyses(tcx: TyCtxt<'_>) {
     if tcx.sess.opts.unstable_opts.hir_stats {
         rustc_passes::hir_stats::print_hir_stats(tcx);
     }
-
     #[cfg(debug_assertions)]
     rustc_passes::hir_id_validator::check_crate(tcx);
-
     let sess = tcx.sess;
-
     sess.time("misc_checking_1", || {
         parallel!(
             {
@@ -732,10 +732,7 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
             }
         );
     });
-
-    // passes are timed inside typeck
-    rustc_hir_analysis::check_crate(tcx)?;
-
+    rustc_hir_analysis::check_crate(tcx);
     sess.time("MIR_borrow_checking", || {
         tcx.hir().par_body_owners(|def_id| {
             // Run unsafety check because it's responsible for stealing and
@@ -744,12 +741,8 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
             tcx.ensure().mir_borrowck(def_id)
         });
     });
-
     sess.time("MIR_effect_checking", || {
         for def_id in tcx.hir().body_owners() {
-            if !tcx.sess.opts.unstable_opts.thir_unsafeck {
-                rustc_mir_transform::check_unsafety::check_unsafety(tcx, def_id);
-            }
             tcx.ensure().has_ffi_unwind_calls(def_id);
 
             // If we need to codegen, ensure that we emit all errors from
@@ -763,16 +756,24 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
             }
         }
     });
-
     tcx.hir().par_body_owners(|def_id| {
         if tcx.is_coroutine(def_id.to_def_id()) {
             tcx.ensure().mir_coroutine_witnesses(def_id);
-            tcx.ensure().check_coroutine_obligations(def_id);
+            tcx.ensure().check_coroutine_obligations(
+                tcx.typeck_root_def_id(def_id.to_def_id()).expect_local(),
+            );
         }
     });
-
     sess.time("layout_testing", || layout_test::test_layout(tcx));
     sess.time("abi_testing", || abi_test::test_abi(tcx));
+}
+
+/// Runs the type-checking, region checking and other miscellaneous analysis
+/// passes on the crate.
+fn analysis(tcx: TyCtxt<'_>, (): ()) -> Result<()> {
+    run_required_analyses(tcx);
+
+    let sess = tcx.sess;
 
     // Avoid overwhelming user with errors if borrow checking failed.
     // I'm not sure how helpful this is, to be honest, but it avoids a

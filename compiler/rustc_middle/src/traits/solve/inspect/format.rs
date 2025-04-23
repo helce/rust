@@ -55,10 +55,7 @@ impl<'a, 'b> ProofTreeFormatter<'a, 'b> {
     pub(super) fn format_goal_evaluation(&mut self, eval: &GoalEvaluation<'_>) -> std::fmt::Result {
         let goal_text = match eval.kind {
             GoalEvaluationKind::Root { orig_values: _ } => "ROOT GOAL",
-            GoalEvaluationKind::Nested { is_normalizes_to_hack } => match is_normalizes_to_hack {
-                IsNormalizesToHack::No => "GOAL",
-                IsNormalizesToHack::Yes => "NORMALIZES-TO HACK GOAL",
-            },
+            GoalEvaluationKind::Nested => "GOAL",
         };
         write!(self.f, "{}: {:?}", goal_text, eval.uncanonicalized_goal)?;
         self.nested(|this| this.format_canonical_goal_evaluation(&eval.evaluation))
@@ -103,6 +100,9 @@ impl<'a, 'b> ProofTreeFormatter<'a, 'b> {
             ProbeKind::Root { result } => {
                 write!(self.f, "ROOT RESULT: {result:?}")
             }
+            ProbeKind::TryNormalizeNonRigid { result } => {
+                write!(self.f, "TRY NORMALIZE NON-RIGID: {result:?}")
+            }
             ProbeKind::NormalizedSelfTyAssembly => {
                 write!(self.f, "NORMALIZING SELF TY FOR ASSEMBLY:")
             }
@@ -111,9 +111,6 @@ impl<'a, 'b> ProofTreeFormatter<'a, 'b> {
             }
             ProbeKind::UpcastProjectionCompatibility => {
                 write!(self.f, "PROBING FOR PROJECTION COMPATIBILITY FOR UPCASTING:")
-            }
-            ProbeKind::CommitIfOk => {
-                write!(self.f, "COMMIT_IF_OK:")
             }
             ProbeKind::MiscCandidate { name, result } => {
                 write!(self.f, "CANDIDATE {name}: {result:?}")
@@ -135,8 +132,6 @@ impl<'a, 'b> ProofTreeFormatter<'a, 'b> {
                     }
                     ProbeStep::EvaluateGoals(eval) => this.format_added_goals_evaluation(eval)?,
                     ProbeStep::NestedProbe(probe) => this.format_probe(probe)?,
-                    ProbeStep::CommitIfOkStart => writeln!(this.f, "COMMIT_IF_OK START")?,
-                    ProbeStep::CommitIfOkSuccess => writeln!(this.f, "COMMIT_IF_OK SUCCESS")?,
                 }
             }
             Ok(())

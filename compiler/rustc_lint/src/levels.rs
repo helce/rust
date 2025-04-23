@@ -191,7 +191,7 @@ fn shallow_lint_levels_on(tcx: TyCtxt<'_>, owner: hir::OwnerId) -> ShallowLintLe
                 levels.add_id(hir::CRATE_HIR_ID);
                 levels.visit_mod(mod_, mod_.spans.inner_span, hir::CRATE_HIR_ID)
             }
-            hir::OwnerNode::AssocOpaqueTy(..) => unreachable!(),
+            hir::OwnerNode::Synthetic => unreachable!(),
         },
     }
 
@@ -354,7 +354,7 @@ impl<'tcx> Visitor<'tcx> for LintLevelsBuilder<'_, LintLevelQueryMap<'tcx>> {
         intravisit::walk_variant(self, v);
     }
 
-    fn visit_local(&mut self, l: &'tcx hir::Local<'tcx>) {
+    fn visit_local(&mut self, l: &'tcx hir::LetStmt<'tcx>) {
         self.add_id(l.hir_id);
         intravisit::walk_local(self, l);
     }
@@ -428,7 +428,7 @@ impl<'tcx> Visitor<'tcx> for LintLevelsBuilder<'_, QueryMapExpectationsWrapper<'
         intravisit::walk_variant(self, v);
     }
 
-    fn visit_local(&mut self, l: &'tcx hir::Local<'tcx>) {
+    fn visit_local(&mut self, l: &'tcx hir::LetStmt<'tcx>) {
         self.add_id(l.hir_id);
         intravisit::walk_local(self, l);
     }
@@ -1078,6 +1078,7 @@ impl<'s, P: LintLevelsProvider> LintLevelsBuilder<'s, P> {
                         feature,
                         GateIssue::Language,
                         lint_from_cli,
+                        None,
                     );
                 },
             );

@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering::Relaxed;
+
 use either::{Left, Right};
 
 use rustc_hir::def::DefKind;
@@ -8,20 +10,22 @@ use rustc_middle::traits::Reveal;
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_session::lint;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::Span;
 use rustc_target::abi::{self, Abi};
 
 use super::{CanAccessMutGlobal, CompileTimeEvalContext, CompileTimeInterpreter};
 use crate::const_eval::CheckAlignment;
-use crate::errors;
 use crate::errors::ConstEvalError;
-use crate::interpret::eval_nullary_intrinsic;
+use crate::errors::{self, DanglingPtrInFinal};
 use crate::interpret::{
     create_static_alloc, intern_const_alloc_recursive, CtfeValidationMode, GlobalId, Immediate,
     InternKind, InterpCx, InterpError, InterpResult, MPlaceTy, MemoryKind, OpTy, RefTracking,
     StackPopCleanup,
 };
+use crate::interpret::{eval_nullary_intrinsic, InternResult};
+use crate::CTRL_C_RECEIVED;
 
 // Returns a pointer to where the result lives
 #[instrument(level = "trace", skip(ecx, body))]
@@ -79,13 +83,41 @@ fn eval_body_using_ecx<'mir, 'tcx, R: InterpretationResult<'tcx>>(
     ecx.storage_live_for_always_live_locals()?;
 
     // The main interpreter loop.
-    while ecx.step()? {}
+    while ecx.step()? {
+        if CTRL_C_RECEIVED.load(Relaxed) {
+            throw_exhaust!(Interrupted);
+        }
+    }
 
     // Intern the result
-    intern_const_alloc_recursive(ecx, intern_kind, &ret)?;
+    let intern_result = intern_const_alloc_recursive(ecx, intern_kind, &ret);
 
     // Since evaluation had no errors, validate the resulting constant.
     const_validate_mplace(&ecx, &ret, cid)?;
+
+    // Only report this after validation, as validaiton produces much better diagnostics.
+    // FIXME: ensure validation always reports this and stop making interning care about it.
+
+    match intern_result {
+        Ok(()) => {}
+        Err(InternResult::FoundDanglingPointer) => {
+            return Err(ecx
+                .tcx
+                .dcx()
+                .emit_err(DanglingPtrInFinal { span: ecx.tcx.span, kind: intern_kind })
+                .into());
+        }
+        Err(InternResult::FoundBadMutablePointer) => {
+            // only report mutable pointers if there were no dangling pointers
+            let err_diag = errors::MutablePtrInFinal { span: ecx.tcx.span, kind: intern_kind };
+            ecx.tcx.emit_node_span_lint(
+                lint::builtin::CONST_EVAL_MUTABLE_PTR_IN_FINAL_VALUE,
+                ecx.best_lint_scope(),
+                err_diag.span,
+                err_diag,
+            )
+        }
+    }
 
     Ok(R::make_result(ret, ecx))
 }
@@ -402,7 +434,7 @@ fn const_validate_mplace<'mir, 'tcx>(
             }
         };
         ecx.const_validate_operand(&mplace.into(), path, &mut ref_tracking, mode)
-            // Instead of just reporting the `InterpError` via the usual machinery, we give a more targetted
+            // Instead of just reporting the `InterpError` via the usual machinery, we give a more targeted
             // error about the validation failure.
             .map_err(|error| report_validation_error(&ecx, error, alloc_id))?;
         inner = true;

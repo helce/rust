@@ -16,16 +16,13 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(unused_macros)]
 
-use crate::ffi::CString;
-
 // Re-export some of our utilities which are expected by other crates.
 pub use crate::panicking::{begin_panic, panic_count};
 pub use core::panicking::{panic_display, panic_fmt};
 
 use crate::sync::Once;
 use crate::sys;
-use crate::sys_common::thread_info;
-use crate::thread::Thread;
+use crate::thread::{self, Thread};
 
 // Prints to the "panic output", depending on the platform this may be:
 // - the standard error output
@@ -96,13 +93,9 @@ unsafe fn init(argc: isize, argv: *const *const u8, sigpipe: u8) {
     unsafe {
         sys::init(argc, argv, sigpipe);
 
-        let main_guard = sys::thread::guard::init();
-        // Next, set up the current Thread with the guard information we just
-        // created. Note that this isn't necessary in general for new threads,
-        // but we just do this to name the main thread and to give it correct
-        // info about the stack bounds.
-        let thread = Thread::new(Some(rtunwrap!(Ok, CString::new("main"))));
-        thread_info::set(main_guard, thread);
+        // Set up the current thread to give it the right name.
+        let thread = Thread::new_main();
+        thread::set_current(thread);
     }
 }
 

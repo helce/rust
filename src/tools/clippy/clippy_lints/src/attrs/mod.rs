@@ -4,6 +4,7 @@ mod allow_attributes_without_reason;
 mod blanket_clippy_restriction_lints;
 mod deprecated_cfg_attr;
 mod deprecated_semver;
+mod duplicated_attributes;
 mod empty_line_after;
 mod inline_always;
 mod maybe_misused_cfg;
@@ -499,6 +500,32 @@ declare_clippy_lint! {
     "item has both inner and outer attributes"
 }
 
+declare_clippy_lint! {
+    /// ### What it does
+    /// Checks for attributes that appear two or more times.
+    ///
+    /// ### Why is this bad?
+    /// Repeating an attribute on the same item (or globally on the same crate)
+    /// is unnecessary and doesn't have an effect.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// #[allow(dead_code)]
+    /// #[allow(dead_code)]
+    /// fn foo() {}
+    /// ```
+    ///
+    /// Use instead:
+    /// ```no_run
+    /// #[allow(dead_code)]
+    /// fn foo() {}
+    /// ```
+    #[clippy::version = "1.78.0"]
+    pub DUPLICATED_ATTRIBUTES,
+    suspicious,
+    "duplicated attribute"
+}
+
 declare_lint_pass!(Attributes => [
     ALLOW_ATTRIBUTES_WITHOUT_REASON,
     INLINE_ALWAYS,
@@ -507,11 +534,13 @@ declare_lint_pass!(Attributes => [
     BLANKET_CLIPPY_RESTRICTION_LINTS,
     SHOULD_PANIC_WITHOUT_EXPECT,
     MIXED_ATTRIBUTES_STYLE,
+    DUPLICATED_ATTRIBUTES,
 ]);
 
 impl<'tcx> LateLintPass<'tcx> for Attributes {
     fn check_crate(&mut self, cx: &LateContext<'tcx>) {
         blanket_clippy_restriction_lints::check_command_line(cx);
+        duplicated_attributes::check(cx, cx.tcx.hir().krate_attrs());
     }
 
     fn check_attribute(&mut self, cx: &LateContext<'tcx>, attr: &'tcx Attribute) {
@@ -551,6 +580,7 @@ impl<'tcx> LateLintPass<'tcx> for Attributes {
             _ => {},
         }
         mixed_attributes_style::check(cx, item.span, attrs);
+        duplicated_attributes::check(cx, attrs);
     }
 
     fn check_impl_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx ImplItem<'_>) {

@@ -127,6 +127,8 @@ ast_lowering_never_pattern_with_guard =
     a guard on a never pattern will never be run
     .suggestion = remove this guard
 
+ast_lowering_no_precise_captures_on_apit = `use<...>` precise capturing syntax not allowed on argument-position `impl Trait`
+
 ast_lowering_previously_used_here = previously used here
 
 ast_lowering_register1 = register `{$reg1_name}`
@@ -161,3 +163,6 @@ ast_lowering_underscore_expr_lhs_assign =
     .label = `_` not allowed here
 
 ast_lowering_use_angle_brackets = use angle brackets instead
+ast_lowering_yield_in_closure =
+    `yield` can only be used in `#[coroutine]` closures, or `gen` blocks
+    .suggestion = use `#[coroutine]` to make this closure a coroutine

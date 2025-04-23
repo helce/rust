@@ -1,3 +1,10 @@
+//! Facilitates the management and generation of tarballs.
+//!
+//! Tarballs efficiently hold Rust compiler build artifacts and
+//! capture a snapshot of each boostrap stage.
+//! In uplifting, a tarball from Stage N captures essential components
+//! to assemble Stage N + 1 compiler.
+
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -11,22 +18,23 @@ use crate::utils::helpers::t;
 #[derive(Copy, Clone)]
 pub(crate) enum OverlayKind {
     Rust,
-    LLVM,
+    Llvm,
     Cargo,
     Clippy,
     Miri,
     Rustfmt,
     RustDemangler,
-    RLS,
+    Rls,
     RustAnalyzer,
     RustcCodegenCranelift,
+    LlvmBitcodeLinker,
 }
 
 impl OverlayKind {
     fn legal_and_readme(&self) -> &[&str] {
         match self {
             OverlayKind::Rust => &["COPYRIGHT", "LICENSE-APACHE", "LICENSE-MIT", "README.md"],
-            OverlayKind::LLVM => {
+            OverlayKind::Llvm => {
                 &["src/llvm-project/llvm/LICENSE.TXT", "src/llvm-project/llvm/README.txt"]
             }
             OverlayKind::Cargo => &[
@@ -53,7 +61,7 @@ impl OverlayKind {
             OverlayKind::RustDemangler => {
                 &["src/tools/rust-demangler/README.md", "LICENSE-APACHE", "LICENSE-MIT"]
             }
-            OverlayKind::RLS => &["src/tools/rls/README.md", "LICENSE-APACHE", "LICENSE-MIT"],
+            OverlayKind::Rls => &["src/tools/rls/README.md", "LICENSE-APACHE", "LICENSE-MIT"],
             OverlayKind::RustAnalyzer => &[
                 "src/tools/rust-analyzer/README.md",
                 "src/tools/rust-analyzer/LICENSE-APACHE",
@@ -64,13 +72,19 @@ impl OverlayKind {
                 "compiler/rustc_codegen_cranelift/LICENSE-APACHE",
                 "compiler/rustc_codegen_cranelift/LICENSE-MIT",
             ],
+            OverlayKind::LlvmBitcodeLinker => &[
+                "COPYRIGHT",
+                "LICENSE-APACHE",
+                "LICENSE-MIT",
+                "src/tools/llvm-bitcode-linker/README.md",
+            ],
         }
     }
 
     fn version(&self, builder: &Builder<'_>) -> String {
         match self {
             OverlayKind::Rust => builder.rust_version(),
-            OverlayKind::LLVM => builder.rust_version(),
+            OverlayKind::Llvm => builder.rust_version(),
             OverlayKind::RustDemangler => builder.release_num("rust-demangler"),
             OverlayKind::Cargo => {
                 builder.cargo_info.version(builder, &builder.release_num("cargo"))
@@ -82,11 +96,12 @@ impl OverlayKind {
             OverlayKind::Rustfmt => {
                 builder.rustfmt_info.version(builder, &builder.release_num("rustfmt"))
             }
-            OverlayKind::RLS => builder.release(&builder.release_num("rls")),
+            OverlayKind::Rls => builder.release(&builder.release_num("rls")),
             OverlayKind::RustAnalyzer => builder
                 .rust_analyzer_info
                 .version(builder, &builder.release_num("rust-analyzer/crates/rust-analyzer")),
             OverlayKind::RustcCodegenCranelift => builder.rust_version(),
+            OverlayKind::LlvmBitcodeLinker => builder.rust_version(),
         }
     }
 }
@@ -342,7 +357,7 @@ impl<'a> Tarball<'a> {
             &self.builder.config.dist_compression_profile
         };
 
-        cmd.args(&["--compression-profile", compression_profile]);
+        cmd.args(["--compression-profile", compression_profile]);
         self.builder.run(&mut cmd);
 
         // Ensure there are no symbolic links in the tarball. In particular,

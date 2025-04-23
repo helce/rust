@@ -37,7 +37,7 @@
 use crate::abi::call::Conv;
 use crate::abi::{Endian, Integer, Size, TargetDataLayout, TargetDataLayoutErrors};
 use crate::json::{Json, ToJson};
-use crate::spec::abi::{lookup as lookup_abi, Abi};
+use crate::spec::abi::Abi;
 use crate::spec::crt_objects::CrtObjects;
 use rustc_fs_util::try_canonicalize;
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
@@ -448,6 +448,28 @@ impl LinkerFlavor {
             | LinkerFlavor::Ptx => false,
         }
     }
+
+    /// For flavors with an `Lld` component, ensure it's enabled. Otherwise, returns the given
+    /// flavor unmodified.
+    pub fn with_lld_enabled(self) -> LinkerFlavor {
+        match self {
+            LinkerFlavor::Gnu(cc, Lld::No) => LinkerFlavor::Gnu(cc, Lld::Yes),
+            LinkerFlavor::Darwin(cc, Lld::No) => LinkerFlavor::Darwin(cc, Lld::Yes),
+            LinkerFlavor::Msvc(Lld::No) => LinkerFlavor::Msvc(Lld::Yes),
+            _ => self,
+        }
+    }
+
+    /// For flavors with an `Lld` component, ensure it's disabled. Otherwise, returns the given
+    /// flavor unmodified.
+    pub fn with_lld_disabled(self) -> LinkerFlavor {
+        match self {
+            LinkerFlavor::Gnu(cc, Lld::Yes) => LinkerFlavor::Gnu(cc, Lld::No),
+            LinkerFlavor::Darwin(cc, Lld::Yes) => LinkerFlavor::Darwin(cc, Lld::No),
+            LinkerFlavor::Msvc(Lld::Yes) => LinkerFlavor::Msvc(Lld::No),
+            _ => self,
+        }
+    }
 }
 
 macro_rules! linker_flavor_cli_impls {
@@ -695,6 +717,58 @@ impl ToJson for LinkSelfContainedComponents {
             .collect();
 
         components.to_json()
+    }
+}
+
+bitflags::bitflags! {
+    /// The `-Z linker-features` components that can individually be enabled or disabled.
+    ///
+    /// They are feature flags intended to be a more flexible mechanism than linker flavors, and
+    /// also to prevent a combinatorial explosion of flavors whenever a new linker feature is
+    /// required. These flags are "generic", in the sense that they can work on multiple targets on
+    /// the CLI. Otherwise, one would have to select different linkers flavors for each target.
+    ///
+    /// Here are some examples of the advantages they offer:
+    /// - default feature sets for principal flavors, or for specific targets.
+    /// - flavor-specific features: for example, clang offers automatic cross-linking with
+    ///   `--target`, which gcc-style compilers don't support. The *flavor* is still a C/C++
+    ///   compiler, and we don't need to multiply the number of flavors for this use-case. Instead,
+    ///   we can have a single `+target` feature.
+    /// - umbrella features: for example if clang accumulates more features in the future than just
+    ///   the `+target` above. That could be modeled as `+clang`.
+    /// - niche features for resolving specific issues: for example, on Apple targets the linker
+    ///   flag implementing the `as-needed` native link modifier (#99424) is only possible on
+    ///   sufficiently recent linker versions.
+    /// - still allows for discovery and automation, for example via feature detection. This can be
+    ///   useful in exotic environments/build systems.
+    #[derive(Clone, Copy, PartialEq, Eq, Default)]
+    pub struct LinkerFeatures: u8 {
+        /// Invoke the linker via a C/C++ compiler (e.g. on most unix targets).
+        const CC  = 1 << 0;
+        /// Use the lld linker, either the system lld or the self-contained linker `rust-lld`.
+        const LLD = 1 << 1;
+    }
+}
+rustc_data_structures::external_bitflags_debug! { LinkerFeatures }
+
+impl LinkerFeatures {
+    /// Parses a single `-Z linker-features` well-known feature, not a set of flags.
+    pub fn from_str(s: &str) -> Option<LinkerFeatures> {
+        Some(match s {
+            "cc" => LinkerFeatures::CC,
+            "lld" => LinkerFeatures::LLD,
+            _ => return None,
+        })
+    }
+
+    /// Returns whether the `lld` linker feature is enabled.
+    pub fn is_lld_enabled(self) -> bool {
+        self.contains(LinkerFeatures::LLD)
+    }
+
+    /// Returns whether the `cc` linker feature is enabled.
+    pub fn is_cc_enabled(self) -> bool {
+        self.contains(LinkerFeatures::CC)
     }
 }
 
@@ -1557,6 +1631,9 @@ supported_targets! {
     ("aarch64-apple-watchos", aarch64_apple_watchos),
     ("aarch64-apple-watchos-sim", aarch64_apple_watchos_sim),
 
+    ("aarch64-apple-visionos", aarch64_apple_visionos),
+    ("aarch64-apple-visionos-sim", aarch64_apple_visionos_sim),
+
     ("armebv7r-none-eabi", armebv7r_none_eabi),
     ("armebv7r-none-eabihf", armebv7r_none_eabihf),
     ("armv7r-none-eabi", armv7r_none_eabi),
@@ -1621,6 +1698,7 @@ supported_targets! {
     ("riscv32i-unknown-none-elf", riscv32i_unknown_none_elf),
     ("riscv32im-risc0-zkvm-elf", riscv32im_risc0_zkvm_elf),
     ("riscv32im-unknown-none-elf", riscv32im_unknown_none_elf),
+    ("riscv32ima-unknown-none-elf", riscv32ima_unknown_none_elf),
     ("riscv32imc-unknown-none-elf", riscv32imc_unknown_none_elf),
     ("riscv32imc-esp-espidf", riscv32imc_esp_espidf),
     ("riscv32imac-esp-espidf", riscv32imac_esp_espidf),
@@ -1849,6 +1927,19 @@ impl HasTargetSpec for Target {
     fn target_spec(&self) -> &Target {
         self
     }
+}
+
+/// Which C ABI to use for `wasm32-unknown-unknown`.
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum WasmCAbi {
+    /// Spec-compliant C ABI.
+    Spec,
+    /// Legacy ABI. Which is non-spec-compliant.
+    Legacy,
+}
+
+pub trait HasWasmCAbiOpt {
+    fn wasm_c_abi_opt(&self) -> WasmCAbi;
 }
 
 type StaticCow<T> = Cow<'static, T>;
@@ -2105,6 +2196,9 @@ pub struct TargetOptions {
     /// compiling `rustc` will be used instead (or llvm if it is not set).
     ///
     /// N.B. when *using* the compiler, backend can always be overridden with `-Zcodegen-backend`.
+    ///
+    /// This was added by WaffleLapkin in #116793. The motivation is a rustc fork that requires a
+    /// custom codegen backend for a particular target.
     pub default_codegen_backend: Option<StaticCow<str>>,
 
     /// Whether to generate trap instructions in places where optimization would
@@ -2205,9 +2299,6 @@ pub struct TargetOptions {
     /// enabled can generated on this target, but the necessary supporting libraries are not
     /// distributed with the target, the sanitizer should still appear in this list for the target.
     pub supported_sanitizers: SanitizerSet,
-
-    /// If present it's a default value to use for adjusting the C ABI.
-    pub default_adjusted_cabi: Option<Abi>,
 
     /// Minimum number of bits in #[repr(C)] enum. Defaults to the size of c_int
     pub c_enum_min_bits: Option<u64>,
@@ -2440,7 +2531,6 @@ impl Default for TargetOptions {
             // `Off` is supported by default, but targets can remove this manually, e.g. Windows.
             supported_split_debuginfo: Cow::Borrowed(&[SplitDebuginfo::Off]),
             supported_sanitizers: SanitizerSet::empty(),
-            default_adjusted_cabi: None,
             c_enum_min_bits: None,
             generate_arange_section: true,
             supports_stack_protector: true,
@@ -2471,9 +2561,21 @@ impl DerefMut for Target {
 
 impl Target {
     /// Given a function ABI, turn it into the correct ABI for this target.
-    pub fn adjust_abi(&self, abi: Abi, c_variadic: bool) -> Abi {
+    pub fn adjust_abi<C>(&self, cx: &C, abi: Abi, c_variadic: bool) -> Abi
+    where
+        C: HasWasmCAbiOpt,
+    {
         match abi {
-            Abi::C { .. } => self.default_adjusted_cabi.unwrap_or(abi),
+            Abi::C { .. } => {
+                if self.arch == "wasm32"
+                    && self.os == "unknown"
+                    && cx.wasm_c_abi_opt() == WasmCAbi::Legacy
+                {
+                    Abi::Wasm
+                } else {
+                    abi
+                }
+            }
 
             // On Windows, `extern "system"` behaves like msvc's `__stdcall`.
             // `__stdcall` only applies on x86 and on non-variadic functions:
@@ -3012,16 +3114,6 @@ impl Target {
                     }
                 }
             } );
-            ($key_name:ident, Option<Abi>) => ( {
-                let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
-                    match lookup_abi(s) {
-                        Ok(abi) => base.$key_name = Some(abi),
-                        _ => return Some(Err(format!("'{}' is not a valid value for abi", s))),
-                    }
-                    Some(Ok(()))
-                })).unwrap_or(Ok(()))
-            } );
             ($key_name:ident, TargetFamilies) => ( {
                 if let Some(value) = obj.remove("target-family") {
                     if let Some(v) = value.as_array() {
@@ -3171,7 +3263,6 @@ impl Target {
         key!(split_debuginfo, SplitDebuginfo)?;
         key!(supported_split_debuginfo, fallible_list)?;
         key!(supported_sanitizers, SanitizerSet)?;
-        key!(default_adjusted_cabi, Option<Abi>)?;
         key!(generate_arange_section, bool);
         key!(supports_stack_protector, bool);
         key!(entry_name);
@@ -3434,10 +3525,6 @@ impl ToJson for Target {
         target_option_val!(entry_name);
         target_option_val!(entry_abi);
         target_option_val!(supports_xray);
-
-        if let Some(abi) = self.default_adjusted_cabi {
-            d.insert("default-adjusted-cabi".into(), Abi::name(abi).to_json());
-        }
 
         // Serializing `-Clink-self-contained` needs a dynamic key to support the
         // backwards-compatible variants.

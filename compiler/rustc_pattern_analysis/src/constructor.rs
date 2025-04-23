@@ -140,6 +140,34 @@
 //! [`ConstructorSet::split`]. The invariants of [`SplitConstructorSet`] are also of interest.
 //!
 //!
+//! ## Unions
+//!
+//! Unions allow us to match a value via several overlapping representations at the same time. For
+//! example, the following is exhaustive because when seeing the value as a boolean we handled all
+//! possible cases (other cases such as `n == 3` would trigger UB).
+//!
+//! ```rust
+//! # fn main() {
+//! union U8AsBool {
+//!     n: u8,
+//!     b: bool,
+//! }
+//! let x = U8AsBool { n: 1 };
+//! unsafe {
+//!     match x {
+//!         U8AsBool { n: 2 } => {}
+//!         U8AsBool { b: true } => {}
+//!         U8AsBool { b: false } => {}
+//!     }
+//! }
+//! # }
+//! ```
+//!
+//! Pattern-matching has no knowledge that e.g. `false as u8 == 0`, so the values we consider in the
+//! algorithm look like `U8AsBool { b: true, n: 2 }`. In other words, for the most part a union is
+//! treated like a struct with the same fields. The difference lies in how we construct witnesses of
+//! non-exhaustiveness.
+//!
 //!
 //! ## Opaque patterns
 //!
@@ -155,13 +183,13 @@ use std::iter::once;
 use smallvec::SmallVec;
 
 use rustc_apfloat::ieee::{DoubleS, IeeeFloat, SingleS};
-use rustc_index::bit_set::GrowableBitSet;
+use rustc_index::bit_set::{BitSet, GrowableBitSet};
+use rustc_index::IndexVec;
 
 use self::Constructor::*;
 use self::MaybeInfiniteInt::*;
 use self::SliceKind::*;
 
-use crate::index;
 use crate::PatCx;
 
 /// Whether we have seen a constructor in the column or not.
@@ -678,15 +706,19 @@ pub enum Constructor<Cx: PatCx> {
     Or,
     /// Wildcard pattern.
     Wildcard,
+    /// Never pattern. Only used in `WitnessPat`. An actual never pattern should be lowered as
+    /// `Wildcard`.
+    Never,
     /// Fake extra constructor for enums that aren't allowed to be matched exhaustively. Also used
-    /// for those types for which we cannot list constructors explicitly, like `f64` and `str`.
+    /// for those types for which we cannot list constructors explicitly, like `f64` and `str`. Only
+    /// used in `WitnessPat`.
     NonExhaustive,
-    /// Fake extra constructor for variants that should not be mentioned in diagnostics.
-    /// We use this for variants behind an unstable gate as well as
-    /// `#[doc(hidden)]` ones.
+    /// Fake extra constructor for variants that should not be mentioned in diagnostics. We use this
+    /// for variants behind an unstable gate as well as `#[doc(hidden)]` ones. Only used in
+    /// `WitnessPat`.
     Hidden,
     /// Fake extra constructor for constructors that are not seen in the matrix, as explained at the
-    /// top of the file.
+    /// top of the file. Only used for specialization.
     Missing,
     /// Fake extra constructor that indicates and empty field that is private. When we encounter one
     /// we skip the column entirely so we don't observe its emptiness. Only used for specialization.
@@ -708,6 +740,7 @@ impl<Cx: PatCx> Clone for Constructor<Cx> {
             Constructor::Str(value) => Constructor::Str(value.clone()),
             Constructor::Opaque(inner) => Constructor::Opaque(inner.clone()),
             Constructor::Or => Constructor::Or,
+            Constructor::Never => Constructor::Never,
             Constructor::Wildcard => Constructor::Wildcard,
             Constructor::NonExhaustive => Constructor::NonExhaustive,
             Constructor::Hidden => Constructor::Hidden,
@@ -814,6 +847,81 @@ impl<Cx: PatCx> Constructor<Cx> {
             }
         })
     }
+
+    pub(crate) fn fmt_fields(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        ty: &Cx::Ty,
+        mut fields: impl Iterator<Item = impl fmt::Debug>,
+    ) -> fmt::Result {
+        let mut first = true;
+        let mut start_or_continue = |s| {
+            if first {
+                first = false;
+                ""
+            } else {
+                s
+            }
+        };
+        let mut start_or_comma = || start_or_continue(", ");
+
+        match self {
+            Struct | Variant(_) | UnionField => {
+                Cx::write_variant_name(f, self, ty)?;
+                // Without `cx`, we can't know which field corresponds to which, so we can't
+                // get the names of the fields. Instead we just display everything as a tuple
+                // struct, which should be good enough.
+                write!(f, "(")?;
+                for p in fields {
+                    write!(f, "{}{:?}", start_or_comma(), p)?;
+                }
+                write!(f, ")")?;
+            }
+            // Note: given the expansion of `&str` patterns done in `expand_pattern`, we should
+            // be careful to detect strings here. However a string literal pattern will never
+            // be reported as a non-exhaustiveness witness, so we can ignore this issue.
+            Ref => {
+                write!(f, "&{:?}", &fields.next().unwrap())?;
+            }
+            Slice(slice) => {
+                write!(f, "[")?;
+                match slice.kind {
+                    SliceKind::FixedLen(_) => {
+                        for p in fields {
+                            write!(f, "{}{:?}", start_or_comma(), p)?;
+                        }
+                    }
+                    SliceKind::VarLen(prefix_len, _) => {
+                        for p in fields.by_ref().take(prefix_len) {
+                            write!(f, "{}{:?}", start_or_comma(), p)?;
+                        }
+                        write!(f, "{}..", start_or_comma())?;
+                        for p in fields {
+                            write!(f, "{}{:?}", start_or_comma(), p)?;
+                        }
+                    }
+                }
+                write!(f, "]")?;
+            }
+            Bool(b) => write!(f, "{b}")?,
+            // Best-effort, will render signed ranges incorrectly
+            IntRange(range) => write!(f, "{range:?}")?,
+            F32Range(lo, hi, end) => write!(f, "{lo}{end}{hi}")?,
+            F64Range(lo, hi, end) => write!(f, "{lo}{end}{hi}")?,
+            Str(value) => write!(f, "{value:?}")?,
+            Opaque(..) => write!(f, "<constant pattern>")?,
+            Or => {
+                for pat in fields {
+                    write!(f, "{}{:?}", start_or_continue(" | "), pat)?;
+                }
+            }
+            Never => write!(f, "!")?,
+            Wildcard | Missing | NonExhaustive | Hidden | PrivateUninhabited => {
+                write!(f, "_ : {:?}", ty)?
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -840,10 +948,7 @@ pub enum ConstructorSet<Cx: PatCx> {
     Struct { empty: bool },
     /// This type has the following list of constructors. If `variants` is empty and
     /// `non_exhaustive` is false, don't use this; use `NoConstructors` instead.
-    Variants {
-        variants: index::IdxContainer<Cx::VariantIdx, VariantVisibility>,
-        non_exhaustive: bool,
-    },
+    Variants { variants: IndexVec<Cx::VariantIdx, VariantVisibility>, non_exhaustive: bool },
     /// The type is `&T`.
     Ref,
     /// The type is a union.
@@ -897,7 +1002,6 @@ impl<Cx: PatCx> ConstructorSet<Cx> {
     /// any) are missing; 2/ split constructors to handle non-trivial intersections e.g. on ranges
     /// or slices. This can get subtle; see [`SplitConstructorSet`] for details of this operation
     /// and its invariants.
-    #[instrument(level = "debug", skip(self, ctors), ret)]
     pub fn split<'a>(
         &self,
         ctors: impl Iterator<Item = &'a Constructor<Cx>> + Clone,
@@ -945,7 +1049,7 @@ impl<Cx: PatCx> ConstructorSet<Cx> {
                 }
             }
             ConstructorSet::Variants { variants, non_exhaustive } => {
-                let mut seen_set = index::IdxSet::new_empty(variants.len());
+                let mut seen_set = BitSet::new_empty(variants.len());
                 for idx in seen.iter().filter_map(|c| c.as_variant()) {
                     seen_set.insert(idx);
                 }
@@ -1040,10 +1144,32 @@ impl<Cx: PatCx> ConstructorSet<Cx> {
                 // In a `MaybeInvalid` place even an empty pattern may be reachable. We therefore
                 // add a dummy empty constructor here, which will be ignored if the place is
                 // `ValidOnly`.
-                missing_empty.push(NonExhaustive);
+                missing_empty.push(Never);
             }
         }
 
         SplitConstructorSet { present, missing, missing_empty }
+    }
+
+    /// Whether this set only contains empty constructors.
+    pub(crate) fn all_empty(&self) -> bool {
+        match self {
+            ConstructorSet::Bool
+            | ConstructorSet::Integers { .. }
+            | ConstructorSet::Ref
+            | ConstructorSet::Union
+            | ConstructorSet::Unlistable => false,
+            ConstructorSet::NoConstructors => true,
+            ConstructorSet::Struct { empty } => *empty,
+            ConstructorSet::Variants { variants, non_exhaustive } => {
+                !*non_exhaustive
+                    && variants
+                        .iter()
+                        .all(|visibility| matches!(visibility, VariantVisibility::Empty))
+            }
+            ConstructorSet::Slice { array_len, subtype_is_empty } => {
+                *subtype_is_empty && matches!(array_len, Some(1..))
+            }
+        }
     }
 }

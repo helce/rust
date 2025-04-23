@@ -56,11 +56,6 @@
 //! [`Rc`]: rc
 //! [`RefCell`]: core::cell
 
-// To run alloc tests without x.py without ending up with two copies of alloc, Miri needs to be
-// able to "empty" this crate. See <https://github.com/rust-lang/miri-test-libstd/issues/4>.
-// rustc itself never sets the feature, so this line has no effect there.
-#![cfg(any(not(feature = "miri-test-libstd"), test, doctest))]
-//
 #![allow(unused_attributes)]
 #![stable(feature = "alloc", since = "1.36.0")]
 #![doc(
@@ -71,7 +66,6 @@
 #![doc(cfg_hide(
     not(test),
     not(any(test, bootstrap)),
-    any(not(feature = "miri-test-libstd"), test, doctest),
     no_global_oom_handling,
     not(no_global_oom_handling),
     not(no_rc),
@@ -114,14 +108,17 @@
 #![feature(const_box)]
 #![feature(const_cow_is_borrowed)]
 #![feature(const_eval_select)]
+#![feature(const_heap)]
 #![feature(const_maybe_uninit_as_mut_ptr)]
 #![feature(const_maybe_uninit_write)]
+#![feature(const_option)]
 #![feature(const_pin)]
 #![feature(const_refs_to_cell)]
 #![feature(const_size_of_val)]
 #![feature(const_waker)]
 #![feature(core_intrinsics)]
 #![feature(deprecated_suggestion)]
+#![feature(deref_pure_trait)]
 #![feature(dispatch_from_dyn)]
 #![feature(error_generic_member_access)]
 #![feature(error_in_core)]
@@ -129,10 +126,8 @@
 #![feature(extend_one)]
 #![feature(fmt_internals)]
 #![feature(fn_traits)]
-#![feature(generic_nonzero)]
 #![feature(hasher_prefixfree_extras)]
 #![feature(hint_assert_unchecked)]
-#![feature(inline_const)]
 #![feature(inplace_iteration)]
 #![feature(iter_advance_by)]
 #![feature(iter_next_chunk)]
@@ -154,7 +149,6 @@
 #![feature(slice_from_ptr_range)]
 #![feature(slice_index_methods)]
 #![feature(slice_ptr_get)]
-#![feature(slice_ptr_len)]
 #![feature(slice_range)]
 #![feature(std_internals)]
 #![feature(str_internals)]
@@ -165,20 +159,21 @@
 #![feature(try_trait_v2)]
 #![feature(try_with_capacity)]
 #![feature(tuple_trait)]
-#![feature(unchecked_math)]
 #![feature(unicode_internals)]
 #![feature(unsize)]
-#![feature(utf8_chunks)]
+#![feature(vec_pop_if)]
 // tidy-alphabetical-end
 //
 // Language features:
 // tidy-alphabetical-start
+#![cfg_attr(bootstrap, feature(associated_type_bounds))]
+#![cfg_attr(bootstrap, feature(inline_const))]
+#![cfg_attr(not(bootstrap), rustc_preserve_ub_checks)]
 #![cfg_attr(not(test), feature(coroutine_trait))]
 #![cfg_attr(test, feature(panic_update_hook))]
 #![cfg_attr(test, feature(test))]
 #![feature(allocator_internals)]
 #![feature(allow_internal_unstable)]
-#![feature(associated_type_bounds)]
 #![feature(c_unwind)]
 #![feature(cfg_sanitize)]
 #![feature(const_mut_refs)]
@@ -196,7 +191,6 @@
 #![feature(multiple_supertrait_upcastable)]
 #![feature(negative_impls)]
 #![feature(never_type)]
-#![feature(pointer_is_aligned)]
 #![feature(rustc_allow_const_fn_unstable)]
 #![feature(rustc_attrs)]
 #![feature(slice_internals)]

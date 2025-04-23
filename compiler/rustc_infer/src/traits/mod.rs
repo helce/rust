@@ -112,7 +112,7 @@ impl<'tcx> PolyTraitObligation<'tcx> {
 }
 
 // `PredicateObligation` is used a lot. Make sure it doesn't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 static_assert_size!(PredicateObligation<'_>, 48);
 
 pub type PredicateObligations<'tcx> = Vec<PredicateObligation<'tcx>>;
@@ -209,7 +209,7 @@ impl<'tcx> FulfillmentError<'tcx> {
 }
 
 impl<'tcx> PolyTraitObligation<'tcx> {
-    pub fn polarity(&self) -> ty::ImplPolarity {
+    pub fn polarity(&self) -> ty::PredicatePolarity {
         self.predicate.skip_binder().polarity
     }
 

@@ -1,15 +1,14 @@
 use crate::FnCtxt;
 use rustc_data_structures::{
-    graph::WithSuccessors,
-    graph::{iterate::DepthFirstSearch, vec_graph::VecGraph},
+    graph::{self, iterate::DepthFirstSearch, vec_graph::VecGraph},
     unord::{UnordBag, UnordMap, UnordSet},
 };
-use rustc_hir::def_id::CRATE_DEF_ID;
 use rustc_infer::infer::{DefineOpaqueTypes, InferOk};
 use rustc_middle::ty::{self, Ty};
-use rustc_span::sym;
+use rustc_span::DUMMY_SP;
 
-enum DivergingFallbackBehavior {
+#[derive(Copy, Clone)]
+pub enum DivergingFallbackBehavior {
     /// Always fallback to `()` (aka "always spontaneous decay")
     FallbackToUnit,
     /// Sometimes fallback to `!`, but mainly fallback to `()` so that most of the crates are not broken.
@@ -78,9 +77,8 @@ impl<'tcx> FnCtxt<'_, 'tcx> {
             return false;
         }
 
-        let diverging_behavior = self.diverging_fallback_behavior();
-        let diverging_fallback =
-            self.calculate_diverging_fallback(&unresolved_variables, diverging_behavior);
+        let diverging_fallback = self
+            .calculate_diverging_fallback(&unresolved_variables, self.diverging_fallback_behavior);
 
         // We do fallback in two passes, to try to generate
         // better error messages.
@@ -94,32 +92,6 @@ impl<'tcx> FnCtxt<'_, 'tcx> {
         fallback_occurred
     }
 
-    fn diverging_fallback_behavior(&self) -> DivergingFallbackBehavior {
-        let Some((mode, span)) = self
-            .tcx
-            .get_attr(CRATE_DEF_ID, sym::rustc_never_type_mode)
-            .map(|attr| (attr.value_str().unwrap(), attr.span))
-        else {
-            if self.tcx.features().never_type_fallback {
-                return DivergingFallbackBehavior::FallbackToNiko;
-            }
-
-            return DivergingFallbackBehavior::FallbackToUnit;
-        };
-
-        match mode {
-            sym::fallback_to_unit => DivergingFallbackBehavior::FallbackToUnit,
-            sym::fallback_to_niko => DivergingFallbackBehavior::FallbackToNiko,
-            sym::fallback_to_never => DivergingFallbackBehavior::FallbackToNever,
-            sym::no_fallback => DivergingFallbackBehavior::NoFallback,
-            _ => {
-                self.tcx.dcx().span_err(span, format!("unknown never type mode: `{mode}` (supported: `fallback_to_unit`, `fallback_to_niko`, `fallback_to_never` and `no_fallback`)"));
-
-                DivergingFallbackBehavior::FallbackToUnit
-            }
-        }
-    }
-
     fn fallback_effects(&self) -> bool {
         let unsolved_effects = self.unsolved_effects();
 
@@ -131,7 +103,7 @@ impl<'tcx> FnCtxt<'_, 'tcx> {
         // that field is only used for type fallback diagnostics.
         for effect in unsolved_effects {
             let expected = self.tcx.consts.true_;
-            let cause = self.misc(rustc_span::DUMMY_SP);
+            let cause = self.misc(DUMMY_SP);
             match self.at(&cause, self.param_env).eq(DefineOpaqueTypes::Yes, expected, effect) {
                 Ok(InferOk { obligations, value: () }) => {
                     self.register_predicates(obligations);
@@ -194,11 +166,7 @@ impl<'tcx> FnCtxt<'_, 'tcx> {
         };
         debug!("fallback_if_possible(ty={:?}): defaulting to `{:?}`", ty, fallback);
 
-        let span = self
-            .infcx
-            .type_var_origin(ty)
-            .map(|origin| origin.span)
-            .unwrap_or(rustc_span::DUMMY_SP);
+        let span = self.infcx.type_var_origin(ty).map(|origin| origin.span).unwrap_or(DUMMY_SP);
         self.demand_eqtype(span, ty, fallback);
         self.fallback_has_occurred.set(true);
         true
@@ -328,7 +296,7 @@ impl<'tcx> FnCtxt<'_, 'tcx> {
                 debug!(
                     "calculate_diverging_fallback: root_vid={:?} reaches {:?}",
                     root_vid,
-                    coercion_graph.depth_first_search(root_vid).collect::<Vec<_>>()
+                    graph::depth_first_search(&coercion_graph, root_vid).collect::<Vec<_>>()
                 );
 
                 // drain the iterator to visit all nodes reachable from this node
@@ -370,12 +338,10 @@ impl<'tcx> FnCtxt<'_, 'tcx> {
         for &diverging_vid in &diverging_vids {
             let diverging_ty = Ty::new_var(self.tcx, diverging_vid);
             let root_vid = self.root_var(diverging_vid);
-            let can_reach_non_diverging = coercion_graph
-                .depth_first_search(root_vid)
+            let can_reach_non_diverging = graph::depth_first_search(&coercion_graph, root_vid)
                 .any(|n| roots_reachable_from_non_diverging.visited(n));
 
             let infer_var_infos: UnordBag<_> = self
-                .inh
                 .infer_var_info
                 .borrow()
                 .items()

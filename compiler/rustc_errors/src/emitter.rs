@@ -541,6 +541,7 @@ pub struct SilentEmitter {
     pub fallback_bundle: LazyFallbackBundle,
     pub fatal_dcx: DiagCtxt,
     pub fatal_note: Option<String>,
+    pub emit_fatal_diagnostic: bool,
 }
 
 impl Translate for SilentEmitter {
@@ -561,7 +562,7 @@ impl Emitter for SilentEmitter {
     }
 
     fn emit_diagnostic(&mut self, mut diag: DiagInner) {
-        if diag.level == Level::Fatal {
+        if self.emit_fatal_diagnostic && diag.level == Level::Fatal {
             if let Some(fatal_note) = &self.fatal_note {
                 diag.sub(Level::Note, fatal_note.clone(), MultiSpan::new());
             }
@@ -1512,7 +1513,9 @@ impl HumanEmitter {
                 for line_idx in 0..annotated_file.lines.len() {
                     let file = annotated_file.file.clone();
                     let line = &annotated_file.lines[line_idx];
-                    if let Some(source_string) = file.get_line(line.line_index - 1) {
+                    if let Some(source_string) =
+                        line.line_index.checked_sub(1).and_then(|l| file.get_line(l))
+                    {
                         let leading_whitespace = source_string
                             .chars()
                             .take_while(|c| c.is_whitespace())
@@ -1552,7 +1555,10 @@ impl HumanEmitter {
                 for line in &annotated_file.lines {
                     max_line_len = max(
                         max_line_len,
-                        annotated_file.file.get_line(line.line_index - 1).map_or(0, |s| s.len()),
+                        line.line_index
+                            .checked_sub(1)
+                            .and_then(|l| annotated_file.file.get_line(l))
+                            .map_or(0, |s| s.len()),
                     );
                     for ann in &line.annotations {
                         span_right_margin = max(span_right_margin, ann.start_col.display);
@@ -1638,6 +1644,27 @@ impl HumanEmitter {
                                     *style,
                                 );
                             }
+                            if let Some(line) = annotated_file.lines.get(line_idx) {
+                                for ann in &line.annotations {
+                                    if let AnnotationType::MultilineStart(pos) = ann.annotation_type
+                                    {
+                                        // In the case where we have elided the entire start of the
+                                        // multispan because those lines were empty, we still need
+                                        // to draw the `|`s across the `...`.
+                                        draw_multiline_line(
+                                            &mut buffer,
+                                            last_buffer_line_num,
+                                            width_offset,
+                                            pos,
+                                            if ann.is_primary {
+                                                Style::UnderlinePrimary
+                                            } else {
+                                                Style::UnderlineSecondary
+                                            },
+                                        );
+                                    }
+                                }
+                            }
                         } else if line_idx_delta == 2 {
                             let unannotated_line = annotated_file
                                 .file
@@ -1664,6 +1691,24 @@ impl HumanEmitter {
                                     *depth,
                                     *style,
                                 );
+                            }
+                            if let Some(line) = annotated_file.lines.get(line_idx) {
+                                for ann in &line.annotations {
+                                    if let AnnotationType::MultilineStart(pos) = ann.annotation_type
+                                    {
+                                        draw_multiline_line(
+                                            &mut buffer,
+                                            last_buffer_line_num,
+                                            width_offset,
+                                            pos,
+                                            if ann.is_primary {
+                                                Style::UnderlinePrimary
+                                            } else {
+                                                Style::UnderlineSecondary
+                                            },
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -1974,7 +2019,7 @@ impl HumanEmitter {
                     let offset: isize = offsets
                         .iter()
                         .filter_map(
-                            |(start, v)| if span_start_pos <= *start { None } else { Some(v) },
+                            |(start, v)| if span_start_pos < *start { None } else { Some(v) },
                         )
                         .sum();
                     let underline_start = (span_start_pos + start) as isize + offset;
@@ -1983,7 +2028,7 @@ impl HumanEmitter {
                     let padding: usize = max_line_num_len + 3;
                     for p in underline_start..underline_end {
                         if let DisplaySuggestion::Underline = show_code_change {
-                            // If this is a replacement, underline with `^`, if this is an addition
+                            // If this is a replacement, underline with `~`, if this is an addition
                             // underline with `+`.
                             buffer.putc(
                                 row_num,
@@ -2417,7 +2462,15 @@ impl FileWithAnnotatedLines {
                 // the beginning doesn't have an underline, but the current logic seems to be
                 // working correctly.
                 let middle = min(ann.line_start + 4, ann.line_end);
-                for line in ann.line_start + 1..middle {
+                // We'll show up to 4 lines past the beginning of the multispan start.
+                // We will *not* include the tail of lines that are only whitespace.
+                let until = (ann.line_start..middle)
+                    .rev()
+                    .filter_map(|line| file.get_line(line - 1).map(|s| (line + 1, s)))
+                    .find(|(_, s)| !s.trim().is_empty())
+                    .map(|(line, _)| line)
+                    .unwrap_or(ann.line_start);
+                for line in ann.line_start + 1..until {
                     // Every `|` that joins the beginning of the span (`___^`) to the end (`|__^`).
                     add_annotation_to_file(&mut output, file.clone(), line, ann.as_line());
                 }

@@ -198,7 +198,7 @@ impl<'tcx> Children {
     }
 }
 
-fn iter_children(children: &mut Children) -> impl Iterator<Item = DefId> + '_ {
+fn iter_children(children: &Children) -> impl Iterator<Item = DefId> + '_ {
     let nonblanket = children.non_blanket_impls.iter().flat_map(|(_, v)| v.iter());
     children.blanket_impls.iter().chain(nonblanket).cloned()
 }
@@ -396,7 +396,7 @@ pub(crate) fn assoc_def(
         // associated type. Normally this situation
         // could only arise through a compiler bug --
         // if the user wrote a bad item name, it
-        // should have failed in astconv.
+        // should have failed during HIR ty lowering.
         bug!(
             "No associated type `{}` for {}",
             tcx.item_name(assoc_def_id),

@@ -140,8 +140,9 @@ pub trait Machine<'mir, 'tcx: 'mir>: Sized {
     /// Should the machine panic on allocation failures?
     const PANIC_ON_ALLOC_FAIL: bool;
 
-    /// Should post-monomorphization checks be run when a stack frame is pushed?
-    const POST_MONO_CHECKS: bool = true;
+    /// Determines whether `eval_mir_constant` can never fail because all required consts have
+    /// already been checked before.
+    const ALL_CONSTS_ARE_PRECHECKED: bool = true;
 
     /// Whether memory accesses should be alignment-checked.
     fn enforce_alignment(ecx: &InterpCx<'mir, 'tcx, Self>) -> bool;
@@ -288,26 +289,17 @@ pub trait Machine<'mir, 'tcx: 'mir>: Sized {
     }
 
     /// Return the `AllocId` for the given thread-local static in the current thread.
-    fn thread_local_static_base_pointer(
+    fn thread_local_static_pointer(
         _ecx: &mut InterpCx<'mir, 'tcx, Self>,
         def_id: DefId,
     ) -> InterpResult<'tcx, Pointer<Self::Provenance>> {
         throw_unsup!(ThreadLocalStatic(def_id))
     }
 
-    /// Return the root pointer for the given `extern static`.
-    fn extern_static_base_pointer(
+    /// Return the `AllocId` for the given `extern static`.
+    fn extern_static_pointer(
         ecx: &InterpCx<'mir, 'tcx, Self>,
         def_id: DefId,
-    ) -> InterpResult<'tcx, Pointer<Self::Provenance>>;
-
-    /// Return a "base" pointer for the given allocation: the one that is used for direct
-    /// accesses to this static/const/fn allocation, or the one returned from the heap allocator.
-    ///
-    /// Not called on `extern` or thread-local statics (those use the methods above).
-    fn adjust_alloc_base_pointer(
-        ecx: &InterpCx<'mir, 'tcx, Self>,
-        ptr: Pointer,
     ) -> InterpResult<'tcx, Pointer<Self::Provenance>>;
 
     /// "Int-to-pointer cast"
@@ -336,6 +328,8 @@ pub trait Machine<'mir, 'tcx: 'mir>: Sized {
 
     /// Called to adjust allocations to the Provenance and AllocExtra of this machine.
     ///
+    /// If `alloc` contains pointers, then they are all pointing to globals.
+    ///
     /// The way we construct allocations is to always first construct it without extra and then add
     /// the extra. This keeps uniform code paths for handling both allocations created by CTFE for
     /// globals, and allocations created by Miri during evaluation.
@@ -347,14 +341,25 @@ pub trait Machine<'mir, 'tcx: 'mir>: Sized {
     /// allocation (because a copy had to be done to adjust things), machine memory will
     /// cache the result. (This relies on `AllocMap::get_or` being able to add the
     /// owned allocation to the map even when the map is shared.)
-    ///
-    /// This must only fail if `alloc` contains provenance.
     fn adjust_allocation<'b>(
         ecx: &InterpCx<'mir, 'tcx, Self>,
         id: AllocId,
         alloc: Cow<'b, Allocation>,
         kind: Option<MemoryKind<Self::MemoryKind>>,
     ) -> InterpResult<'tcx, Cow<'b, Allocation<Self::Provenance, Self::AllocExtra, Self::Bytes>>>;
+
+    /// Return a "root" pointer for the given allocation: the one that is used for direct
+    /// accesses to this static/const/fn allocation, or the one returned from the heap allocator.
+    ///
+    /// Not called on `extern` or thread-local statics (those use the methods above).
+    ///
+    /// `kind` is the kind of the allocation the pointer points to; it can be `None` when
+    /// it's a global and `GLOBAL_KIND` is `None`.
+    fn adjust_alloc_root_pointer(
+        ecx: &InterpCx<'mir, 'tcx, Self>,
+        ptr: Pointer,
+        kind: Option<MemoryKind<Self::MemoryKind>>,
+    ) -> InterpResult<'tcx, Pointer<Self::Provenance>>;
 
     /// Evaluate the inline assembly.
     ///
@@ -427,6 +432,7 @@ pub trait Machine<'mir, 'tcx: 'mir>: Sized {
         _prov: (AllocId, Self::ProvenanceExtra),
         _size: Size,
         _align: Align,
+        _kind: MemoryKind<Self::MemoryKind>,
     ) -> InterpResult<'tcx> {
         Ok(())
     }
@@ -525,7 +531,7 @@ pub trait Machine<'mir, 'tcx: 'mir>: Sized {
     fn eval_mir_constant<F>(
         ecx: &InterpCx<'mir, 'tcx, Self>,
         val: mir::Const<'tcx>,
-        span: Option<Span>,
+        span: Span,
         layout: Option<TyAndLayout<'tcx>>,
         eval: F,
     ) -> InterpResult<'tcx, OpTy<'tcx, Self::Provenance>>
@@ -533,7 +539,7 @@ pub trait Machine<'mir, 'tcx: 'mir>: Sized {
         F: Fn(
             &InterpCx<'mir, 'tcx, Self>,
             mir::Const<'tcx>,
-            Option<Span>,
+            Span,
             Option<TyAndLayout<'tcx>>,
         ) -> InterpResult<'tcx, OpTy<'tcx, Self::Provenance>>,
     {
@@ -593,7 +599,7 @@ pub macro compile_time_machine(<$mir: lifetime, $tcx: lifetime>) {
         Ok(alloc)
     }
 
-    fn extern_static_base_pointer(
+    fn extern_static_pointer(
         ecx: &InterpCx<$mir, $tcx, Self>,
         def_id: DefId,
     ) -> InterpResult<$tcx, Pointer> {
@@ -602,9 +608,10 @@ pub macro compile_time_machine(<$mir: lifetime, $tcx: lifetime>) {
     }
 
     #[inline(always)]
-    fn adjust_alloc_base_pointer(
+    fn adjust_alloc_root_pointer(
         _ecx: &InterpCx<$mir, $tcx, Self>,
         ptr: Pointer<CtfeProvenance>,
+        _kind: Option<MemoryKind<Self::MemoryKind>>,
     ) -> InterpResult<$tcx, Pointer<CtfeProvenance>> {
         Ok(ptr)
     }

@@ -7,7 +7,7 @@ use rustc_hir::{ItemId, Node, CRATE_HIR_ID};
 use rustc_middle::query::Providers;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::config::{sigpipe, CrateType, EntryFnType};
-use rustc_session::parse::feature_err;
+use rustc_session::{config::RemapPathScopeComponents, RemapFileNameExt};
 use rustc_span::symbol::sym;
 use rustc_span::{Span, Symbol};
 
@@ -133,16 +133,6 @@ fn configure_main(tcx: TyCtxt<'_>, visitor: &EntryContext<'_>) -> Option<(DefId,
                 return None;
             }
 
-            if main_def.is_import && !tcx.features().imported_main {
-                let span = main_def.span;
-                feature_err(
-                    &tcx.sess,
-                    sym::imported_main,
-                    span,
-                    "using an imported function as entry point `main` is experimental",
-                )
-                .emit();
-            }
             return Some((def_id, EntryFnType::Main { sigpipe: sigpipe(tcx, def_id) }));
         }
         no_main_err(tcx, visitor);
@@ -176,10 +166,14 @@ fn no_main_err(tcx: TyCtxt<'_>, visitor: &EntryContext<'_>) {
 
     // There is no main function.
     let mut has_filename = true;
-    let filename = tcx.sess.local_crate_source_file().unwrap_or_else(|| {
-        has_filename = false;
-        Default::default()
-    });
+    let filename = tcx
+        .sess
+        .local_crate_source_file()
+        .map(|src| src.for_scope(&tcx.sess, RemapPathScopeComponents::DIAGNOSTICS).to_path_buf())
+        .unwrap_or_else(|| {
+            has_filename = false;
+            Default::default()
+        });
     let main_def_opt = tcx.resolutions(()).main_def;
     let code = E0601;
     let add_teach_note = tcx.sess.teach(code);

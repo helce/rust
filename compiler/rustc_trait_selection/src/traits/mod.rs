@@ -46,7 +46,7 @@ pub use self::coherence::{IsFirstInputType, OrphanCheckErr, OverlapResult};
 pub use self::engine::{ObligationCtxt, TraitEngineExt};
 pub use self::fulfill::{FulfillmentContext, PendingPredicateObligation};
 pub use self::normalize::NormalizeExt;
-pub use self::object_safety::astconv_object_safety_violations;
+pub use self::object_safety::hir_ty_lowering_object_safety_violations;
 pub use self::object_safety::is_vtable_safe_method;
 pub use self::object_safety::object_safety_violations_for_assoc_item;
 pub use self::object_safety::ObjectSafetyViolation;
@@ -61,12 +61,12 @@ pub use self::specialize::{
 pub use self::structural_match::search_for_structural_match_violation;
 pub use self::structural_normalize::StructurallyNormalizeExt;
 pub use self::util::elaborate;
-pub use self::util::{
-    check_args_compatible, supertrait_def_ids, supertraits, transitive_bounds,
-    transitive_bounds_that_define_assoc_item, SupertraitDefIds,
-};
-pub use self::util::{expand_trait_aliases, TraitAliasExpander};
+pub use self::util::{expand_trait_aliases, TraitAliasExpander, TraitAliasExpansionInfo};
 pub use self::util::{get_vtable_index_of_object_method, impl_item_is_final, upcast_choices};
+pub use self::util::{
+    supertrait_def_ids, supertraits, transitive_bounds, transitive_bounds_that_define_assoc_item,
+    SupertraitDefIds,
+};
 pub use self::util::{with_replaced_escaping_bound_vars, BoundVarReplacer, PlaceholderReplacer};
 
 pub use rustc_infer::traits::*;
@@ -162,7 +162,7 @@ fn pred_known_to_hold_modulo_regions<'tcx>(
             let errors = ocx.select_all_or_error();
             match errors.as_slice() {
                 // Only known to hold if we did no inference.
-                [] => infcx.shallow_resolve(goal) == goal,
+                [] => infcx.resolve_vars_if_possible(goal) == goal,
 
                 errors => {
                     debug!(?errors);
@@ -482,7 +482,7 @@ fn is_impossible_associated_item(
         type Result = ControlFlow<()>;
         fn visit_ty(&mut self, t: Ty<'tcx>) -> Self::Result {
             // If this is a parameter from the trait item's own generics, then bail
-            if let ty::Param(param) = t.kind()
+            if let ty::Param(param) = *t.kind()
                 && let param_def_id = self.generics.type_param(param, self.tcx).def_id
                 && self.tcx.parent(param_def_id) == self.trait_item_def_id
             {
@@ -492,7 +492,7 @@ fn is_impossible_associated_item(
         }
         fn visit_region(&mut self, r: ty::Region<'tcx>) -> Self::Result {
             if let ty::ReEarlyParam(param) = r.kind()
-                && let param_def_id = self.generics.region_param(&param, self.tcx).def_id
+                && let param_def_id = self.generics.region_param(param, self.tcx).def_id
                 && self.tcx.parent(param_def_id) == self.trait_item_def_id
             {
                 return ControlFlow::Break(());
@@ -501,7 +501,7 @@ fn is_impossible_associated_item(
         }
         fn visit_const(&mut self, ct: ty::Const<'tcx>) -> Self::Result {
             if let ty::ConstKind::Param(param) = ct.kind()
-                && let param_def_id = self.generics.const_param(&param, self.tcx).def_id
+                && let param_def_id = self.generics.const_param(param, self.tcx).def_id
                 && self.tcx.parent(param_def_id) == self.trait_item_def_id
             {
                 return ControlFlow::Break(());

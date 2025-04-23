@@ -9,7 +9,7 @@ use rustc_hir::def::{DefKind, Res};
 use rustc_hir::intravisit;
 use rustc_hir::{GenericParamKind, ImplItemKind};
 use rustc_infer::infer::outlives::env::OutlivesEnvironment;
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
+use rustc_infer::infer::type_variable::TypeVariableOrigin;
 use rustc_infer::infer::{self, InferCtxt, TyCtxtInferExt};
 use rustc_infer::traits::{util, FulfillmentError};
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
@@ -639,10 +639,9 @@ pub(super) fn collect_return_position_impl_trait_in_trait_tys<'tcx>(
         }
     }
 
-    if !unnormalized_trait_sig.output().references_error() {
-        debug_assert!(
-            !collector.types.is_empty(),
-            "expect >0 RPITITs in call to `collect_return_position_impl_trait_in_trait_tys`"
+    if !unnormalized_trait_sig.output().references_error() && collector.types.is_empty() {
+        tcx.dcx().delayed_bug(
+            "expect >0 RPITITs in call to `collect_return_position_impl_trait_in_trait_tys`",
         );
     }
 
@@ -746,7 +745,7 @@ pub(super) fn collect_return_position_impl_trait_in_trait_tys<'tcx>(
 
     // We may not collect all RPITITs that we see in the HIR for a trait signature
     // because an RPITIT was located within a missing item. Like if we have a sig
-    // returning `-> Missing<impl Sized>`, that gets converted to `-> [type error]`,
+    // returning `-> Missing<impl Sized>`, that gets converted to `-> {type error}`,
     // and when walking through the signature we end up never collecting the def id
     // of the `impl Sized`. Insert that here, so we don't ICE later.
     for assoc_item in tcx.associated_types_for_impl_traits_in_associated_fn(trait_m.def_id) {
@@ -801,10 +800,10 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for ImplTraitInTraitCollector<'_, 'tcx> {
                 bug!("FIXME(RPITIT): error here");
             }
             // Replace with infer var
-            let infer_ty = self.ocx.infcx.next_ty_var(TypeVariableOrigin {
-                span: self.span,
-                kind: TypeVariableOriginKind::MiscVariable,
-            });
+            let infer_ty = self
+                .ocx
+                .infcx
+                .next_ty_var(TypeVariableOrigin { span: self.span, param_def_id: None });
             self.types.insert(proj.def_id, (infer_ty, proj.args));
             // Recurse into bounds
             for (pred, pred_span) in self
@@ -1305,7 +1304,7 @@ fn compare_number_of_generics<'tcx>(
                     .iter()
                     .filter(|p| match p.kind {
                         hir::GenericParamKind::Lifetime {
-                            kind: hir::LifetimeParamKind::Elided,
+                            kind: hir::LifetimeParamKind::Elided(_),
                         } => {
                             // A fn can have an arbitrary number of extra elided lifetimes for the
                             // same signature.
@@ -1724,6 +1723,7 @@ pub(super) fn compare_impl_const_raw(
 
     compare_number_of_generics(tcx, impl_const_item, trait_const_item, false)?;
     compare_generic_param_kinds(tcx, impl_const_item, trait_const_item, false)?;
+    check_region_bounds_on_impl_item(tcx, impl_const_item, trait_const_item, false)?;
     compare_const_predicate_entailment(tcx, impl_const_item, trait_const_item, impl_trait_ref)
 }
 
@@ -1763,8 +1763,6 @@ fn compare_const_predicate_entailment<'tcx>(
 
     let impl_ct_predicates = tcx.predicates_of(impl_ct.def_id);
     let trait_ct_predicates = tcx.predicates_of(trait_ct.def_id);
-
-    check_region_bounds_on_impl_item(tcx, impl_ct, trait_ct, false)?;
 
     // The predicates declared by the impl definition, the trait and the
     // associated const in the trait are assumed.
@@ -1867,6 +1865,7 @@ pub(super) fn compare_impl_ty<'tcx>(
     let _: Result<(), ErrorGuaranteed> = try {
         compare_number_of_generics(tcx, impl_ty, trait_ty, false)?;
         compare_generic_param_kinds(tcx, impl_ty, trait_ty, false)?;
+        check_region_bounds_on_impl_item(tcx, impl_ty, trait_ty, false)?;
         compare_type_predicate_entailment(tcx, impl_ty, trait_ty, impl_trait_ref)?;
         check_type_bounds(tcx, trait_ty, impl_ty, impl_trait_ref)?;
     };
@@ -1886,8 +1885,6 @@ fn compare_type_predicate_entailment<'tcx>(
 
     let impl_ty_predicates = tcx.predicates_of(impl_ty.def_id);
     let trait_ty_predicates = tcx.predicates_of(trait_ty.def_id);
-
-    check_region_bounds_on_impl_item(tcx, impl_ty, trait_ty, false)?;
 
     let impl_ty_own_bounds = impl_ty_predicates.instantiate_own(tcx, impl_args);
     if impl_ty_own_bounds.len() == 0 {

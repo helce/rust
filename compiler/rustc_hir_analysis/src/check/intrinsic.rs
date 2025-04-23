@@ -107,6 +107,7 @@ pub fn intrinsic_operation_unsafety(tcx: TyCtxt<'_>, intrinsic_id: LocalDefId) -
         | sym::cttz
         | sym::bswap
         | sym::bitreverse
+        | sym::three_way_compare
         | sym::discriminant_value
         | sym::type_id
         | sym::likely
@@ -127,8 +128,8 @@ pub fn intrinsic_operation_unsafety(tcx: TyCtxt<'_>, intrinsic_id: LocalDefId) -
         | sym::variant_count
         | sym::is_val_statically_known
         | sym::ptr_mask
-        | sym::check_language_ub
-        | sym::check_library_ub
+        | sym::aggregate_raw_ptr
+        | sym::ub_checks
         | sym::fadd_algebraic
         | sym::fsub_algebraic
         | sym::fmul_algebraic
@@ -183,7 +184,7 @@ pub fn check_intrinsic_type(
             let region = ty::Region::new_bound(
                 tcx,
                 ty::INNERMOST,
-                ty::BoundRegion { var: ty::BoundVar::from_u32(0), kind: ty::BrAnon },
+                ty::BoundRegion { var: ty::BoundVar::ZERO, kind: ty::BrAnon },
             );
             let env_region = ty::Region::new_bound(
                 tcx,
@@ -191,7 +192,7 @@ pub fn check_intrinsic_type(
                 ty::BoundRegion { var: ty::BoundVar::from_u32(2), kind: ty::BrEnv },
             );
             let va_list_ty = tcx.type_of(did).instantiate(tcx, &[region.into()]);
-            (Ty::new_ref(tcx, env_region, ty::TypeAndMut { ty: va_list_ty, mutbl }), va_list_ty)
+            (Ty::new_ref(tcx, env_region, va_list_ty, mutbl), va_list_ty)
         })
     };
 
@@ -240,15 +241,9 @@ pub fn check_intrinsic_type(
             sym::prefetch_read_data
             | sym::prefetch_write_data
             | sym::prefetch_read_instruction
-            | sym::prefetch_write_instruction => (
-                1,
-                0,
-                vec![
-                    Ty::new_ptr(tcx, ty::TypeAndMut { ty: param(0), mutbl: hir::Mutability::Not }),
-                    tcx.types.i32,
-                ],
-                Ty::new_unit(tcx),
-            ),
+            | sym::prefetch_write_instruction => {
+                (1, 0, vec![Ty::new_imm_ptr(tcx, param(0)), tcx.types.i32], Ty::new_unit(tcx))
+            }
             sym::needs_drop => (1, 0, vec![], tcx.types.bool),
 
             sym::type_name => (1, 0, vec![], Ty::new_static_str(tcx)),
@@ -257,28 +252,22 @@ pub fn check_intrinsic_type(
             sym::arith_offset => (
                 1,
                 0,
-                vec![
-                    Ty::new_ptr(tcx, ty::TypeAndMut { ty: param(0), mutbl: hir::Mutability::Not }),
-                    tcx.types.isize,
-                ],
-                Ty::new_ptr(tcx, ty::TypeAndMut { ty: param(0), mutbl: hir::Mutability::Not }),
+                vec![Ty::new_imm_ptr(tcx, param(0)), tcx.types.isize],
+                Ty::new_imm_ptr(tcx, param(0)),
             ),
             sym::ptr_mask => (
                 1,
                 0,
-                vec![
-                    Ty::new_ptr(tcx, ty::TypeAndMut { ty: param(0), mutbl: hir::Mutability::Not }),
-                    tcx.types.usize,
-                ],
-                Ty::new_ptr(tcx, ty::TypeAndMut { ty: param(0), mutbl: hir::Mutability::Not }),
+                vec![Ty::new_imm_ptr(tcx, param(0)), tcx.types.usize],
+                Ty::new_imm_ptr(tcx, param(0)),
             ),
 
             sym::copy | sym::copy_nonoverlapping => (
                 1,
                 0,
                 vec![
-                    Ty::new_ptr(tcx, ty::TypeAndMut { ty: param(0), mutbl: hir::Mutability::Not }),
-                    Ty::new_ptr(tcx, ty::TypeAndMut { ty: param(0), mutbl: hir::Mutability::Mut }),
+                    Ty::new_imm_ptr(tcx, param(0)),
+                    Ty::new_mut_ptr(tcx, param(0)),
                     tcx.types.usize,
                 ],
                 Ty::new_unit(tcx),
@@ -287,8 +276,8 @@ pub fn check_intrinsic_type(
                 1,
                 0,
                 vec![
-                    Ty::new_ptr(tcx, ty::TypeAndMut { ty: param(0), mutbl: hir::Mutability::Mut }),
-                    Ty::new_ptr(tcx, ty::TypeAndMut { ty: param(0), mutbl: hir::Mutability::Not }),
+                    Ty::new_mut_ptr(tcx, param(0)),
+                    Ty::new_imm_ptr(tcx, param(0)),
                     tcx.types.usize,
                 ],
                 Ty::new_unit(tcx),
@@ -300,11 +289,7 @@ pub fn check_intrinsic_type(
             sym::write_bytes | sym::volatile_set_memory => (
                 1,
                 0,
-                vec![
-                    Ty::new_ptr(tcx, ty::TypeAndMut { ty: param(0), mutbl: hir::Mutability::Mut }),
-                    tcx.types.u8,
-                    tcx.types.usize,
-                ],
+                vec![Ty::new_mut_ptr(tcx, param(0)), tcx.types.u8, tcx.types.usize],
                 Ty::new_unit(tcx),
             ),
 
@@ -427,13 +412,15 @@ pub fn check_intrinsic_type(
                 (1, 0, vec![Ty::new_mut_ptr(tcx, param(0)), param(0)], Ty::new_unit(tcx))
             }
 
-            sym::ctpop
-            | sym::ctlz
-            | sym::ctlz_nonzero
-            | sym::cttz
-            | sym::cttz_nonzero
-            | sym::bswap
-            | sym::bitreverse => (1, 0, vec![param(0)], param(0)),
+            sym::ctpop | sym::ctlz | sym::ctlz_nonzero | sym::cttz | sym::cttz_nonzero => {
+                (1, 0, vec![param(0)], tcx.types.u32)
+            }
+
+            sym::bswap | sym::bitreverse => (1, 0, vec![param(0)], param(0)),
+
+            sym::three_way_compare => {
+                (1, 0, vec![param(0), param(0)], tcx.ty_ordering_enum(Some(span)))
+            }
 
             sym::add_with_overflow | sym::sub_with_overflow | sym::mul_with_overflow => {
                 (1, 0, vec![param(0), param(0)], Ty::new_tup(tcx, &[param(0), tcx.types.bool]))
@@ -441,7 +428,7 @@ pub fn check_intrinsic_type(
 
             sym::ptr_guaranteed_cmp => (
                 1,
-                0,
+                1,
                 vec![Ty::new_imm_ptr(tcx, param(0)), Ty::new_imm_ptr(tcx, param(0))],
                 tcx.types.u8,
             ),
@@ -471,9 +458,8 @@ pub fn check_intrinsic_type(
             sym::unchecked_div | sym::unchecked_rem | sym::exact_div => {
                 (1, 0, vec![param(0), param(0)], param(0))
             }
-            sym::unchecked_shl | sym::unchecked_shr | sym::rotate_left | sym::rotate_right => {
-                (1, 0, vec![param(0), param(0)], param(0))
-            }
+            sym::unchecked_shl | sym::unchecked_shr => (2, 0, vec![param(0), param(1)], param(0)),
+            sym::rotate_left | sym::rotate_right => (1, 0, vec![param(0), tcx.types.u32], param(0)),
             sym::unchecked_add | sym::unchecked_sub | sym::unchecked_mul => {
                 (1, 0, vec![param(0), param(0)], param(0))
             }
@@ -500,13 +486,15 @@ pub fn check_intrinsic_type(
                 (1, 0, vec![Ty::new_mut_ptr(tcx, param(0)), param(0)], Ty::new_unit(tcx))
             }
 
+            sym::typed_swap => (1, 1, vec![Ty::new_mut_ptr(tcx, param(0)); 2], Ty::new_unit(tcx)),
+
             sym::discriminant_value => {
                 let assoc_items = tcx.associated_item_def_ids(
                     tcx.require_lang_item(hir::LangItem::DiscriminantKind, None),
                 );
                 let discriminant_def_id = assoc_items[0];
 
-                let br = ty::BoundRegion { var: ty::BoundVar::from_u32(0), kind: ty::BrAnon };
+                let br = ty::BoundRegion { var: ty::BoundVar::ZERO, kind: ty::BrAnon };
                 (
                     1,
                     0,
@@ -545,7 +533,7 @@ pub fn check_intrinsic_type(
 
             sym::va_start | sym::va_end => match mk_va_list_ty(hir::Mutability::Mut) {
                 Some((va_list_ref_ty, _)) => (0, 0, vec![va_list_ref_ty], Ty::new_unit(tcx)),
-                None => bug!("`va_list` language item needed for C-variadic intrinsics"),
+                None => bug!("`va_list` lang item needed for C-variadic intrinsics"),
             },
 
             sym::va_copy => match mk_va_list_ty(hir::Mutability::Not) {
@@ -553,12 +541,12 @@ pub fn check_intrinsic_type(
                     let va_list_ptr_ty = Ty::new_mut_ptr(tcx, va_list_ty);
                     (0, 0, vec![va_list_ptr_ty, va_list_ref_ty], Ty::new_unit(tcx))
                 }
-                None => bug!("`va_list` language item needed for C-variadic intrinsics"),
+                None => bug!("`va_list` lang item needed for C-variadic intrinsics"),
             },
 
             sym::va_arg => match mk_va_list_ty(hir::Mutability::Mut) {
                 Some((va_list_ref_ty, _)) => (1, 0, vec![va_list_ref_ty], param(0)),
-                None => bug!("`va_list` language item needed for C-variadic intrinsics"),
+                None => bug!("`va_list` lang item needed for C-variadic intrinsics"),
             },
 
             sym::nontemporal_store => {
@@ -566,7 +554,7 @@ pub fn check_intrinsic_type(
             }
 
             sym::raw_eq => {
-                let br = ty::BoundRegion { var: ty::BoundVar::from_u32(0), kind: ty::BrAnon };
+                let br = ty::BoundRegion { var: ty::BoundVar::ZERO, kind: ty::BrAnon };
                 let param_ty_lhs =
                     Ty::new_imm_ref(tcx, ty::Region::new_bound(tcx, ty::INNERMOST, br), param(0));
                 let br = ty::BoundRegion { var: ty::BoundVar::from_u32(1), kind: ty::BrAnon };
@@ -579,13 +567,17 @@ pub fn check_intrinsic_type(
 
             sym::is_val_statically_known => (1, 1, vec![param(0)], tcx.types.bool),
 
-            sym::const_eval_select => (4, 0, vec![param(0), param(1), param(2)], param(3)),
+            sym::const_eval_select => (4, 1, vec![param(0), param(1), param(2)], param(3)),
 
             sym::vtable_size | sym::vtable_align => {
                 (0, 0, vec![Ty::new_imm_ptr(tcx, Ty::new_unit(tcx))], tcx.types.usize)
             }
 
-            sym::check_language_ub | sym::check_library_ub => (0, 1, Vec::new(), tcx.types.bool),
+            // This type check is not particularly useful, but the `where` bounds
+            // on the definition in `core` do the heavy lifting for checking it.
+            sym::aggregate_raw_ptr => (3, 1, vec![param(1), param(2)], param(0)),
+
+            sym::ub_checks => (0, 1, Vec::new(), tcx.types.bool),
 
             sym::simd_eq
             | sym::simd_ne
@@ -638,8 +630,8 @@ pub fn check_intrinsic_type(
             sym::simd_cast
             | sym::simd_as
             | sym::simd_cast_ptr
-            | sym::simd_expose_addr
-            | sym::simd_from_exposed_addr => (2, 0, vec![param(0)], param(1)),
+            | sym::simd_expose_provenance
+            | sym::simd_with_exposed_provenance => (2, 0, vec![param(0)], param(1)),
             sym::simd_bitmask => (2, 0, vec![param(0)], param(1)),
             sym::simd_select | sym::simd_select_bitmask => {
                 (2, 0, vec![param(0), param(1), param(1)], param(1))
@@ -657,10 +649,6 @@ pub fn check_intrinsic_type(
             | sym::simd_reduce_max => (2, 0, vec![param(0)], param(1)),
             sym::simd_shuffle => (3, 0, vec![param(0), param(0), param(1)], param(2)),
             sym::simd_shuffle_generic => (2, 1, vec![param(0), param(0)], param(1)),
-
-            sym::retag_box_to_raw => {
-                (2, 0, vec![Ty::new_mut_ptr(tcx, param(0))], Ty::new_mut_ptr(tcx, param(0)))
-            }
 
             other => {
                 tcx.dcx().emit_err(UnrecognizedIntrinsicFunction { span, name: other });

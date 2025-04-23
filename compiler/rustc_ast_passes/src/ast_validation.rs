@@ -266,14 +266,18 @@ impl<'a> AstValidator<'a> {
             return;
         }
 
-        self.dcx().emit_err(errors::VisibilityNotPermitted { span: vis.span, note });
+        self.dcx().emit_err(errors::VisibilityNotPermitted {
+            span: vis.span,
+            note,
+            remove_qualifier_sugg: vis.span,
+        });
     }
 
     fn check_decl_no_pat(decl: &FnDecl, mut report_err: impl FnMut(Span, Option<Ident>, bool)) {
         for Param { pat, .. } in &decl.inputs {
             match pat.kind {
-                PatKind::Ident(BindingAnnotation::NONE, _, None) | PatKind::Wild => {}
-                PatKind::Ident(BindingAnnotation::MUT, ident, None) => {
+                PatKind::Ident(BindingMode::NONE, _, None) | PatKind::Wild => {}
+                PatKind::Ident(BindingMode::MUT, ident, None) => {
                     report_err(pat.span, Some(ident), true)
                 }
                 _ => report_err(pat.span, None, false),
@@ -346,7 +350,7 @@ impl<'a> AstValidator<'a> {
             in_impl: matches!(parent, TraitOrTraitImpl::TraitImpl { .. }),
             const_context_label: parent_constness,
             remove_const_sugg: (
-                self.session.source_map().span_extend_while(span, |c| c == ' ').unwrap_or(span),
+                self.session.source_map().span_extend_while_whitespace(span),
                 match parent_constness {
                     Some(_) => rustc_errors::Applicability::MachineApplicable,
                     None => rustc_errors::Applicability::MaybeIncorrect,
@@ -514,13 +518,32 @@ impl<'a> AstValidator<'a> {
     }
 
     /// An `fn` in `extern { ... }` cannot have qualifiers, e.g. `async fn`.
-    fn check_foreign_fn_headerless(&self, ident: Ident, span: Span, header: FnHeader) {
-        if header.has_qualifiers() {
+    fn check_foreign_fn_headerless(
+        &self,
+        // Deconstruct to ensure exhaustiveness
+        FnHeader { unsafety, coroutine_kind, constness, ext }: FnHeader,
+    ) {
+        let report_err = |span| {
             self.dcx().emit_err(errors::FnQualifierInExtern {
-                span: ident.span,
+                span: span,
                 block: self.current_extern_span(),
-                sugg_span: span.until(ident.span.shrink_to_lo()),
             });
+        };
+        match unsafety {
+            Unsafe::Yes(span) => report_err(span),
+            Unsafe::No => (),
+        }
+        match coroutine_kind {
+            Some(knd) => report_err(knd.span()),
+            None => (),
+        }
+        match constness {
+            Const::Yes(span) => report_err(span),
+            Const::No => (),
+        }
+        match ext {
+            Extern::None => (),
+            Extern::Implicit(span) | Extern::Explicit(_, span) => report_err(span),
         }
     }
 
@@ -714,7 +737,7 @@ impl<'a> AstValidator<'a> {
                     }
                 }
             }
-            TyKind::ImplTrait(_, bounds) => {
+            TyKind::ImplTrait(_, bounds, _) => {
                 if self.is_impl_trait_banned {
                     self.dcx().emit_err(errors::ImplTraitPath { span: ty.span });
                 }
@@ -1145,7 +1168,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             ForeignItemKind::Fn(box Fn { defaultness, sig, body, .. }) => {
                 self.check_defaultness(fi.span, *defaultness);
                 self.check_foreign_fn_bodyless(fi.ident, body.as_deref());
-                self.check_foreign_fn_headerless(fi.ident, fi.span, sig.header);
+                self.check_foreign_fn_headerless(sig.header);
                 self.check_foreign_item_ascii_only(fi.ident);
             }
             ForeignItemKind::TyAlias(box TyAlias {
@@ -1169,7 +1192,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             ForeignItemKind::MacCall(..) => {}
         }
 
-        visit::walk_foreign_item(self, fi)
+        visit::walk_item(self, fi)
     }
 
     // Mirrors `visit::walk_generic_args`, but tracks relevant state.
@@ -1552,7 +1575,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
 /// When encountering an equality constraint in a `where` clause, emit an error. If the code seems
 /// like it's setting an associated type, provide an appropriate suggestion.
 fn deny_equality_constraints(
-    this: &mut AstValidator<'_>,
+    this: &AstValidator<'_>,
     predicate: &WhereEqPredicate,
     generics: &Generics,
 ) {

@@ -9,14 +9,13 @@ mod tests;
 
 use self::counters::{CounterIncrementSite, CoverageCounters};
 use self::graph::{BasicCoverageBlock, CoverageGraph};
-use self::spans::{BcbMapping, BcbMappingKind, CoverageSpans};
+use self::spans::{BcbBranchPair, BcbMapping, BcbMappingKind, CoverageSpans};
 
 use crate::MirPass;
 
-use rustc_middle::hir;
 use rustc_middle::mir::coverage::*;
 use rustc_middle::mir::{
-    self, BasicBlock, BasicBlockData, Coverage, SourceInfo, Statement, StatementKind, Terminator,
+    self, BasicBlock, BasicBlockData, SourceInfo, Statement, StatementKind, Terminator,
     TerminatorKind,
 };
 use rustc_middle::ty::TyCtxt;
@@ -101,9 +100,12 @@ fn instrument_function_for_coverage<'tcx>(tcx: TyCtxt<'tcx>, mir_body: &mut mir:
         &coverage_counters,
     );
 
+    inject_mcdc_statements(mir_body, &basic_coverage_blocks, &coverage_spans);
+
     mir_body.function_coverage_info = Some(Box::new(FunctionCoverageInfo {
         function_source_hash: hir_info.function_source_hash,
         num_counters: coverage_counters.num_counters(),
+        mcdc_bitmap_bytes: coverage_spans.test_vector_bitmap_bytes(),
         expressions: coverage_counters.into_expressions(),
         mappings,
     }));
@@ -124,8 +126,11 @@ fn create_mappings<'tcx>(
     let body_span = hir_info.body_span;
 
     let source_file = source_map.lookup_source_file(body_span.lo());
-    use rustc_session::RemapFileNameExt;
-    let file_name = Symbol::intern(&source_file.name.for_codegen(tcx.sess).to_string_lossy());
+
+    use rustc_session::{config::RemapPathScopeComponents, RemapFileNameExt};
+    let file_name = Symbol::intern(
+        &source_file.name.for_scope(tcx.sess, RemapPathScopeComponents::MACRO).to_string_lossy(),
+    );
 
     let term_for_bcb = |bcb| {
         coverage_counters
@@ -134,20 +139,47 @@ fn create_mappings<'tcx>(
             .as_term()
     };
 
-    coverage_spans
-        .all_bcb_mappings()
-        .filter_map(|&BcbMapping { kind: bcb_mapping_kind, span }| {
-            let kind = match bcb_mapping_kind {
+    let mut mappings = Vec::new();
+
+    mappings.extend(coverage_spans.mappings.iter().filter_map(
+        |BcbMapping { kind: bcb_mapping_kind, span }| {
+            let kind = match *bcb_mapping_kind {
                 BcbMappingKind::Code(bcb) => MappingKind::Code(term_for_bcb(bcb)),
-                BcbMappingKind::Branch { true_bcb, false_bcb } => MappingKind::Branch {
+                BcbMappingKind::MCDCBranch { true_bcb, false_bcb, condition_info: None } => {
+                    MappingKind::Branch {
+                        true_term: term_for_bcb(true_bcb),
+                        false_term: term_for_bcb(false_bcb),
+                    }
+                }
+                BcbMappingKind::MCDCBranch {
+                    true_bcb,
+                    false_bcb,
+                    condition_info: Some(mcdc_params),
+                } => MappingKind::MCDCBranch {
                     true_term: term_for_bcb(true_bcb),
                     false_term: term_for_bcb(false_bcb),
+                    mcdc_params,
                 },
+                BcbMappingKind::MCDCDecision { bitmap_idx, conditions_num, .. } => {
+                    MappingKind::MCDCDecision(DecisionInfo { bitmap_idx, conditions_num })
+                }
             };
+            let code_region = make_code_region(source_map, file_name, *span, body_span)?;
+            Some(Mapping { kind, code_region })
+        },
+    ));
+
+    mappings.extend(coverage_spans.branch_pairs.iter().filter_map(
+        |&BcbBranchPair { span, true_bcb, false_bcb }| {
+            let true_term = term_for_bcb(true_bcb);
+            let false_term = term_for_bcb(false_bcb);
+            let kind = MappingKind::Branch { true_term, false_term };
             let code_region = make_code_region(source_map, file_name, span, body_span)?;
             Some(Mapping { kind, code_region })
-        })
-        .collect::<Vec<_>>()
+        },
+    ));
+
+    mappings
 }
 
 /// For each BCB node or BCB edge that has an associated coverage counter,
@@ -202,6 +234,55 @@ fn inject_coverage_statements<'tcx>(
     }
 }
 
+/// For each conditions inject statements to update condition bitmap after it has been evaluated.
+/// For each decision inject statements to update test vector bitmap after it has been evaluated.
+fn inject_mcdc_statements<'tcx>(
+    mir_body: &mut mir::Body<'tcx>,
+    basic_coverage_blocks: &CoverageGraph,
+    coverage_spans: &CoverageSpans,
+) {
+    if coverage_spans.test_vector_bitmap_bytes() == 0 {
+        return;
+    }
+
+    // Inject test vector update first because `inject_statement` always insert new statement at head.
+    for (end_bcbs, bitmap_idx) in
+        coverage_spans.mappings.iter().filter_map(|mapping| match &mapping.kind {
+            BcbMappingKind::MCDCDecision { end_bcbs, bitmap_idx, .. } => {
+                Some((end_bcbs, *bitmap_idx))
+            }
+            _ => None,
+        })
+    {
+        for end in end_bcbs {
+            let end_bb = basic_coverage_blocks[*end].leader_bb();
+            inject_statement(mir_body, CoverageKind::TestVectorBitmapUpdate { bitmap_idx }, end_bb);
+        }
+    }
+
+    for (true_bcb, false_bcb, condition_id) in
+        coverage_spans.mappings.iter().filter_map(|mapping| match mapping.kind {
+            BcbMappingKind::MCDCBranch { true_bcb, false_bcb, condition_info } => {
+                Some((true_bcb, false_bcb, condition_info?.condition_id))
+            }
+            _ => None,
+        })
+    {
+        let true_bb = basic_coverage_blocks[true_bcb].leader_bb();
+        inject_statement(
+            mir_body,
+            CoverageKind::CondBitmapUpdate { id: condition_id, value: true },
+            true_bb,
+        );
+        let false_bb = basic_coverage_blocks[false_bcb].leader_bb();
+        inject_statement(
+            mir_body,
+            CoverageKind::CondBitmapUpdate { id: condition_id, value: false },
+            false_bb,
+        );
+    }
+}
+
 /// Given two basic blocks that have a control-flow edge between them, creates
 /// and returns a new block that sits between those blocks.
 fn inject_edge_counter_basic_block(
@@ -231,10 +312,7 @@ fn inject_statement(mir_body: &mut mir::Body<'_>, counter_kind: CoverageKind, bb
     debug!("  injecting statement {counter_kind:?} for {bb:?}");
     let data = &mut mir_body[bb];
     let source_info = data.terminator().source_info;
-    let statement = Statement {
-        source_info,
-        kind: StatementKind::Coverage(Box::new(Coverage { kind: counter_kind })),
-    };
+    let statement = Statement { source_info, kind: StatementKind::Coverage(counter_kind) };
     data.statements.insert(0, statement);
 }
 
@@ -368,8 +446,7 @@ fn extract_hir_info<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> ExtractedHir
     // to HIR for it.
 
     let hir_node = tcx.hir_node_by_def_id(def_id);
-    let (_, fn_body_id) =
-        hir::map::associated_body(hir_node).expect("HIR node is a function with body");
+    let fn_body_id = hir_node.body_id().expect("HIR node is a function with body");
     let hir_body = tcx.hir().body(fn_body_id);
 
     let maybe_fn_sig = hir_node.fn_sig();

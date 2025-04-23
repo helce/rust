@@ -99,6 +99,12 @@ impl Ty {
     }
 }
 
+/// Represents a pattern in the type system
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Pattern {
+    Range { start: Option<Const>, end: Option<Const>, include_end: bool },
+}
+
 /// Represents a constant in MIR or from the Type system.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Const {
@@ -481,6 +487,7 @@ pub enum RigidTy {
     Foreign(ForeignDef),
     Str,
     Array(Ty, Const),
+    Pat(Ty, Pattern),
     Slice(Ty),
     RawPtr(Ty, Mutability),
     Ref(Region, Ty, Mutability),
@@ -654,7 +661,7 @@ impl AdtDef {
         with(|cx| cx.def_ty(self.0))
     }
 
-    /// Retrieve the type of this Adt instantiating the type with the given arguments.
+    /// Retrieve the type of this Adt by instantiating and normalizing it with the given arguments.
     ///
     /// This will assume the type can be instantiated with these arguments.
     pub fn ty_with_args(&self, args: &GenericArgs) -> Ty {
@@ -733,7 +740,7 @@ pub struct FieldDef {
 }
 
 impl FieldDef {
-    /// Retrieve the type of this field instantiating the type with the given arguments.
+    /// Retrieve the type of this field instantiating and normalizing it with the given arguments.
     ///
     /// This will assume the type can be instantiated with these arguments.
     pub fn ty_with_args(&self, args: &GenericArgs) -> Ty {
@@ -1332,7 +1339,7 @@ pub enum AliasRelationDirection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraitPredicate {
     pub trait_ref: TraitRef,
-    pub polarity: ImplPolarity,
+    pub polarity: PredicatePolarity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1352,6 +1359,12 @@ pub enum ImplPolarity {
     Positive,
     Negative,
     Reservation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PredicatePolarity {
+    Positive,
+    Negative,
 }
 
 pub trait IndexedVal {

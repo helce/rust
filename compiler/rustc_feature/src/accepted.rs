@@ -59,6 +59,8 @@ declare_features! (
     (accepted, asm_sym, "1.66.0", Some(93333)),
     /// Allows the definition of associated constants in `trait` or `impl` blocks.
     (accepted, associated_consts, "1.20.0", Some(29646)),
+    /// Allows the user of associated type bounds.
+    (accepted, associated_type_bounds, "1.79.0", Some(52662)),
     /// Allows using associated `type`s in `trait`s.
     (accepted, associated_types, "1.0.0", None),
     /// Allows free and inherent `async fn`s, `async` blocks, and `<expr>.await` expressions.
@@ -96,6 +98,8 @@ declare_features! (
     (accepted, closure_to_fn_coercion, "1.19.0", Some(39817)),
     /// Allows using the CMPXCHG16B target feature.
     (accepted, cmpxchg16b_target_feature, "1.69.0", Some(44839)),
+    /// Allows use of the `#[collapse_debuginfo]` attribute.
+    (accepted, collapse_debuginfo, "1.79.0", Some(100758)),
     /// Allows usage of the `compile_error!` macro.
     (accepted, compile_error, "1.20.0", Some(40872)),
     /// Allows `impl Trait` in function return types.
@@ -203,10 +207,14 @@ declare_features! (
     (accepted, impl_header_lifetime_elision, "1.31.0", Some(15872)),
     /// Allows referencing `Self` and projections in impl-trait.
     (accepted, impl_trait_projections, "1.74.0", Some(103532)),
+    /// Allows using imported `main` function
+    (accepted, imported_main, "1.79.0", Some(28937)),
     /// Allows using `a..=b` and `..=b` as inclusive range syntaxes.
     (accepted, inclusive_range_syntax, "1.26.0", Some(28237)),
     /// Allows inferring outlives requirements (RFC 2093).
     (accepted, infer_outlives_requirements, "1.30.0", Some(44493)),
+    /// Allow anonymous constants from an inline `const` block
+    (accepted, inline_const, "1.79.0", Some(76001)),
     /// Allows irrefutable patterns in `if let` and `while let` statements (RFC 2086).
     (accepted, irrefutable_let_patterns, "1.33.0", Some(44495)),
     /// Allows `#[instruction_set(_)]` attribute.
@@ -351,6 +359,8 @@ declare_features! (
     (accepted, type_alias_enum_variants, "1.37.0", Some(49683)),
     /// Allows macros to appear in the type position.
     (accepted, type_macros, "1.13.0", Some(27245)),
+    /// Allows using type privacy lints (`private_interfaces`, `private_bounds`, `unnameable_types`).
+    (accepted, type_privacy_lints, "1.79.0", Some(48054)),
     /// Allows `const _: TYPE = VALUE`.
     (accepted, underscore_const_names, "1.37.0", Some(54912)),
     /// Allows `use path as _;` and `extern crate c as _;`.

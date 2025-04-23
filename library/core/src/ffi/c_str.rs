@@ -438,13 +438,7 @@ impl CStr {
             unsafe { &*(bytes as *const [u8] as *const CStr) }
         }
 
-        #[cfg_attr(not(bootstrap), allow(unused_unsafe))] // on bootstrap bump, remove unsafe block
-        // SAFETY: The const and runtime versions have identical behavior
-        // unless the safety contract of `from_bytes_with_nul_unchecked` is
-        // violated, which is UB.
-        unsafe {
-            intrinsics::const_eval_select((bytes,), const_impl, rt_impl)
-        }
+        intrinsics::const_eval_select((bytes,), const_impl, rt_impl)
     }
 
     /// Returns the inner pointer to this C string.
@@ -523,8 +517,6 @@ impl CStr {
     /// # Examples
     ///
     /// ```
-    /// #![feature(cstr_count_bytes)]
-    ///
     /// use std::ffi::CStr;
     ///
     /// let cstr = CStr::from_bytes_with_nul(b"foo\0").unwrap();
@@ -536,7 +528,7 @@ impl CStr {
     #[inline]
     #[must_use]
     #[doc(alias("len", "strlen"))]
-    #[unstable(feature = "cstr_count_bytes", issue = "114441")]
+    #[stable(feature = "cstr_count_bytes", since = "1.79.0")]
     #[rustc_const_unstable(feature = "const_cstr_from_ptr", issue = "113219")]
     pub const fn count_bytes(&self) -> usize {
         self.inner.len() - 1
@@ -759,11 +751,7 @@ const unsafe fn const_strlen(ptr: *const c_char) -> usize {
         unsafe { strlen(s) }
     }
 
-    #[cfg_attr(not(bootstrap), allow(unused_unsafe))] // on bootstrap bump, remove unsafe block
-    // SAFETY: the two functions always provide equivalent functionality
-    unsafe {
-        intrinsics::const_eval_select((ptr,), strlen_ct, strlen_rt)
-    }
+    intrinsics::const_eval_select((ptr,), strlen_ct, strlen_rt)
 }
 
 /// An iterator over the bytes of a [`CStr`], without the nul terminator.

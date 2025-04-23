@@ -16,19 +16,17 @@
 use hir::def::DefKind;
 use rustc_ast::Mutability;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
-use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 use rustc_middle::mir::interpret::{ConstAllocation, CtfeProvenance, InterpResult};
 use rustc_middle::query::TyCtxtAt;
 use rustc_middle::ty::layout::TyAndLayout;
-use rustc_session::lint;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::sym;
 
 use super::{AllocId, Allocation, InterpCx, MPlaceTy, Machine, MemoryKind, PlaceTy};
 use crate::const_eval;
-use crate::errors::{DanglingPtrInFinal, MutablePtrInFinal};
+use crate::errors::NestedStaticInThreadLocal;
 
 pub trait CompileTimeMachine<'mir, 'tcx: 'mir, T> = Machine<
         'mir,
@@ -108,6 +106,10 @@ fn intern_as_new_static<'tcx>(
     );
     tcx.set_nested_alloc_id_static(alloc_id, feed.def_id());
 
+    if tcx.is_thread_local_static(static_id.into()) {
+        tcx.dcx().emit_err(NestedStaticInThreadLocal { span: tcx.def_span(static_id) });
+    }
+
     // These do not inherit the codegen attrs of the parent static allocation, since
     // it doesn't make sense for them to inherit their `#[no_mangle]` and `#[link_name = ..]`
     // and the like.
@@ -117,6 +119,7 @@ fn intern_as_new_static<'tcx>(
     feed.generics_of(tcx.generics_of(static_id).clone());
     feed.def_ident_span(tcx.def_ident_span(static_id));
     feed.explicit_predicates_of(tcx.explicit_predicates_of(static_id));
+    feed.feed_hir();
 }
 
 /// How a constant value should be interned.
@@ -127,6 +130,12 @@ pub enum InternKind {
     /// A `const` item
     Constant,
     Promoted,
+}
+
+#[derive(Debug)]
+pub enum InternResult {
+    FoundBadMutablePointer,
+    FoundDanglingPointer,
 }
 
 /// Intern `ret` and everything it references.
@@ -144,7 +153,7 @@ pub fn intern_const_alloc_recursive<
     ecx: &mut InterpCx<'mir, 'tcx, M>,
     intern_kind: InternKind,
     ret: &MPlaceTy<'tcx>,
-) -> Result<(), ErrorGuaranteed> {
+) -> Result<(), InternResult> {
     // We are interning recursively, and for mutability we are distinguishing the "root" allocation
     // that we are starting in, and all other allocations that we are encountering recursively.
     let (base_mutability, inner_mutability, is_static) = match intern_kind {
@@ -196,7 +205,7 @@ pub fn intern_const_alloc_recursive<
     // Whether we encountered a bad mutable pointer.
     // We want to first report "dangling" and then "mutable", so we need to delay reporting these
     // errors.
-    let mut found_bad_mutable_pointer = false;
+    let mut result = Ok(());
 
     // Keep interning as long as there are things to intern.
     // We show errors if there are dangling pointers, or mutable pointers in immutable contexts
@@ -246,7 +255,10 @@ pub fn intern_const_alloc_recursive<
             // on the promotion analysis not screwing up to ensure that it is sound to intern
             // promoteds as immutable.
             trace!("found bad mutable pointer");
-            found_bad_mutable_pointer = true;
+            // Prefer dangling pointer errors over mutable pointer errors
+            if result.is_ok() {
+                result = Err(InternResult::FoundBadMutablePointer);
+            }
         }
         if ecx.tcx.try_get_global_alloc(alloc_id).is_some() {
             // Already interned.
@@ -264,21 +276,15 @@ pub fn intern_const_alloc_recursive<
         // pointers before deciding which allocations can be made immutable; but for now we are
         // okay with losing some potential for immutability here. This can anyway only affect
         // `static mut`.
-        todo.extend(intern_shallow(ecx, alloc_id, inner_mutability).map_err(|()| {
-            ecx.tcx.dcx().emit_err(DanglingPtrInFinal { span: ecx.tcx.span, kind: intern_kind })
-        })?);
+        match intern_shallow(ecx, alloc_id, inner_mutability) {
+            Ok(nested) => todo.extend(nested),
+            Err(()) => {
+                ecx.tcx.dcx().delayed_bug("found dangling pointer during const interning");
+                result = Err(InternResult::FoundDanglingPointer);
+            }
+        }
     }
-    if found_bad_mutable_pointer {
-        let err_diag = MutablePtrInFinal { span: ecx.tcx.span, kind: intern_kind };
-        ecx.tcx.emit_node_span_lint(
-            lint::builtin::CONST_EVAL_MUTABLE_PTR_IN_FINAL_VALUE,
-            ecx.best_lint_scope(),
-            err_diag.span,
-            err_diag,
-        )
-    }
-
-    Ok(())
+    result
 }
 
 /// Intern `ret`. This function assumes that `ret` references no other allocation.
@@ -297,7 +303,9 @@ pub fn intern_const_alloc_for_constprop<
         return Ok(());
     }
     // Move allocation to `tcx`.
-    for _ in intern_shallow(ecx, alloc_id, Mutability::Not).map_err(|()| err_ub!(DeadLocal))? {
+    if let Some(_) =
+        (intern_shallow(ecx, alloc_id, Mutability::Not).map_err(|()| err_ub!(DeadLocal))?).next()
+    {
         // We are not doing recursive interning, so we don't currently support provenance.
         // (If this assertion ever triggers, we should just implement a
         // proper recursive interning loop -- or just call `intern_const_alloc_recursive`.

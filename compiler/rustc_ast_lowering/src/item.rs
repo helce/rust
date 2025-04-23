@@ -11,7 +11,7 @@ use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{LocalDefId, CRATE_DEF_ID};
 use rustc_hir::PredicateOrigin;
-use rustc_index::{Idx, IndexSlice, IndexVec};
+use rustc_index::{IndexSlice, IndexVec};
 use rustc_middle::span_bug;
 use rustc_middle::ty::{ResolverAstLowering, TyCtxt};
 use rustc_span::edit_distance::find_best_match_for_name;
@@ -203,7 +203,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 body,
                 ..
             }) => {
-                self.with_new_scopes(ident.span, |this| {
+                self.with_new_scopes(*fn_sig_span, |this| {
                     // Note: we don't need to change the return type from `T` to
                     // `impl Future<Output = T>` here because lower_body
                     // only cares about the input argument patterns in the function
@@ -373,6 +373,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         (trait_ref, lowered_ty)
                     });
 
+                self.is_in_trait_impl = trait_ref.is_some();
                 let new_impl_items = self
                     .arena
                     .alloc_from_iter(impl_items.iter().map(|item| self.lower_impl_item_ref(item)));
@@ -562,7 +563,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         let kind =
                             this.lower_use_tree(use_tree, &prefix, id, vis_span, &mut ident, attrs);
                         if let Some(attrs) = attrs {
-                            this.attrs.insert(hir::ItemLocalId::new(0), attrs);
+                            this.attrs.insert(hir::ItemLocalId::ZERO, attrs);
                         }
 
                         let item = hir::Item {
@@ -978,13 +979,6 @@ impl<'hir> LoweringContext<'_, 'hir> {
     }
 
     fn lower_impl_item_ref(&mut self, i: &AssocItem) -> hir::ImplItemRef {
-        let trait_item_def_id = self
-            .resolver
-            .get_partial_res(i.id)
-            .map(|r| r.expect_full_res().opt_def_id())
-            .unwrap_or(None);
-        self.is_in_trait_impl = trait_item_def_id.is_some();
-
         hir::ImplItemRef {
             id: hir::ImplItemId { owner_id: hir::OwnerId { def_id: self.local_def_id(i.id) } },
             ident: self.lower_ident(i.ident),
@@ -1000,7 +994,11 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 },
                 AssocItemKind::MacCall(..) => unimplemented!(),
             },
-            trait_item_def_id,
+            trait_item_def_id: self
+                .resolver
+                .get_partial_res(i.id)
+                .map(|r| r.expect_full_res().opt_def_id())
+                .unwrap_or(None),
         }
     }
 
@@ -1181,9 +1179,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             // Check if this is a binding pattern, if so, we can optimize and avoid adding a
             // `let <pat> = __argN;` statement. In this case, we do not rename the parameter.
             let (ident, is_simple_parameter) = match parameter.pat.kind {
-                hir::PatKind::Binding(hir::BindingAnnotation(ByRef::No, _), _, ident, _) => {
-                    (ident, true)
-                }
+                hir::PatKind::Binding(hir::BindingMode(ByRef::No, _), _, ident, _) => (ident, true),
                 // For `ref mut` or wildcard arguments, we can't reuse the binding, but
                 // we can keep the same name for the parameter.
                 // This lets rustdoc render it correctly in documentation.
@@ -1246,7 +1242,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 // because the user may have specified a `ref mut` binding in the next
                 // statement.
                 let (move_pat, move_id) =
-                    self.pat_ident_binding_mode(desugared_span, ident, hir::BindingAnnotation::MUT);
+                    self.pat_ident_binding_mode(desugared_span, ident, hir::BindingMode::MUT);
                 let move_expr = self.expr_ident(desugared_span, ident, new_parameter_id);
                 let move_stmt = self.stmt_let_pat(
                     None,
@@ -1348,7 +1344,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         (generics, hir::FnSig { header, decl, span: self.lower_span(sig.span) })
     }
 
-    fn lower_fn_header(&mut self, h: FnHeader) -> hir::FnHeader {
+    pub(super) fn lower_fn_header(&mut self, h: FnHeader) -> hir::FnHeader {
         let asyncness = if let Some(CoroutineKind::Async { span, .. }) = h.coroutine_kind {
             hir::IsAsync::Async(span)
         } else {
@@ -1429,8 +1425,8 @@ impl<'hir> LoweringContext<'_, 'hir> {
         // Error if `?Trait` bounds in where clauses don't refer directly to type parameters.
         // Note: we used to clone these bounds directly onto the type parameter (and avoid lowering
         // these into hir when we lower thee where clauses), but this makes it quite difficult to
-        // keep track of the Span info. Now, `add_implicitly_sized` in `AstConv` checks both param bounds and
-        // where clauses for `?Sized`.
+        // keep track of the Span info. Now, `<dyn HirTyLowerer>::add_implicit_sized_bound`
+        // checks both param bounds and where clauses for `?Sized`.
         for pred in &generics.where_clause.predicates {
             let WherePredicate::BoundPredicate(bound_pred) = pred else {
                 continue;

@@ -81,7 +81,7 @@ pub struct NoMatchData<'tcx> {
 
 // A pared down enum describing just the places from which a method
 // candidate can arise. Used for error reporting only.
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CandidateSource {
     Impl(DefId),
     Trait(DefId /* trait id */),
@@ -90,7 +90,7 @@ pub enum CandidateSource {
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// Determines whether the type `self_ty` supports a visible method named `method_name` or not.
     #[instrument(level = "debug", skip(self))]
-    pub fn method_exists(
+    pub fn method_exists_for_diagnostic(
         &self,
         method_name: Ident,
         self_ty: Ty<'tcx>,
@@ -101,7 +101,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             probe::Mode::MethodCall,
             method_name,
             return_type,
-            IsSuggestion(false),
+            IsSuggestion(true),
             self_ty,
             call_expr_id,
             ProbeScope::TraitsInScope,
@@ -200,11 +200,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if let Some(span) = result.illegal_sized_bound {
             let mut needs_mut = false;
             if let ty::Ref(region, t_type, mutability) = self_ty.kind() {
-                let trait_type = Ty::new_ref(
-                    self.tcx,
-                    *region,
-                    ty::TypeAndMut { ty: *t_type, mutbl: mutability.invert() },
-                );
+                let trait_type = Ty::new_ref(self.tcx, *region, *t_type, mutability.invert());
                 // We probe again to see if there might be a borrow mutability discrepancy.
                 match self.lookup_probe(
                     segment.ident,

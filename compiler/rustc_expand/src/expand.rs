@@ -482,7 +482,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                             derive_invocations.reserve(derives.len());
                             derives
                                 .into_iter()
-                                .map(|(path, item, _exts, is_const)| {
+                                .map(|DeriveResolution { path, item, exts: _, is_const }| {
                                     // FIXME: Consider using the derive resolutions (`_exts`)
                                     // instead of enqueuing the derives to be resolved again later.
                                     let expn_id = LocalExpnId::fresh_empty();
@@ -871,7 +871,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
         let mut parser = self.cx.new_parser_from_tts(toks);
         match parse_ast_fragment(&mut parser, kind) {
             Ok(fragment) => {
-                ensure_complete_parse(&mut parser, path, kind.name(), span);
+                ensure_complete_parse(&parser, path, kind.name(), span);
                 fragment
             }
             Err(mut err) => {
@@ -958,7 +958,7 @@ pub fn parse_ast_fragment<'a>(
 }
 
 pub fn ensure_complete_parse<'a>(
-    parser: &mut Parser<'a>,
+    parser: &Parser<'a>,
     macro_path: &ast::Path,
     kind_name: &str,
     span: Span,
@@ -1218,7 +1218,7 @@ impl InvocationCollectorNode for AstNodeWrapper<P<ast::AssocItem>, TraitItemTag>
         fragment.make_trait_items()
     }
     fn noop_flat_map<V: MutVisitor>(self, visitor: &mut V) -> Self::OutputTy {
-        noop_flat_map_assoc_item(self.wrapped, visitor)
+        noop_flat_map_item(self.wrapped, visitor)
     }
     fn is_mac_call(&self) -> bool {
         matches!(self.wrapped.kind, AssocItemKind::MacCall(..))
@@ -1243,7 +1243,7 @@ impl InvocationCollectorNode for AstNodeWrapper<P<ast::AssocItem>, ImplItemTag> 
         fragment.make_impl_items()
     }
     fn noop_flat_map<V: MutVisitor>(self, visitor: &mut V) -> Self::OutputTy {
-        noop_flat_map_assoc_item(self.wrapped, visitor)
+        noop_flat_map_item(self.wrapped, visitor)
     }
     fn is_mac_call(&self) -> bool {
         matches!(self.wrapped.kind, AssocItemKind::MacCall(..))
@@ -1266,7 +1266,7 @@ impl InvocationCollectorNode for P<ast::ForeignItem> {
         fragment.make_foreign_items()
     }
     fn noop_flat_map<V: MutVisitor>(self, visitor: &mut V) -> Self::OutputTy {
-        noop_flat_map_foreign_item(self, visitor)
+        noop_flat_map_item(self, visitor)
     }
     fn is_mac_call(&self) -> bool {
         matches!(self.kind, ForeignItemKind::MacCall(..))

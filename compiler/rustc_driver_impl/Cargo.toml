@@ -65,6 +65,11 @@ features = [
     "Win32_System_Diagnostics_Debug",
 ]
 
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+# tidy-alphabetical-start
+ctrlc = "3.4.4"
+# tidy-alphabetical-end
+
 [features]
 # tidy-alphabetical-start
 llvm = ['rustc_interface/llvm']

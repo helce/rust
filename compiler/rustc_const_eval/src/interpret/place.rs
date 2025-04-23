@@ -1010,7 +1010,7 @@ where
     ) -> InterpResult<'tcx, MPlaceTy<'tcx, M::Provenance>> {
         // This must be an allocation in `tcx`
         let _ = self.tcx.global_alloc(raw.alloc_id);
-        let ptr = self.global_base_pointer(Pointer::from(raw.alloc_id))?;
+        let ptr = self.global_root_pointer(Pointer::from(raw.alloc_id))?;
         let layout = self.layout_of(raw.ty)?;
         Ok(self.ptr_to_mplace(ptr.into(), layout))
     }
@@ -1020,16 +1020,20 @@ where
     pub(super) fn unpack_dyn_trait(
         &self,
         mplace: &MPlaceTy<'tcx, M::Provenance>,
+        expected_trait: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
     ) -> InterpResult<'tcx, (MPlaceTy<'tcx, M::Provenance>, Pointer<Option<M::Provenance>>)> {
         assert!(
             matches!(mplace.layout.ty.kind(), ty::Dynamic(_, _, ty::Dyn)),
             "`unpack_dyn_trait` only makes sense on `dyn*` types"
         );
         let vtable = mplace.meta().unwrap_meta().to_pointer(self)?;
-        let (ty, _) = self.get_ptr_vtable(vtable)?;
-        let layout = self.layout_of(ty)?;
+        let (ty, vtable_trait) = self.get_ptr_vtable(vtable)?;
+        if expected_trait.principal() != vtable_trait {
+            throw_ub!(InvalidVTableTrait { expected_trait, vtable_trait });
+        }
         // This is a kind of transmute, from a place with unsized type and metadata to
         // a place with sized type and no metadata.
+        let layout = self.layout_of(ty)?;
         let mplace =
             MPlaceTy { mplace: MemPlace { meta: MemPlaceMeta::None, ..mplace.mplace }, layout };
         Ok((mplace, vtable))
@@ -1040,6 +1044,7 @@ where
     pub(super) fn unpack_dyn_star<P: Projectable<'tcx, M::Provenance>>(
         &self,
         val: &P,
+        expected_trait: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
     ) -> InterpResult<'tcx, (P, Pointer<Option<M::Provenance>>)> {
         assert!(
             matches!(val.layout().ty.kind(), ty::Dynamic(_, _, ty::DynStar)),
@@ -1048,17 +1053,19 @@ where
         let data = self.project_field(val, 0)?;
         let vtable = self.project_field(val, 1)?;
         let vtable = self.read_pointer(&vtable.to_op(self)?)?;
-        let (ty, _) = self.get_ptr_vtable(vtable)?;
+        let (ty, vtable_trait) = self.get_ptr_vtable(vtable)?;
+        if expected_trait.principal() != vtable_trait {
+            throw_ub!(InvalidVTableTrait { expected_trait, vtable_trait });
+        }
+        // `data` is already the right thing but has the wrong type. So we transmute it.
         let layout = self.layout_of(ty)?;
-        // `data` is already the right thing but has the wrong type. So we transmute it, by
-        // projecting with offset 0.
         let data = data.transmute(layout, self)?;
         Ok((data, vtable))
     }
 }
 
 // Some nodes are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 mod size_asserts {
     use super::*;
     use rustc_data_structures::static_assert_size;

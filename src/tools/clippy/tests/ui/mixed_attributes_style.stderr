@@ -1,5 +1,5 @@
 error: item has both inner and outer attributes
-  --> tests/ui/mixed_attributes_style.rs:9:1
+  --> tests/ui/mixed_attributes_style.rs:10:1
    |
 LL | / #[allow(unused)]
 LL | | fn foo1() {
@@ -10,7 +10,7 @@ LL | |     #![allow(unused)]
    = help: to override `-D warnings` add `#[allow(clippy::mixed_attributes_style)]`
 
 error: item has both inner and outer attributes
-  --> tests/ui/mixed_attributes_style.rs:23:1
+  --> tests/ui/mixed_attributes_style.rs:24:1
    |
 LL | / /// linux
 LL | |
@@ -19,7 +19,7 @@ LL | |     //! windows
    | |_______________^
 
 error: item has both inner and outer attributes
-  --> tests/ui/mixed_attributes_style.rs:38:1
+  --> tests/ui/mixed_attributes_style.rs:39:1
    |
 LL | / #[allow(unused)]
 LL | | mod bar {
@@ -27,7 +27,7 @@ LL | |     #![allow(unused)]
    | |_____________________^
 
 error: item has both inner and outer attributes
-  --> tests/ui/mixed_attributes_style.rs:68:9
+  --> tests/ui/mixed_attributes_style.rs:69:9
    |
 LL | /         #[allow(dead_code)]
 LL | |         mod inner_mod {
@@ -35,7 +35,7 @@ LL | |             #![allow(dead_code)]
    | |________________________________^
 
 error: item has both inner and outer attributes
-  --> tests/ui/mixed_attributes_style.rs:79:9
+  --> tests/ui/mixed_attributes_style.rs:80:9
    |
 LL | /         #[allow(dead_code)]
 LL | |         mod inner_mod {
@@ -43,7 +43,7 @@ LL | |             #![allow(dead_code)]
    | |________________________________^
 
 error: item has both inner and outer attributes
-  --> tests/ui/mixed_attributes_style.rs:84:5
+  --> tests/ui/mixed_attributes_style.rs:85:5
    |
 LL | /     /// Nested mod
 LL | |     #[allow(unused)]
@@ -52,7 +52,7 @@ LL | |         #![allow(unused)]
    | |_________________________^
 
 error: item has both inner and outer attributes
-  --> tests/ui/mixed_attributes_style.rs:89:9
+  --> tests/ui/mixed_attributes_style.rs:90:9
    |
 LL | /         #[allow(dead_code)]
 LL | |         mod inner_mod {

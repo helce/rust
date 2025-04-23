@@ -44,7 +44,7 @@ pub fn obligations<'tcx>(
         GenericArgKind::Const(ct) => {
             match ct.kind() {
                 ty::ConstKind::Infer(_) => {
-                    let resolved = infcx.shallow_resolve(ct);
+                    let resolved = infcx.shallow_resolve_const(ct);
                     if resolved == ct {
                         // No progress.
                         return None;
@@ -363,7 +363,7 @@ impl<'a, 'tcx> WfPredicates<'a, 'tcx> {
 
         // Negative trait predicates don't require supertraits to hold, just
         // that their args are WF.
-        if trait_pred.polarity == ty::ImplPolarity::Negative {
+        if trait_pred.polarity == ty::PredicatePolarity::Negative {
             self.compute_negative_trait_pred(trait_ref);
             return;
         }
@@ -381,7 +381,7 @@ impl<'a, 'tcx> WfPredicates<'a, 'tcx> {
             if let Some(parent_trait_pred) = predicate.to_opt_poly_trait_pred() {
                 cause = cause.derived_cause(
                     parent_trait_pred,
-                    traits::ObligationCauseCode::DerivedObligation,
+                    traits::ObligationCauseCode::WellFormedDerivedObligation,
                 );
             }
             extend_cause_with_original_assoc_item_obligation(tcx, item, &mut cause, predicate);
@@ -647,6 +647,8 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
     fn visit_ty(&mut self, t: <TyCtxt<'tcx> as ty::Interner>::Ty) -> Self::Result {
         debug!("wf bounds for t={:?} t.kind={:#?}", t, t.kind());
 
+        let tcx = self.tcx();
+
         match *t.kind() {
             ty::Bool
             | ty::Char
@@ -679,6 +681,10 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
                 // Note that we handle the len is implicitly checked while walking `arg`.
             }
 
+            ty::Pat(subty, _) => {
+                self.require_sized(subty, traits::MiscObligation);
+            }
+
             ty::Tuple(tys) => {
                 if let Some((_last, rest)) = tys.split_last() {
                     for &elem in rest {
@@ -687,7 +693,7 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
                 }
             }
 
-            ty::RawPtr(_) => {
+            ty::RawPtr(_, _) => {
                 // Simple cases that are WF if their type args are WF.
             }
 
@@ -707,6 +713,14 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
             }
 
             ty::FnDef(did, args) => {
+                // HACK: Check the return type of function definitions for
+                // well-formedness to mostly fix #84533. This is still not
+                // perfect and there may be ways to abuse the fact that we
+                // ignore requirements with escaping bound vars. That's a
+                // more general issue however.
+                let fn_sig = tcx.fn_sig(did).instantiate(tcx, args);
+                fn_sig.output().skip_binder().visit_with(self);
+
                 let obligations = self.nominal_obligations(did, args);
                 self.out.extend(obligations);
             }
@@ -716,7 +730,7 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
                 if !r.has_escaping_bound_vars() && !rty.has_escaping_bound_vars() {
                     let cause = self.cause(traits::ReferenceOutlivesReferent(t));
                     self.out.push(traits::Obligation::with_depth(
-                        self.tcx(),
+                        tcx,
                         cause,
                         self.recursion_depth,
                         self.param_env,
@@ -805,12 +819,12 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
                 // obligations that don't refer to Self and
                 // checking those
 
-                let defer_to_coercion = self.tcx().features().object_safe_for_dispatch;
+                let defer_to_coercion = tcx.features().object_safe_for_dispatch;
 
                 if !defer_to_coercion {
                     if let Some(principal) = data.principal_def_id() {
                         self.out.push(traits::Obligation::with_depth(
-                            self.tcx(),
+                            tcx,
                             self.cause(traits::WellFormed(None)),
                             self.recursion_depth,
                             self.param_env,
@@ -835,7 +849,7 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
             ty::Infer(_) => {
                 let cause = self.cause(traits::WellFormed(None));
                 self.out.push(traits::Obligation::with_depth(
-                    self.tcx(),
+                    tcx,
                     cause,
                     self.recursion_depth,
                     self.param_env,
@@ -850,6 +864,8 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
     }
 
     fn visit_const(&mut self, c: <TyCtxt<'tcx> as ty::Interner>::Const) -> Self::Result {
+        let tcx = self.tcx();
+
         match c.kind() {
             ty::ConstKind::Unevaluated(uv) => {
                 if !c.has_escaping_bound_vars() {
@@ -861,7 +877,7 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
                     ));
                     let cause = self.cause(traits::WellFormed(None));
                     self.out.push(traits::Obligation::with_depth(
-                        self.tcx(),
+                        tcx,
                         cause,
                         self.recursion_depth,
                         self.param_env,
@@ -873,7 +889,7 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
                 let cause = self.cause(traits::WellFormed(None));
 
                 self.out.push(traits::Obligation::with_depth(
-                    self.tcx(),
+                    tcx,
                     cause,
                     self.recursion_depth,
                     self.param_env,
@@ -895,7 +911,7 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
                 ));
                 let cause = self.cause(traits::WellFormed(None));
                 self.out.push(traits::Obligation::with_depth(
-                    self.tcx(),
+                    tcx,
                     cause,
                     self.recursion_depth,
                     self.param_env,

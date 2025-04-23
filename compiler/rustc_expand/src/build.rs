@@ -1,6 +1,6 @@
 use crate::base::ExtCtxt;
 use rustc_ast::ptr::P;
-use rustc_ast::{self as ast, AttrVec, BlockCheckMode, Expr, LocalKind, PatKind, UnOp};
+use rustc_ast::{self as ast, AttrVec, BlockCheckMode, Expr, LocalKind, MatchKind, PatKind, UnOp};
 use rustc_ast::{attr, token, util::literal};
 use rustc_span::source_map::Spanned;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
@@ -46,6 +46,23 @@ impl<'a> ExtCtxt<'a> {
             args,
         });
         ast::Path { span, segments, tokens: None }
+    }
+
+    pub fn macro_call(
+        &self,
+        span: Span,
+        path: ast::Path,
+        delim: ast::token::Delimiter,
+        tokens: ast::tokenstream::TokenStream,
+    ) -> P<ast::MacCall> {
+        P(ast::MacCall {
+            path,
+            args: P(ast::DelimArgs {
+                dspan: ast::tokenstream::DelimSpan { open: span, close: span },
+                delim,
+                tokens,
+            }),
+        })
     }
 
     pub fn ty_mt(&self, ty: P<ast::Ty>, mutbl: ast::Mutability) -> ast::MutTy {
@@ -185,7 +202,7 @@ impl<'a> ExtCtxt<'a> {
         ex: P<ast::Expr>,
     ) -> ast::Stmt {
         let pat = if mutbl {
-            self.pat_ident_binding_mode(sp, ident, ast::BindingAnnotation::MUT)
+            self.pat_ident_binding_mode(sp, ident, ast::BindingMode::MUT)
         } else {
             self.pat_ident(sp, ident)
         };
@@ -263,6 +280,10 @@ impl<'a> ExtCtxt<'a> {
 
     pub fn expr_field(&self, span: Span, expr: P<Expr>, field: Ident) -> P<ast::Expr> {
         self.expr(span, ast::ExprKind::Field(expr, field))
+    }
+
+    pub fn expr_macro_call(&self, span: Span, call: P<ast::MacCall>) -> P<ast::Expr> {
+        self.expr(span, ast::ExprKind::MacCall(call))
     }
 
     pub fn expr_binary(
@@ -410,16 +431,19 @@ impl<'a> ExtCtxt<'a> {
         self.expr(sp, ast::ExprKind::Tup(exprs))
     }
 
-    pub fn expr_fail(&self, span: Span, msg: Symbol) -> P<ast::Expr> {
-        self.expr_call_global(
-            span,
-            [sym::std, sym::rt, sym::begin_panic].iter().map(|s| Ident::new(*s, span)).collect(),
-            thin_vec![self.expr_str(span, msg)],
-        )
-    }
-
     pub fn expr_unreachable(&self, span: Span) -> P<ast::Expr> {
-        self.expr_fail(span, Symbol::intern("internal error: entered unreachable code"))
+        self.expr_macro_call(
+            span,
+            self.macro_call(
+                span,
+                self.path_global(
+                    span,
+                    [sym::std, sym::unreachable].map(|s| Ident::new(s, span)).to_vec(),
+                ),
+                ast::token::Delimiter::Parenthesis,
+                ast::tokenstream::TokenStream::default(),
+            ),
+        )
     }
 
     pub fn expr_ok(&self, sp: Span, expr: P<ast::Expr>) -> P<ast::Expr> {
@@ -466,14 +490,14 @@ impl<'a> ExtCtxt<'a> {
         self.pat(span, PatKind::Lit(expr))
     }
     pub fn pat_ident(&self, span: Span, ident: Ident) -> P<ast::Pat> {
-        self.pat_ident_binding_mode(span, ident, ast::BindingAnnotation::NONE)
+        self.pat_ident_binding_mode(span, ident, ast::BindingMode::NONE)
     }
 
     pub fn pat_ident_binding_mode(
         &self,
         span: Span,
         ident: Ident,
-        ann: ast::BindingAnnotation,
+        ann: ast::BindingMode,
     ) -> P<ast::Pat> {
         let pat = PatKind::Ident(ann, ident.with_span_pos(span), None);
         self.pat(span, pat)
@@ -524,7 +548,7 @@ impl<'a> ExtCtxt<'a> {
     }
 
     pub fn expr_match(&self, span: Span, arg: P<ast::Expr>, arms: ThinVec<ast::Arm>) -> P<Expr> {
-        self.expr(span, ast::ExprKind::Match(arg, arms))
+        self.expr(span, ast::ExprKind::Match(arg, arms, MatchKind::Prefix))
     }
 
     pub fn expr_if(

@@ -7,8 +7,8 @@ use rustc_data_structures::fx::FxHasher;
 use rustc_hir::def::Res;
 use rustc_hir::MatchSource::TryDesugar;
 use rustc_hir::{
-    ArrayLen, BinOpKind, BindingAnnotation, Block, BodyId, Closure, Expr, ExprField, ExprKind, FnRetTy, GenericArg,
-    GenericArgs, HirId, HirIdMap, InlineAsmOperand, Let, Lifetime, LifetimeName, Pat, PatField, PatKind, Path,
+    ArrayLen, BinOpKind, BindingMode, Block, BodyId, Closure, Expr, ExprField, ExprKind, FnRetTy, GenericArg,
+    GenericArgs, HirId, HirIdMap, InlineAsmOperand, LetExpr, Lifetime, LifetimeName, Pat, PatField, PatKind, Path,
     PathSegment, PrimTy, QPath, Stmt, StmtKind, Ty, TyKind, TypeBinding,
 };
 use rustc_lexer::{tokenize, TokenKind};
@@ -837,7 +837,7 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
                     }
                 }
             },
-            ExprKind::Let(Let { pat, init, ty, .. }) => {
+            ExprKind::Let(LetExpr { pat, init, ty, .. }) => {
                 self.hash_expr(init);
                 if let Some(ty) = ty {
                     self.hash_ty(ty);
@@ -947,14 +947,14 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
     pub fn hash_pat(&mut self, pat: &Pat<'_>) {
         std::mem::discriminant(&pat.kind).hash(&mut self.s);
         match pat.kind {
-            PatKind::Binding(BindingAnnotation(by_ref, mutability), _, _, pat) => {
+            PatKind::Binding(BindingMode(by_ref, mutability), _, _, pat) => {
                 std::mem::discriminant(&by_ref).hash(&mut self.s);
                 std::mem::discriminant(&mutability).hash(&mut self.s);
                 if let Some(pat) = pat {
                     self.hash_pat(pat);
                 }
             },
-            PatKind::Box(pat) => self.hash_pat(pat),
+            PatKind::Box(pat) | PatKind::Deref(pat) => self.hash_pat(pat),
             PatKind::Lit(expr) => self.hash_expr(expr),
             PatKind::Or(pats) => {
                 for pat in pats {
@@ -1067,6 +1067,10 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
             &TyKind::Array(ty, len) => {
                 self.hash_ty(ty);
                 self.hash_array_length(len);
+            },
+            TyKind::Pat(ty, pat) => {
+                self.hash_ty(ty);
+                self.hash_pat(pat);
             },
             TyKind::Ptr(ref mut_ty) => {
                 self.hash_ty(mut_ty.ty);

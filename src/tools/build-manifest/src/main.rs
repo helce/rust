@@ -60,6 +60,7 @@ static TARGETS: &[&str] = &[
     "aarch64-apple-ios-sim",
     "aarch64-unknown-fuchsia",
     "aarch64-linux-android",
+    "aarch64-pc-windows-gnullvm",
     "aarch64-pc-windows-msvc",
     "aarch64-unknown-hermit",
     "aarch64-unknown-linux-gnu",
@@ -100,6 +101,7 @@ static TARGETS: &[&str] = &[
     "i686-apple-darwin",
     "i686-linux-android",
     "i686-pc-windows-gnu",
+    "i686-pc-windows-gnullvm",
     "i686-pc-windows-msvc",
     "i686-unknown-freebsd",
     "i686-unknown-linux-gnu",
@@ -134,6 +136,7 @@ static TARGETS: &[&str] = &[
     "riscv32i-unknown-none-elf",
     "riscv32im-risc0-zkvm-elf",
     "riscv32im-unknown-none-elf",
+    "riscv32ima-unknown-none-elf",
     "riscv32imc-unknown-none-elf",
     "riscv32imac-unknown-none-elf",
     "riscv32imafc-unknown-none-elf",
@@ -164,6 +167,7 @@ static TARGETS: &[&str] = &[
     "x86_64-unknown-fuchsia",
     "x86_64-linux-android",
     "x86_64-pc-windows-gnu",
+    "x86_64-pc-windows-gnullvm",
     "x86_64-pc-windows-msvc",
     "x86_64-pc-solaris",
     "x86_64-unikraft-linux-musl",
@@ -471,7 +475,8 @@ impl Builder {
                 | PkgType::LlvmTools
                 | PkgType::RustAnalysis
                 | PkgType::JsonDocs
-                | PkgType::RustcCodegenCranelift => {
+                | PkgType::RustcCodegenCranelift
+                | PkgType::LlvmBitcodeLinker => {
                     extensions.push(host_component(pkg));
                 }
                 PkgType::RustcDev | PkgType::RustcDocs => {

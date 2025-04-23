@@ -151,6 +151,15 @@ fn push_inner<'tcx>(stack: &mut TypeWalkerStack<'tcx>, parent: GenericArg<'tcx>)
             | ty::Bound(..)
             | ty::Foreign(..) => {}
 
+            ty::Pat(ty, pat) => {
+                match *pat {
+                    ty::PatternKind::Range { start, end, include_end: _ } => {
+                        stack.extend(end.map(Into::into));
+                        stack.extend(start.map(Into::into));
+                    }
+                }
+                stack.push(ty.into());
+            }
             ty::Array(ty, len) => {
                 stack.push(len.into());
                 stack.push(ty.into());
@@ -158,8 +167,8 @@ fn push_inner<'tcx>(stack: &mut TypeWalkerStack<'tcx>, parent: GenericArg<'tcx>)
             ty::Slice(ty) => {
                 stack.push(ty.into());
             }
-            ty::RawPtr(mt) => {
-                stack.push(mt.ty.into());
+            ty::RawPtr(ty, _) => {
+                stack.push(ty.into());
             }
             ty::Ref(lt, ty, _) => {
                 stack.push(ty.into());
