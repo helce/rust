@@ -348,8 +348,6 @@ pub(crate) fn create_object_file(sess: &Session) -> Option<write::Object<'static
                 "elbrus-12c" => elf::EF_E2K_MACH_12C     | elf::EF_E2K_INCOMPAT,
                 "elbrus-16c" => elf::EF_E2K_MACH_16C     | elf::EF_E2K_INCOMPAT,
                 "elbrus-2c3" => elf::EF_E2K_MACH_2C3     | elf::EF_E2K_INCOMPAT,
-                "elbrus-48c" => elf::EF_E2K_MACH_48C     | elf::EF_E2K_INCOMPAT,
-                "elbrus-8v7" => elf::EF_E2K_MACH_8V7     | elf::EF_E2K_INCOMPAT,
                 _ => elf::EF_E2K_MACH_EV4,
             };
 
