@@ -12,10 +12,7 @@ where
     }
 
     if ret.layout.is_aggregate() {
-        ret.cast_to(Uniform {
-            unit: Reg::i64(),
-            total: ret.layout.size.align_to(Reg::i64().align(cx)),
-        });
+        ret.cast_to(Uniform::new(Reg::i64(), ret.layout.size.align_to(Reg::i64().align(cx))));
     } else {
         ret.extend_integer_width_to(64);
     }
@@ -32,10 +29,7 @@ where
     }
 
     if arg.layout.is_aggregate() {
-        arg.cast_to(Uniform {
-            unit: Reg::i64(),
-            total: arg.layout.size.align_to(Reg::i64().align(cx)),
-        });
+        arg.cast_to(Uniform::new(Reg::i64(), arg.layout.size.align_to(Reg::i64().align(cx))));
     } else {
         arg.extend_integer_width_to(64);
     }
