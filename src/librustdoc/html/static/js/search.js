@@ -3298,6 +3298,7 @@ ${item.displayPath}<span class="${type}">${name}</span>\
     }
     class RoaringBitmap {
         constructor(str) {
+            global.atob = require("atob");
             const strdecoded = atob(str);
             const u8array = new Uint8Array(strdecoded.length);
             for (let j = 0; j < strdecoded.length; ++j) {
