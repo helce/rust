@@ -6,8 +6,6 @@
 
 #![doc(test(attr(warn(non_local_definitions))))]
 
-#![doc(test(attr(warn(non_local_definitions))))]
-
 //! ```
 //! #[macro_export]
 //! macro_rules! a_macro { () => {} }
