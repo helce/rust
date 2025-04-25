@@ -1,7 +1,10 @@
+# This test checks that dynamic Rust linking with C does not encounter any errors, with static dependencies given preference over dynamic. (This is the default behaviour.)
+# See https://github.com/rust-lang/rust/issues/10434
+
 # ignore-cross-compile
 include ../tools.mk
 
-# ignore-macos
+# ignore-apple
 #
 # This hits an assertion in the linker on older versions of osx apparently
 

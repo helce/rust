@@ -11,7 +11,8 @@ use crate::value::Value;
 use rustc_codegen_ssa::base::{wants_msvc_seh, wants_wasm_eh};
 use rustc_codegen_ssa::errors as ssa_errors;
 use rustc_codegen_ssa::traits::*;
-use rustc_data_structures::base_n;
+use rustc_data_structures::base_n::ToBaseN;
+use rustc_data_structures::base_n::ALPHANUMERIC_ONLY;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::small_c_str::SmallCStr;
 use rustc_hir::def_id::DefId;
@@ -129,6 +130,15 @@ pub unsafe fn create_module<'ll>(
             // Earlier LLVMs leave this as default alignment, so remove it.
             // See https://reviews.llvm.org/D86310
             target_data_layout = target_data_layout.replace("-i128:128", "");
+        }
+    }
+
+    if llvm_version < (19, 0, 0) {
+        if sess.target.arch == "aarch64" || sess.target.arch.starts_with("arm64") {
+            // LLVM 19 sets -Fn32 in its data layout string for 64-bit ARM
+            // Earlier LLVMs leave this default, so remove it.
+            // See https://github.com/llvm/llvm-project/pull/90702
+            target_data_layout = target_data_layout.replace("-Fn32", "");
         }
     }
 
@@ -1015,7 +1025,7 @@ impl CodegenCx<'_, '_> {
         let mut name = String::with_capacity(prefix.len() + 6);
         name.push_str(prefix);
         name.push('.');
-        base_n::push_str(idx as u128, base_n::ALPHANUMERIC_ONLY, &mut name);
+        name.push_str(&(idx as u64).to_base(ALPHANUMERIC_ONLY));
         name
     }
 }

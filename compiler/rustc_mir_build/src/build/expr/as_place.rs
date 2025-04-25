@@ -12,8 +12,10 @@ use rustc_middle::mir::*;
 use rustc_middle::thir::*;
 use rustc_middle::ty::AdtDef;
 use rustc_middle::ty::{self, CanonicalUserTypeAnnotation, Ty, Variance};
+use rustc_middle::{bug, span_bug};
 use rustc_span::Span;
 use rustc_target::abi::{FieldIdx, VariantIdx, FIRST_VARIANT};
+use tracing::{debug, instrument, trace};
 
 use std::assert_matches::assert_matches;
 use std::iter;
@@ -250,7 +252,18 @@ fn strip_prefix<'a, 'tcx>(
 
 impl<'tcx> PlaceBuilder<'tcx> {
     pub(in crate::build) fn to_place(&self, cx: &Builder<'_, 'tcx>) -> Place<'tcx> {
-        self.try_to_place(cx).unwrap()
+        self.try_to_place(cx).unwrap_or_else(|| match self.base {
+            PlaceBase::Local(local) => span_bug!(
+                cx.local_decls[local].source_info.span,
+                "could not resolve local: {local:#?} + {:?}",
+                self.projection
+            ),
+            PlaceBase::Upvar { var_hir_id, closure_def_id: _ } => span_bug!(
+                cx.tcx.hir().span(var_hir_id.0),
+                "could not resolve upvar: {var_hir_id:?} + {:?}",
+                self.projection
+            ),
+        })
     }
 
     /// Creates a `Place` or returns `None` if an upvar cannot be resolved

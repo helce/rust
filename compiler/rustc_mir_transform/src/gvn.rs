@@ -91,6 +91,7 @@ use rustc_hir::def::DefKind;
 use rustc_index::bit_set::BitSet;
 use rustc_index::newtype_index;
 use rustc_index::IndexVec;
+use rustc_middle::bug;
 use rustc_middle::mir::interpret::GlobalAlloc;
 use rustc_middle::mir::visit::*;
 use rustc_middle::mir::*;
@@ -121,7 +122,7 @@ impl<'tcx> MirPass<'tcx> for GVN {
 
 fn propagate_ssa<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
     let param_env = tcx.param_env_reveal_all_normalized(body.source.def_id());
-    let ssa = SsaLocals::new(body);
+    let ssa = SsaLocals::new(tcx, body, param_env);
     // Clone dominators as we need them while mutating the body.
     let dominators = body.basic_blocks.dominators().clone();
 
@@ -222,7 +223,6 @@ enum Value<'tcx> {
     NullaryOp(NullOp<'tcx>, Ty<'tcx>),
     UnaryOp(UnOp, VnIndex),
     BinaryOp(BinOp, VnIndex, VnIndex),
-    CheckedBinaryOp(BinOp, VnIndex, VnIndex),
     Cast {
         kind: CastKind,
         value: VnIndex,
@@ -233,7 +233,7 @@ enum Value<'tcx> {
 
 struct VnState<'body, 'tcx> {
     tcx: TyCtxt<'tcx>,
-    ecx: InterpCx<'tcx, 'tcx, DummyMachine>,
+    ecx: InterpCx<'tcx, DummyMachine>,
     param_env: ty::ParamEnv<'tcx>,
     local_decls: &'body LocalDecls<'tcx>,
     /// Value stored in each local.
@@ -496,7 +496,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             UnaryOp(un_op, operand) => {
                 let operand = self.evaluated[operand].as_ref()?;
                 let operand = self.ecx.read_immediate(operand).ok()?;
-                let (val, _) = self.ecx.overflowing_unary_op(un_op, &operand).ok()?;
+                let val = self.ecx.unary_op(un_op, &operand).ok()?;
                 val.into()
             }
             BinaryOp(bin_op, lhs, rhs) => {
@@ -504,22 +504,8 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 let lhs = self.ecx.read_immediate(lhs).ok()?;
                 let rhs = self.evaluated[rhs].as_ref()?;
                 let rhs = self.ecx.read_immediate(rhs).ok()?;
-                let (val, _) = self.ecx.overflowing_binary_op(bin_op, &lhs, &rhs).ok()?;
+                let val = self.ecx.binary_op(bin_op, &lhs, &rhs).ok()?;
                 val.into()
-            }
-            CheckedBinaryOp(bin_op, lhs, rhs) => {
-                let lhs = self.evaluated[lhs].as_ref()?;
-                let lhs = self.ecx.read_immediate(lhs).ok()?;
-                let rhs = self.evaluated[rhs].as_ref()?;
-                let rhs = self.ecx.read_immediate(rhs).ok()?;
-                let (val, overflowed) = self.ecx.overflowing_binary_op(bin_op, &lhs, &rhs).ok()?;
-                let tuple = Ty::new_tup_from_iter(
-                    self.tcx,
-                    [val.layout.ty, self.tcx.types.bool].into_iter(),
-                );
-                let tuple = self.ecx.layout_of(tuple).ok()?;
-                ImmTy::from_scalar_pair(val.to_scalar(), Scalar::from_bool(overflowed), tuple)
-                    .into()
             }
             Cast { kind, value, from: _, to } => match kind {
                 CastKind::IntToInt | CastKind::IntToFloat => {
@@ -594,7 +580,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 let ty = place.ty(self.local_decls, self.tcx).ty;
                 if let Some(Mutability::Not) = ty.ref_mutability()
                     && let Some(pointee_ty) = ty.builtin_deref(true)
-                    && pointee_ty.ty.is_freeze(self.tcx, self.param_env)
+                    && pointee_ty.is_freeze(self.tcx, self.param_env)
                 {
                     // An immutable borrow `_x` always points to the same value for the
                     // lifetime of the borrow, so we can merge all instances of `*_x`.
@@ -724,6 +710,14 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
         // Invariant: `value` holds the value up-to the `index`th projection excluded.
         let mut value = self.locals[place.local]?;
         for (index, proj) in place.projection.iter().enumerate() {
+            if let Value::Projection(pointer, ProjectionElem::Deref) = *self.get(value)
+                && let Value::Address { place: mut pointee, kind, .. } = *self.get(pointer)
+                && let AddressKind::Ref(BorrowKind::Shared) = kind
+                && let Some(v) = self.simplify_place_value(&mut pointee, location)
+            {
+                value = v;
+                place_ref = pointee.project_deeper(&place.projection[index..], self.tcx).as_ref();
+            }
             if let Some(local) = self.try_as_local(value, location) {
                 // Both `local` and `Place { local: place.local, projection: projection[..index] }`
                 // hold the same value. Therefore, following place holds the value in the original
@@ -735,6 +729,14 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             value = self.project(base, value, proj)?;
         }
 
+        if let Value::Projection(pointer, ProjectionElem::Deref) = *self.get(value)
+            && let Value::Address { place: mut pointee, kind, .. } = *self.get(pointer)
+            && let AddressKind::Ref(BorrowKind::Shared) = kind
+            && let Some(v) = self.simplify_place_value(&mut pointee, location)
+        {
+            value = v;
+            place_ref = pointee.project_deeper(&[], self.tcx).as_ref();
+        }
         if let Some(new_local) = self.try_as_local(value, location) {
             place_ref = PlaceRef { local: new_local, projection: &[] };
         }
@@ -814,23 +816,11 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 // on both operands for side effect.
                 let lhs = lhs?;
                 let rhs = rhs?;
-                if let Some(value) = self.simplify_binary(op, false, ty, lhs, rhs) {
+
+                if let Some(value) = self.simplify_binary(op, ty, lhs, rhs) {
                     return Some(value);
                 }
                 Value::BinaryOp(op, lhs, rhs)
-            }
-            Rvalue::CheckedBinaryOp(op, box (ref mut lhs, ref mut rhs)) => {
-                let ty = lhs.ty(self.local_decls, self.tcx);
-                let lhs = self.simplify_operand(lhs, location);
-                let rhs = self.simplify_operand(rhs, location);
-                // Only short-circuit options after we called `simplify_operand`
-                // on both operands for side effect.
-                let lhs = lhs?;
-                let rhs = rhs?;
-                if let Some(value) = self.simplify_binary(op, true, ty, lhs, rhs) {
-                    return Some(value);
-                }
-                Value::CheckedBinaryOp(op, lhs, rhs)
             }
             Rvalue::UnaryOp(op, ref mut arg) => {
                 let arg = self.simplify_operand(arg, location)?;
@@ -961,7 +951,6 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
     fn simplify_binary(
         &mut self,
         op: BinOp,
-        checked: bool,
         lhs_ty: Ty<'tcx>,
         lhs: VnIndex,
         rhs: VnIndex,
@@ -990,22 +979,39 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
         use Either::{Left, Right};
         let a = as_bits(lhs).map_or(Right(lhs), Left);
         let b = as_bits(rhs).map_or(Right(rhs), Left);
+
         let result = match (op, a, b) {
             // Neutral elements.
-            (BinOp::Add | BinOp::BitOr | BinOp::BitXor, Left(0), Right(p))
+            (
+                BinOp::Add
+                | BinOp::AddWithOverflow
+                | BinOp::AddUnchecked
+                | BinOp::BitOr
+                | BinOp::BitXor,
+                Left(0),
+                Right(p),
+            )
             | (
                 BinOp::Add
+                | BinOp::AddWithOverflow
+                | BinOp::AddUnchecked
                 | BinOp::BitOr
                 | BinOp::BitXor
                 | BinOp::Sub
+                | BinOp::SubWithOverflow
+                | BinOp::SubUnchecked
                 | BinOp::Offset
                 | BinOp::Shl
                 | BinOp::Shr,
                 Right(p),
                 Left(0),
             )
-            | (BinOp::Mul, Left(1), Right(p))
-            | (BinOp::Mul | BinOp::Div, Right(p), Left(1)) => p,
+            | (BinOp::Mul | BinOp::MulWithOverflow | BinOp::MulUnchecked, Left(1), Right(p))
+            | (
+                BinOp::Mul | BinOp::MulWithOverflow | BinOp::MulUnchecked | BinOp::Div,
+                Right(p),
+                Left(1),
+            ) => p,
             // Attempt to simplify `x & ALL_ONES` to `x`, with `ALL_ONES` depending on type size.
             (BinOp::BitAnd, Right(p), Left(ones)) | (BinOp::BitAnd, Left(ones), Right(p))
                 if ones == layout.size.truncate(u128::MAX)
@@ -1014,10 +1020,21 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 p
             }
             // Absorbing elements.
-            (BinOp::Mul | BinOp::BitAnd, _, Left(0))
+            (
+                BinOp::Mul | BinOp::MulWithOverflow | BinOp::MulUnchecked | BinOp::BitAnd,
+                _,
+                Left(0),
+            )
             | (BinOp::Rem, _, Left(1))
             | (
-                BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::BitAnd | BinOp::Shl | BinOp::Shr,
+                BinOp::Mul
+                | BinOp::MulWithOverflow
+                | BinOp::MulUnchecked
+                | BinOp::Div
+                | BinOp::Rem
+                | BinOp::BitAnd
+                | BinOp::Shl
+                | BinOp::Shr,
                 Left(0),
                 _,
             ) => self.insert_scalar(Scalar::from_uint(0u128, layout.size), lhs_ty),
@@ -1029,7 +1046,9 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 self.insert_scalar(Scalar::from_uint(ones, layout.size), lhs_ty)
             }
             // Sub/Xor with itself.
-            (BinOp::Sub | BinOp::BitXor, a, b) if a == b => {
+            (BinOp::Sub | BinOp::SubWithOverflow | BinOp::SubUnchecked | BinOp::BitXor, a, b)
+                if a == b =>
+            {
                 self.insert_scalar(Scalar::from_uint(0u128, layout.size), lhs_ty)
             }
             // Comparison:
@@ -1043,7 +1062,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             _ => return None,
         };
 
-        if checked {
+        if op.is_overflowing() {
             let false_val = self.insert_bool(false);
             Some(self.insert_tuple(vec![result, false_val]))
         } else {
@@ -1099,7 +1118,11 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
         // Trivial case: we are fetching a statically known length.
         let place_ty = place.ty(self.local_decls, self.tcx).ty;
         if let ty::Array(_, len) = place_ty.kind() {
-            return self.insert_constant(Const::from_ty_const(*len, self.tcx));
+            return self.insert_constant(Const::from_ty_const(
+                *len,
+                self.tcx.types.usize,
+                self.tcx,
+            ));
         }
 
         let mut inner = self.simplify_place_value(place, location)?;
@@ -1117,11 +1140,15 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
         if let Value::Cast { kind, from, to, .. } = self.get(inner)
             && let CastKind::PointerCoercion(ty::adjustment::PointerCoercion::Unsize) = kind
             && let Some(from) = from.builtin_deref(true)
-            && let ty::Array(_, len) = from.ty.kind()
+            && let ty::Array(_, len) = from.kind()
             && let Some(to) = to.builtin_deref(true)
-            && let ty::Slice(..) = to.ty.kind()
+            && let ty::Slice(..) = to.kind()
         {
-            return self.insert_constant(Const::from_ty_const(*len, self.tcx));
+            return self.insert_constant(Const::from_ty_const(
+                *len,
+                self.tcx.types.usize,
+                self.tcx,
+            ));
         }
 
         // Fallback: a symbolic `Len`.
@@ -1130,7 +1157,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
 }
 
 fn op_to_prop_const<'tcx>(
-    ecx: &mut InterpCx<'_, 'tcx, DummyMachine>,
+    ecx: &mut InterpCx<'tcx, DummyMachine>,
     op: &OpTy<'tcx>,
 ) -> Option<ConstValue<'tcx>> {
     // Do not attempt to propagate unsized locals.

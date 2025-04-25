@@ -42,6 +42,7 @@ use std::cell::OnceCell;
 use std::cell::RefCell;
 use std::iter;
 use std::ops::Range;
+use tracing::debug;
 
 mod create_scope_map;
 pub mod gdb;
@@ -512,7 +513,7 @@ impl<'ll, 'tcx> DebugInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
             let mut names = generics.parent.map_or_else(Vec::new, |def_id| {
                 get_parameter_names(cx, cx.tcx.generics_of(def_id))
             });
-            names.extend(generics.params.iter().map(|param| param.name));
+            names.extend(generics.own_params.iter().map(|param| param.name));
             names
         }
 

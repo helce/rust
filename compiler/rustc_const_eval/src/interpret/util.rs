@@ -1,5 +1,4 @@
 use crate::const_eval::{CompileTimeEvalContext, CompileTimeInterpreter, InterpretationResult};
-use crate::interpret::{MemPlaceMeta, MemoryKind};
 use rustc_hir::def_id::LocalDefId;
 use rustc_middle::mir;
 use rustc_middle::mir::interpret::{Allocation, InterpResult, Pointer};
@@ -8,8 +7,9 @@ use rustc_middle::ty::{
     self, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor,
 };
 use std::ops::ControlFlow;
+use tracing::debug;
 
-use super::{InterpCx, MPlaceTy};
+use super::{throw_inval, InterpCx, MPlaceTy, MemPlaceMeta, MemoryKind};
 
 /// Checks whether a type contains generic parameters which must be instantiated.
 ///
@@ -82,9 +82,9 @@ where
 }
 
 impl<'tcx> InterpretationResult<'tcx> for mir::interpret::ConstAllocation<'tcx> {
-    fn make_result<'mir>(
+    fn make_result(
         mplace: MPlaceTy<'tcx>,
-        ecx: &mut InterpCx<'mir, 'tcx, CompileTimeInterpreter<'mir, 'tcx>>,
+        ecx: &mut InterpCx<'tcx, CompileTimeInterpreter<'tcx>>,
     ) -> Self {
         let alloc_id = mplace.ptr().provenance.unwrap().alloc_id();
         let alloc = ecx.memory.alloc_map.swap_remove(&alloc_id).unwrap().1;
@@ -92,8 +92,8 @@ impl<'tcx> InterpretationResult<'tcx> for mir::interpret::ConstAllocation<'tcx> 
     }
 }
 
-pub(crate) fn create_static_alloc<'mir, 'tcx: 'mir>(
-    ecx: &mut CompileTimeEvalContext<'mir, 'tcx>,
+pub(crate) fn create_static_alloc<'tcx>(
+    ecx: &mut CompileTimeEvalContext<'tcx>,
     static_def_id: LocalDefId,
     layout: TyAndLayout<'tcx>,
 ) -> InterpResult<'tcx, MPlaceTy<'tcx>> {

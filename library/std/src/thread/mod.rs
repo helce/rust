@@ -174,8 +174,8 @@ use crate::ptr::addr_of_mut;
 use crate::str;
 use crate::sync::atomic::{AtomicUsize, Ordering};
 use crate::sync::Arc;
+use crate::sys::sync::Parker;
 use crate::sys::thread as imp;
-use crate::sys_common::thread_parking::Parker;
 use crate::sys_common::{AsInner, IntoInner};
 use crate::time::{Duration, Instant};
 
@@ -205,7 +205,7 @@ cfg_if::cfg_if! {
         #[doc(hidden)]
         #[unstable(feature = "thread_local_internals", issue = "none")]
         pub mod local_impl {
-            pub use crate::sys::thread_local::{thread_local_inner, Key, abort_on_dtor_unwind};
+            pub use crate::sys::thread_local::*;
         }
     }
 }
@@ -561,7 +561,8 @@ impl Builder {
         let main = Box::new(main);
         // SAFETY: dynamic size and alignment of the Box remain the same. See below for why the
         // lifetime change is justified.
-        let main = unsafe { Box::from_raw(Box::into_raw(main) as *mut (dyn FnOnce() + 'static)) };
+        let main =
+            unsafe { Box::from_raw(Box::into_raw(main) as *mut (dyn FnOnce() + Send + 'static)) };
 
         Ok(JoinInner {
             // SAFETY:
@@ -703,9 +704,14 @@ thread_local! {
 
 /// Sets the thread handle for the current thread.
 ///
-/// Panics if the handle has been set already or when called from a TLS destructor.
+/// Aborts if the handle has been set already to reduce code size.
 pub(crate) fn set_current(thread: Thread) {
-    CURRENT.with(|current| current.set(thread).unwrap());
+    // Using `unwrap` here can add ~3kB to the binary size. We have complete
+    // control over where this is called, so just abort if there is a bug.
+    CURRENT.with(|current| match current.set(thread) {
+        Ok(()) => {}
+        Err(_) => rtabort!("thread::set_current should only be called once per thread"),
+    });
 }
 
 /// Gets a handle to the thread that invokes it.
@@ -1539,7 +1545,7 @@ struct Packet<'scope, T> {
 // The type `T` should already always be Send (otherwise the thread could not
 // have been created) and the Packet is Sync because all access to the
 // `UnsafeCell` synchronized (by the `join()` boundary), and `ScopeData` is Sync.
-unsafe impl<'scope, T: Sync> Sync for Packet<'scope, T> {}
+unsafe impl<'scope, T: Send> Sync for Packet<'scope, T> {}
 
 impl<'scope, T> Drop for Packet<'scope, T> {
     fn drop(&mut self) {

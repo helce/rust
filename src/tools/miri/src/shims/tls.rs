@@ -235,28 +235,28 @@ enum TlsDtorsStatePriv<'tcx> {
 impl<'tcx> TlsDtorsState<'tcx> {
     pub fn on_stack_empty(
         &mut self,
-        this: &mut MiriInterpCx<'_, 'tcx>,
+        this: &mut MiriInterpCx<'tcx>,
     ) -> InterpResult<'tcx, Poll<()>> {
         use TlsDtorsStatePriv::*;
         let new_state = 'new_state: {
             match &mut self.0 {
                 Init => {
                     match this.tcx.sess.target.os.as_ref() {
-                        "linux" | "freebsd" | "android" => {
-                            // Run the pthread dtors.
-                            break 'new_state PthreadDtors(Default::default());
-                        }
                         "macos" => {
                             // The macOS thread wide destructor runs "before any TLS slots get
                             // freed", so do that first.
                             this.schedule_macos_tls_dtor()?;
-                            // When the stack is empty again, go on with the pthread dtors.
+                            // When that destructor is done, go on with the pthread dtors.
+                            break 'new_state PthreadDtors(Default::default());
+                        }
+                        _ if this.target_os_is_unix() => {
+                            // All other Unixes directly jump to running the pthread dtors.
                             break 'new_state PthreadDtors(Default::default());
                         }
                         "windows" => {
                             // Determine which destructors to run.
                             let dtors = this.lookup_windows_tls_dtors()?;
-                            // And move to the final state.
+                            // And move to the next state, that runs them.
                             break 'new_state WindowsDtors(dtors);
                         }
                         _ => {
@@ -282,7 +282,7 @@ impl<'tcx> TlsDtorsState<'tcx> {
                     }
                 }
                 Done => {
-                    this.machine.tls.delete_all_thread_tls(this.get_active_thread());
+                    this.machine.tls.delete_all_thread_tls(this.active_thread());
                     return Ok(Poll::Ready(()));
                 }
             }
@@ -293,8 +293,8 @@ impl<'tcx> TlsDtorsState<'tcx> {
     }
 }
 
-impl<'mir, 'tcx: 'mir> EvalContextPrivExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-trait EvalContextPrivExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+impl<'tcx> EvalContextPrivExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+trait EvalContextPrivExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     /// Schedule TLS destructors for Windows.
     /// On windows, TLS destructors are managed by std.
     fn lookup_windows_tls_dtors(&mut self) -> InterpResult<'tcx, Vec<ImmTy<'tcx, Provenance>>> {
@@ -332,7 +332,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     /// executed.
     fn schedule_macos_tls_dtor(&mut self) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        let thread_id = this.get_active_thread();
+        let thread_id = this.active_thread();
         if let Some((instance, data)) = this.machine.tls.macos_thread_dtors.remove(&thread_id) {
             trace!("Running macos dtor {:?} on {:?} at {:?}", instance, data, thread_id);
 
@@ -354,7 +354,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         state: &mut RunningDtorState,
     ) -> InterpResult<'tcx, Poll<()>> {
         let this = self.eval_context_mut();
-        let active_thread = this.get_active_thread();
+        let active_thread = this.active_thread();
 
         // Fetch next dtor after `key`.
         let dtor = match this.machine.tls.fetch_tls_dtor(state.last_key, active_thread) {

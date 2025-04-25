@@ -5,6 +5,7 @@ use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::{codes::*, struct_span_code_err, ErrorGuaranteed};
 use rustc_infer::infer::outlives::env::OutlivesEnvironment;
 use rustc_infer::infer::{RegionResolutionError, TyCtxtInferExt};
+use rustc_infer::traits::ObligationCauseCode;
 use rustc_middle::ty::util::CheckRegions;
 use rustc_middle::ty::GenericArgsRef;
 use rustc_middle::ty::{self, TyCtxt};
@@ -122,7 +123,7 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
     adt_to_impl_args: GenericArgsRef<'tcx>,
 ) -> Result<(), ErrorGuaranteed> {
     let infcx = tcx.infer_ctxt().build();
-    let ocx = ObligationCtxt::new(&infcx);
+    let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
 
     // Take the param-env of the adt and instantiate the args that show up in
     // the implementation's self type. This gives us the assumptions that the
@@ -139,7 +140,7 @@ fn ensure_drop_predicates_are_implied_by_item_defn<'tcx>(
     for (pred, span) in tcx.predicates_of(drop_impl_def_id).instantiate_identity(tcx) {
         let normalize_cause = traits::ObligationCause::misc(span, adt_def_id);
         let pred = ocx.normalize(&normalize_cause, param_env, pred);
-        let cause = traits::ObligationCause::new(span, adt_def_id, traits::DropImpl);
+        let cause = traits::ObligationCause::new(span, adt_def_id, ObligationCauseCode::DropImpl);
         ocx.register_obligation(traits::Obligation::new(tcx, cause, param_env, pred));
     }
 

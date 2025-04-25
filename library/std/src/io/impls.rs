@@ -287,6 +287,9 @@ impl Read for &[u8] {
     #[inline]
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
         if buf.len() > self.len() {
+            // `read_exact` makes no promise about the content of `buf` if it
+            // fails so don't bother about that.
+            *self = &self[self.len()..];
             return Err(io::Error::READ_EXACT_EOF);
         }
         let (a, b) = self.split_at(buf.len());
@@ -307,6 +310,9 @@ impl Read for &[u8] {
     #[inline]
     fn read_buf_exact(&mut self, mut cursor: BorrowedCursor<'_>) -> io::Result<()> {
         if cursor.capacity() > self.len() {
+            // Append everything we can to the cursor.
+            cursor.append(*self);
+            *self = &self[self.len()..];
             return Err(io::Error::READ_EXACT_EOF);
         }
         let (a, b) = self.split_at(cursor.capacity());
@@ -329,8 +335,9 @@ impl Read for &[u8] {
     #[inline]
     fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
         let content = str::from_utf8(self).map_err(|_| io::Error::INVALID_UTF8)?;
-        buf.push_str(content);
         let len = self.len();
+        buf.try_reserve(len)?;
+        buf.push_str(content);
         *self = &self[len..];
         Ok(len)
     }
@@ -473,14 +480,8 @@ impl<A: Allocator> Read for VecDeque<u8, A> {
 
     #[inline]
     fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
-        // We have to use a single contiguous slice because the `VecDequeue` might be split in the
-        // middle of an UTF-8 character.
-        let len = self.len();
-        let content = self.make_contiguous();
-        let string = str::from_utf8(content).map_err(|_| io::Error::INVALID_UTF8)?;
-        buf.push_str(string);
-        self.clear();
-        Ok(len)
+        // SAFETY: We only append to the buffer
+        unsafe { io::append_to_string(buf, |buf| self.read_to_end(buf)) }
     }
 }
 

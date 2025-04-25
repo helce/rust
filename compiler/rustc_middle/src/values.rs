@@ -23,7 +23,7 @@ impl<'tcx> Value<TyCtxt<'tcx>> for Ty<'_> {
     }
 }
 
-impl<'tcx> Value<TyCtxt<'tcx>> for Result<ty::EarlyBinder<Ty<'_>>, CyclePlaceholder> {
+impl<'tcx> Value<TyCtxt<'tcx>> for Result<ty::EarlyBinder<'_, Ty<'_>>, CyclePlaceholder> {
     fn from_cycle_error(_tcx: TyCtxt<'tcx>, _: &CycleError, guar: ErrorGuaranteed) -> Self {
         Err(CyclePlaceholder(guar))
     }
@@ -65,7 +65,7 @@ impl<'tcx> Value<TyCtxt<'tcx>> for ty::Binder<'_, ty::FnSig<'_>> {
             std::iter::repeat(err).take(arity),
             err,
             false,
-            rustc_hir::Unsafety::Normal,
+            rustc_hir::Safety::Safe,
             rustc_target::spec::abi::Abi::Rust,
         ));
 
@@ -111,7 +111,7 @@ impl<'tcx> Value<TyCtxt<'tcx>> for Representability {
     }
 }
 
-impl<'tcx> Value<TyCtxt<'tcx>> for ty::EarlyBinder<Ty<'_>> {
+impl<'tcx> Value<TyCtxt<'tcx>> for ty::EarlyBinder<'_, Ty<'_>> {
     fn from_cycle_error(
         tcx: TyCtxt<'tcx>,
         cycle_error: &CycleError,
@@ -121,7 +121,7 @@ impl<'tcx> Value<TyCtxt<'tcx>> for ty::EarlyBinder<Ty<'_>> {
     }
 }
 
-impl<'tcx> Value<TyCtxt<'tcx>> for ty::EarlyBinder<ty::Binder<'_, ty::FnSig<'_>>> {
+impl<'tcx> Value<TyCtxt<'tcx>> for ty::EarlyBinder<'_, ty::Binder<'_, ty::FnSig<'_>>> {
     fn from_cycle_error(
         tcx: TyCtxt<'tcx>,
         cycle_error: &CycleError,
@@ -141,7 +141,7 @@ impl<'tcx> Value<TyCtxt<'tcx>> for &[ty::Variance] {
             && frame.query.dep_kind == dep_kinds::variances_of
             && let Some(def_id) = frame.query.def_id
         {
-            let n = tcx.generics_of(def_id).params.len();
+            let n = tcx.generics_of(def_id).own_params.len();
             vec![ty::Variance::Bivariant; n].leak()
         } else {
             span_bug!(

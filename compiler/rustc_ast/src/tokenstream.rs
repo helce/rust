@@ -20,7 +20,7 @@ use crate::AttrVec;
 
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync::{self, Lrc};
-use rustc_macros::HashStable_Generic;
+use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 use rustc_serialize::{Decodable, Encodable};
 use rustc_span::{sym, Span, SpanDecoder, SpanEncoder, Symbol, DUMMY_SP};
 use smallvec::{smallvec, SmallVec};
@@ -466,12 +466,6 @@ impl TokenStream {
 
     pub fn from_nonterminal_ast(nt: &Nonterminal) -> TokenStream {
         match nt {
-            Nonterminal::NtIdent(ident, is_raw) => {
-                TokenStream::token_alone(token::Ident(ident.name, *is_raw), ident.span)
-            }
-            Nonterminal::NtLifetime(ident) => {
-                TokenStream::token_alone(token::Lifetime(ident.name), ident.span)
-            }
             Nonterminal::NtItem(item) => TokenStream::from_ast(item),
             Nonterminal::NtBlock(block) => TokenStream::from_ast(block),
             Nonterminal::NtStmt(stmt) if let StmtKind::Empty = stmt.kind => {
@@ -489,15 +483,21 @@ impl TokenStream {
     }
 
     fn flatten_token(token: &Token, spacing: Spacing) -> TokenTree {
-        match &token.kind {
-            token::Interpolated(nt) if let token::NtIdent(ident, is_raw) = nt.0 => {
+        match token.kind {
+            token::NtIdent(ident, is_raw) => {
                 TokenTree::Token(Token::new(token::Ident(ident.name, is_raw), ident.span), spacing)
             }
-            token::Interpolated(nt) => TokenTree::Delimited(
+            token::NtLifetime(ident) => TokenTree::Delimited(
                 DelimSpan::from_single(token.span),
                 DelimSpacing::new(Spacing::JointHidden, spacing),
                 Delimiter::Invisible,
-                TokenStream::from_nonterminal_ast(&nt.0).flattened(),
+                TokenStream::token_alone(token::Lifetime(ident.name), ident.span),
+            ),
+            token::Interpolated(ref nt) => TokenTree::Delimited(
+                DelimSpan::from_single(token.span),
+                DelimSpacing::new(Spacing::JointHidden, spacing),
+                Delimiter::Invisible,
+                TokenStream::from_nonterminal_ast(&nt).flattened(),
             ),
             _ => TokenTree::Token(token.clone(), spacing),
         }
@@ -516,7 +516,10 @@ impl TokenStream {
     pub fn flattened(&self) -> TokenStream {
         fn can_skip(stream: &TokenStream) -> bool {
             stream.trees().all(|tree| match tree {
-                TokenTree::Token(token, _) => !matches!(token.kind, token::Interpolated(_)),
+                TokenTree::Token(token, _) => !matches!(
+                    token.kind,
+                    token::NtIdent(..) | token::NtLifetime(..) | token::Interpolated(..)
+                ),
                 TokenTree::Delimited(.., inner) => can_skip(inner),
             })
         }
@@ -658,11 +661,11 @@ impl TokenStream {
             if attr_style == AttrStyle::Inner {
                 vec![
                     TokenTree::token_joint(token::Pound, span),
-                    TokenTree::token_alone(token::Not, span),
+                    TokenTree::token_joint_hidden(token::Not, span),
                     body,
                 ]
             } else {
-                vec![TokenTree::token_alone(token::Pound, span), body]
+                vec![TokenTree::token_joint_hidden(token::Pound, span), body]
             }
         }
     }
@@ -706,7 +709,7 @@ impl<'t> Iterator for RefTokenTreeCursor<'t> {
 /// involve associated types) for getting individual elements, or
 /// `RefTokenTreeCursor` if you really want an `Iterator`, e.g. in a `for`
 /// loop.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TokenTreeCursor {
     pub stream: TokenStream,
     index: usize,

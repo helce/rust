@@ -5,6 +5,7 @@ use crate::{
 use rustc_errors::MultiSpan;
 use rustc_hir as hir;
 use rustc_middle::ty;
+use rustc_session::{declare_lint, declare_lint_pass};
 use rustc_span::{sym, Symbol};
 
 declare_lint! {
@@ -112,11 +113,11 @@ impl<'tcx> LateLintPass<'tcx> for LetUnderscore {
 
         let mut top_level = true;
 
-        // We recursively walk through all patterns, so that we can catch cases where the lock is nested in a pattern.
-        // For the basic `let_underscore_drop` lint, we only look at the top level, since there are many legitimate reasons
-        // to bind a sub-pattern to an `_`, if we're only interested in the rest.
-        // But with locks, we prefer having the chance of "false positives" over missing cases, since the effects can be
-        // quite catastrophic.
+        // We recursively walk through all patterns, so that we can catch cases where the lock is
+        // nested in a pattern. For the basic `let_underscore_drop` lint, we only look at the top
+        // level, since there are many legitimate reasons to bind a sub-pattern to an `_`, if we're
+        // only interested in the rest. But with locks, we prefer having the chance of "false
+        // positives" over missing cases, since the effects can be quite catastrophic.
         local.pat.walk_always(|pat| {
             let is_top_level = top_level;
             top_level = false;

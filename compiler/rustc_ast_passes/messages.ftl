@@ -55,9 +55,6 @@ ast_passes_const_without_body =
 ast_passes_constraint_on_negative_bound =
     associated type constraints not allowed on negative bounds
 
-ast_passes_deprecated_where_clause_location =
-    where clause not allowed here
-
 ast_passes_equality_in_where = equality constraints are not yet supported in `where` clauses
     .label = not supported
     .suggestion = if `{$ident}` is an associated type you're trying to set, use the associated type binding syntax
@@ -70,6 +67,9 @@ ast_passes_extern_fn_qualifiers = functions in `extern` blocks cannot have quali
     .label = in this `extern` block
     .suggestion = remove this qualifier
 
+ast_passes_extern_invalid_safety = items in unadorned `extern` blocks cannot have safety qualifiers
+    .suggestion = add unsafe to this `extern` block
+
 ast_passes_extern_item_ascii = items in `extern` blocks cannot use non-ascii identifiers
     .label = in this `extern` block
     .note = this limitation may be lifted in the future; see issue #83942 <https://github.com/rust-lang/rust/issues/83942> for more information
@@ -79,8 +79,6 @@ ast_passes_extern_keyword_link = for more information, visit https://doc.rust-la
 ast_passes_extern_types_cannot = `type`s inside `extern` blocks cannot have {$descr}
     .suggestion = remove the {$remove_descr}
     .label = `extern` block begins here
-
-ast_passes_extern_without_abi = extern declarations without an explicit ABI are deprecated
 
 ast_passes_feature_on_non_nightly = `#![feature]` may not be used on the {$channel} release channel
     .suggestion = remove the attribute
@@ -96,9 +94,6 @@ ast_passes_fn_body_extern = incorrect function inside `extern` block
 
 ast_passes_fn_param_c_var_args_not_last =
     `...` must be the last argument of a C-variadic function
-
-ast_passes_fn_param_c_var_args_only =
-    C-variadic function must be declared with at least one named argument
 
 ast_passes_fn_param_doc_comment =
     documentation comments cannot be applied to function parameters
@@ -181,6 +176,8 @@ ast_passes_keyword_lifetime =
 ast_passes_match_arm_with_no_body =
     `match` arm with no body
     .suggestion = add a body after the pattern
+
+ast_passes_missing_unsafe_on_extern = extern blocks must be unsafe
 
 ast_passes_module_nonascii = trying to load file for module `{$name}` with non-ascii identifier name
     .help = consider using the `#[path]` attribute to specify filesystem path
@@ -266,6 +263,9 @@ ast_passes_unsafe_item = {$kind} cannot be declared unsafe
 ast_passes_unsafe_negative_impl = negative impls cannot be unsafe
     .negative = negative because of this
     .unsafe = unsafe because of this
+
+ast_passes_unsafe_static =
+    static items cannot be declared with `unsafe` safety qualifier outside of `extern` block
 
 ast_passes_visibility_not_permitted =
     visibility qualifiers are not permitted here

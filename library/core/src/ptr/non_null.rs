@@ -512,7 +512,6 @@ impl<T: ?Sized> NonNull<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(non_null_convenience)]
     /// use std::ptr::NonNull;
     ///
     /// let mut s = [1, 2, 3];
@@ -523,12 +522,12 @@ impl<T: ?Sized> NonNull<T> {
     ///     println!("{}", ptr.offset(2).read());
     /// }
     /// ```
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
-    #[must_use = "returns a new pointer rather than modifying its argument"]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
-    pub const unsafe fn offset(self, count: isize) -> NonNull<T>
+    #[must_use = "returns a new pointer rather than modifying its argument"]
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
+    pub const unsafe fn offset(self, count: isize) -> Self
     where
         T: Sized,
     {
@@ -549,11 +548,11 @@ impl<T: ?Sized> NonNull<T> {
     ///
     /// For non-`Sized` pointees this operation changes only the data pointer,
     /// leaving the metadata untouched.
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
     #[must_use]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
     pub const unsafe fn byte_offset(self, count: isize) -> Self {
         // SAFETY: the caller must uphold the safety contract for `offset` and `byte_offset` has
         // the same safety contract.
@@ -599,7 +598,6 @@ impl<T: ?Sized> NonNull<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(non_null_convenience)]
     /// use std::ptr::NonNull;
     ///
     /// let s: &str = "123";
@@ -610,11 +608,11 @@ impl<T: ?Sized> NonNull<T> {
     ///     println!("{}", ptr.add(2).read() as char);
     /// }
     /// ```
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
-    #[must_use = "returns a new pointer rather than modifying its argument"]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[must_use = "returns a new pointer rather than modifying its argument"]
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
     pub const unsafe fn add(self, count: usize) -> Self
     where
         T: Sized,
@@ -636,12 +634,12 @@ impl<T: ?Sized> NonNull<T> {
     ///
     /// For non-`Sized` pointees this operation changes only the data pointer,
     /// leaving the metadata untouched.
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
     #[must_use]
     #[inline(always)]
-    #[rustc_allow_const_fn_unstable(set_ptr_value)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[rustc_allow_const_fn_unstable(set_ptr_value)]
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
     pub const unsafe fn byte_add(self, count: usize) -> Self {
         // SAFETY: the caller must uphold the safety contract for `add` and `byte_add` has the same
         // safety contract.
@@ -688,7 +686,6 @@ impl<T: ?Sized> NonNull<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(non_null_convenience)]
     /// use std::ptr::NonNull;
     ///
     /// let s: &str = "123";
@@ -699,11 +696,12 @@ impl<T: ?Sized> NonNull<T> {
     ///     println!("{}", end.sub(2).read() as char);
     /// }
     /// ```
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
-    #[must_use = "returns a new pointer rather than modifying its argument"]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[must_use = "returns a new pointer rather than modifying its argument"]
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_allow_const_fn_unstable(unchecked_neg)]
     pub const unsafe fn sub(self, count: usize) -> Self
     where
         T: Sized,
@@ -715,7 +713,7 @@ impl<T: ?Sized> NonNull<T> {
             // SAFETY: the caller must uphold the safety contract for `offset`.
             // Because the pointee is *not* a ZST, that means that `count` is
             // at most `isize::MAX`, and thus the negation cannot overflow.
-            unsafe { self.offset(intrinsics::unchecked_sub(0, count as isize)) }
+            unsafe { self.offset((count as isize).unchecked_neg()) }
         }
     }
 
@@ -730,12 +728,12 @@ impl<T: ?Sized> NonNull<T> {
     ///
     /// For non-`Sized` pointees this operation changes only the data pointer,
     /// leaving the metadata untouched.
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
     #[must_use]
     #[inline(always)]
-    #[rustc_allow_const_fn_unstable(set_ptr_value)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[rustc_allow_const_fn_unstable(set_ptr_value)]
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
     pub const unsafe fn byte_sub(self, count: usize) -> Self {
         // SAFETY: the caller must uphold the safety contract for `sub` and `byte_sub` has the same
         // safety contract.
@@ -816,7 +814,6 @@ impl<T: ?Sized> NonNull<T> {
     /// Basic usage:
     ///
     /// ```
-    /// #![feature(non_null_convenience)]
     /// use std::ptr::NonNull;
     ///
     /// let a = [0; 5];
@@ -833,7 +830,7 @@ impl<T: ?Sized> NonNull<T> {
     /// *Incorrect* usage:
     ///
     /// ```rust,no_run
-    /// #![feature(non_null_convenience, strict_provenance)]
+    /// #![feature(strict_provenance)]
     /// use std::ptr::NonNull;
     ///
     /// let ptr1 = NonNull::new(Box::into_raw(Box::new(0u8))).unwrap();
@@ -845,14 +842,13 @@ impl<T: ?Sized> NonNull<T> {
     /// // Since ptr2_other and ptr2 are derived from pointers to different objects,
     /// // computing their offset is undefined behavior, even though
     /// // they point to the same address!
-    /// unsafe {
-    ///     let zero = ptr2_other.offset_from(ptr2); // Undefined Behavior
-    /// }
+    ///
+    /// let zero = unsafe { ptr2_other.offset_from(ptr2) }; // Undefined Behavior
     /// ```
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
     pub const unsafe fn offset_from(self, origin: NonNull<T>) -> isize
     where
         T: Sized,
@@ -870,10 +866,10 @@ impl<T: ?Sized> NonNull<T> {
     ///
     /// For non-`Sized` pointees this operation considers only the data pointers,
     /// ignoring the metadata.
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
     pub const unsafe fn byte_offset_from<U: ?Sized>(self, origin: NonNull<U>) -> isize {
         // SAFETY: the caller must uphold the safety contract for `byte_offset_from`.
         unsafe { self.pointer.byte_offset_from(origin.pointer) }
@@ -897,7 +893,7 @@ impl<T: ?Sized> NonNull<T> {
     /// to [`sub`](#method.sub)).  The following are all equivalent, assuming
     /// that their safety preconditions are met:
     /// ```rust
-    /// # #![feature(non_null_convenience)]
+    /// # #![feature(ptr_sub_ptr)]
     /// # unsafe fn blah(ptr: std::ptr::NonNull<u32>, origin: std::ptr::NonNull<u32>, count: usize) -> bool {
     /// ptr.sub_ptr(origin) == count
     /// # &&
@@ -926,7 +922,7 @@ impl<T: ?Sized> NonNull<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(non_null_convenience)]
+    /// #![feature(ptr_sub_ptr)]
     /// use std::ptr::NonNull;
     ///
     /// let a = [0; 5];
@@ -942,12 +938,10 @@ impl<T: ?Sized> NonNull<T> {
     /// // This would be incorrect, as the pointers are not correctly ordered:
     /// // ptr1.sub_ptr(ptr2)
     /// ```
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
-    // #[unstable(feature = "ptr_sub_ptr", issue = "95892")]
-    // #[rustc_const_unstable(feature = "const_ptr_sub_ptr", issue = "95892")]
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[unstable(feature = "ptr_sub_ptr", issue = "95892")]
+    #[rustc_const_unstable(feature = "const_ptr_sub_ptr", issue = "95892")]
     pub const unsafe fn sub_ptr(self, subtracted: NonNull<T>) -> usize
     where
         T: Sized,
@@ -962,10 +956,10 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::read`] for safety concerns and examples.
     ///
     /// [`ptr::read`]: crate::ptr::read()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
     pub const unsafe fn read(self) -> T
     where
         T: Sized,
@@ -984,9 +978,9 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::read_volatile`] for safety concerns and examples.
     ///
     /// [`ptr::read_volatile`]: crate::ptr::read_volatile()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
     pub unsafe fn read_volatile(self) -> T
     where
         T: Sized,
@@ -1003,10 +997,10 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::read_unaligned`] for safety concerns and examples.
     ///
     /// [`ptr::read_unaligned`]: crate::ptr::read_unaligned()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
     pub const unsafe fn read_unaligned(self) -> T
     where
         T: Sized,
@@ -1023,10 +1017,10 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::copy`] for safety concerns and examples.
     ///
     /// [`ptr::copy`]: crate::ptr::copy()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
     pub const unsafe fn copy_to(self, dest: NonNull<T>, count: usize)
     where
         T: Sized,
@@ -1043,10 +1037,10 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::copy_nonoverlapping`] for safety concerns and examples.
     ///
     /// [`ptr::copy_nonoverlapping`]: crate::ptr::copy_nonoverlapping()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
     pub const unsafe fn copy_to_nonoverlapping(self, dest: NonNull<T>, count: usize)
     where
         T: Sized,
@@ -1063,10 +1057,10 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::copy`] for safety concerns and examples.
     ///
     /// [`ptr::copy`]: crate::ptr::copy()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
     pub const unsafe fn copy_from(self, src: NonNull<T>, count: usize)
     where
         T: Sized,
@@ -1083,10 +1077,10 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::copy_nonoverlapping`] for safety concerns and examples.
     ///
     /// [`ptr::copy_nonoverlapping`]: crate::ptr::copy_nonoverlapping()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
     pub const unsafe fn copy_from_nonoverlapping(self, src: NonNull<T>, count: usize)
     where
         T: Sized,
@@ -1100,8 +1094,8 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::drop_in_place`] for safety concerns and examples.
     ///
     /// [`ptr::drop_in_place`]: crate::ptr::drop_in_place()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline(always)]
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
     pub unsafe fn drop_in_place(self) {
         // SAFETY: the caller must uphold the safety contract for `drop_in_place`.
         unsafe { ptr::drop_in_place(self.as_ptr()) }
@@ -1113,11 +1107,10 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::write`] for safety concerns and examples.
     ///
     /// [`ptr::write`]: crate::ptr::write()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
-    //#[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
     pub const unsafe fn write(self, val: T)
     where
         T: Sized,
@@ -1132,12 +1125,11 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::write_bytes`] for safety concerns and examples.
     ///
     /// [`ptr::write_bytes`]: crate::ptr::write_bytes()
-    #[doc(alias = "memset")]
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
-    //#[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
     #[inline(always)]
+    #[doc(alias = "memset")]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
     pub const unsafe fn write_bytes(self, val: u8, count: usize)
     where
         T: Sized,
@@ -1156,9 +1148,9 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::write_volatile`] for safety concerns and examples.
     ///
     /// [`ptr::write_volatile`]: crate::ptr::write_volatile()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
     pub unsafe fn write_volatile(self, val: T)
     where
         T: Sized,
@@ -1175,11 +1167,10 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::write_unaligned`] for safety concerns and examples.
     ///
     /// [`ptr::write_unaligned`]: crate::ptr::write_unaligned()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
-    //#[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
     pub const unsafe fn write_unaligned(self, val: T)
     where
         T: Sized,
@@ -1194,8 +1185,8 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::replace`] for safety concerns and examples.
     ///
     /// [`ptr::replace`]: crate::ptr::replace()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
     #[inline(always)]
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
     pub unsafe fn replace(self, src: T) -> T
     where
         T: Sized,
@@ -1211,10 +1202,9 @@ impl<T: ?Sized> NonNull<T> {
     /// See [`ptr::swap`] for safety concerns and examples.
     ///
     /// [`ptr::swap`]: crate::ptr::swap()
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
-    //#[rustc_const_unstable(feature = "const_swap", issue = "83163")]
     #[inline(always)]
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_unstable(feature = "const_swap", issue = "83163")]
     pub const unsafe fn swap(self, with: NonNull<T>)
     where
         T: Sized,
@@ -1246,7 +1236,6 @@ impl<T: ?Sized> NonNull<T> {
     /// Accessing adjacent `u8` as `u16`
     ///
     /// ```
-    /// #![feature(non_null_convenience)]
     /// use std::mem::align_of;
     /// use std::ptr::NonNull;
     ///
@@ -1264,11 +1253,10 @@ impl<T: ?Sized> NonNull<T> {
     /// }
     /// # }
     /// ```
-    #[unstable(feature = "non_null_convenience", issue = "117691")]
-    #[rustc_const_unstable(feature = "non_null_convenience", issue = "117691")]
-    //#[rustc_const_unstable(feature = "const_align_offset", issue = "90962")]
-    #[must_use]
     #[inline]
+    #[must_use]
+    #[stable(feature = "non_null_convenience", since = "1.80.0")]
+    #[rustc_const_unstable(feature = "const_align_offset", issue = "90962")]
     pub const fn align_offset(self, align: usize) -> usize
     where
         T: Sized,
@@ -1312,10 +1300,9 @@ impl<T: ?Sized> NonNull<T> {
     /// underlying allocation.
     ///
     /// ```
-    /// #![feature(const_pointer_is_aligned)]
-    /// #![feature(non_null_convenience)]
-    /// #![feature(const_option)]
     /// #![feature(const_nonnull_new)]
+    /// #![feature(const_option)]
+    /// #![feature(const_pointer_is_aligned)]
     /// use std::ptr::NonNull;
     ///
     /// // On some platforms, the alignment of primitives is less than their size.
@@ -1390,10 +1377,10 @@ impl<T: ?Sized> NonNull<T> {
     /// ```
     ///
     /// [tracking issue]: https://github.com/rust-lang/rust/issues/104203
+    #[inline]
+    #[must_use]
     #[stable(feature = "pointer_is_aligned", since = "1.79.0")]
     #[rustc_const_unstable(feature = "const_pointer_is_aligned", issue = "104203")]
-    #[must_use]
-    #[inline]
     pub const fn is_aligned(self) -> bool
     where
         T: Sized,
@@ -1505,10 +1492,10 @@ impl<T: ?Sized> NonNull<T> {
     /// ```
     ///
     /// [tracking issue]: https://github.com/rust-lang/rust/issues/104203
+    #[inline]
+    #[must_use]
     #[unstable(feature = "pointer_is_aligned_to", issue = "96284")]
     #[rustc_const_unstable(feature = "const_pointer_is_aligned", issue = "104203")]
-    #[must_use]
-    #[inline]
     pub const fn is_aligned_to(self, align: usize) -> bool {
         self.pointer.is_aligned_to(align)
     }
@@ -1579,10 +1566,7 @@ impl<T> NonNull<[T]> {
     /// assert!(!slice.is_empty());
     /// ```
     #[stable(feature = "slice_ptr_is_empty_nonnull", since = "1.79.0")]
-    #[rustc_const_stable(
-        feature = "const_slice_ptr_is_empty_nonnull",
-        since = "1.79.0"
-    )]
+    #[rustc_const_stable(feature = "const_slice_ptr_is_empty_nonnull", since = "1.79.0")]
     #[must_use]
     #[inline]
     pub const fn is_empty(self) -> bool {

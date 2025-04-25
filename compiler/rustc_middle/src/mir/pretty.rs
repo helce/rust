@@ -15,6 +15,7 @@ use rustc_middle::mir::interpret::{
 use rustc_middle::mir::visit::Visitor;
 use rustc_middle::mir::*;
 use rustc_target::abi::Size;
+use tracing::trace;
 
 const INDENT: &str = "    ";
 /// Alignment for lining up comments following MIR statements
@@ -496,20 +497,27 @@ fn write_coverage_branch_info(
         )?;
     }
 
-    for coverage::MCDCBranchSpan { span, condition_info, true_marker, false_marker } in
-        mcdc_branch_spans
+    for coverage::MCDCBranchSpan {
+        span,
+        condition_info,
+        true_marker,
+        false_marker,
+        decision_depth,
+    } in mcdc_branch_spans
     {
         writeln!(
             w,
-            "{INDENT}coverage mcdc branch {{ condition_id: {:?}, true: {true_marker:?}, false: {false_marker:?} }} => {span:?}",
+            "{INDENT}coverage mcdc branch {{ condition_id: {:?}, true: {true_marker:?}, false: {false_marker:?}, depth: {decision_depth:?} }} => {span:?}",
             condition_info.map(|info| info.condition_id)
         )?;
     }
 
-    for coverage::MCDCDecisionSpan { span, conditions_num, end_markers } in mcdc_decision_spans {
+    for coverage::MCDCDecisionSpan { span, num_conditions, end_markers, decision_depth } in
+        mcdc_decision_spans
+    {
         writeln!(
             w,
-            "{INDENT}coverage mcdc decision {{ conditions_num: {conditions_num:?}, end: {end_markers:?} }} => {span:?}"
+            "{INDENT}coverage mcdc decision {{ num_conditions: {num_conditions:?}, end: {end_markers:?}, depth: {decision_depth:?} }} => {span:?}"
         )?;
     }
 
@@ -551,10 +559,10 @@ fn write_mir_sig(tcx: TyCtxt<'_>, body: &Body<'_>, w: &mut dyn io::Write) -> io:
     match (kind, body.source.promoted) {
         (_, Some(_)) => write!(w, "const ")?, // promoteds are the closest to consts
         (DefKind::Const | DefKind::AssocConst, _) => write!(w, "const ")?,
-        (DefKind::Static { mutability: hir::Mutability::Not, nested: false }, _) => {
+        (DefKind::Static { safety: _, mutability: hir::Mutability::Not, nested: false }, _) => {
             write!(w, "static ")?
         }
-        (DefKind::Static { mutability: hir::Mutability::Mut, nested: false }, _) => {
+        (DefKind::Static { safety: _, mutability: hir::Mutability::Mut, nested: false }, _) => {
             write!(w, "static mut ")?
         }
         (_, _) if is_function => write!(w, "fn ")?,
@@ -964,9 +972,6 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                 with_no_trimmed_paths!(write!(fmt, "{place:?} as {ty} ({kind:?})"))
             }
             BinaryOp(ref op, box (ref a, ref b)) => write!(fmt, "{op:?}({a:?}, {b:?})"),
-            CheckedBinaryOp(ref op, box (ref a, ref b)) => {
-                write!(fmt, "Checked{op:?}({a:?}, {b:?})")
-            }
             UnaryOp(ref op, ref a) => write!(fmt, "{op:?}({a:?})"),
             Discriminant(ref place) => write!(fmt, "discriminant({place:?})"),
             NullaryOp(ref op, ref t) => {
@@ -1308,12 +1313,12 @@ impl<'tcx> Visitor<'tcx> for ExtraComments<'tcx> {
             };
 
             let val = match const_ {
-                Const::Ty(ct) => match ct.kind() {
+                Const::Ty(_, ct) => match ct.kind() {
                     ty::ConstKind::Param(p) => format!("ty::Param({p})"),
                     ty::ConstKind::Unevaluated(uv) => {
                         format!("ty::Unevaluated({}, {:?})", self.tcx.def_path_str(uv.def), uv.args,)
                     }
-                    ty::ConstKind::Value(val) => format!("ty::Valtree({})", fmt_valtree(&val)),
+                    ty::ConstKind::Value(_, val) => format!("ty::Valtree({})", fmt_valtree(&val)),
                     // No `ty::` prefix since we also use this to represent errors from `mir::Unevaluated`.
                     ty::ConstKind::Error(_) => "Error".to_string(),
                     // These variants shouldn't exist in the MIR.
@@ -1412,7 +1417,7 @@ pub fn write_allocations<'tcx>(
     impl<'tcx> Visitor<'tcx> for CollectAllocIds {
         fn visit_constant(&mut self, c: &ConstOperand<'tcx>, _: Location) {
             match c.const_ {
-                Const::Ty(_) | Const::Unevaluated(..) => {}
+                Const::Ty(_, _) | Const::Unevaluated(..) => {}
                 Const::Val(val, _) => {
                     self.0.extend(alloc_ids_from_const_val(val));
                 }

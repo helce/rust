@@ -25,12 +25,6 @@
 #![feature(yeet_expr)]
 // tidy-alphabetical-end
 
-#[macro_use]
-extern crate rustc_macros;
-
-#[macro_use]
-extern crate tracing;
-
 extern crate self as rustc_errors;
 
 pub use codes::*;
@@ -45,7 +39,7 @@ pub use diagnostic_impls::{
 };
 pub use emitter::ColorConfig;
 pub use rustc_error_messages::{
-    fallback_fluent_bundle, fluent_bundle, DelayDm, DiagMessage, FluentBundle, LanguageIdentifier,
+    fallback_fluent_bundle, fluent_bundle, DiagMessage, FluentBundle, LanguageIdentifier,
     LazyFallbackBundle, MultiSpan, SpanLabel, SubdiagMessage,
 };
 pub use rustc_lint_defs::{pluralize, Applicability};
@@ -64,6 +58,7 @@ use rustc_data_structures::stable_hasher::{Hash128, StableHasher};
 use rustc_data_structures::sync::{Lock, Lrc};
 use rustc_data_structures::AtomicRef;
 use rustc_lint_defs::LintExpectationId;
+use rustc_macros::{Decodable, Encodable};
 use rustc_span::source_map::SourceMap;
 use rustc_span::{Loc, Span, DUMMY_SP};
 use std::backtrace::{Backtrace, BacktraceStatus};
@@ -76,6 +71,7 @@ use std::num::NonZero;
 use std::ops::DerefMut;
 use std::panic;
 use std::path::{Path, PathBuf};
+use tracing::debug;
 
 use Level::*;
 
@@ -576,8 +572,8 @@ impl Drop for DiagCtxtInner {
             if let Some(backtrace) = &self.must_produce_diag {
                 panic!(
                     "must_produce_diag: `trimmed_def_paths` called but no diagnostics emitted; \
-                       use `DelayDm` for lints or `with_no_trimmed_paths` for debugging. \
-                       called at: {backtrace}"
+                     `with_no_trimmed_paths` for debugging. \
+                     called at: {backtrace}"
                 );
             }
         }

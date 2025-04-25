@@ -10,6 +10,7 @@ use crate::graph::vec_graph::VecGraph;
 use crate::graph::{DirectedGraph, NumEdges, Successors};
 use rustc_index::{Idx, IndexSlice, IndexVec};
 use std::ops::Range;
+use tracing::{debug, instrument};
 
 #[cfg(test)]
 mod tests;
@@ -39,7 +40,7 @@ pub struct SccData<S: Idx> {
 }
 
 impl<N: Idx, S: Idx + Ord> Sccs<N, S> {
-    pub fn new(graph: &(impl DirectedGraph<Node = N> + Successors)) -> Self {
+    pub fn new(graph: &impl Successors<Node = N>) -> Self {
         SccsConstruction::construct(graph)
     }
 

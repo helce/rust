@@ -93,13 +93,6 @@ pub struct FnParamTooMany {
 }
 
 #[derive(Diagnostic)]
-#[diag(ast_passes_fn_param_c_var_args_only)]
-pub struct FnParamCVarArgsOnly {
-    #[primary_span]
-    pub span: Span,
-}
-
-#[derive(Diagnostic)]
 #[diag(ast_passes_fn_param_c_var_args_not_last)]
 pub struct FnParamCVarArgsNotLast {
     #[primary_span]
@@ -221,6 +214,22 @@ pub enum ExternBlockSuggestion {
         end_span: Span,
         abi: Symbol,
     },
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_passes_extern_invalid_safety)]
+pub struct InvalidSafetyOnExtern {
+    #[primary_span]
+    pub item_span: Span,
+    #[suggestion(code = "", applicability = "maybe-incorrect")]
+    pub block: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_passes_unsafe_static)]
+pub struct UnsafeStatic {
+    #[primary_span]
+    pub span: Span,
 }
 
 #[derive(Diagnostic)]
@@ -493,6 +502,13 @@ pub struct UnsafeItem {
 }
 
 #[derive(Diagnostic)]
+#[diag(ast_passes_missing_unsafe_on_extern)]
+pub struct MissingUnsafeOnExtern {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
 #[diag(ast_passes_fieldless_union)]
 pub struct FieldlessUnion {
     #[primary_span]
@@ -669,6 +685,7 @@ pub struct ConstAndCVariadic {
 
 #[derive(Diagnostic)]
 #[diag(ast_passes_pattern_in_foreign, code = E0130)]
+// FIXME: deduplicate with rustc_lint (`BuiltinLintDiag::PatternsInFnsWithoutBody`)
 pub struct PatternInForeign {
     #[primary_span]
     #[label]
@@ -677,6 +694,7 @@ pub struct PatternInForeign {
 
 #[derive(Diagnostic)]
 #[diag(ast_passes_pattern_in_bodiless, code = E0642)]
+// FIXME: deduplicate with rustc_lint (`BuiltinLintDiag::PatternsInFnsWithoutBody`)
 pub struct PatternInBodiless {
     #[primary_span]
     #[label]

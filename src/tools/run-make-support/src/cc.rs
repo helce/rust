@@ -1,8 +1,9 @@
-use std::env;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{bin_name, cygpath_windows, handle_failed_output, is_msvc, is_windows, tmp_dir, uname};
+use crate::{
+    bin_name, cygpath_windows, env_var, handle_failed_output, is_msvc, is_windows, tmp_dir, uname,
+};
 
 /// Construct a new platform-specific C compiler invocation.
 ///
@@ -27,11 +28,11 @@ impl Cc {
     /// WARNING: This means that what flags are accepted by the underlying C compile is
     /// platform- AND compiler-specific. Consult the relevant docs for `gcc`, `clang` and `mvsc`.
     pub fn new() -> Self {
-        let compiler = env::var("CC").unwrap();
+        let compiler = env_var("CC");
 
         let mut cmd = Command::new(compiler);
 
-        let default_cflags = env::var("CC_DEFAULT_FLAGS").unwrap();
+        let default_cflags = env_var("CC_DEFAULT_FLAGS");
         for flag in default_cflags.split(char::is_whitespace) {
             cmd.arg(flag);
         }
@@ -41,6 +42,14 @@ impl Cc {
 
     /// Specify path of the input file.
     pub fn input<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+        self.cmd.arg(path.as_ref());
+        self
+    }
+
+    /// Adds directories to the list that the linker searches for libraries.
+    /// Equivalent to `-L`.
+    pub fn library_search_path<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+        self.cmd.arg("-L");
         self.cmd.arg(path.as_ref());
         self
     }
@@ -70,6 +79,18 @@ impl Cc {
         }
 
         self
+    }
+
+    /// Specify path of the output binary.
+    pub fn output<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+        self.cmd.arg("-o");
+        self.cmd.arg(path.as_ref());
+        self
+    }
+
+    /// Get the [`Output`][::std::process::Output] of the finished process.
+    pub fn command_output(&mut self) -> ::std::process::Output {
+        self.cmd.output().expect("failed to get output of finished process")
     }
 }
 
@@ -161,8 +182,9 @@ pub fn extra_cxx_flags() -> Vec<&'static str> {
     if is_windows() {
         if is_msvc() { vec![] } else { vec!["-lstdc++"] }
     } else {
-        match uname() {
-            n if n.contains("Darwin") => vec!["-lc++"],
+        match &uname()[..] {
+            "Darwin" => vec!["-lc++"],
+            "FreeBSD" | "SunOS" | "OpenBSD" => vec![],
             _ => vec!["-lstdc++"],
         }
     }

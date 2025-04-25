@@ -150,7 +150,7 @@ fn desugar_builtin_format_args() {
 fn main() {
     let are = "are";
     let count = 10;
-    builtin#format_args("hello {count:02} {} friends, we {are:?} {0}{last}", "fancy", last = "!");
+    builtin#format_args("\u{1b}hello {count:02} {} friends, we {are:?} {0}{last}", "fancy", last = "!");
 }
 "#,
     );
@@ -161,7 +161,7 @@ fn main() {
             let count = 10;
             builtin#lang(Arguments::new_v1_formatted)(
                 &[
-                    "hello ", " ", " friends, we ", " ", "",
+                    "\u{1b}hello ", " ", " friends, we ", " ", "",
                 ],
                 &[
                     builtin#lang(Argument::new_display)(
@@ -318,18 +318,20 @@ fn f() {
 
     expect![[r#"
         fn f() {
-            $crate::panicking::panic_fmt(
-                builtin#lang(Arguments::new_v1_formatted)(
-                    &[
-                        "cc",
-                    ],
-                    &[],
-                    &[],
-                    unsafe {
-                        builtin#lang(UnsafeArg::new)()
-                    },
-                ),
-            );
+            {
+                $crate::panicking::panic_fmt(
+                    builtin#lang(Arguments::new_v1_formatted)(
+                        &[
+                            "cc",
+                        ],
+                        &[],
+                        &[],
+                        unsafe {
+                            builtin#lang(UnsafeArg::new)()
+                        },
+                    ),
+                );
+            };
         }"#]]
     .assert_eq(&body.pretty_print(&db, def))
 }

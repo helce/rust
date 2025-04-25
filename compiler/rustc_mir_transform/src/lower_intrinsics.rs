@@ -2,6 +2,7 @@
 
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, TyCtxt};
+use rustc_middle::{bug, span_bug};
 use rustc_span::symbol::sym;
 
 pub struct LowerIntrinsics;
@@ -139,16 +140,16 @@ impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
                                 rhs = args.next().unwrap();
                             }
                             let bin_op = match intrinsic.name {
-                                sym::add_with_overflow => BinOp::Add,
-                                sym::sub_with_overflow => BinOp::Sub,
-                                sym::mul_with_overflow => BinOp::Mul,
+                                sym::add_with_overflow => BinOp::AddWithOverflow,
+                                sym::sub_with_overflow => BinOp::SubWithOverflow,
+                                sym::mul_with_overflow => BinOp::MulWithOverflow,
                                 _ => bug!("unexpected intrinsic"),
                             };
                             block.statements.push(Statement {
                                 source_info: terminator.source_info,
                                 kind: StatementKind::Assign(Box::new((
                                     *destination,
-                                    Rvalue::CheckedBinaryOp(bin_op, Box::new((lhs.node, rhs.node))),
+                                    Rvalue::BinaryOp(bin_op, Box::new((lhs.node, rhs.node))),
                                 ))),
                             });
                             terminator.kind = TerminatorKind::Goto { target };
@@ -313,6 +314,23 @@ impl<'tcx> MirPass<'tcx> for LowerIntrinsics {
                             ))),
                         });
 
+                        terminator.kind = TerminatorKind::Goto { target };
+                    }
+                    sym::ptr_metadata => {
+                        let Ok([ptr]) = <[_; 1]>::try_from(std::mem::take(args)) else {
+                            span_bug!(
+                                terminator.source_info.span,
+                                "Wrong number of arguments for ptr_metadata intrinsic",
+                            );
+                        };
+                        let target = target.unwrap();
+                        block.statements.push(Statement {
+                            source_info: terminator.source_info,
+                            kind: StatementKind::Assign(Box::new((
+                                *destination,
+                                Rvalue::UnaryOp(UnOp::PtrMetadata, ptr.node),
+                            ))),
+                        });
                         terminator.kind = TerminatorKind::Goto { target };
                     }
                     _ => {}

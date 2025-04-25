@@ -69,9 +69,6 @@ const_eval_deref_function_pointer =
     accessing {$allocation} which contains a function
 const_eval_deref_vtable_pointer =
     accessing {$allocation} which contains a vtable
-const_eval_different_allocations =
-    `{$name}` called on pointers into different allocations
-
 const_eval_division_by_zero =
     dividing by zero
 const_eval_division_overflow =
@@ -234,20 +231,25 @@ const_eval_not_enough_caller_args =
 const_eval_nullary_intrinsic_fail =
     could not evaluate nullary intrinsic
 
+const_eval_offset_from_different_allocations =
+    `{$name}` called on pointers into different allocations
+const_eval_offset_from_different_integers =
+    `{$name}` called on different pointers without provenance (i.e., without an associated allocation)
 const_eval_offset_from_overflow =
     `{$name}` called when first pointer is too far ahead of second
-
-const_eval_offset_from_test = out-of-bounds `offset_from`
+const_eval_offset_from_test =
+    out-of-bounds `offset_from`
 const_eval_offset_from_underflow =
     `{$name}` called when first pointer is too far before second
+const_eval_offset_from_unsigned_overflow =
+    `ptr_offset_from_unsigned` called when first pointer has smaller offset than second: {$a_offset} < {$b_offset}
 
 const_eval_operator_non_const =
     cannot call non-const operator in {const_eval_const_context}s
-const_eval_overflow =
-    overflow executing `{$name}`
-
+const_eval_overflow_arith =
+    arithmetic overflow in `{$intrinsic}`
 const_eval_overflow_shift =
-    overflowing shift by {$val} in `{$name}`
+    overflowing shift by {$shift_amount} in `{$intrinsic}`
 
 const_eval_panic =
     the evaluated program panicked at '{$msg}', {$file}:{$line}:{$col}
@@ -381,8 +383,6 @@ const_eval_unreachable = entering unreachable code
 const_eval_unreachable_unwind =
     unwinding past a stack frame that does not allow unwinding
 
-const_eval_unsigned_offset_from_overflow =
-    `ptr_offset_from_unsigned` called when first pointer has smaller offset than second: {$a_offset} < {$b_offset}
 const_eval_unsized_local = unsized locals are not supported
 const_eval_unstable_const_fn = `{$def_path}` is not yet stable as a const fn
 

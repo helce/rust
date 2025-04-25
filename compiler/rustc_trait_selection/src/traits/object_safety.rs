@@ -13,18 +13,19 @@ use super::elaborate;
 use crate::infer::TyCtxtInferExt;
 use crate::traits::query::evaluate_obligation::InferCtxtExt;
 use crate::traits::{self, Obligation, ObligationCause};
-use rustc_errors::{DelayDm, FatalError, MultiSpan};
+use rustc_errors::FatalError;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{
-    self, EarlyBinder, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitor,
+    self, EarlyBinder, ExistentialPredicateStableCmpExt as _, Ty, TyCtxt, TypeSuperVisitable,
+    TypeVisitable, TypeVisitor,
 };
 use rustc_middle::ty::{GenericArg, GenericArgs};
-use rustc_middle::ty::{ToPredicate, TypeVisitableExt};
-use rustc_session::lint::builtin::WHERE_CLAUSES_OBJECT_SAFETY;
+use rustc_middle::ty::{TypeVisitableExt, Upcast};
 use rustc_span::symbol::Symbol;
 use rustc_span::Span;
+use rustc_target::abi::Abi;
 use smallvec::SmallVec;
 
 use std::iter;
@@ -43,7 +44,8 @@ pub fn hir_ty_lowering_object_safety_violations(
     trait_def_id: DefId,
 ) -> Vec<ObjectSafetyViolation> {
     debug_assert!(tcx.generics_of(trait_def_id).has_self);
-    let violations = traits::supertrait_def_ids(tcx, trait_def_id)
+    let violations = tcx
+        .supertrait_def_ids(trait_def_id)
         .map(|def_id| predicates_reference_self(tcx, def_id, true))
         .filter(|spans| !spans.is_empty())
         .map(ObjectSafetyViolation::SupertraitSelf)
@@ -57,50 +59,19 @@ fn object_safety_violations(tcx: TyCtxt<'_>, trait_def_id: DefId) -> &'_ [Object
     debug!("object_safety_violations: {:?}", trait_def_id);
 
     tcx.arena.alloc_from_iter(
-        traits::supertrait_def_ids(tcx, trait_def_id)
+        tcx.supertrait_def_ids(trait_def_id)
             .flat_map(|def_id| object_safety_violations_for_trait(tcx, def_id)),
     )
 }
 
-fn check_is_object_safe(tcx: TyCtxt<'_>, trait_def_id: DefId) -> bool {
-    let violations = tcx.object_safety_violations(trait_def_id);
-
-    if violations.is_empty() {
-        return true;
-    }
-
-    // If the trait contains any other violations, then let the error reporting path
-    // report it instead of emitting a warning here.
-    if violations.iter().all(|violation| {
-        matches!(
-            violation,
-            ObjectSafetyViolation::Method(_, MethodViolationCode::WhereClauseReferencesSelf, _)
-        )
-    }) {
-        for violation in violations {
-            if let ObjectSafetyViolation::Method(
-                _,
-                MethodViolationCode::WhereClauseReferencesSelf,
-                span,
-            ) = violation
-            {
-                lint_object_unsafe_trait(tcx, *span, trait_def_id, violation);
-            }
-        }
-        return true;
-    }
-
-    false
+fn is_object_safe(tcx: TyCtxt<'_>, trait_def_id: DefId) -> bool {
+    tcx.object_safety_violations(trait_def_id).is_empty()
 }
 
 /// We say a method is *vtable safe* if it can be invoked on a trait
 /// object. Note that object-safe traits can have some
 /// non-vtable-safe methods, so long as they require `Self: Sized` or
 /// otherwise ensure that they cannot be used when `Self = Trait`.
-///
-/// [`MethodViolationCode::WhereClauseReferencesSelf`] is considered object safe due to backwards
-/// compatibility, see <https://github.com/rust-lang/rust/issues/51443> and
-/// [`WHERE_CLAUSES_OBJECT_SAFETY`].
 pub fn is_vtable_safe_method(tcx: TyCtxt<'_>, trait_def_id: DefId, method: ty::AssocItem) -> bool {
     debug_assert!(tcx.generics_of(trait_def_id).has_self);
     debug!("is_vtable_safe_method({:?}, {:?})", trait_def_id, method);
@@ -109,9 +80,7 @@ pub fn is_vtable_safe_method(tcx: TyCtxt<'_>, trait_def_id: DefId, method: ty::A
         return false;
     }
 
-    virtual_call_violations_for_method(tcx, trait_def_id, method)
-        .iter()
-        .all(|v| matches!(v, MethodViolationCode::WhereClauseReferencesSelf))
+    virtual_call_violations_for_method(tcx, trait_def_id, method).is_empty()
 }
 
 fn object_safety_violations_for_trait(
@@ -144,58 +113,20 @@ fn object_safety_violations_for_trait(
         violations.push(ObjectSafetyViolation::SupertraitNonLifetimeBinder(spans));
     }
 
+    if violations.is_empty() {
+        for item in tcx.associated_items(trait_def_id).in_definition_order() {
+            if let ty::AssocKind::Fn = item.kind {
+                check_receiver_correct(tcx, trait_def_id, *item);
+            }
+        }
+    }
+
     debug!(
         "object_safety_violations_for_trait(trait_def_id={:?}) = {:?}",
         trait_def_id, violations
     );
 
     violations
-}
-
-/// Lint object-unsafe trait.
-fn lint_object_unsafe_trait(
-    tcx: TyCtxt<'_>,
-    span: Span,
-    trait_def_id: DefId,
-    violation: &ObjectSafetyViolation,
-) {
-    // Using `CRATE_NODE_ID` is wrong, but it's hard to get a more precise id.
-    // It's also hard to get a use site span, so we use the method definition span.
-    tcx.node_span_lint(
-        WHERE_CLAUSES_OBJECT_SAFETY,
-        hir::CRATE_HIR_ID,
-        span,
-        DelayDm(|| format!("the trait `{}` cannot be made into an object", tcx.def_path_str(trait_def_id))),
-        |err| {
-            let node = tcx.hir().get_if_local(trait_def_id);
-            let mut spans = MultiSpan::from_span(span);
-            if let Some(hir::Node::Item(item)) = node {
-                spans.push_span_label(
-                    item.ident.span,
-                    "this trait cannot be made into an object...",
-                );
-                spans.push_span_label(span, format!("...because {}", violation.error_msg()));
-            } else {
-                spans.push_span_label(
-                    span,
-                    format!(
-                        "the trait cannot be made into an object because {}",
-                        violation.error_msg()
-                    ),
-                );
-            };
-            err.span_note(
-                spans,
-                "for a trait to be \"object safe\" it needs to allow building a vtable to allow the \
-                call to be resolvable dynamically; for more information visit \
-                <https://doc.rust-lang.org/reference/items/traits.html#object-safety>",
-            );
-            if node.is_some() {
-                // Only provide the help if its a local trait, otherwise it's not
-                violation.solution().add_to(err);
-            }
-        },
-    );
 }
 
 fn sized_trait_bound_spans<'tcx>(
@@ -304,7 +235,7 @@ fn predicate_references_self<'tcx>(
             //
             // This is ALT2 in issue #56288, see that for discussion of the
             // possible alternatives.
-            data.projection_ty.args[1..].iter().any(has_self_ty).then_some(sp)
+            data.projection_term.args[1..].iter().any(has_self_ty).then_some(sp)
         }
         ty::ClauseKind::ConstArgHasType(_ct, ty) => has_self_ty(&ty.into()).then_some(sp),
 
@@ -397,7 +328,7 @@ pub fn object_safety_violations_for_assoc_item(
         // Associated types can only be object safe if they have `Self: Sized` bounds.
         ty::AssocKind::Type => {
             if !tcx.features().generic_associated_types_extended
-                && !tcx.generics_of(item.def_id).params.is_empty()
+                && !tcx.generics_of(item.def_id).is_own_empty()
                 && !item.is_impl_trait_in_trait()
             {
                 vec![ObjectSafetyViolation::GAT(item.name, item.ident(tcx).span)]
@@ -497,59 +428,8 @@ fn virtual_call_violations_for_method<'tcx>(
             };
             errors.push(MethodViolationCode::UndispatchableReceiver(span));
         } else {
-            // Do sanity check to make sure the receiver actually has the layout of a pointer.
-
-            use rustc_target::abi::Abi;
-
-            let param_env = tcx.param_env(method.def_id);
-
-            let abi_of_ty = |ty: Ty<'tcx>| -> Option<Abi> {
-                match tcx.layout_of(param_env.and(ty)) {
-                    Ok(layout) => Some(layout.abi),
-                    Err(err) => {
-                        // #78372
-                        tcx.dcx().span_delayed_bug(
-                            tcx.def_span(method.def_id),
-                            format!("error: {err}\n while computing layout for type {ty:?}"),
-                        );
-                        None
-                    }
-                }
-            };
-
-            // e.g., `Rc<()>`
-            let unit_receiver_ty =
-                receiver_for_self_ty(tcx, receiver_ty, Ty::new_unit(tcx), method.def_id);
-
-            match abi_of_ty(unit_receiver_ty) {
-                Some(Abi::Scalar(..)) => (),
-                abi => {
-                    tcx.dcx().span_delayed_bug(
-                        tcx.def_span(method.def_id),
-                        format!(
-                            "receiver when `Self = ()` should have a Scalar ABI; found {abi:?}"
-                        ),
-                    );
-                }
-            }
-
-            let trait_object_ty = object_ty_for_trait(tcx, trait_def_id, tcx.lifetimes.re_static);
-
-            // e.g., `Rc<dyn Trait>`
-            let trait_object_receiver =
-                receiver_for_self_ty(tcx, receiver_ty, trait_object_ty, method.def_id);
-
-            match abi_of_ty(trait_object_receiver) {
-                Some(Abi::ScalarPair(..)) => (),
-                abi => {
-                    tcx.dcx().span_delayed_bug(
-                        tcx.def_span(method.def_id),
-                        format!(
-                            "receiver when `Self = {trait_object_ty}` should have a ScalarPair ABI; found {abi:?}"
-                        ),
-                    );
-                }
-            }
+            // We confirm that the `receiver_is_dispatchable` is accurate later,
+            // see `check_receiver_correct`. It should be kept in sync with this code.
         }
     }
 
@@ -610,6 +490,55 @@ fn virtual_call_violations_for_method<'tcx>(
     errors
 }
 
+/// This code checks that `receiver_is_dispatchable` is correctly implemented.
+///
+/// This check is outlined from the object safety check to avoid cycles with
+/// layout computation, which relies on knowing whether methods are object safe.
+pub fn check_receiver_correct<'tcx>(tcx: TyCtxt<'tcx>, trait_def_id: DefId, method: ty::AssocItem) {
+    if !is_vtable_safe_method(tcx, trait_def_id, method) {
+        return;
+    }
+
+    let method_def_id = method.def_id;
+    let sig = tcx.fn_sig(method_def_id).instantiate_identity();
+    let param_env = tcx.param_env(method_def_id);
+    let receiver_ty = tcx.liberate_late_bound_regions(method_def_id, sig.input(0));
+
+    if receiver_ty == tcx.types.self_param {
+        // Assumed OK, may change later if unsized_locals permits `self: Self` as dispatchable.
+        return;
+    }
+
+    // e.g., `Rc<()>`
+    let unit_receiver_ty = receiver_for_self_ty(tcx, receiver_ty, tcx.types.unit, method_def_id);
+    match tcx.layout_of(param_env.and(unit_receiver_ty)).map(|l| l.abi) {
+        Ok(Abi::Scalar(..)) => (),
+        abi => {
+            tcx.dcx().span_delayed_bug(
+                tcx.def_span(method_def_id),
+                format!("receiver {unit_receiver_ty:?} when `Self = ()` should have a Scalar ABI; found {abi:?}"),
+            );
+        }
+    }
+
+    let trait_object_ty = object_ty_for_trait(tcx, trait_def_id, tcx.lifetimes.re_static);
+
+    // e.g., `Rc<dyn Trait>`
+    let trait_object_receiver =
+        receiver_for_self_ty(tcx, receiver_ty, trait_object_ty, method_def_id);
+    match tcx.layout_of(param_env.and(trait_object_receiver)).map(|l| l.abi) {
+        Ok(Abi::ScalarPair(..)) => (),
+        abi => {
+            tcx.dcx().span_delayed_bug(
+                tcx.def_span(method_def_id),
+                format!(
+                    "receiver {trait_object_receiver:?} when `Self = {trait_object_ty}` should have a ScalarPair ABI; found {abi:?}"
+                ),
+            );
+        }
+    }
+}
+
 /// Performs a type instantiation to produce the version of `receiver_ty` when `Self = self_ty`.
 /// For example, for `receiver_ty = Rc<Self>` and `self_ty = Foo`, returns `Rc<Foo>`.
 fn receiver_for_self_ty<'tcx>(
@@ -648,11 +577,11 @@ fn object_ty_for_trait<'tcx>(
     ));
     debug!(?trait_predicate);
 
-    let pred: ty::Predicate<'tcx> = trait_ref.to_predicate(tcx);
+    let pred: ty::Predicate<'tcx> = trait_ref.upcast(tcx);
     let mut elaborated_predicates: Vec<_> = elaborate(tcx, [pred])
         .filter_map(|pred| {
             debug!(?pred);
-            let pred = pred.to_opt_poly_projection_pred()?;
+            let pred = pred.as_projection_clause()?;
             Some(pred.map_bound(|p| {
                 ty::ExistentialPredicate::Projection(ty::ExistentialProjection::erase_self_ty(
                     tcx, p,
@@ -751,8 +680,7 @@ fn receiver_is_dispatchable<'tcx>(
 
         // Self: Unsize<U>
         let unsize_predicate =
-            ty::TraitRef::new(tcx, unsize_did, [tcx.types.self_param, unsized_self_ty])
-                .to_predicate(tcx);
+            ty::TraitRef::new(tcx, unsize_did, [tcx.types.self_param, unsized_self_ty]).upcast(tcx);
 
         // U: Trait<Arg1, ..., ArgN>
         let trait_predicate = {
@@ -761,7 +689,7 @@ fn receiver_is_dispatchable<'tcx>(
                 if param.index == 0 { unsized_self_ty.into() } else { tcx.mk_param_from_def(param) }
             });
 
-            ty::TraitRef::new(tcx, trait_def_id, args).to_predicate(tcx)
+            ty::TraitRef::new(tcx, trait_def_id, args).upcast(tcx)
         };
 
         let caller_bounds =
@@ -926,7 +854,7 @@ pub fn contains_illegal_impl_trait_in_trait<'tcx>(
 pub fn provide(providers: &mut Providers) {
     *providers = Providers {
         object_safety_violations,
-        check_is_object_safe,
+        is_object_safe,
         generics_require_sized_self,
         ..*providers
     };

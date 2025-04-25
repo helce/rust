@@ -1,5 +1,6 @@
 use rustc_hir as hir;
 use rustc_hir::lang_items::LangItem;
+use rustc_middle::bug;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::layout::{
     fn_can_unwind, FnAbiError, HasParamEnv, HasTyCtxt, LayoutCx, LayoutOf, TyAndLayout,
@@ -13,6 +14,7 @@ use rustc_target::abi::call::{
 };
 use rustc_target::abi::*;
 use rustc_target::spec::abi::Abi as SpecAbi;
+use tracing::debug;
 
 use std::iter;
 
@@ -36,7 +38,7 @@ fn fn_sig_for_fn_abi<'tcx>(
             [],
             tcx.thread_local_ptr_ty(instance.def_id()),
             false,
-            hir::Unsafety::Normal,
+            hir::Safety::Safe,
             rustc_target::spec::abi::Abi::Unadjusted,
         ));
     }
@@ -95,7 +97,7 @@ fn fn_sig_for_fn_abi<'tcx>(
                     iter::once(env_ty).chain(sig.inputs().iter().cloned()),
                     sig.output(),
                     sig.c_variadic,
-                    sig.unsafety,
+                    sig.safety,
                     sig.abi,
                 ),
                 bound_vars,
@@ -149,7 +151,7 @@ fn fn_sig_for_fn_abi<'tcx>(
                         args.as_coroutine_closure().coroutine_captures_by_ref_ty(),
                     ),
                     sig.c_variadic,
-                    sig.unsafety,
+                    sig.safety,
                     sig.abi,
                 ),
                 bound_vars,
@@ -300,7 +302,7 @@ fn fn_sig_for_fn_abi<'tcx>(
                     [env_ty, resume_ty],
                     ret_ty,
                     false,
-                    hir::Unsafety::Normal,
+                    hir::Safety::Safe,
                     rustc_target::spec::abi::Abi::Rust,
                 )
             } else {
@@ -309,7 +311,7 @@ fn fn_sig_for_fn_abi<'tcx>(
                     [env_ty],
                     ret_ty,
                     false,
-                    hir::Unsafety::Normal,
+                    hir::Safety::Safe,
                     rustc_target::spec::abi::Abi::Rust,
                 )
             };
@@ -518,7 +520,8 @@ fn fn_abi_sanity_check<'tcx>(
                     assert!(
                         matches!(&*cx.tcx.sess.target.arch, "wasm32" | "wasm64")
                             || matches!(spec_abi, SpecAbi::PtxKernel | SpecAbi::Unadjusted),
-                        r#"`PassMode::Direct` for aggregates only allowed for "unadjusted" and "ptx-kernel" functions and on wasm\nProblematic type: {:#?}"#,
+                        "`PassMode::Direct` for aggregates only allowed for \"unadjusted\" and \"ptx-kernel\" functions and on wasm\n\
+                          Problematic type: {:#?}",
                         arg.layout,
                     );
                 }
@@ -854,7 +857,7 @@ fn make_thin_self_ptr<'tcx>(
     // we now have a type like `*mut RcBox<dyn Trait>`
     // change its layout to that of `*mut ()`, a thin pointer, but keep the same type
     // this is understood as a special case elsewhere in the compiler
-    let unit_ptr_ty = Ty::new_mut_ptr(tcx, Ty::new_unit(tcx));
+    let unit_ptr_ty = Ty::new_mut_ptr(tcx, tcx.types.unit);
 
     TyAndLayout {
         ty: fat_pointer_ty,

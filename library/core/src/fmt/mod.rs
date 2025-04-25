@@ -72,14 +72,24 @@ pub type Result = result::Result<(), Error>;
 /// The error type which is returned from formatting a message into a stream.
 ///
 /// This type does not support transmission of an error other than that an error
-/// occurred. Any extra information must be arranged to be transmitted through
-/// some other means.
+/// occurred. This is because, despite the existence of this error,
+/// string formatting is considered an infallible operation.
+/// `fmt()` implementors should not return this `Error` unless they received it from their
+/// [`Formatter`]. The only time your code should create a new instance of this
+/// error is when implementing `fmt::Write`, in order to cancel the formatting operation when
+/// writing to the underlying stream fails.
 ///
-/// An important thing to remember is that the type `fmt::Error` should not be
+/// Any extra information must be arranged to be transmitted through some other means,
+/// such as storing it in a field to be consulted after the formatting operation has been
+/// cancelled. (For example, this is how [`std::io::Write::write_fmt()`] propagates IO errors
+/// during writing.)
+///
+/// This type, `fmt::Error`, should not be
 /// confused with [`std::io::Error`] or [`std::error::Error`], which you may also
 /// have in scope.
 ///
 /// [`std::io::Error`]: ../../std/io/struct.Error.html
+/// [`std::io::Write::write_fmt()`]: ../../std/io/trait.Write.html#method.write_fmt
 /// [`std::error::Error`]: ../../std/error/trait.Error.html
 ///
 /// # Examples
@@ -118,8 +128,10 @@ pub trait Write {
     /// This function will return an instance of [`std::fmt::Error`][Error] on error.
     ///
     /// The purpose of that error is to abort the formatting operation when the underlying
-    /// destination encounters some error preventing it from accepting more text; it should
-    /// generally be propagated rather than handled, at least when implementing formatting traits.
+    /// destination encounters some error preventing it from accepting more text;
+    /// in particular, it does not communicate any information about *what* error occurred.
+    /// It should generally be propagated rather than handled, at least when implementing
+    /// formatting traits.
     ///
     /// # Examples
     ///
@@ -326,20 +338,19 @@ pub struct Arguments<'a> {
 impl<'a> Arguments<'a> {
     #[inline]
     #[rustc_const_unstable(feature = "const_fmt_arguments_new", issue = "none")]
-    pub const fn new_const(pieces: &'a [&'static str]) -> Self {
-        if pieces.len() > 1 {
-            panic!("invalid args");
-        }
+    pub const fn new_const<const N: usize>(pieces: &'a [&'static str; N]) -> Self {
+        const { assert!(N <= 1) };
         Arguments { pieces, fmt: None, args: &[] }
     }
 
     /// When using the format_args!() macro, this function is used to generate the
     /// Arguments structure.
     #[inline]
-    pub fn new_v1(pieces: &'a [&'static str], args: &'a [rt::Argument<'a>]) -> Arguments<'a> {
-        if pieces.len() < args.len() || pieces.len() > args.len() + 1 {
-            panic!("invalid args");
-        }
+    pub fn new_v1<const P: usize, const A: usize>(
+        pieces: &'a [&'static str; P],
+        args: &'a [rt::Argument<'a>; A],
+    ) -> Arguments<'a> {
+        const { assert!(P >= A && P <= A + 1, "invalid args") }
         Arguments { pieces, fmt: None, args }
     }
 
@@ -586,7 +597,7 @@ impl Display for Arguments<'_> {
 #[rustc_diagnostic_item = "Debug"]
 #[rustc_trivial_field_reads]
 pub trait Debug {
-    /// Formats the value using the given formatter.
+    #[doc = include_str!("fmt_trait_method_doc.md")]
     ///
     /// # Examples
     ///
@@ -703,7 +714,7 @@ pub use macros::Debug;
 #[rustc_diagnostic_item = "Display"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Display {
-    /// Formats the value using the given formatter.
+    #[doc = include_str!("fmt_trait_method_doc.md")]
     ///
     /// # Examples
     ///
@@ -777,7 +788,7 @@ pub trait Display {
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Octal {
-    /// Formats the value using the given formatter.
+    #[doc = include_str!("fmt_trait_method_doc.md")]
     #[stable(feature = "rust1", since = "1.0.0")]
     fn fmt(&self, f: &mut Formatter<'_>) -> Result;
 }
@@ -836,7 +847,7 @@ pub trait Octal {
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Binary {
-    /// Formats the value using the given formatter.
+    #[doc = include_str!("fmt_trait_method_doc.md")]
     #[stable(feature = "rust1", since = "1.0.0")]
     fn fmt(&self, f: &mut Formatter<'_>) -> Result;
 }
@@ -891,7 +902,7 @@ pub trait Binary {
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait LowerHex {
-    /// Formats the value using the given formatter.
+    #[doc = include_str!("fmt_trait_method_doc.md")]
     #[stable(feature = "rust1", since = "1.0.0")]
     fn fmt(&self, f: &mut Formatter<'_>) -> Result;
 }
@@ -946,7 +957,7 @@ pub trait LowerHex {
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait UpperHex {
-    /// Formats the value using the given formatter.
+    #[doc = include_str!("fmt_trait_method_doc.md")]
     #[stable(feature = "rust1", since = "1.0.0")]
     fn fmt(&self, f: &mut Formatter<'_>) -> Result;
 }
@@ -997,7 +1008,7 @@ pub trait UpperHex {
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_diagnostic_item = "Pointer"]
 pub trait Pointer {
-    /// Formats the value using the given formatter.
+    #[doc = include_str!("fmt_trait_method_doc.md")]
     #[stable(feature = "rust1", since = "1.0.0")]
     fn fmt(&self, f: &mut Formatter<'_>) -> Result;
 }
@@ -1048,7 +1059,7 @@ pub trait Pointer {
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait LowerExp {
-    /// Formats the value using the given formatter.
+    #[doc = include_str!("fmt_trait_method_doc.md")]
     #[stable(feature = "rust1", since = "1.0.0")]
     fn fmt(&self, f: &mut Formatter<'_>) -> Result;
 }
@@ -1099,7 +1110,7 @@ pub trait LowerExp {
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait UpperExp {
-    /// Formats the value using the given formatter.
+    #[doc = include_str!("fmt_trait_method_doc.md")]
     #[stable(feature = "rust1", since = "1.0.0")]
     fn fmt(&self, f: &mut Formatter<'_>) -> Result;
 }
@@ -2387,23 +2398,47 @@ impl Display for bool {
 impl Debug for str {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         f.write_char('"')?;
-        let mut from = 0;
-        for (i, c) in self.char_indices() {
-            let esc = c.escape_debug_ext(EscapeDebugExtArgs {
-                escape_grapheme_extended: true,
-                escape_single_quote: false,
-                escape_double_quote: true,
-            });
-            // If char needs escaping, flush backlog so far and write, else skip
-            if esc.len() != 1 {
-                f.write_str(&self[from..i])?;
-                for c in esc {
-                    f.write_char(c)?;
-                }
-                from = i + c.len_utf8();
-            }
+
+        // substring we know is printable
+        let mut printable_range = 0..0;
+
+        fn needs_escape(b: u8) -> bool {
+            b > 0x7E || b < 0x20 || b == b'\\' || b == b'"'
         }
-        f.write_str(&self[from..])?;
+
+        // the loop here first skips over runs of printable ASCII as a fast path.
+        // other chars (unicode, or ASCII that needs escaping) are then handled per-`char`.
+        let mut rest = self;
+        while rest.len() > 0 {
+            let Some(non_printable_start) = rest.as_bytes().iter().position(|&b| needs_escape(b))
+            else {
+                printable_range.end += rest.len();
+                break;
+            };
+
+            printable_range.end += non_printable_start;
+            // SAFETY: the position was derived from an iterator, so is known to be within bounds, and at a char boundary
+            rest = unsafe { rest.get_unchecked(non_printable_start..) };
+
+            let mut chars = rest.chars();
+            if let Some(c) = chars.next() {
+                let esc = c.escape_debug_ext(EscapeDebugExtArgs {
+                    escape_grapheme_extended: true,
+                    escape_single_quote: false,
+                    escape_double_quote: true,
+                });
+                if esc.len() != 1 {
+                    f.write_str(&self[printable_range.clone()])?;
+                    Display::fmt(&esc, f)?;
+                    printable_range.start = printable_range.end + c.len_utf8();
+                }
+                printable_range.end += c.len_utf8();
+            }
+            rest = chars.as_str();
+        }
+
+        f.write_str(&self[printable_range])?;
+
         f.write_char('"')
     }
 }
@@ -2419,13 +2454,12 @@ impl Display for str {
 impl Debug for char {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         f.write_char('\'')?;
-        for c in self.escape_debug_ext(EscapeDebugExtArgs {
+        let esc = self.escape_debug_ext(EscapeDebugExtArgs {
             escape_grapheme_extended: true,
             escape_single_quote: true,
             escape_double_quote: false,
-        }) {
-            f.write_char(c)?
-        }
+        });
+        Display::fmt(&esc, f)?;
         f.write_char('\'')
     }
 }

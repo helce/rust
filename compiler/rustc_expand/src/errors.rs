@@ -1,6 +1,6 @@
 use rustc_ast::ast;
 use rustc_errors::codes::*;
-use rustc_macros::Diagnostic;
+use rustc_macros::{Diagnostic, Subdiagnostic};
 use rustc_session::Limit;
 use rustc_span::symbol::{Ident, MacroRulesNormalizedIdent};
 use rustc_span::{Span, Symbol};
@@ -432,4 +432,21 @@ pub struct ExpectedParenOrBrace<'a> {
     #[primary_span]
     pub span: Span,
     pub token: Cow<'a, str>,
+}
+
+#[derive(Diagnostic)]
+#[diag(expand_empty_delegation_list)]
+pub(crate) struct EmptyDelegationList {
+    #[primary_span]
+    pub span: Span,
+}
+
+// This used to be the `proc_macro_back_compat` lint (#83125). It was later
+// turned into a hard error.
+#[derive(Diagnostic)]
+#[diag(expand_proc_macro_back_compat)]
+#[note]
+pub struct ProcMacroBackCompat {
+    pub crate_name: String,
+    pub fixed_version: String,
 }

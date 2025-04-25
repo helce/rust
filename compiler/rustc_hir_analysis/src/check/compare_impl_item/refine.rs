@@ -3,6 +3,7 @@ use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_infer::infer::{outlives::env::OutlivesEnvironment, TyCtxtInferExt};
 use rustc_lint_defs::builtin::{REFINING_IMPL_TRAIT_INTERNAL, REFINING_IMPL_TRAIT_REACHABLE};
+use rustc_middle::span_bug;
 use rustc_middle::traits::{ObligationCause, Reveal};
 use rustc_middle::ty::{
     self, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperVisitable, TypeVisitable, TypeVisitor,
@@ -266,7 +267,7 @@ fn report_mismatched_rpitit_signature<'tcx>(
             .explicit_item_bounds(future_ty.def_id)
             .iter_instantiated_copied(tcx, future_ty.args)
             .find_map(|(clause, _)| match clause.kind().no_bound_vars()? {
-                ty::ClauseKind::Projection(proj) => proj.term.ty(),
+                ty::ClauseKind::Projection(proj) => proj.term.as_type(),
                 _ => None,
             })
         else {

@@ -14,14 +14,13 @@ use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::sync::{self, Lrc};
 use rustc_errors::{DiagCtxt, ErrorGuaranteed, PResult};
 use rustc_feature::Features;
-use rustc_lint_defs::builtin::PROC_MACRO_BACK_COMPAT;
-use rustc_lint_defs::{BufferedEarlyLint, BuiltinLintDiag, RegisteredTools};
-use rustc_parse::{parser, MACRO_ARGUMENTS};
+use rustc_lint_defs::{BufferedEarlyLint, RegisteredTools};
+use rustc_parse::{parser::Parser, MACRO_ARGUMENTS};
 use rustc_session::config::CollapseMacroDebuginfo;
 use rustc_session::{parse::ParseSess, Limit, Session};
 use rustc_span::def_id::{CrateNum, DefId, LocalDefId};
 use rustc_span::edition::Edition;
-use rustc_span::hygiene::{AstPass, ExpnData, ExpnKind, LocalExpnId};
+use rustc_span::hygiene::{AstPass, ExpnData, ExpnKind, LocalExpnId, MacroKind};
 use rustc_span::source_map::SourceMap;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
 use rustc_span::{FileName, Span, DUMMY_SP};
@@ -31,8 +30,6 @@ use std::iter;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use thin_vec::ThinVec;
-
-pub(crate) use rustc_span::hygiene::MacroKind;
 
 // When adding new variants, make sure to
 // adjust the `visit_*` / `flat_map_*` calls in `InvocationCollector`
@@ -573,35 +570,6 @@ impl DummyResult {
             tokens: None,
         })
     }
-
-    /// A plain dummy pattern.
-    pub fn raw_pat(sp: Span) -> ast::Pat {
-        ast::Pat { id: ast::DUMMY_NODE_ID, kind: PatKind::Wild, span: sp, tokens: None }
-    }
-
-    /// A plain dummy type.
-    pub fn raw_ty(sp: Span) -> P<ast::Ty> {
-        // FIXME(nnethercote): you might expect `ast::TyKind::Dummy` to be used here, but some
-        // values produced here end up being lowered to HIR, which `ast::TyKind::Dummy` does not
-        // support, so we use an empty tuple instead.
-        P(ast::Ty {
-            id: ast::DUMMY_NODE_ID,
-            kind: ast::TyKind::Tup(ThinVec::new()),
-            span: sp,
-            tokens: None,
-        })
-    }
-
-    /// A plain dummy crate.
-    pub fn raw_crate() -> ast::Crate {
-        ast::Crate {
-            attrs: Default::default(),
-            items: Default::default(),
-            spans: Default::default(),
-            id: ast::DUMMY_NODE_ID,
-            is_placeholder: Default::default(),
-        }
-    }
 }
 
 impl MacResult for DummyResult {
@@ -610,7 +578,12 @@ impl MacResult for DummyResult {
     }
 
     fn make_pat(self: Box<DummyResult>) -> Option<P<ast::Pat>> {
-        Some(P(DummyResult::raw_pat(self.span)))
+        Some(P(ast::Pat {
+            id: ast::DUMMY_NODE_ID,
+            kind: PatKind::Wild,
+            span: self.span,
+            tokens: None,
+        }))
     }
 
     fn make_items(self: Box<DummyResult>) -> Option<SmallVec<[P<ast::Item>; 1]>> {
@@ -638,7 +611,15 @@ impl MacResult for DummyResult {
     }
 
     fn make_ty(self: Box<DummyResult>) -> Option<P<ast::Ty>> {
-        Some(DummyResult::raw_ty(self.span))
+        // FIXME(nnethercote): you might expect `ast::TyKind::Dummy` to be used here, but some
+        // values produced here end up being lowered to HIR, which `ast::TyKind::Dummy` does not
+        // support, so we use an empty tuple instead.
+        Some(P(ast::Ty {
+            id: ast::DUMMY_NODE_ID,
+            kind: ast::TyKind::Tup(ThinVec::new()),
+            span: self.span,
+            tokens: None,
+        }))
     }
 
     fn make_arms(self: Box<DummyResult>) -> Option<SmallVec<[ast::Arm; 1]>> {
@@ -670,7 +651,13 @@ impl MacResult for DummyResult {
     }
 
     fn make_crate(self: Box<DummyResult>) -> Option<ast::Crate> {
-        Some(DummyResult::raw_crate())
+        Some(ast::Crate {
+            attrs: Default::default(),
+            items: Default::default(),
+            spans: Default::default(),
+            id: ast::DUMMY_NODE_ID,
+            is_placeholder: Default::default(),
+        })
     }
 }
 
@@ -1162,8 +1149,8 @@ impl<'a> ExtCtxt<'a> {
     pub fn monotonic_expander<'b>(&'b mut self) -> expand::MacroExpander<'b, 'a> {
         expand::MacroExpander::new(self, true)
     }
-    pub fn new_parser_from_tts(&self, stream: TokenStream) -> parser::Parser<'a> {
-        rustc_parse::stream_to_parser(&self.sess.psess, stream, MACRO_ARGUMENTS)
+    pub fn new_parser_from_tts(&self, stream: TokenStream) -> Parser<'a> {
+        Parser::new(&self.sess.psess, stream, MACRO_ARGUMENTS)
     }
     pub fn source_map(&self) -> &'a SourceMap {
         self.sess.psess.source_map()
@@ -1342,83 +1329,63 @@ pub fn parse_macro_name_and_helper_attrs(
     Some((trait_ident.name, proc_attrs))
 }
 
-/// This nonterminal looks like some specific enums from
-/// `proc-macro-hack` and `procedural-masquerade` crates.
-/// We need to maintain some special pretty-printing behavior for them due to incorrect
-/// asserts in old versions of those crates and their wide use in the ecosystem.
-/// See issue #73345 for more details.
+/// If this item looks like a specific enums from `rental`, emit a fatal error.
+/// See #73345 and #83125 for more details.
 /// FIXME(#73933): Remove this eventually.
-fn pretty_printing_compatibility_hack(item: &Item, sess: &Session) -> bool {
+fn pretty_printing_compatibility_hack(item: &Item, sess: &Session) {
     let name = item.ident.name;
-    if name == sym::ProceduralMasqueradeDummyType {
-        if let ast::ItemKind::Enum(enum_def, _) = &item.kind {
-            if let [variant] = &*enum_def.variants {
-                if variant.ident.name == sym::Input {
-                    let filename = sess.source_map().span_to_filename(item.ident.span);
-                    if let FileName::Real(real) = filename {
-                        if let Some(c) = real
-                            .local_path()
-                            .unwrap_or(Path::new(""))
-                            .components()
-                            .flat_map(|c| c.as_os_str().to_str())
-                            .find(|c| c.starts_with("rental") || c.starts_with("allsorts-rental"))
-                        {
-                            let crate_matches = if c.starts_with("allsorts-rental") {
-                                true
-                            } else {
-                                let mut version = c.trim_start_matches("rental-").split('.');
-                                version.next() == Some("0")
-                                    && version.next() == Some("5")
-                                    && version
-                                        .next()
-                                        .and_then(|c| c.parse::<u32>().ok())
-                                        .is_some_and(|v| v < 6)
-                            };
+    if name == sym::ProceduralMasqueradeDummyType
+        && let ast::ItemKind::Enum(enum_def, _) = &item.kind
+        && let [variant] = &*enum_def.variants
+        && variant.ident.name == sym::Input
+        && let FileName::Real(real) = sess.source_map().span_to_filename(item.ident.span)
+        && let Some(c) = real
+            .local_path()
+            .unwrap_or(Path::new(""))
+            .components()
+            .flat_map(|c| c.as_os_str().to_str())
+            .find(|c| c.starts_with("rental") || c.starts_with("allsorts-rental"))
+    {
+        let crate_matches = if c.starts_with("allsorts-rental") {
+            true
+        } else {
+            let mut version = c.trim_start_matches("rental-").split('.');
+            version.next() == Some("0")
+                && version.next() == Some("5")
+                && version.next().and_then(|c| c.parse::<u32>().ok()).is_some_and(|v| v < 6)
+        };
 
-                            if crate_matches {
-                                // FIXME: make this translatable
-                                #[allow(rustc::untranslatable_diagnostic)]
-                                sess.psess.buffer_lint_with_diagnostic(
-                                        PROC_MACRO_BACK_COMPAT,
-                                        item.ident.span,
-                                        ast::CRATE_NODE_ID,
-                                        "using an old version of `rental`",
-                                        BuiltinLintDiag::ProcMacroBackCompat(
-                                        "older versions of the `rental` crate will stop compiling in future versions of Rust; \
-                                        please update to `rental` v0.5.6, or switch to one of the `rental` alternatives".to_string()
-                                        )
-                                    );
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
+        if crate_matches {
+            // FIXME: make this translatable
+            #[allow(rustc::untranslatable_diagnostic)]
+            sess.psess.dcx.emit_fatal(errors::ProcMacroBackCompat {
+                crate_name: "rental".to_string(),
+                fixed_version: "0.5.6".to_string(),
+            });
         }
     }
-    false
 }
 
-pub(crate) fn ann_pretty_printing_compatibility_hack(ann: &Annotatable, sess: &Session) -> bool {
+pub(crate) fn ann_pretty_printing_compatibility_hack(ann: &Annotatable, sess: &Session) {
     let item = match ann {
         Annotatable::Item(item) => item,
         Annotatable::Stmt(stmt) => match &stmt.kind {
             ast::StmtKind::Item(item) => item,
-            _ => return false,
+            _ => return,
         },
-        _ => return false,
+        _ => return,
     };
     pretty_printing_compatibility_hack(item, sess)
 }
 
-pub(crate) fn nt_pretty_printing_compatibility_hack(nt: &Nonterminal, sess: &Session) -> bool {
+pub(crate) fn nt_pretty_printing_compatibility_hack(nt: &Nonterminal, sess: &Session) {
     let item = match nt {
         Nonterminal::NtItem(item) => item,
         Nonterminal::NtStmt(stmt) => match &stmt.kind {
             ast::StmtKind::Item(item) => item,
-            _ => return false,
+            _ => return,
         },
-        _ => return false,
+        _ => return,
     };
     pretty_printing_compatibility_hack(item, sess)
 }

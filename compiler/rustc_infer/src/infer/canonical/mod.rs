@@ -21,8 +21,7 @@
 //!
 //! [c]: https://rust-lang.github.io/chalk/book/canonical_queries/canonicalization.html
 
-use crate::infer::ConstVariableOrigin;
-use crate::infer::{InferCtxt, RegionVariableOrigin, TypeVariableOrigin};
+use crate::infer::{InferCtxt, RegionVariableOrigin};
 use rustc_index::IndexVec;
 use rustc_middle::infer::unify_key::EffectVarValue;
 use rustc_middle::ty::fold::TypeFoldable;
@@ -114,10 +113,9 @@ impl<'tcx> InferCtxt<'tcx> {
         match cv_info.kind {
             CanonicalVarKind::Ty(ty_kind) => {
                 let ty = match ty_kind {
-                    CanonicalTyVarKind::General(ui) => self.next_ty_var_in_universe(
-                        TypeVariableOrigin { param_def_id: None, span },
-                        universe_map(ui),
-                    ),
+                    CanonicalTyVarKind::General(ui) => {
+                        self.next_ty_var_in_universe(span, universe_map(ui))
+                    }
 
                     CanonicalTyVarKind::Int => self.next_int_var(),
 
@@ -145,13 +143,9 @@ impl<'tcx> InferCtxt<'tcx> {
                 ty::Region::new_placeholder(self.tcx, placeholder_mapped).into()
             }
 
-            CanonicalVarKind::Const(ui, ty) => self
-                .next_const_var_in_universe(
-                    ty,
-                    ConstVariableOrigin { param_def_id: None, span },
-                    universe_map(ui),
-                )
-                .into(),
+            CanonicalVarKind::Const(ui) => {
+                self.next_const_var_in_universe(span, universe_map(ui)).into()
+            }
             CanonicalVarKind::Effect => {
                 let vid = self
                     .inner
@@ -159,13 +153,12 @@ impl<'tcx> InferCtxt<'tcx> {
                     .effect_unification_table()
                     .new_key(EffectVarValue::Unknown)
                     .vid;
-                ty::Const::new_infer(self.tcx, ty::InferConst::EffectVar(vid), self.tcx.types.bool)
-                    .into()
+                ty::Const::new_infer(self.tcx, ty::InferConst::EffectVar(vid)).into()
             }
-            CanonicalVarKind::PlaceholderConst(ty::PlaceholderConst { universe, bound }, ty) => {
+            CanonicalVarKind::PlaceholderConst(ty::PlaceholderConst { universe, bound }) => {
                 let universe_mapped = universe_map(universe);
                 let placeholder_mapped = ty::PlaceholderConst { universe: universe_mapped, bound };
-                ty::Const::new_placeholder(self.tcx, placeholder_mapped, ty).into()
+                ty::Const::new_placeholder(self.tcx, placeholder_mapped).into()
             }
         }
     }

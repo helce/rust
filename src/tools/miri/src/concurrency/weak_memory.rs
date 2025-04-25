@@ -48,7 +48,7 @@
 //! One consequence of this difference is that safe/sound Rust allows for more operations on atomic locations
 //! than the C++20 atomic API was intended to allow, such as non-atomically accessing
 //! a previously atomically accessed location, or accessing previously atomically accessed locations with a differently sized operation
-//! (such as accessing the top 16 bits of an AtomicU32). These scenarios are generally undiscussed in formalisations of C++ memory model.
+//! (such as accessing the top 16 bits of an AtomicU32). These scenarios are generally undiscussed in formalizations of C++ memory model.
 //! In Rust, these operations can only be done through a `&mut AtomicFoo` reference or one derived from it, therefore these operations
 //! can only happen after all previous accesses on the same locations. This implementation is adapted to allow these operations.
 //! A mixed atomicity read that races with writes, or a write that races with reads or writes will still cause UBs to be thrown.
@@ -243,7 +243,7 @@ impl StoreBufferAlloc {
     }
 }
 
-impl<'mir, 'tcx: 'mir> StoreBuffer {
+impl<'tcx> StoreBuffer {
     fn new(init: Scalar<Provenance>) -> Self {
         let mut buffer = VecDeque::new();
         buffer.reserve(STORE_BUFFER_LIMIT);
@@ -265,7 +265,7 @@ impl<'mir, 'tcx: 'mir> StoreBuffer {
     fn read_from_last_store(
         &self,
         global: &DataRaceState,
-        thread_mgr: &ThreadManager<'_, '_>,
+        thread_mgr: &ThreadManager<'_>,
         is_seqcst: bool,
     ) {
         let store_elem = self.buffer.back();
@@ -278,7 +278,7 @@ impl<'mir, 'tcx: 'mir> StoreBuffer {
     fn buffered_read(
         &self,
         global: &DataRaceState,
-        thread_mgr: &ThreadManager<'_, '_>,
+        thread_mgr: &ThreadManager<'_>,
         is_seqcst: bool,
         rng: &mut (impl rand::Rng + ?Sized),
         validate: impl FnOnce() -> InterpResult<'tcx>,
@@ -309,7 +309,7 @@ impl<'mir, 'tcx: 'mir> StoreBuffer {
         &mut self,
         val: Scalar<Provenance>,
         global: &DataRaceState,
-        thread_mgr: &ThreadManager<'_, '_>,
+        thread_mgr: &ThreadManager<'_>,
         is_seqcst: bool,
     ) -> InterpResult<'tcx> {
         let (index, clocks) = global.active_thread_state(thread_mgr);
@@ -463,10 +463,8 @@ impl StoreElement {
     }
 }
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
-    crate::MiriInterpCxExt<'mir, 'tcx>
-{
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub(super) trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn buffered_atomic_rmw(
         &mut self,
         new_val: Scalar<Provenance>,

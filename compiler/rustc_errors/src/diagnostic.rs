@@ -7,6 +7,7 @@ use rustc_data_structures::fx::FxIndexMap;
 use rustc_error_messages::fluent_value_from_str_list_sep_by_and;
 use rustc_error_messages::FluentValue;
 use rustc_lint_defs::{Applicability, LintExpectationId};
+use rustc_macros::{Decodable, Encodable};
 use rustc_span::source_map::Spanned;
 use rustc_span::symbol::Symbol;
 use rustc_span::{Span, DUMMY_SP};
@@ -17,6 +18,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::panic;
 use std::thread::panicking;
+use tracing::debug;
 
 /// Error type for `DiagInner`'s `suggestions` field, indicating that
 /// `.disable_suggestions()` was called on the `DiagInner`.
@@ -198,8 +200,6 @@ pub trait SubdiagMessageOp<G: EmissionGuarantee> =
 pub trait LintDiagnostic<'a, G: EmissionGuarantee> {
     /// Decorate and emit a lint.
     fn decorate_lint<'b>(self, diag: &'b mut Diag<'a, G>);
-
-    fn msg(&self) -> DiagMessage;
 }
 
 #[derive(Clone, Debug, Encodable, Decodable)]
@@ -894,7 +894,7 @@ impl<'a, G: EmissionGuarantee> Diag<'a, G> {
         style: SuggestionStyle,
     ) -> &mut Self {
         suggestion.sort_unstable();
-        suggestion.dedup();
+        suggestion.dedup_by(|(s1, m1), (s2, m2)| s1.source_equal(*s2) && m1 == m2);
 
         let parts = suggestion
             .into_iter()

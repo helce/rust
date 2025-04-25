@@ -1,11 +1,7 @@
 #![feature(decl_macro)]
-#![feature(lazy_cell)]
 #![feature(let_chains)]
 #![feature(thread_spawn_unchecked)]
 #![feature(try_blocks)]
-
-#[macro_use]
-extern crate tracing;
 
 mod callbacks;
 mod errors;

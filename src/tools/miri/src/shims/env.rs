@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
 use rustc_data_structures::fx::FxHashMap;
 
@@ -24,8 +24,8 @@ impl VisitProvenance for EnvVars<'_> {
 }
 
 impl<'tcx> EnvVars<'tcx> {
-    pub(crate) fn init<'mir>(
-        ecx: &mut InterpCx<'mir, 'tcx, MiriMachine<'mir, 'tcx>>,
+    pub(crate) fn init(
+        ecx: &mut InterpCx<'tcx, MiriMachine<'tcx>>,
         config: &MiriConfig,
     ) -> InterpResult<'tcx> {
         // Initialize the `env_vars` map.
@@ -58,9 +58,7 @@ impl<'tcx> EnvVars<'tcx> {
         Ok(())
     }
 
-    pub(crate) fn cleanup<'mir>(
-        ecx: &mut InterpCx<'mir, 'tcx, MiriMachine<'mir, 'tcx>>,
-    ) -> InterpResult<'tcx> {
+    pub(crate) fn cleanup(ecx: &mut InterpCx<'tcx, MiriMachine<'tcx>>) -> InterpResult<'tcx> {
         let this = ecx.eval_context_mut();
         match this.machine.env_vars {
             EnvVars::Unix(_) => UnixEnvVars::cleanup(this),
@@ -98,5 +96,16 @@ impl<'tcx> EnvVars<'tcx> {
     }
 }
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {}
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
+    /// Try to get an environment variable from the interpreted program's environment. This is
+    /// useful for implementing shims which are documented to read from the environment.
+    fn get_env_var(&mut self, name: &OsStr) -> InterpResult<'tcx, Option<OsString>> {
+        let this = self.eval_context_ref();
+        match &this.machine.env_vars {
+            EnvVars::Uninit => return Ok(None),
+            EnvVars::Unix(vars) => vars.get(this, name),
+            EnvVars::Windows(vars) => vars.get(name),
+        }
+    }
+}

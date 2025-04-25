@@ -61,11 +61,21 @@ declare_clippy_lint! {
     ///
     /// This lint permits lint attributes for lints emitted on the items themself.
     /// For `use` items these lints are:
+    /// * ambiguous_glob_reexports
+    /// * dead_code
     /// * deprecated
+    /// * hidden_glob_reexports
     /// * unreachable_pub
-    /// * unused_imports
+    /// * unused
+    /// * unused_braces
+    /// * unused_import_braces
+    /// * clippy::disallowed_types
     /// * clippy::enum_glob_use
     /// * clippy::macro_use_imports
+    /// * clippy::module_name_repetitions
+    /// * clippy::redundant_pub_crate
+    /// * clippy::single_component_path_imports
+    /// * clippy::unsafe_removed_from_name
     /// * clippy::wildcard_imports
     ///
     /// For `extern crate` items these lints are:
@@ -299,9 +309,9 @@ declare_clippy_lint! {
     ///
     /// (This requires the `lint_reasons` feature)
     ///
-    /// ### Why is this bad?
-    /// Allowing a lint should always have a reason. This reason should be documented to
-    /// ensure that others understand the reasoning
+    /// ### Why restrict this?
+    /// Justifying each `allow` helps readers understand the reasoning,
+    /// and may allow removing `allow` attributes if their purpose is obsolete.
     ///
     /// ### Example
     /// ```no_run

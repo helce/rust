@@ -1,14 +1,17 @@
 use crate::bounds::Bounds;
-use crate::hir_ty_lowering::{GenericArgCountMismatch, GenericArgCountResult, OnlySelfBounds};
+use crate::hir_ty_lowering::{
+    GenericArgCountMismatch, GenericArgCountResult, OnlySelfBounds, RegionInferReason,
+};
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_errors::{codes::*, struct_span_code_err};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
 use rustc_lint_defs::builtin::UNUSED_ASSOCIATED_TYPE_BOUNDS;
+use rustc_middle::span_bug;
 use rustc_middle::ty::fold::BottomUpFolder;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable};
-use rustc_middle::ty::{DynKind, ToPredicate};
+use rustc_middle::ty::{self, ExistentialPredicateStableCmpExt as _, Ty, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{DynKind, Upcast};
 use rustc_span::{ErrorGuaranteed, Span};
 use rustc_trait_selection::traits::error_reporting::report_object_safety_error;
 use rustc_trait_selection::traits::{self, hir_ty_lowering_object_safety_violations};
@@ -118,7 +121,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
             .filter(|(trait_ref, _)| !tcx.trait_is_auto(trait_ref.def_id()));
 
         for (base_trait_ref, span) in regular_traits_refs_spans {
-            let base_pred: ty::Predicate<'tcx> = base_trait_ref.to_predicate(tcx);
+            let base_pred: ty::Predicate<'tcx> = base_trait_ref.upcast(tcx);
             for pred in traits::elaborate(tcx, [base_pred]).filter_only_self() {
                 debug!("observing object predicate `{pred:?}`");
 
@@ -140,9 +143,8 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                         // `trait_object_dummy_self`, so check for that.
                         let references_self = match pred.skip_binder().term.unpack() {
                             ty::TermKind::Ty(ty) => ty.walk().any(|arg| arg == dummy_self.into()),
-                            ty::TermKind::Const(c) => {
-                                c.ty().walk().any(|arg| arg == dummy_self.into())
-                            }
+                            // FIXME(associated_const_equality): We should walk the const instead of not doing anything
+                            ty::TermKind::Const(_) => false,
                         };
 
                         // If the projection output contains `Self`, force the user to
@@ -227,7 +229,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                     .skip(1) // Remove `Self` for `ExistentialPredicate`.
                     .map(|(index, arg)| {
                         if arg == dummy_self.into() {
-                            let param = &generics.params[index];
+                            let param = &generics.own_params[index];
                             missing_type_params.push(param.name);
                             Ty::new_misc_error(tcx).into()
                         } else if arg.walk().any(|arg| arg == dummy_self.into()) {
@@ -280,11 +282,11 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
 
         let existential_projections = projection_bounds.iter().map(|(bound, _)| {
             bound.map_bound(|mut b| {
-                assert_eq!(b.projection_ty.self_ty(), dummy_self);
+                assert_eq!(b.projection_term.self_ty(), dummy_self);
 
                 // Like for trait refs, verify that `dummy_self` did not leak inside default type
                 // parameters.
-                let references_self = b.projection_ty.args.iter().skip(1).any(|arg| {
+                let references_self = b.projection_term.args.iter().skip(1).any(|arg| {
                     if arg.walk().any(|arg| arg == dummy_self.into()) {
                         return true;
                     }
@@ -294,7 +296,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                     let guar = tcx
                         .dcx()
                         .span_delayed_bug(span, "trait object projection bounds reference `Self`");
-                    b.projection_ty = replace_dummy_self_with_error(tcx, b.projection_ty, guar);
+                    b.projection_term = replace_dummy_self_with_error(tcx, b.projection_term, guar);
                 }
 
                 ty::ExistentialProjection::erase_self_ty(tcx, b)
@@ -320,30 +322,20 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
 
         // Use explicitly-specified region bound.
         let region_bound = if !lifetime.is_elided() {
-            self.lower_lifetime(lifetime, None)
+            self.lower_lifetime(lifetime, RegionInferReason::ObjectLifetimeDefault)
         } else {
             self.compute_object_lifetime_bound(span, existential_predicates).unwrap_or_else(|| {
                 if tcx.named_bound_var(lifetime.hir_id).is_some() {
-                    self.lower_lifetime(lifetime, None)
+                    self.lower_lifetime(lifetime, RegionInferReason::ObjectLifetimeDefault)
                 } else {
-                    self.re_infer(None, span).unwrap_or_else(|| {
-                        let err = struct_span_code_err!(
-                            tcx.dcx(),
-                            span,
-                            E0228,
-                            "the lifetime bound for this object type cannot be deduced \
-                             from context; please supply an explicit bound"
-                        );
-                        let e = if borrowed {
-                            // We will have already emitted an error E0106 complaining about a
-                            // missing named lifetime in `&dyn Trait`, so we elide this one.
-                            err.delay_as_bug()
+                    self.re_infer(
+                        span,
+                        if borrowed {
+                            RegionInferReason::ObjectLifetimeDefault
                         } else {
-                            err.emit()
-                        };
-                        self.set_tainted_by_errors(e);
-                        ty::Region::new_error(tcx, e)
-                    })
+                            RegionInferReason::BorrowedObjectLifetimeDefault
+                        },
+                    )
                 }
             })
         };

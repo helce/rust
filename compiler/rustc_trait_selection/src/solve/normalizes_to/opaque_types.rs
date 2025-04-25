@@ -1,6 +1,7 @@
 //! Computes a normalizes-to (projection) goal for opaque types. This goal
 //! behaves differently depending on the param-env's reveal mode and whether
 //! the opaque is in a defining scope.
+use rustc_infer::infer::InferCtxt;
 use rustc_middle::traits::query::NoSolution;
 use rustc_middle::traits::solve::{Certainty, Goal, QueryResult};
 use rustc_middle::traits::Reveal;
@@ -9,14 +10,14 @@ use rustc_middle::ty::util::NotUniqueParam;
 
 use crate::solve::{EvalCtxt, SolverMode};
 
-impl<'tcx> EvalCtxt<'_, 'tcx> {
+impl<'tcx> EvalCtxt<'_, InferCtxt<'tcx>> {
     pub(super) fn normalize_opaque_type(
         &mut self,
         goal: Goal<'tcx, ty::NormalizesTo<'tcx>>,
     ) -> QueryResult<'tcx> {
-        let tcx = self.tcx();
+        let tcx = self.interner();
         let opaque_ty = goal.predicate.alias;
-        let expected = goal.predicate.term.ty().expect("no such thing as an opaque const");
+        let expected = goal.predicate.term.as_type().expect("no such thing as an opaque const");
 
         match (goal.param_env.reveal(), self.solver_mode()) {
             (Reveal::UserFacing, SolverMode::Normal) => {
@@ -30,7 +31,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
                     return Err(NoSolution);
                 }
                 // FIXME: This may have issues when the args contain aliases...
-                match self.tcx().uses_unique_placeholders_ignoring_regions(opaque_ty.args) {
+                match self.interner().uses_unique_placeholders_ignoring_regions(opaque_ty.args) {
                     Err(NotUniqueParam::NotParam(param)) if param.is_non_region_infer() => {
                         return self.evaluate_added_goals_and_make_canonical_response(
                             Certainty::AMBIGUOUS,

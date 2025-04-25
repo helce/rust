@@ -2,8 +2,9 @@
 
 use crate::fmt;
 use crate::hash::{Hash, Hasher};
-#[cfg(not(bootstrap))]
 use crate::intrinsics::aggregate_raw_ptr;
+#[cfg(not(bootstrap))]
+use crate::intrinsics::ptr_metadata;
 use crate::marker::Freeze;
 
 /// Provides the pointer metadata type of any pointed-to type.
@@ -95,10 +96,17 @@ pub trait Thin = Pointee<Metadata = ()>;
 #[rustc_const_unstable(feature = "ptr_metadata", issue = "81513")]
 #[inline]
 pub const fn metadata<T: ?Sized>(ptr: *const T) -> <T as Pointee>::Metadata {
-    // SAFETY: Accessing the value from the `PtrRepr` union is safe since *const T
-    // and PtrComponents<T> have the same memory layouts. Only std can make this
-    // guarantee.
-    unsafe { PtrRepr { const_ptr: ptr }.components.metadata }
+    #[cfg(bootstrap)]
+    {
+        // SAFETY: Accessing the value from the `PtrRepr` union is safe since *const T
+        // and PtrComponents<T> have the same memory layouts. Only std can make this
+        // guarantee.
+        unsafe { PtrRepr { const_ptr: ptr }.components.metadata }
+    }
+    #[cfg(not(bootstrap))]
+    {
+        ptr_metadata(ptr)
+    }
 }
 
 /// Forms a (possibly-wide) raw pointer from a data pointer and metadata.
@@ -112,20 +120,10 @@ pub const fn metadata<T: ?Sized>(ptr: *const T) -> <T as Pointee>::Metadata {
 #[rustc_const_unstable(feature = "ptr_metadata", issue = "81513")]
 #[inline]
 pub const fn from_raw_parts<T: ?Sized>(
-    data_pointer: *const (),
+    data_pointer: *const impl Thin,
     metadata: <T as Pointee>::Metadata,
 ) -> *const T {
-    #[cfg(bootstrap)]
-    {
-        // SAFETY: Accessing the value from the `PtrRepr` union is safe since *const T
-        // and PtrComponents<T> have the same memory layouts. Only std can make this
-        // guarantee.
-        unsafe { PtrRepr { components: PtrComponents { data_pointer, metadata } }.const_ptr }
-    }
-    #[cfg(not(bootstrap))]
-    {
-        aggregate_raw_ptr(data_pointer, metadata)
-    }
+    aggregate_raw_ptr(data_pointer, metadata)
 }
 
 /// Performs the same functionality as [`from_raw_parts`], except that a
@@ -136,23 +134,14 @@ pub const fn from_raw_parts<T: ?Sized>(
 #[rustc_const_unstable(feature = "ptr_metadata", issue = "81513")]
 #[inline]
 pub const fn from_raw_parts_mut<T: ?Sized>(
-    data_pointer: *mut (),
+    data_pointer: *mut impl Thin,
     metadata: <T as Pointee>::Metadata,
 ) -> *mut T {
-    #[cfg(bootstrap)]
-    {
-        // SAFETY: Accessing the value from the `PtrRepr` union is safe since *const T
-        // and PtrComponents<T> have the same memory layouts. Only std can make this
-        // guarantee.
-        unsafe { PtrRepr { components: PtrComponents { data_pointer, metadata } }.mut_ptr }
-    }
-    #[cfg(not(bootstrap))]
-    {
-        aggregate_raw_ptr(data_pointer, metadata)
-    }
+    aggregate_raw_ptr(data_pointer, metadata)
 }
 
 #[repr(C)]
+#[cfg(bootstrap)]
 union PtrRepr<T: ?Sized> {
     const_ptr: *const T,
     mut_ptr: *mut T,
@@ -160,15 +149,18 @@ union PtrRepr<T: ?Sized> {
 }
 
 #[repr(C)]
+#[cfg(bootstrap)]
 struct PtrComponents<T: ?Sized> {
     data_pointer: *const (),
     metadata: <T as Pointee>::Metadata,
 }
 
 // Manual impl needed to avoid `T: Copy` bound.
+#[cfg(bootstrap)]
 impl<T: ?Sized> Copy for PtrComponents<T> {}
 
 // Manual impl needed to avoid `T: Clone` bound.
+#[cfg(bootstrap)]
 impl<T: ?Sized> Clone for PtrComponents<T> {
     fn clone(&self) -> Self {
         *self
@@ -199,8 +191,8 @@ impl<T: ?Sized> Clone for PtrComponents<T> {
 /// compare equal (since identical vtables can be deduplicated within a codegen unit).
 #[lang = "dyn_metadata"]
 pub struct DynMetadata<Dyn: ?Sized> {
-    vtable_ptr: &'static VTable,
-    phantom: crate::marker::PhantomData<Dyn>,
+    _vtable_ptr: &'static VTable,
+    _phantom: crate::marker::PhantomData<Dyn>,
 }
 
 extern "C" {
@@ -212,6 +204,17 @@ extern "C" {
 }
 
 impl<Dyn: ?Sized> DynMetadata<Dyn> {
+    /// One of the things that rustc_middle does with this being a lang item is
+    /// give it `FieldsShape::Primitive`, which means that as far as codegen can
+    /// tell, it *is* a reference, and thus doesn't have any fields.
+    /// That means we can't use field access, and have to transmute it instead.
+    #[inline]
+    fn vtable_ptr(self) -> *const VTable {
+        // SAFETY: this layout assumption is hard-coded into the compiler.
+        // If it's somehow not a size match, the transmute will error.
+        unsafe { crate::mem::transmute::<Self, &'static VTable>(self) }
+    }
+
     /// Returns the size of the type associated with this vtable.
     #[inline]
     pub fn size_of(self) -> usize {
@@ -219,18 +222,14 @@ impl<Dyn: ?Sized> DynMetadata<Dyn> {
         // Consider a reference like `&(i32, dyn Send)`: the vtable will only store the size of the
         // `Send` part!
         // SAFETY: DynMetadata always contains a valid vtable pointer
-        return unsafe {
-            crate::intrinsics::vtable_size(self.vtable_ptr as *const VTable as *const ())
-        };
+        return unsafe { crate::intrinsics::vtable_size(self.vtable_ptr() as *const ()) };
     }
 
     /// Returns the alignment of the type associated with this vtable.
     #[inline]
     pub fn align_of(self) -> usize {
         // SAFETY: DynMetadata always contains a valid vtable pointer
-        return unsafe {
-            crate::intrinsics::vtable_align(self.vtable_ptr as *const VTable as *const ())
-        };
+        return unsafe { crate::intrinsics::vtable_align(self.vtable_ptr() as *const ()) };
     }
 
     /// Returns the size and alignment together as a `Layout`
@@ -247,7 +246,7 @@ unsafe impl<Dyn: ?Sized> Sync for DynMetadata<Dyn> {}
 
 impl<Dyn: ?Sized> fmt::Debug for DynMetadata<Dyn> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("DynMetadata").field(&(self.vtable_ptr as *const VTable)).finish()
+        f.debug_tuple("DynMetadata").field(&self.vtable_ptr()).finish()
     }
 }
 
@@ -269,7 +268,7 @@ impl<Dyn: ?Sized> Eq for DynMetadata<Dyn> {}
 impl<Dyn: ?Sized> PartialEq for DynMetadata<Dyn> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        crate::ptr::eq::<VTable>(self.vtable_ptr, other.vtable_ptr)
+        crate::ptr::eq::<VTable>(self.vtable_ptr(), other.vtable_ptr())
     }
 }
 
@@ -277,7 +276,7 @@ impl<Dyn: ?Sized> Ord for DynMetadata<Dyn> {
     #[inline]
     #[allow(ambiguous_wide_pointer_comparisons)]
     fn cmp(&self, other: &Self) -> crate::cmp::Ordering {
-        (self.vtable_ptr as *const VTable).cmp(&(other.vtable_ptr as *const VTable))
+        <*const VTable>::cmp(&self.vtable_ptr(), &other.vtable_ptr())
     }
 }
 
@@ -291,6 +290,6 @@ impl<Dyn: ?Sized> PartialOrd for DynMetadata<Dyn> {
 impl<Dyn: ?Sized> Hash for DynMetadata<Dyn> {
     #[inline]
     fn hash<H: Hasher>(&self, hasher: &mut H) {
-        crate::ptr::hash::<VTable, _>(self.vtable_ptr, hasher)
+        crate::ptr::hash::<VTable, _>(self.vtable_ptr(), hasher)
     }
 }

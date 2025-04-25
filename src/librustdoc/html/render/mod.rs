@@ -52,6 +52,7 @@ use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def_id::{DefId, DefIdSet};
 use rustc_hir::Mutability;
+use rustc_middle::ty::print::PrintTraitRefExt;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_session::RustcVersion;
 use rustc_span::{
@@ -182,6 +183,7 @@ pub(crate) enum RenderTypeId {
     Primitive(clean::PrimitiveType),
     AssociatedType(Symbol),
     Index(isize),
+    Mut,
 }
 
 impl RenderTypeId {
@@ -504,7 +506,6 @@ fn scrape_examples_help(shared: &SharedContext<'_>) -> String {
             edition: shared.edition(),
             playground: &shared.playground,
             heading_offset: HeadingOffset::H1,
-            custom_code_classes_in_docs: false,
         }
         .into_string()
     )
@@ -538,7 +539,6 @@ fn render_markdown<'a, 'cx: 'a>(
     heading_offset: HeadingOffset,
 ) -> impl fmt::Display + 'a + Captures<'cx> {
     display_fn(move |f| {
-        let custom_code_classes_in_docs = cx.tcx().features().custom_code_classes_in_docs;
         write!(
             f,
             "<div class=\"docblock\">{}</div>",
@@ -550,7 +550,6 @@ fn render_markdown<'a, 'cx: 'a>(
                 edition: cx.shared.edition(),
                 playground: &cx.shared.playground,
                 heading_offset,
-                custom_code_classes_in_docs,
             }
             .into_string()
         )
@@ -926,13 +925,15 @@ fn assoc_method(
     // FIXME: Once https://github.com/rust-lang/rust/issues/67792 is implemented, we can remove
     // this condition.
     let constness = match render_mode {
-        RenderMode::Normal => {
-            print_constness_with_space(&header.constness, meth.const_stability(tcx))
-        }
+        RenderMode::Normal => print_constness_with_space(
+            &header.constness,
+            meth.stable_since(tcx),
+            meth.const_stability(tcx),
+        ),
         RenderMode::ForDeref { .. } => "",
     };
     let asyncness = header.asyncness.print_with_space();
-    let unsafety = header.unsafety.print_with_space();
+    let safety = header.safety.print_with_space();
     let abi = print_abi_with_space(header.abi).to_string();
     let href = assoc_href_attr(meth, link, cx);
 
@@ -943,7 +944,7 @@ fn assoc_method(
         + defaultness.len()
         + constness.len()
         + asyncness.len()
-        + unsafety.len()
+        + safety.len()
         + abi.len()
         + name.as_str().len()
         + generics_len;
@@ -962,14 +963,14 @@ fn assoc_method(
     w.reserve(header_len + "<a href=\"\" class=\"fn\">{".len() + "</a>".len());
     write!(
         w,
-        "{indent}{vis}{defaultness}{constness}{asyncness}{unsafety}{abi}fn \
+        "{indent}{vis}{defaultness}{constness}{asyncness}{safety}{abi}fn \
          <a{href} class=\"fn\">{name}</a>{generics}{decl}{notable_traits}{where_clause}",
         indent = indent_str,
         vis = vis,
         defaultness = defaultness,
         constness = constness,
         asyncness = asyncness,
-        unsafety = unsafety,
+        safety = safety,
         abi = abi,
         href = href,
         name = name,
@@ -1014,18 +1015,23 @@ fn render_stability_since_raw_with_extra(
                 .map(|since| (format!("const since {since}"), format!("const: {since}")))
         }
         Some(ConstStability { level: StabilityLevel::Unstable { issue, .. }, feature, .. }) => {
-            let unstable = if let Some(n) = issue {
-                format!(
-                    "<a \
+            if stable_version.is_none() {
+                // don't display const unstable if entirely unstable
+                None
+            } else {
+                let unstable = if let Some(n) = issue {
+                    format!(
+                        "<a \
                         href=\"https://github.com/rust-lang/rust/issues/{n}\" \
                         title=\"Tracking issue for {feature}\"\
                        >unstable</a>"
-                )
-            } else {
-                String::from("unstable")
-            };
+                    )
+                } else {
+                    String::from("unstable")
+                };
 
-            Some((String::from("const unstable"), format!("const: {unstable}")))
+                Some((String::from("const unstable"), format!("const: {unstable}")))
+            }
         }
         _ => None,
     };
@@ -1422,6 +1428,10 @@ pub(crate) fn notable_traits_button(ty: &clean::Type, cx: &mut Context<'_>) -> O
     if let Some(impls) = cx.cache().impls.get(&did) {
         for i in impls {
             let impl_ = i.inner_impl();
+            if impl_.polarity != ty::ImplPolarity::Positive {
+                continue;
+            }
+
             if !ty.is_doc_subtype_of(&impl_.for_, cx.cache()) {
                 // Two different types might have the same did,
                 // without actually being the same.
@@ -1457,6 +1467,10 @@ fn notable_traits_decl(ty: &clean::Type, cx: &Context<'_>) -> (String, String) {
 
     for i in impls {
         let impl_ = i.inner_impl();
+        if impl_.polarity != ty::ImplPolarity::Positive {
+            continue;
+        }
+
         if !ty.is_doc_subtype_of(&impl_.for_, cx.cache()) {
             // Two different types might have the same did,
             // without actually being the same.
@@ -1868,7 +1882,6 @@ fn render_impl(
                      </div>",
                 );
             }
-            let custom_code_classes_in_docs = cx.tcx().features().custom_code_classes_in_docs;
             write!(
                 w,
                 "<div class=\"docblock\">{}</div>",
@@ -1880,7 +1893,6 @@ fn render_impl(
                     edition: cx.shared.edition(),
                     playground: &cx.shared.playground,
                     heading_offset: HeadingOffset::H4,
-                    custom_code_classes_in_docs,
                 }
                 .into_string()
             );

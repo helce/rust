@@ -1,4 +1,3 @@
-use crate::solve;
 use crate::traits::query::NoSolution;
 use crate::traits::wf;
 use crate::traits::ObligationCtxt;
@@ -7,6 +6,7 @@ use rustc_infer::infer::canonical::Canonical;
 use rustc_infer::infer::outlives::components::{push_outlives_components, Component};
 use rustc_infer::infer::resolve::OpportunisticRegionResolver;
 use rustc_infer::traits::query::OutlivesBound;
+use rustc_macros::{HashStable, TypeFoldable, TypeVisitable};
 use rustc_middle::infer::canonical::CanonicalQueryResponse;
 use rustc_middle::traits::ObligationCause;
 use rustc_middle::ty::{self, ParamEnvAnd, Ty, TyCtxt, TypeFolder, TypeVisitableExt};
@@ -161,8 +161,7 @@ pub fn compute_implied_outlives_bounds_compat_inner<'tcx>(
     let mut checked_wf_args = rustc_data_structures::fx::FxHashSet::default();
     let mut wf_args = vec![ty.into()];
 
-    let mut outlives_bounds: Vec<ty::OutlivesPredicate<ty::GenericArg<'tcx>, ty::Region<'tcx>>> =
-        vec![];
+    let mut outlives_bounds: Vec<ty::OutlivesPredicate<'tcx, ty::GenericArg<'tcx>>> = vec![];
 
     while let Some(arg) = wf_args.pop() {
         if !checked_wf_args.insert(arg) {
@@ -262,11 +261,9 @@ pub fn compute_implied_outlives_bounds_compat_inner<'tcx>(
                 let mut ty_a = ocx.infcx.resolve_vars_if_possible(ty_a);
                 // Need to manually normalize in the new solver as `wf::obligations` does not.
                 if ocx.infcx.next_trait_solver() {
-                    ty_a = solve::deeply_normalize(
-                        ocx.infcx.at(&ObligationCause::dummy(), param_env),
-                        ty_a,
-                    )
-                    .map_err(|_errs| NoSolution)?;
+                    ty_a = ocx
+                        .deeply_normalize(&ObligationCause::dummy(), param_env, ty_a)
+                        .map_err(|_| NoSolution)?;
                 }
                 let mut components = smallvec![];
                 push_outlives_components(tcx, ty_a, &mut components);

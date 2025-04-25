@@ -68,15 +68,11 @@ This API is completely unstable and subject to change.
 #![feature(iter_intersperse)]
 #![feature(let_chains)]
 #![feature(never_type)]
-#![feature(lazy_cell)]
 #![feature(slice_partition_dedup)]
 #![feature(try_blocks)]
 
 #[macro_use]
 extern crate tracing;
-
-#[macro_use]
-extern crate rustc_middle;
 
 // These are used by Clippy.
 pub mod check;
@@ -184,7 +180,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
         let def_kind = tcx.def_kind(item_def_id);
         match def_kind {
             DefKind::Static { .. } => tcx.ensure().eval_static_initializer(item_def_id),
-            DefKind::Const if tcx.generics_of(item_def_id).params.is_empty() => {
+            DefKind::Const if tcx.generics_of(item_def_id).is_empty() => {
                 let instance = ty::Instance::new(item_def_id.into(), ty::GenericArgs::empty());
                 let cid = GlobalId { instance, promoted: None };
                 let param_env = ty::ParamEnv::reveal_all();

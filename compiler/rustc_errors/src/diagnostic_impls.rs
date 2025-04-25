@@ -7,12 +7,13 @@ use crate::{
 use rustc_ast as ast;
 use rustc_ast_pretty::pprust;
 use rustc_hir as hir;
+use rustc_macros::Subdiagnostic;
 use rustc_span::edition::Edition;
 use rustc_span::symbol::{Ident, MacroRulesNormalizedIdent, Symbol};
 use rustc_span::Span;
 use rustc_target::abi::TargetDataLayoutErrors;
 use rustc_target::spec::{PanicStrategy, SplitDebuginfo, StackProtector, TargetTriple};
-use rustc_type_ir as type_ir;
+use rustc_type_ir::{ClosureKind, FloatTy};
 use std::backtrace::Backtrace;
 use std::borrow::Cow;
 use std::fmt;
@@ -92,6 +93,39 @@ into_diag_arg_using_display!(
     ExitStatus,
     ErrCode,
 );
+
+impl<I: rustc_type_ir::Interner> IntoDiagArg for rustc_type_ir::TraitRef<I> {
+    fn into_diag_arg(self) -> DiagArgValue {
+        self.to_string().into_diag_arg()
+    }
+}
+
+impl<I: rustc_type_ir::Interner> IntoDiagArg for rustc_type_ir::ExistentialTraitRef<I> {
+    fn into_diag_arg(self) -> DiagArgValue {
+        self.to_string().into_diag_arg()
+    }
+}
+
+impl<I: rustc_type_ir::Interner> IntoDiagArg for rustc_type_ir::UnevaluatedConst<I> {
+    fn into_diag_arg(self) -> rustc_errors::DiagArgValue {
+        format!("{self:?}").into_diag_arg()
+    }
+}
+
+impl<I: rustc_type_ir::Interner> IntoDiagArg for rustc_type_ir::FnSig<I> {
+    fn into_diag_arg(self) -> rustc_errors::DiagArgValue {
+        format!("{self:?}").into_diag_arg()
+    }
+}
+
+impl<I: rustc_type_ir::Interner, T> IntoDiagArg for rustc_type_ir::Binder<I, T>
+where
+    T: IntoDiagArg,
+{
+    fn into_diag_arg(self) -> DiagArgValue {
+        self.skip_binder().into_diag_arg()
+    }
+}
 
 into_diag_arg_for_number!(i8, u8, i16, u16, i32, u32, i64, u64, i128, u128, isize, usize);
 
@@ -195,7 +229,7 @@ impl IntoDiagArg for ast::token::TokenKind {
     }
 }
 
-impl IntoDiagArg for type_ir::FloatTy {
+impl IntoDiagArg for FloatTy {
     fn into_diag_arg(self) -> DiagArgValue {
         DiagArgValue::Str(Cow::Borrowed(self.name_str()))
     }
@@ -251,9 +285,15 @@ impl IntoDiagArg for Level {
     }
 }
 
-impl IntoDiagArg for type_ir::ClosureKind {
+impl IntoDiagArg for ClosureKind {
     fn into_diag_arg(self) -> DiagArgValue {
         DiagArgValue::Str(self.as_str().into())
+    }
+}
+
+impl IntoDiagArg for hir::def::Namespace {
+    fn into_diag_arg(self) -> DiagArgValue {
+        DiagArgValue::Str(Cow::Borrowed(self.descr()))
     }
 }
 

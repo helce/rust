@@ -12,9 +12,6 @@ use std::sync::OnceLock;
 
 use rustc_hash::FxHashMap;
 
-/// Ignored attribute namespaces used by tools.
-pub const TOOL_MODULES: &[&str] = &["rustfmt", "clippy"];
-
 pub struct BuiltinAttribute {
     pub name: &'static str,
     pub template: AttributeTemplate,
@@ -207,7 +204,6 @@ pub const INERT_ATTRIBUTES: &[BuiltinAttribute] = &[
     ),
 
     // Entry point:
-    gated!(unix_sigpipe, Normal, template!(Word, NameValueStr: "inherit|sig_ign|sig_dfl"), ErrorFollowing, experimental!(unix_sigpipe)),
     ungated!(start, Normal, template!(Word), WarnFollowing),
     ungated!(no_start, CrateLevel, template!(Word), WarnFollowing),
     ungated!(no_main, CrateLevel, template!(Word), WarnFollowing),

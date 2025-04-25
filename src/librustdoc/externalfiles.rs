@@ -1,5 +1,5 @@
 use crate::html::markdown::{ErrorCodes, HeadingOffset, IdMap, Markdown, Playground};
-use crate::rustc_span::edition::Edition;
+use rustc_span::edition::Edition;
 use std::fs;
 use std::path::Path;
 use std::str;
@@ -46,8 +46,6 @@ impl ExternalHtml {
                 edition,
                 playground,
                 heading_offset: HeadingOffset::H2,
-                // For external files, it'll be disabled until the feature is enabled by default.
-                custom_code_classes_in_docs: false,
             }
             .into_string()
         );
@@ -63,8 +61,6 @@ impl ExternalHtml {
                 edition,
                 playground,
                 heading_offset: HeadingOffset::H2,
-                // For external files, it'll be disabled until the feature is enabled by default.
-                custom_code_classes_in_docs: false,
             }
             .into_string()
         );

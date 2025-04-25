@@ -4,7 +4,6 @@
 #![feature(cow_is_borrowed)]
 #![feature(decl_macro)]
 #![feature(impl_trait_in_assoc_type)]
-#![cfg_attr(bootstrap, feature(inline_const))]
 #![feature(is_sorted)]
 #![feature(let_chains)]
 #![feature(map_try_insert)]
@@ -17,8 +16,6 @@
 
 #[macro_use]
 extern crate tracing;
-#[macro_use]
-extern crate rustc_middle;
 
 use hir::ConstContext;
 use required_consts::RequiredConstsVisitor;
@@ -39,6 +36,7 @@ use rustc_middle::mir::{
 use rustc_middle::query;
 use rustc_middle::ty::{self, TyCtxt, TypeVisitableExt};
 use rustc_middle::util::Providers;
+use rustc_middle::{bug, span_bug};
 use rustc_span::{source_map::Spanned, sym, DUMMY_SP};
 use rustc_trait_selection::traits;
 
@@ -111,9 +109,9 @@ mod simplify_comparison_integral;
 mod sroa;
 mod unreachable_enum_branching;
 mod unreachable_prop;
+mod validate;
 
-use rustc_const_eval::transform::check_consts::{self, ConstCx};
-use rustc_const_eval::transform::validate;
+use rustc_const_eval::check_consts::{self, ConstCx};
 use rustc_mir_dataflow::rustc_peek;
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

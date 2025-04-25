@@ -4,6 +4,10 @@ hir_analysis_ambiguous_assoc_item = ambiguous associated {$assoc_kind} `{$assoc_
 hir_analysis_ambiguous_lifetime_bound =
     ambiguous lifetime bound, explicit lifetime bound required
 
+hir_analysis_assoc_item_constraints_not_allowed_here =
+    associated item constraints are not allowed here
+    .label = associated item constraint not allowed here
+
 hir_analysis_assoc_item_not_found = associated {$assoc_kind} `{$assoc_name}` not found for `{$ty_param_name}`
 
 hir_analysis_assoc_item_not_found_found_in_other_trait_label = there is {$identically_named ->
@@ -23,10 +27,6 @@ hir_analysis_assoc_kind_mismatch = expected {$expected}, found {$got}
     .bound_on_assoc_const_label = bounds are not allowed on associated constants
 
 hir_analysis_assoc_kind_mismatch_wrap_in_braces_sugg = consider adding braces here
-
-hir_analysis_assoc_type_binding_not_allowed =
-    associated type bindings are not allowed here
-    .label = associated type not allowed here
 
 hir_analysis_associated_type_trait_uninferred_generic_params = cannot use the associated type of a trait with uninferred generic parameters
     .suggestion = use a fully qualified path with inferred lifetimes
@@ -201,6 +201,12 @@ hir_analysis_inherent_ty_outside_relevant = cannot define inherent `impl` for a 
     .help = consider moving this inherent impl into the crate defining the type if possible
     .span_help = alternatively add `#[rustc_allow_incoherent_impl]` to the relevant impl items
 
+hir_analysis_invalid_receiver_ty = invalid `self` parameter type: `{$receiver_ty}`
+    .note = type of `self` must be `Self` or a type that dereferences to it
+
+hir_analysis_invalid_receiver_ty_help =
+    consider changing to `self`, `&self`, `&mut self`, `self: Box<Self>`, `self: Rc<Self>`, `self: Arc<Self>`, or `self: Pin<P>` (where P is one of the previous types except `Self`)
+
 hir_analysis_invalid_union_field =
     field must implement `Copy` or be wrapped in `ManuallyDrop<...>` to be used in a union
     .note = union fields must not have drop side-effects, which is currently enforced via either `Copy` or `ManuallyDrop<...>`
@@ -365,9 +371,9 @@ hir_analysis_pass_to_variadic_function = can't pass `{$ty}` to variadic function
     .suggestion = cast the value to `{$cast_ty}`
     .help = cast the value to `{$cast_ty}`
 
-hir_analysis_pattern_type_non_const_range = "range patterns must have constant range start and end"
-hir_analysis_pattern_type_wild_pat = "wildcard patterns are not permitted for pattern types"
-    .label = "this type is the same as the inner type without a pattern"
+hir_analysis_pattern_type_non_const_range = range patterns must have constant range start and end
+hir_analysis_pattern_type_wild_pat = wildcard patterns are not permitted for pattern types
+    .label = this type is the same as the inner type without a pattern
 hir_analysis_placeholder_not_allowed_item_signatures = the placeholder `_` is not allowed within types on item signatures for {$kind}
     .label = not allowed in type signatures
 
@@ -486,13 +492,13 @@ hir_analysis_transparent_non_zero_sized_enum = the variant of a transparent {$de
 
 hir_analysis_ty_of_assoc_const_binding_note = `{$assoc_const}` has type `{$ty}`
 
-hir_analysis_ty_param_first_local = type parameter `{$param_ty}` must be covered by another type when it appears before the first local type (`{$local_type}`)
-    .label = type parameter `{$param_ty}` must be covered by another type when it appears before the first local type (`{$local_type}`)
+hir_analysis_ty_param_first_local = type parameter `{$param}` must be covered by another type when it appears before the first local type (`{$local_type}`)
+    .label = type parameter `{$param}` must be covered by another type when it appears before the first local type (`{$local_type}`)
     .note = implementing a foreign trait is only possible if at least one of the types for which it is implemented is local, and no uncovered type parameters appear before that first local type
     .case_note = in this case, 'before' refers to the following order: `impl<..> ForeignTrait<T1, ..., Tn> for T0`, where `T0` is the first and `Tn` is the last
 
-hir_analysis_ty_param_some = type parameter `{$param_ty}` must be used as the type parameter for some local type (e.g., `MyStruct<{$param_ty}>`)
-    .label = type parameter `{$param_ty}` must be used as the type parameter for some local type
+hir_analysis_ty_param_some = type parameter `{$param}` must be used as the type parameter for some local type (e.g., `MyStruct<{$param}>`)
+    .label = type parameter `{$param}` must be used as the type parameter for some local type
     .note = implementing a foreign trait is only possible if at least one of the types for which it is implemented is local
     .only_note = only traits defined in the current crate can be implemented for a type parameter
 

@@ -88,6 +88,9 @@ pub trait Step: 'static + Clone + Debug + PartialEq + Eq + Hash {
 
     /// Primary function to execute this rule. Can call `builder.ensure()`
     /// with other steps to run those.
+    ///
+    /// This gets called twice during a normal `./x.py` execution: first
+    /// with `dry_run() == true`, and then for real.
     fn run(self, builder: &Builder<'_>) -> Self::Output;
 
     /// When bootstrap is passed a set of paths, this controls whether this rule
@@ -317,11 +320,13 @@ const PATH_REMAP: &[(&str, &[&str])] = &[
     (
         "tests",
         &[
+            // tidy-alphabetical-start
             "tests/assembly",
             "tests/codegen",
             "tests/codegen-units",
             "tests/coverage",
             "tests/coverage-run-rustdoc",
+            "tests/crashes",
             "tests/debuginfo",
             "tests/incremental",
             "tests/mir-opt",
@@ -337,6 +342,7 @@ const PATH_REMAP: &[(&str, &[&str])] = &[
             "tests/rustdoc-ui",
             "tests/ui",
             "tests/ui-fulldeps",
+            // tidy-alphabetical-end
         ],
     ),
 ];
@@ -791,7 +797,6 @@ impl<'a> Builder<'a> {
             ),
             Kind::Test => describe!(
                 crate::core::build_steps::toolstate::ToolStateCheck,
-                test::ExpandYamlAnchors,
                 test::Tidy,
                 test::Ui,
                 test::Crashes,
@@ -883,6 +888,7 @@ impl<'a> Builder<'a> {
                 doc::Tidy,
                 doc::Bootstrap,
                 doc::Releases,
+                doc::RunMakeSupport,
             ),
             Kind::Dist => describe!(
                 dist::Docs,
@@ -933,7 +939,6 @@ impl<'a> Builder<'a> {
                 install::Src,
             ),
             Kind::Run => describe!(
-                run::ExpandYamlAnchors,
                 run::BuildManifest,
                 run::BumpStage0,
                 run::ReplaceVersionPlaceholder,
@@ -2126,13 +2131,10 @@ impl<'a> Builder<'a> {
             // during incremental builds" heuristic for the standard library.
             rustflags.arg("-Zinline-mir");
 
-            // FIXME: always pass this after the next `#[cfg(bootstrap)]` update.
-            if compiler.stage != 0 {
-                // Similarly, we need to keep debug info for functions inlined into other std functions,
-                // even if we're not going to output debuginfo for the crate we're currently building,
-                // so that it'll be available when downstream consumers of std try to use it.
-                rustflags.arg("-Zinline-mir-preserve-debug");
-            }
+            // Similarly, we need to keep debug info for functions inlined into other std functions,
+            // even if we're not going to output debuginfo for the crate we're currently building,
+            // so that it'll be available when downstream consumers of std try to use it.
+            rustflags.arg("-Zinline-mir-preserve-debug");
         }
 
         if self.config.rustc_parallel
@@ -2554,7 +2556,12 @@ impl Cargo {
         // FIXME: the guard against msvc shouldn't need to be here
         if target.is_msvc() {
             if let Some(ref cl) = builder.config.llvm_clang_cl {
-                self.command.env("CC", cl).env("CXX", cl);
+                // FIXME: There is a bug in Clang 18 when building for ARM64:
+                // https://github.com/llvm/llvm-project/pull/81849. This is
+                // fixed in LLVM 19, but can't be backported.
+                if !target.starts_with("aarch64") && !target.starts_with("arm64ec") {
+                    self.command.env("CC", cl).env("CXX", cl);
+                }
             }
         } else {
             let ccache = builder.config.ccache.as_ref();

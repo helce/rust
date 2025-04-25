@@ -1,13 +1,13 @@
 //! Linux `eventfd` implementation.
 //! Currently just a stub.
-use std::cell::Cell;
 use std::io;
 
-use rustc_middle::ty::TyCtxt;
 use rustc_target::abi::Endian;
 
 use crate::shims::unix::*;
 use crate::*;
+
+use self::shims::unix::fd::FileDescriptor;
 
 /// A kind of file descriptor created by `eventfd`.
 /// The `Event` type isn't currently written to by `eventfd`.
@@ -20,24 +20,19 @@ use crate::*;
 struct Event {
     /// The object contains an unsigned 64-bit integer (uint64_t) counter that is maintained by the
     /// kernel. This counter is initialized with the value specified in the argument initval.
-    val: Cell<u64>,
+    val: u64,
 }
 
-impl FileDescriptor for Event {
+impl FileDescription for Event {
     fn name(&self) -> &'static str {
         "event"
-    }
-
-    fn dup(&mut self) -> io::Result<Box<dyn FileDescriptor>> {
-        // FIXME: this is wrong, the new and old FD should refer to the same event object!
-        Ok(Box::new(Event { val: self.val.clone() }))
     }
 
     fn close<'tcx>(
         self: Box<Self>,
         _communicate_allowed: bool,
-    ) -> InterpResult<'tcx, io::Result<i32>> {
-        Ok(Ok(0))
+    ) -> InterpResult<'tcx, io::Result<()>> {
+        Ok(Ok(()))
     }
 
     /// A write call adds the 8-byte integer value supplied in
@@ -53,29 +48,26 @@ impl FileDescriptor for Event {
     /// supplied buffer is less than 8 bytes, or if an attempt is
     /// made to write the value 0xffffffffffffffff.
     fn write<'tcx>(
-        &self,
+        &mut self,
         _communicate_allowed: bool,
         bytes: &[u8],
-        tcx: TyCtxt<'tcx>,
+        ecx: &mut MiriInterpCx<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
-        let v1 = self.val.get();
         let bytes: [u8; 8] = bytes.try_into().unwrap(); // FIXME fail gracefully when this has the wrong size
         // Convert from target endianness to host endianness.
-        let num = match tcx.sess.target.endian {
+        let num = match ecx.tcx.sess.target.endian {
             Endian::Little => u64::from_le_bytes(bytes),
             Endian::Big => u64::from_be_bytes(bytes),
         };
         // FIXME handle blocking when addition results in exceeding the max u64 value
         // or fail with EAGAIN if the file descriptor is nonblocking.
-        let v2 = v1.checked_add(num).unwrap();
-        self.val.set(v2);
-        assert_eq!(8, bytes.len());
+        self.val = self.val.checked_add(num).unwrap();
         Ok(Ok(8))
     }
 }
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     /// This function creates an `Event` that is used as an event wait/notify mechanism by
     /// user-space applications, and by the kernel to notify user-space applications of events.
     /// The `Event` contains an `u64` counter maintained by the kernel. The counter is initialized
@@ -119,7 +111,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             throw_unsup_format!("eventfd: EFD_SEMAPHORE is unsupported");
         }
 
-        let fd = this.machine.fds.insert_fd(Box::new(Event { val: Cell::new(val.into()) }));
+        let fd = this.machine.fds.insert_fd(FileDescriptor::new(Event { val: val.into() }));
         Ok(Scalar::from_i32(fd))
     }
 }

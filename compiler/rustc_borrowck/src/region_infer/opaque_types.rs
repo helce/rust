@@ -40,7 +40,7 @@ impl<'tcx> RegionInferenceContext<'tcx> {
     /// compares lifetimes directly, so we need to map the inference variables
     /// back to concrete lifetimes: `'static`, `ReEarlyParam` or `ReLateParam`.
     ///
-    /// First we map the regions in the the generic parameters `_Return<'1>` to
+    /// First we map the regions in the generic parameters `_Return<'1>` to
     /// their `external_name` giving `_Return<'a>`. This step is a bit involved.
     /// See the [rustc-dev-guide chapter] for more info.
     ///
@@ -340,7 +340,7 @@ fn check_opaque_type_well_formed<'tcx>(
         .with_next_trait_solver(next_trait_solver)
         .with_opaque_type_inference(parent_def_id)
         .build();
-    let ocx = ObligationCtxt::new(&infcx);
+    let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
     let identity_args = GenericArgs::identity_for_item(tcx, def_id);
 
     // Require that the hidden type actually fulfills all the bounds of the opaque type, even without

@@ -16,7 +16,7 @@ use rustc_ast::token::{self, BinOpToken, CommentKind, Delimiter, Nonterminal, To
 use rustc_ast::tokenstream::{Spacing, TokenStream, TokenTree};
 use rustc_ast::util::classify;
 use rustc_ast::util::comments::{Comment, CommentStyle};
-use rustc_ast::{self as ast, AttrArgs, AttrArgsEq, BlockCheckMode, PatKind};
+use rustc_ast::{self as ast, AttrArgs, AttrArgsEq, BlockCheckMode, PatKind, Safety};
 use rustc_ast::{attr, BindingMode, ByRef, DelimArgs, RangeEnd, RangeSyntax, Term};
 use rustc_ast::{GenericArg, GenericBound, SelfKind};
 use rustc_ast::{InlineAsmOperand, InlineAsmRegOrRegClass};
@@ -55,8 +55,8 @@ impl PpAnn for NoAnn {}
 
 pub struct Comments<'a> {
     sm: &'a SourceMap,
-    comments: Vec<Comment>,
-    current: usize,
+    // Stored in reverse order so we can consume them by popping.
+    reversed_comments: Vec<Comment>,
 }
 
 /// Returns `None` if the first `col` chars of `s` contain a non-whitespace char.
@@ -182,21 +182,25 @@ fn gather_comments(sm: &SourceMap, path: FileName, src: String) -> Vec<Comment> 
 
 impl<'a> Comments<'a> {
     pub fn new(sm: &'a SourceMap, filename: FileName, input: String) -> Comments<'a> {
-        let comments = gather_comments(sm, filename, input);
-        Comments { sm, comments, current: 0 }
+        let mut comments = gather_comments(sm, filename, input);
+        comments.reverse();
+        Comments { sm, reversed_comments: comments }
     }
 
-    // FIXME: This shouldn't probably clone lmao
-    fn next(&self) -> Option<Comment> {
-        self.comments.get(self.current).cloned()
+    fn peek(&self) -> Option<&Comment> {
+        self.reversed_comments.last()
+    }
+
+    fn next(&mut self) -> Option<Comment> {
+        self.reversed_comments.pop()
     }
 
     fn trailing_comment(
-        &self,
+        &mut self,
         span: rustc_span::Span,
         next_pos: Option<BytePos>,
     ) -> Option<Comment> {
-        if let Some(cmnt) = self.next() {
+        if let Some(cmnt) = self.peek() {
             if cmnt.style != CommentStyle::Trailing {
                 return None;
             }
@@ -204,7 +208,7 @@ impl<'a> Comments<'a> {
             let comment_line = self.sm.lookup_char_pos(cmnt.pos);
             let next = next_pos.unwrap_or_else(|| cmnt.pos + BytePos(1));
             if span.hi() < cmnt.pos && cmnt.pos < next && span_line.line == comment_line.line {
-                return Some(cmnt);
+                return Some(self.next().unwrap());
             }
         }
 
@@ -245,6 +249,7 @@ pub fn print_crate<'a>(
         let fake_attr = attr::mk_attr_nested_word(
             g,
             ast::AttrStyle::Inner,
+            Safety::Default,
             sym::feature,
             sym::prelude_import,
             DUMMY_SP,
@@ -255,7 +260,13 @@ pub fn print_crate<'a>(
         // root, so this is not needed, and actually breaks things.
         if edition.is_rust_2015() {
             // `#![no_std]`
-            let fake_attr = attr::mk_attr_word(g, ast::AttrStyle::Inner, sym::no_std, DUMMY_SP);
+            let fake_attr = attr::mk_attr_word(
+                g,
+                ast::AttrStyle::Inner,
+                Safety::Default,
+                sym::no_std,
+                DUMMY_SP,
+            );
             s.print_attribute(&fake_attr);
         }
     }
@@ -400,7 +411,8 @@ impl std::ops::DerefMut for State<'_> {
 
 /// This trait is used for both AST and HIR pretty-printing.
 pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::DerefMut {
-    fn comments(&mut self) -> &mut Option<Comments<'a>>;
+    fn comments(&self) -> Option<&Comments<'a>>;
+    fn comments_mut(&mut self) -> Option<&mut Comments<'a>>;
     fn ann_post(&mut self, ident: Ident);
     fn print_generic_args(&mut self, args: &ast::GenericArgs, colons_before_params: bool);
 
@@ -442,18 +454,18 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
 
     fn maybe_print_comment(&mut self, pos: BytePos) -> bool {
         let mut has_comment = false;
-        while let Some(cmnt) = self.next_comment() {
-            if cmnt.pos < pos {
-                has_comment = true;
-                self.print_comment(&cmnt);
-            } else {
+        while let Some(cmnt) = self.peek_comment() {
+            if cmnt.pos >= pos {
                 break;
             }
+            has_comment = true;
+            let cmnt = self.next_comment().unwrap();
+            self.print_comment(cmnt);
         }
         has_comment
     }
 
-    fn print_comment(&mut self, cmnt: &Comment) {
+    fn print_comment(&mut self, cmnt: Comment) {
         match cmnt.style {
             CommentStyle::Mixed => {
                 if !self.is_beginning_of_line() {
@@ -517,19 +529,23 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
                 self.hardbreak();
             }
         }
-        if let Some(cmnts) = self.comments() {
-            cmnts.current += 1;
-        }
+    }
+
+    fn peek_comment<'b>(&'b self) -> Option<&'b Comment>
+    where
+        'a: 'b,
+    {
+        self.comments().and_then(|c| c.peek())
     }
 
     fn next_comment(&mut self) -> Option<Comment> {
-        self.comments().as_mut().and_then(|c| c.next())
+        self.comments_mut().and_then(|c| c.next())
     }
 
     fn maybe_print_trailing_comment(&mut self, span: rustc_span::Span, next_pos: Option<BytePos>) {
-        if let Some(cmnts) = self.comments() {
+        if let Some(cmnts) = self.comments_mut() {
             if let Some(cmnt) = cmnts.trailing_comment(span, next_pos) {
-                self.print_comment(&cmnt);
+                self.print_comment(cmnt);
             }
         }
     }
@@ -537,11 +553,11 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
     fn print_remaining_comments(&mut self) {
         // If there aren't any remaining comments, then we need to manually
         // make sure there is a line break at the end.
-        if self.next_comment().is_none() {
+        if self.peek_comment().is_none() {
             self.hardbreak();
         }
         while let Some(cmnt) = self.next_comment() {
-            self.print_comment(&cmnt)
+            self.print_comment(cmnt)
         }
     }
 
@@ -672,22 +688,40 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
         }
     }
 
+    // The easiest way to implement token stream pretty printing would be to
+    // print each token followed by a single space. But that would produce ugly
+    // output, so we go to some effort to do better.
+    //
+    // First, we track whether each token that appears in source code is
+    // followed by a space, with `Spacing`, and reproduce that in the output.
+    // This works well in a lot of cases. E.g. `stringify!(x + y)` produces
+    // "x + y" and `stringify!(x+y)` produces "x+y".
+    //
+    // But this doesn't work for code produced by proc macros (which have no
+    // original source text representation) nor for code produced by decl
+    // macros (which are tricky because the whitespace after tokens appearing
+    // in macro rules isn't always what you want in the produced output). For
+    // these we mostly use `Spacing::Alone`, which is the conservative choice.
+    //
+    // So we have a backup mechanism for when `Spacing::Alone` occurs between a
+    // pair of tokens: we check if that pair of tokens can obviously go
+    // together without a space between them. E.g. token `x` followed by token
+    // `,` is better printed as `x,` than `x ,`. (Even if the original source
+    // code was `x ,`.)
+    //
+    // Finally, we must be careful about changing the output. Token pretty
+    // printing is used by `stringify!` and `impl Display for
+    // proc_macro::TokenStream`, and some programs rely on the output having a
+    // particular form, even though they shouldn't. In particular, some proc
+    // macros do `format!({stream})` on a token stream and then "parse" the
+    // output with simple string matching that can't handle whitespace changes.
+    // E.g. we have seen cases where a proc macro can handle `a :: b` but not
+    // `a::b`. See #117433 for some examples.
     fn print_tts(&mut self, tts: &TokenStream, convert_dollar_crate: bool) {
         let mut iter = tts.trees().peekable();
         while let Some(tt) = iter.next() {
             let spacing = self.print_tt(tt, convert_dollar_crate);
             if let Some(next) = iter.peek() {
-                // Should we print a space after `tt`? There are two guiding
-                // factors.
-                // - `spacing` is the more important and accurate one. Most
-                //   tokens have good spacing information, and
-                //   `Joint`/`JointHidden` get used a lot.
-                // - `space_between` is the backup. Code produced by proc
-                //   macros has worse spacing information, with no
-                //   `JointHidden` usage and too much `Alone` usage, which
-                //   would result in over-spaced output such as
-                //   `( x () , y . z )`. `space_between` avoids some of the
-                //   excess whitespace.
                 if spacing == Spacing::Alone && space_between(tt, next) {
                     self.space();
                 }
@@ -852,8 +886,6 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
             token::NtBlock(e) => self.block_to_string(e),
             token::NtStmt(e) => self.stmt_to_string(e),
             token::NtPat(e) => self.pat_to_string(e),
-            &token::NtIdent(e, is_raw) => IdentPrinter::for_ast_ident(e, is_raw.into()).to_string(),
-            token::NtLifetime(e) => e.to_string(),
             token::NtLiteral(e) => self.expr_to_string(e),
             token::NtVis(e) => self.vis_to_string(e),
         }
@@ -915,10 +947,14 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
             token::Literal(lit) => literal_to_string(lit).into(),
 
             /* Name components */
-            token::Ident(s, is_raw) => {
-                IdentPrinter::new(s, is_raw.into(), convert_dollar_crate).to_string().into()
+            token::Ident(name, is_raw) => {
+                IdentPrinter::new(name, is_raw.into(), convert_dollar_crate).to_string().into()
             }
-            token::Lifetime(s) => s.to_string().into(),
+            token::NtIdent(ident, is_raw) => {
+                IdentPrinter::for_ast_ident(ident, is_raw.into()).to_string().into()
+            }
+            token::Lifetime(name) => name.to_string().into(),
+            token::NtLifetime(ident) => ident.name.to_string().into(),
 
             /* Other */
             token::DocComment(comment_kind, attr_style, data) => {
@@ -926,7 +962,7 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
             }
             token::Eof => "<eof>".into(),
 
-            token::Interpolated(ref nt) => self.nonterminal_to_string(&nt.0).into(),
+            token::Interpolated(ref nt) => self.nonterminal_to_string(&nt).into(),
         }
     }
 
@@ -994,8 +1030,12 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
 }
 
 impl<'a> PrintState<'a> for State<'a> {
-    fn comments(&mut self) -> &mut Option<Comments<'a>> {
-        &mut self.comments
+    fn comments(&self) -> Option<&Comments<'a>> {
+        self.comments.as_ref()
+    }
+
+    fn comments_mut(&mut self) -> Option<&mut Comments<'a>> {
+        self.comments.as_mut()
     }
 
     fn ann_post(&mut self, ident: Ident) {
@@ -1012,7 +1052,7 @@ impl<'a> PrintState<'a> for State<'a> {
                 self.word("<");
                 self.commasep(Inconsistent, &data.args, |s, arg| match arg {
                     ast::AngleBracketedArg::Arg(a) => s.print_generic_arg(a),
-                    ast::AngleBracketedArg::Constraint(c) => s.print_assoc_constraint(c),
+                    ast::AngleBracketedArg::Constraint(c) => s.print_assoc_item_constraint(c),
                 });
                 self.word(">")
             }
@@ -1064,21 +1104,21 @@ impl<'a> State<'a> {
         }
     }
 
-    pub fn print_assoc_constraint(&mut self, constraint: &ast::AssocConstraint) {
+    pub fn print_assoc_item_constraint(&mut self, constraint: &ast::AssocItemConstraint) {
         self.print_ident(constraint.ident);
         if let Some(args) = constraint.gen_args.as_ref() {
             self.print_generic_args(args, false)
         }
         self.space();
         match &constraint.kind {
-            ast::AssocConstraintKind::Equality { term } => {
+            ast::AssocItemConstraintKind::Equality { term } => {
                 self.word_space("=");
                 match term {
                     Term::Ty(ty) => self.print_type(ty),
                     Term::Const(c) => self.print_expr_anon_const(c, &[]),
                 }
             }
-            ast::AssocConstraintKind::Bound { bounds } => {
+            ast::AssocItemConstraintKind::Bound { bounds } => {
                 if !bounds.is_empty() {
                     self.word_nbsp(":");
                     self.print_type_bounds(bounds);
@@ -1138,7 +1178,7 @@ impl<'a> State<'a> {
                 self.pclose();
             }
             ast::TyKind::BareFn(f) => {
-                self.print_ty_fn(f.ext, f.unsafety, &f.decl, None, &f.generic_params);
+                self.print_ty_fn(f.ext, f.safety, &f.decl, None, &f.generic_params);
             }
             ast::TyKind::Path(None, path) => {
                 self.print_path(path, false, 0);
@@ -1238,7 +1278,11 @@ impl<'a> State<'a> {
                 if let Some((init, els)) = loc.kind.init_else_opt() {
                     self.nbsp();
                     self.word_space("=");
-                    self.print_expr(init, FixupContext::default());
+                    self.print_expr_cond_paren(
+                        init,
+                        els.is_some() && classify::expr_trailing_brace(init).is_some(),
+                        FixupContext::default(),
+                    );
                     if let Some(els) = els {
                         self.cbox(INDENT_UNIT);
                         self.ibox(INDENT_UNIT);
@@ -1892,7 +1936,7 @@ impl<'a> State<'a> {
     fn print_ty_fn(
         &mut self,
         ext: ast::Extern,
-        unsafety: ast::Unsafe,
+        safety: ast::Safety,
         decl: &ast::FnDecl,
         name: Option<Ident>,
         generic_params: &[ast::GenericParam],
@@ -1908,7 +1952,7 @@ impl<'a> State<'a> {
             },
             span: DUMMY_SP,
         };
-        let header = ast::FnHeader { unsafety, ext, ..ast::FnHeader::default() };
+        let header = ast::FnHeader { safety, ext, ..ast::FnHeader::default() };
         self.print_fn(decl, header, name, &generics);
         self.end();
     }
@@ -1916,7 +1960,7 @@ impl<'a> State<'a> {
     fn print_fn_header_info(&mut self, header: ast::FnHeader) {
         self.print_constness(header.constness);
         header.coroutine_kind.map(|coroutine_kind| self.print_coroutine_kind(coroutine_kind));
-        self.print_unsafety(header.unsafety);
+        self.print_safety(header.safety);
 
         match header.ext {
             ast::Extern::None => {}
@@ -1933,10 +1977,11 @@ impl<'a> State<'a> {
         self.word("fn")
     }
 
-    fn print_unsafety(&mut self, s: ast::Unsafe) {
+    fn print_safety(&mut self, s: ast::Safety) {
         match s {
-            ast::Unsafe::No => {}
-            ast::Unsafe::Yes(_) => self.word_nbsp("unsafe"),
+            ast::Safety::Default => {}
+            ast::Safety::Safe(_) => self.word_nbsp("safe"),
+            ast::Safety::Unsafe(_) => self.word_nbsp("unsafe"),
         }
     }
 

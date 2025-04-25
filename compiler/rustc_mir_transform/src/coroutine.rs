@@ -69,7 +69,8 @@ use rustc_middle::mir::visit::{MutVisitor, PlaceContext, Visitor};
 use rustc_middle::mir::*;
 use rustc_middle::ty::CoroutineArgs;
 use rustc_middle::ty::InstanceDef;
-use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::ty::{self, CoroutineArgsExt, Ty, TyCtxt};
+use rustc_middle::{bug, span_bug};
 use rustc_mir_dataflow::impls::{
     MaybeBorrowedLocals, MaybeLiveLocals, MaybeRequiresStorage, MaybeStorageLive,
 };
@@ -1260,7 +1261,7 @@ fn create_coroutine_drop_shim<'tcx>(
     }
 
     // Replace the return variable
-    body.local_decls[RETURN_PLACE] = LocalDecl::with_source_info(Ty::new_unit(tcx), source_info);
+    body.local_decls[RETURN_PLACE] = LocalDecl::with_source_info(tcx.types.unit, source_info);
 
     make_coroutine_state_argument_indirect(tcx, &mut body);
 
@@ -1607,7 +1608,7 @@ fn check_field_tys_sized<'tcx>(
     let infcx = tcx.infer_ctxt().ignoring_regions().build();
     let param_env = tcx.param_env(def_id);
 
-    let ocx = ObligationCtxt::new(&infcx);
+    let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
     for field_ty in &coroutine_layout.field_tys {
         ocx.register_bound(
             ObligationCause::new(

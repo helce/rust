@@ -90,7 +90,7 @@ impl<'a> State<'a> {
             Node::Stmt(a) => self.print_stmt(a),
             Node::PathSegment(a) => self.print_path_segment(a),
             Node::Ty(a) => self.print_type(a),
-            Node::TypeBinding(a) => self.print_type_binding(a),
+            Node::AssocItemConstraint(a) => self.print_assoc_item_constraint(a),
             Node::TraitRef(a) => self.print_trait_ref(a),
             Node::Pat(a) => self.print_pat(a),
             Node::PatField(a) => self.print_patfield(a),
@@ -139,8 +139,12 @@ impl std::ops::DerefMut for State<'_> {
 }
 
 impl<'a> PrintState<'a> for State<'a> {
-    fn comments(&mut self) -> &mut Option<Comments<'a>> {
-        &mut self.comments
+    fn comments(&self) -> Option<&Comments<'a>> {
+        self.comments.as_ref()
+    }
+
+    fn comments_mut(&mut self) -> Option<&mut Comments<'a>> {
+        self.comments.as_mut()
     }
 
     fn ann_post(&mut self, ident: Ident) {
@@ -283,7 +287,7 @@ impl<'a> State<'a> {
                 self.pclose();
             }
             hir::TyKind::BareFn(f) => {
-                self.print_ty_fn(f.abi, f.unsafety, f.decl, None, f.generic_params, f.param_names);
+                self.print_ty_fn(f.abi, f.safety, f.decl, None, f.generic_params, f.param_names);
             }
             hir::TyKind::OpaqueDef(..) => self.word("/*impl Trait*/"),
             hir::TyKind::Path(ref qpath) => self.print_qpath(qpath, false),
@@ -342,12 +346,12 @@ impl<'a> State<'a> {
         self.maybe_print_comment(item.span.lo());
         self.print_outer_attributes(self.attrs(item.hir_id()));
         match item.kind {
-            hir::ForeignItemKind::Fn(decl, arg_names, generics) => {
+            hir::ForeignItemKind::Fn(decl, arg_names, generics, safety) => {
                 self.head("");
                 self.print_fn(
                     decl,
                     hir::FnHeader {
-                        unsafety: hir::Unsafety::Normal,
+                        safety,
                         constness: hir::Constness::NotConst,
                         abi: Abi::Rust,
                         asyncness: hir::IsAsync::NotAsync,
@@ -361,7 +365,8 @@ impl<'a> State<'a> {
                 self.word(";");
                 self.end() // end the outer fn box
             }
-            hir::ForeignItemKind::Static(t, m) => {
+            hir::ForeignItemKind::Static(t, m, safety) => {
+                self.print_safety(safety);
                 self.head("static");
                 if m.is_mut() {
                     self.word_space("mut");
@@ -578,7 +583,7 @@ impl<'a> State<'a> {
                 self.print_struct(struct_def, generics, item.ident.name, item.span, true);
             }
             hir::ItemKind::Impl(&hir::Impl {
-                unsafety,
+                safety,
                 polarity,
                 defaultness,
                 defaultness_span: _,
@@ -589,7 +594,7 @@ impl<'a> State<'a> {
             }) => {
                 self.head("");
                 self.print_defaultness(defaultness);
-                self.print_unsafety(unsafety);
+                self.print_safety(safety);
                 self.word_nbsp("impl");
 
                 if !generics.params.is_empty() {
@@ -618,10 +623,10 @@ impl<'a> State<'a> {
                 }
                 self.bclose(item.span);
             }
-            hir::ItemKind::Trait(is_auto, unsafety, generics, bounds, trait_items) => {
+            hir::ItemKind::Trait(is_auto, safety, generics, bounds, trait_items) => {
                 self.head("");
                 self.print_is_auto(is_auto);
-                self.print_unsafety(unsafety);
+                self.print_safety(safety);
                 self.word_nbsp("trait");
                 self.print_ident(item.ident);
                 self.print_generic_params(generics.params);
@@ -968,7 +973,7 @@ impl<'a> State<'a> {
         self.print_else(elseopt)
     }
 
-    fn print_array_length(&mut self, len: &hir::ArrayLen) {
+    fn print_array_length(&mut self, len: &hir::ArrayLen<'_>) {
         match len {
             hir::ArrayLen::Infer(..) => self.word("_"),
             hir::ArrayLen::Body(ct) => self.print_anon_const(ct),
@@ -1052,7 +1057,7 @@ impl<'a> State<'a> {
         self.end()
     }
 
-    fn print_expr_repeat(&mut self, element: &hir::Expr<'_>, count: &hir::ArrayLen) {
+    fn print_expr_repeat(&mut self, element: &hir::Expr<'_>, count: &hir::ArrayLen<'_>) {
         self.ibox(INDENT_UNIT);
         self.word("[");
         self.print_expr(element);
@@ -1132,7 +1137,7 @@ impl<'a> State<'a> {
         self.print_ident(segment.ident);
 
         let generic_args = segment.args();
-        if !generic_args.args.is_empty() || !generic_args.bindings.is_empty() {
+        if !generic_args.args.is_empty() || !generic_args.constraints.is_empty() {
             self.print_generic_args(generic_args, true);
         }
 
@@ -1450,7 +1455,7 @@ impl<'a> State<'a> {
                     self.word_space(":");
                 }
                 // containing cbox, will be closed by print-block at `}`
-                self.cbox(INDENT_UNIT);
+                self.cbox(0);
                 // head-box, will be closed by print-block after `{`
                 self.ibox(0);
                 self.print_block(blk);
@@ -1673,9 +1678,9 @@ impl<'a> State<'a> {
                     });
                 }
 
-                for binding in generic_args.bindings {
+                for constraint in generic_args.constraints {
                     start_or_comma(self);
-                    self.print_type_binding(binding);
+                    self.print_assoc_item_constraint(constraint);
                 }
 
                 if !empty.get() {
@@ -1683,13 +1688,15 @@ impl<'a> State<'a> {
                 }
             }
             hir::GenericArgsParentheses::ParenSugar => {
+                let (inputs, output) = generic_args.paren_sugar_inputs_output().unwrap();
+
                 self.word("(");
-                self.commasep(Inconsistent, generic_args.inputs(), |s, ty| s.print_type(ty));
+                self.commasep(Inconsistent, inputs, |s, ty| s.print_type(ty));
                 self.word(")");
 
                 self.space_if_not_bol();
                 self.word_space("->");
-                self.print_type(generic_args.bindings[0].ty());
+                self.print_type(output);
             }
             hir::GenericArgsParentheses::ReturnTypeNotation => {
                 self.word("(..)");
@@ -1697,19 +1704,19 @@ impl<'a> State<'a> {
         }
     }
 
-    fn print_type_binding(&mut self, binding: &hir::TypeBinding<'_>) {
-        self.print_ident(binding.ident);
-        self.print_generic_args(binding.gen_args, false);
+    fn print_assoc_item_constraint(&mut self, constraint: &hir::AssocItemConstraint<'_>) {
+        self.print_ident(constraint.ident);
+        self.print_generic_args(constraint.gen_args, false);
         self.space();
-        match binding.kind {
-            hir::TypeBindingKind::Equality { ref term } => {
+        match constraint.kind {
+            hir::AssocItemConstraintKind::Equality { ref term } => {
                 self.word_space("=");
                 match term {
                     Term::Ty(ty) => self.print_type(ty),
                     Term::Const(ref c) => self.print_anon_const(c),
                 }
             }
-            hir::TypeBindingKind::Constraint { bounds } => {
+            hir::AssocItemConstraintKind::Bound { bounds } => {
                 self.print_bounds(":", bounds);
             }
         }
@@ -2230,7 +2237,7 @@ impl<'a> State<'a> {
     fn print_ty_fn(
         &mut self,
         abi: Abi,
-        unsafety: hir::Unsafety,
+        safety: hir::Safety,
         decl: &hir::FnDecl<'_>,
         name: Option<Symbol>,
         generic_params: &[hir::GenericParam<'_>],
@@ -2242,7 +2249,7 @@ impl<'a> State<'a> {
         self.print_fn(
             decl,
             hir::FnHeader {
-                unsafety,
+                safety,
                 abi,
                 constness: hir::Constness::NotConst,
                 asyncness: hir::IsAsync::NotAsync,
@@ -2263,7 +2270,7 @@ impl<'a> State<'a> {
             hir::IsAsync::Async(_) => self.word_nbsp("async"),
         }
 
-        self.print_unsafety(header.unsafety);
+        self.print_safety(header.safety);
 
         if header.abi != Abi::Rust {
             self.word_nbsp("extern");
@@ -2280,10 +2287,10 @@ impl<'a> State<'a> {
         }
     }
 
-    fn print_unsafety(&mut self, s: hir::Unsafety) {
+    fn print_safety(&mut self, s: hir::Safety) {
         match s {
-            hir::Unsafety::Normal => {}
-            hir::Unsafety::Unsafe => self.word_nbsp("unsafe"),
+            hir::Safety::Safe => {}
+            hir::Safety::Unsafe => self.word_nbsp("unsafe"),
         }
     }
 

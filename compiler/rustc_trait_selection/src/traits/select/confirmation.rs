@@ -11,11 +11,13 @@ use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir::lang_items::LangItem;
 use rustc_infer::infer::HigherRankedType;
 use rustc_infer::infer::{DefineOpaqueTypes, InferOk};
+use rustc_infer::traits::ObligationCauseCode;
 use rustc_middle::traits::{BuiltinImplSource, SignatureMismatchData};
 use rustc_middle::ty::{
-    self, GenericArgs, GenericArgsRef, GenericParamDefKind, ToPolyTraitRef, ToPredicate,
-    TraitPredicate, Ty, TyCtxt,
+    self, GenericArgs, GenericArgsRef, GenericParamDefKind, ToPolyTraitRef, TraitPredicate, Ty,
+    TyCtxt, Upcast,
 };
+use rustc_middle::{bug, span_bug};
 use rustc_span::def_id::DefId;
 
 use crate::traits::normalize::{normalize_with_depth, normalize_with_depth_to};
@@ -25,10 +27,9 @@ use crate::traits::vtable::{
     VtblSegment,
 };
 use crate::traits::{
-    BuiltinDerivedObligation, ImplDerivedObligation, ImplDerivedObligationCause, ImplSource,
-    ImplSourceUserDefinedData, Normalized, Obligation, ObligationCause, PolyTraitObligation,
-    PredicateObligation, Selection, SelectionError, SignatureMismatch, TraitNotObjectSafe,
-    TraitObligation, Unimplemented,
+    ImplDerivedCause, ImplSource, ImplSourceUserDefinedData, Normalized, Obligation,
+    ObligationCause, PolyTraitObligation, PredicateObligation, Selection, SelectionError,
+    SignatureMismatch, TraitNotObjectSafe, TraitObligation, Unimplemented,
 };
 
 use super::BuiltinImplConditions;
@@ -275,7 +276,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 bug!("obligation {:?} had matched a builtin impl but now doesn't", obligation);
             };
 
-            let cause = obligation.derived_cause(BuiltinDerivedObligation);
+            let cause = obligation.derived_cause(ObligationCauseCode::BuiltinDerived);
             self.collect_predicates_for_types(
                 obligation.param_env,
                 cause,
@@ -435,7 +436,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     ) -> Vec<PredicateObligation<'tcx>> {
         debug!(?nested, "vtable_auto_impl");
         ensure_sufficient_stack(|| {
-            let cause = obligation.derived_cause(BuiltinDerivedObligation);
+            let cause = obligation.derived_cause(ObligationCauseCode::BuiltinDerived);
 
             let poly_trait_ref = obligation.predicate.to_poly_trait_ref();
             let trait_ref = self.infcx.enter_forall_and_leak_universe(poly_trait_ref);
@@ -606,7 +607,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         for assoc_type in assoc_types {
             let defs: &ty::Generics = tcx.generics_of(assoc_type);
 
-            if !defs.params.is_empty() && !tcx.features().generic_associated_types_extended {
+            if !defs.own_params.is_empty() && !tcx.features().generic_associated_types_extended {
                 tcx.dcx().span_delayed_bug(
                     obligation.cause.span,
                     "GATs in trait object shouldn't have been considered",
@@ -618,7 +619,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // higher-ranked things.
             // Prevent, e.g., `dyn Iterator<Item = str>`.
             for bound in self.tcx().item_bounds(assoc_type).transpose_iter() {
-                let arg_bound = if defs.count() == 0 {
+                let arg_bound = if defs.is_empty() {
                     bound.instantiate(tcx, trait_predicate.trait_ref.args)
                 } else {
                     let mut args = smallvec::SmallVec::with_capacity(defs.count());
@@ -664,9 +665,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                                 tcx,
                                 ty::INNERMOST,
                                 ty::BoundVar::from_usize(bound_vars.len() - 1),
-                                tcx.type_of(param.def_id)
-                                    .no_bound_vars()
-                                    .expect("const parameter types cannot be generic"),
                             )
                             .into()
                         }
@@ -675,7 +673,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     let assoc_ty_args = tcx.mk_args(&args);
                     let bound =
                         bound.map_bound(|b| b.kind().skip_binder()).instantiate(tcx, assoc_ty_args);
-                    ty::Binder::bind_with_vars(bound, bound_vars).to_predicate(tcx)
+                    ty::Binder::bind_with_vars(bound, bound_vars).upcast(tcx)
                 };
                 let normalized_bound = normalize_with_depth_to(
                     self,
@@ -693,7 +691,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
         let vtable_base = vtable_trait_first_method_offset(
             tcx,
-            (unnormalized_upcast_trait_ref, ty::Binder::dummy(object_trait_ref)),
+            unnormalized_upcast_trait_ref,
+            ty::Binder::dummy(object_trait_ref),
         );
 
         Ok(ImplSource::Builtin(BuiltinImplSource::Object { vtable_base: vtable_base }, nested))
@@ -722,7 +721,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
         let mut nested =
             self.equate_trait_refs(obligation.with(tcx, placeholder_predicate), trait_ref)?;
-        let cause = obligation.derived_cause(BuiltinDerivedObligation);
+        let cause = obligation.derived_cause(ObligationCauseCode::BuiltinDerived);
 
         // Confirm the `type Output: Sized;` bound that is present on `FnOnce`
         let output_ty = self.infcx.enter_forall_and_leak_universe(sig.output());
@@ -734,7 +733,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             output_ty,
             &mut nested,
         );
-        let tr = ty::TraitRef::from_lang_item(self.tcx(), LangItem::Sized, cause.span, [output_ty]);
+        let tr = ty::TraitRef::new(
+            self.tcx(),
+            self.tcx().require_lang_item(LangItem::Sized, Some(cause.span)),
+            [output_ty],
+        );
         nested.push(Obligation::new(self.infcx.tcx, cause, obligation.param_env, tr));
 
         Ok(nested)
@@ -1008,10 +1011,12 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         } else {
             nested.push(obligation.with(
                 self.tcx(),
-                ty::TraitRef::from_lang_item(
+                ty::TraitRef::new(
                     self.tcx(),
-                    LangItem::AsyncFnKindHelper,
-                    obligation.cause.span,
+                    self.tcx().require_lang_item(
+                        LangItem::AsyncFnKindHelper,
+                        Some(obligation.cause.span),
+                    ),
                     [kind_ty, Ty::from_closure_kind(self.tcx(), goal_kind)],
                 ),
             ));
@@ -1214,7 +1219,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // `T` -> `Trait`
             (_, &ty::Dynamic(data, r, ty::Dyn)) => {
                 let mut object_dids = data.auto_traits().chain(data.principal_def_id());
-                if let Some(did) = object_dids.find(|did| !tcx.check_is_object_safe(*did)) {
+                if let Some(did) = object_dids.find(|did| !tcx.is_object_safe(*did)) {
                     return Err(TraitNotObjectSafe(did));
                 }
 
@@ -1240,19 +1245,18 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     .collect();
 
                 // We can only make objects from sized types.
-                let tr = ty::TraitRef::from_lang_item(
+                let tr = ty::TraitRef::new(
                     tcx,
-                    LangItem::Sized,
-                    obligation.cause.span,
+                    tcx.require_lang_item(LangItem::Sized, Some(obligation.cause.span)),
                     [source],
                 );
-                nested.push(predicate_to_obligation(tr.to_predicate(tcx)));
+                nested.push(predicate_to_obligation(tr.upcast(tcx)));
 
                 // If the type is `Foo + 'a`, ensure that the type
                 // being cast to `Foo + 'a` outlives `'a`:
                 let outlives = ty::OutlivesPredicate(source, r);
                 nested.push(predicate_to_obligation(
-                    ty::Binder::dummy(ty::ClauseKind::TypeOutlives(outlives)).to_predicate(tcx),
+                    ty::ClauseKind::TypeOutlives(outlives).upcast(tcx),
                 ));
 
                 ImplSource::Builtin(BuiltinImplSource::Misc, nested)
@@ -1380,7 +1384,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         let self_ty = obligation.self_ty().map_bound(|ty| self.infcx.shallow_resolve(ty));
 
         let mut nested = vec![];
-        let cause = obligation.derived_cause(BuiltinDerivedObligation);
+        let cause = obligation.derived_cause(ObligationCauseCode::BuiltinDerived);
 
         // If we have a custom `impl const Drop`, then
         // first check it like a regular impl candidate.
@@ -1395,7 +1399,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             debug!(?args, "impl args");
 
             let cause = obligation.derived_cause(|derived| {
-                ImplDerivedObligation(Box::new(ImplDerivedObligationCause {
+                ObligationCauseCode::ImplDerived(Box::new(ImplDerivedCause {
                     derived,
                     impl_or_alias_def_id: impl_def_id,
                     impl_def_predicate_index: None,
@@ -1473,10 +1477,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         cause.clone(),
                         obligation.recursion_depth + 1,
                         self_ty.rebind(ty::TraitPredicate {
-                            trait_ref: ty::TraitRef::from_lang_item(
+                            trait_ref: ty::TraitRef::new(
                                 self.tcx(),
-                                LangItem::Destruct,
-                                cause.span,
+                                self.tcx().require_lang_item(LangItem::Destruct, Some(cause.span)),
                                 [nested_ty.into(), host_effect_param],
                             ),
                             polarity: ty::PredicatePolarity::Positive,
@@ -1506,10 +1509,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 | ty::Infer(_)
                 | ty::Placeholder(_) => {
                     let predicate = self_ty.rebind(ty::TraitPredicate {
-                        trait_ref: ty::TraitRef::from_lang_item(
+                        trait_ref: ty::TraitRef::new(
                             self.tcx(),
-                            LangItem::Destruct,
-                            cause.span,
+                            self.tcx().require_lang_item(LangItem::Destruct, Some(cause.span)),
                             [nested_ty.into(), host_effect_param],
                         ),
                         polarity: ty::PredicatePolarity::Positive,

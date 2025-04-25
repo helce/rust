@@ -13,11 +13,13 @@ use rustc_data_structures::work_queue::WorkQueue;
 use rustc_graphviz as dot;
 use rustc_hir::def_id::DefId;
 use rustc_index::{Idx, IndexVec};
+use rustc_middle::bug;
 use rustc_middle::mir::{self, traversal, BasicBlock};
 use rustc_middle::mir::{create_dump_file, dump_enabled};
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::symbol::{sym, Symbol};
+use tracing::{debug, error};
 
 use super::fmt::DebugWithContext;
 use super::graphviz;

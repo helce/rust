@@ -33,8 +33,8 @@ use std::{fmt, hash::Hash};
 use base_db::{salsa::impl_intern_value_trivial, CrateId, FileId};
 use either::Either;
 use span::{
-    Edition, ErasedFileAstId, FileRange, HirFileIdRepr, Span, SpanAnchor, SyntaxContextData,
-    SyntaxContextId,
+    Edition, ErasedFileAstId, FileAstId, FileRange, HirFileIdRepr, Span, SpanAnchor,
+    SyntaxContextData, SyntaxContextId,
 };
 use syntax::{
     ast::{self, AstNode},
@@ -132,13 +132,13 @@ pub enum ExpandError {
     MacroDefinition,
     Mbe(mbe::ExpandError),
     RecursionOverflow,
-    Other(Box<Box<str>>),
-    ProcMacroPanic(Box<Box<str>>),
+    Other(Arc<Box<str>>),
+    ProcMacroPanic(Arc<Box<str>>),
 }
 
 impl ExpandError {
     pub fn other(msg: impl Into<Box<str>>) -> Self {
-        ExpandError::Other(Box::new(msg.into()))
+        ExpandError::Other(Arc::new(msg.into()))
     }
 }
 
@@ -543,6 +543,18 @@ impl MacroCallLoc {
                     ast_id.with_value(ast_id.to_node(db).syntax().clone())
                 }
             }
+        }
+    }
+
+    pub fn to_node_item(&self, db: &dyn ExpandDatabase) -> InFile<ast::Item> {
+        match self.kind {
+            MacroCallKind::FnLike { ast_id, .. } => {
+                InFile::new(ast_id.file_id, ast_id.map(FileAstId::upcast).to_node(db))
+            }
+            MacroCallKind::Derive { ast_id, .. } => {
+                InFile::new(ast_id.file_id, ast_id.map(FileAstId::upcast).to_node(db))
+            }
+            MacroCallKind::Attr { ast_id, .. } => InFile::new(ast_id.file_id, ast_id.to_node(db)),
         }
     }
 

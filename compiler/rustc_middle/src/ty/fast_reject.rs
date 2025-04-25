@@ -2,6 +2,7 @@ use crate::mir::Mutability;
 use crate::ty::GenericArgKind;
 use crate::ty::{self, GenericArgsRef, Ty, TyCtxt, TypeVisitableExt};
 use rustc_hir::def_id::DefId;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::iter;
@@ -280,13 +281,13 @@ impl DeepRejectCtxt {
             }
             ty::FnPtr(obl_sig) => match k {
                 ty::FnPtr(impl_sig) => {
-                    let ty::FnSig { inputs_and_output, c_variadic, unsafety, abi } =
+                    let ty::FnSig { inputs_and_output, c_variadic, safety, abi } =
                         obl_sig.skip_binder();
                     let impl_sig = impl_sig.skip_binder();
 
                     abi == impl_sig.abi
                         && c_variadic == impl_sig.c_variadic
-                        && unsafety == impl_sig.unsafety
+                        && safety == impl_sig.safety
                         && inputs_and_output.len() == impl_sig.inputs_and_output.len()
                         && iter::zip(inputs_and_output, impl_sig.inputs_and_output)
                             .all(|(obl, imp)| self.types_may_unify(obl, imp))
@@ -329,20 +330,19 @@ impl DeepRejectCtxt {
     }
 
     pub fn consts_may_unify(self, obligation_ct: ty::Const<'_>, impl_ct: ty::Const<'_>) -> bool {
-        match impl_ct.kind() {
+        let impl_val = match impl_ct.kind() {
             ty::ConstKind::Expr(_)
             | ty::ConstKind::Param(_)
             | ty::ConstKind::Unevaluated(_)
             | ty::ConstKind::Error(_) => {
                 return true;
             }
-            ty::ConstKind::Value(_) => {}
+            ty::ConstKind::Value(_, impl_val) => impl_val,
             ty::ConstKind::Infer(_) | ty::ConstKind::Bound(..) | ty::ConstKind::Placeholder(_) => {
                 bug!("unexpected impl arg: {:?}", impl_ct)
             }
-        }
+        };
 
-        let k = impl_ct.kind();
         match obligation_ct.kind() {
             ty::ConstKind::Param(_) => match self.treat_obligation_params {
                 TreatParams::ForLookup => false,
@@ -357,10 +357,7 @@ impl DeepRejectCtxt {
             ty::ConstKind::Expr(_) | ty::ConstKind::Unevaluated(_) | ty::ConstKind::Error(_) => {
                 true
             }
-            ty::ConstKind::Value(obl) => match k {
-                ty::ConstKind::Value(imp) => obl == imp,
-                _ => true,
-            },
+            ty::ConstKind::Value(_, obl_val) => obl_val == impl_val,
 
             ty::ConstKind::Infer(_) => true,
 

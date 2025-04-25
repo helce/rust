@@ -3,7 +3,6 @@ use crate::errors::{
     SourceKindMultiSuggestion, SourceKindSubdiag,
 };
 use crate::infer::error_reporting::TypeErrCtxt;
-use crate::infer::type_variable::TypeVariableOrigin;
 use crate::infer::InferCtxt;
 use rustc_errors::{codes::*, Diag, IntoDiagArg};
 use rustc_hir as hir;
@@ -12,8 +11,9 @@ use rustc_hir::def::{CtorOf, DefKind, Namespace};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{Body, Closure, Expr, ExprKind, FnRetTy, HirId, LetStmt, LocalSource};
+use rustc_middle::bug;
 use rustc_middle::hir::nested_filter;
-use rustc_middle::infer::unify_key::{ConstVariableOrigin, ConstVariableValue};
+use rustc_middle::infer::unify_key::ConstVariableValue;
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow};
 use rustc_middle::ty::print::{FmtPrinter, PrettyPrinter, Print, Printer};
 use rustc_middle::ty::{
@@ -168,7 +168,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for ClosureEraser<'tcx> {
                 let closure_sig = args.as_closure().sig();
                 Ty::new_fn_ptr(
                     self.tcx,
-                    self.tcx.signature_unclosure(closure_sig, hir::Unsafety::Normal),
+                    self.tcx.signature_unclosure(closure_sig, hir::Safety::Safe),
                 )
             }
             _ => ty.super_fold_with(self),
@@ -457,10 +457,10 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         };
 
         let mut local_visitor = FindInferSourceVisitor::new(self, typeck_results, arg);
-        if let Some(body_id) = self.tcx.hir().maybe_body_owned_by(
+        if let Some(body) = self.tcx.hir().maybe_body_owned_by(
             self.tcx.typeck_root_def_id(body_def_id.to_def_id()).expect_local(),
         ) {
-            let expr = self.tcx.hir().body(body_id).value;
+            let expr = body.value;
             local_visitor.visit_expr(expr);
         }
 
@@ -522,7 +522,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 infer_subdiags.push(SourceKindSubdiag::GenericLabel {
                     span,
                     is_type,
-                    param_name: generics.params[argument_index].name.to_string(),
+                    param_name: generics.own_params[argument_index].name.to_string(),
                     parent_exists,
                     parent_prefix,
                     parent_name,
@@ -542,18 +542,8 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
 
                             match arg.unpack() {
                                 GenericArgKind::Lifetime(_) => bug!("unexpected lifetime"),
-                                GenericArgKind::Type(_) => self
-                                    .next_ty_var(TypeVariableOrigin {
-                                        span: DUMMY_SP,
-                                        param_def_id: None,
-                                    })
-                                    .into(),
-                                GenericArgKind::Const(arg) => self
-                                    .next_const_var(
-                                        arg.ty(),
-                                        ConstVariableOrigin { span: DUMMY_SP, param_def_id: None },
-                                    )
-                                    .into(),
+                                GenericArgKind::Type(_) => self.next_ty_var(DUMMY_SP).into(),
+                                GenericArgKind::Const(_) => self.next_const_var(DUMMY_SP).into(),
                             }
                         }))
                         .unwrap();
@@ -569,9 +559,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 }
             }
             InferSourceKind::FullyQualifiedMethodCall { receiver, successor, args, def_id } => {
-                let placeholder = Some(
-                    self.next_ty_var(TypeVariableOrigin { span: DUMMY_SP, param_def_id: None }),
-                );
+                let placeholder = Some(self.next_ty_var(DUMMY_SP));
                 if let Some(args) = args.make_suggestable(self.infcx.tcx, true, placeholder) {
                     let mut printer = fmt_printer(self, Namespace::ValueNS);
                     printer.print_def_path(def_id, args).unwrap();
@@ -605,9 +593,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 }
             }
             InferSourceKind::ClosureReturn { ty, data, should_wrap_expr } => {
-                let placeholder = Some(
-                    self.next_ty_var(TypeVariableOrigin { span: DUMMY_SP, param_def_id: None }),
-                );
+                let placeholder = Some(self.next_ty_var(DUMMY_SP));
                 if let Some(ty) = ty.make_suggestable(self.infcx.tcx, true, placeholder) {
                     let ty_info = ty_to_string(self, ty, None);
                     multi_suggestions.push(SourceKindMultiSuggestion::new_closure_return(
@@ -1175,7 +1161,7 @@ impl<'a, 'tcx> Visitor<'tcx> for FindInferSourceVisitor<'a, 'tcx> {
 
     /// For closures, we first visit the parameters and then the content,
     /// as we prefer those.
-    fn visit_body(&mut self, body: &'tcx Body<'tcx>) {
+    fn visit_body(&mut self, body: &Body<'tcx>) {
         for param in body.params {
             debug!(
                 "param: span {:?}, ty_span {:?}, pat.span {:?}",

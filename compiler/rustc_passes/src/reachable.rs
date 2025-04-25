@@ -1,14 +1,26 @@
-//! Finds local items that are externally reachable, which means that other crates need access to
-//! their compiled machine code or their MIR.
+//! Finds local items that are "reachable", which means that other crates need access to their
+//! compiled code or their *runtime* MIR. (Compile-time MIR is always encoded anyway, so we don't
+//! worry about that here.)
 //!
-//! An item is "externally reachable" if it is relevant for other crates. This obviously includes
-//! all public items. However, some of these items cannot be compiled to machine code (because they
-//! are generic), and for some the machine code is not sufficient (because we want to cross-crate
-//! inline them). These items "need cross-crate MIR". When a reachable function `f` needs
-//! cross-crate MIR, then all the functions it calls also become reachable, as they will be
-//! necessary to use the MIR of `f` from another crate. Furthermore, an item can become "externally
-//! reachable" by having a `const`/`const fn` return a pointer to that item, so we also need to
-//! recurse into reachable `const`/`const fn`.
+//! An item is "reachable" if codegen that happens in downstream crates can end up referencing this
+//! item. This obviously includes all public items. However, some of these items cannot be codegen'd
+//! (because they are generic), and for some the compiled code is not sufficient (because we want to
+//! cross-crate inline them). These items "need cross-crate MIR". When a reachable function `f`
+//! needs cross-crate MIR, then its MIR may be codegen'd in a downstream crate, and hence items it
+//! mentions need to be considered reachable.
+//!
+//! Furthermore, if a `const`/`const fn` is reachable, then it can return pointers to other items,
+//! making those reachable as well. For instance, consider a `const fn` returning a pointer to an
+//! otherwise entirely private function: if a downstream crate calls that `const fn` to compute the
+//! initial value of a `static`, then it needs to generate a direct reference to this function --
+//! i.e., the function is directly reachable from that downstream crate! Hence we have to recurse
+//! into `const` and `const fn`.
+//!
+//! Conversely, reachability *stops* when it hits a monomorphic non-`const` function that we do not
+//! want to cross-crate inline. That function will just be codegen'd in this crate, which means the
+//! monomorphization collector will consider it a root and then do another graph traversal to
+//! codegen everything called by this function -- but that's a very different graph from what we are
+//! considering here as at that point, everything is monomorphic.
 
 use hir::def_id::LocalDefIdSet;
 use rustc_data_structures::stack::ensure_sufficient_stack;
@@ -17,13 +29,15 @@ use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::Node;
+use rustc_middle::bug;
 use rustc_middle::middle::codegen_fn_attrs::{CodegenFnAttrFlags, CodegenFnAttrs};
 use rustc_middle::middle::privacy::{self, Level};
-use rustc_middle::mir::interpret::{ConstAllocation, GlobalAlloc};
+use rustc_middle::mir::interpret::{ConstAllocation, ErrorHandled, GlobalAlloc};
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, ExistentialTraitRef, TyCtxt};
 use rustc_privacy::DefIdVisitor;
 use rustc_session::config::CrateType;
+use tracing::debug;
 
 /// Determines whether this item is recursive for reachability. See `is_recursively_reachable_local`
 /// below for details.
@@ -143,6 +157,7 @@ impl<'tcx> ReachableContext<'tcx> {
                 }
                 hir::ImplItemKind::Type(_) => false,
             },
+            Node::Expr(&hir::Expr { kind: hir::ExprKind::Closure(..), .. }) => true,
             _ => false,
         }
     }
@@ -191,11 +206,21 @@ impl<'tcx> ReachableContext<'tcx> {
                         }
                     }
 
-                    // Reachable constants will be inlined into other crates
-                    // unconditionally, so we need to make sure that their
-                    // contents are also reachable.
                     hir::ItemKind::Const(_, _, init) => {
-                        self.visit_nested_body(init);
+                        // Only things actually ending up in the final constant need to be reachable.
+                        // Everything else is either already available as `mir_for_ctfe`, or can't be used
+                        // by codegen anyway.
+                        match self.tcx.const_eval_poly_to_alloc(item.owner_id.def_id.into()) {
+                            Ok(alloc) => {
+                                let alloc = self.tcx.global_alloc(alloc.alloc_id).unwrap_memory();
+                                self.propagate_from_alloc(alloc);
+                            }
+                            // Reachable generic constants will be inlined into other crates
+                            // unconditionally, so we need to make sure that their
+                            // contents are also reachable.
+                            Err(ErrorHandled::TooGeneric(_)) => self.visit_nested_body(init),
+                            Err(ErrorHandled::Reported(..)) => {}
+                        }
                     }
                     hir::ItemKind::Static(..) => {
                         if let Ok(alloc) = self.tcx.eval_static_initializer(item.owner_id.def_id) {

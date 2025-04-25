@@ -31,9 +31,11 @@ use crate::traits::error_reporting::TypeErrCtxtExt as _;
 use crate::traits::query::evaluate_obligation::InferCtxtExt as _;
 use rustc_errors::ErrorGuaranteed;
 use rustc_middle::query::Providers;
+use rustc_middle::span_bug;
+use rustc_middle::ty::error::{ExpectedFound, TypeError};
 use rustc_middle::ty::fold::TypeFoldable;
 use rustc_middle::ty::visit::{TypeVisitable, TypeVisitableExt};
-use rustc_middle::ty::{self, ToPredicate, Ty, TyCtxt, TypeFolder, TypeSuperVisitable};
+use rustc_middle::ty::{self, Ty, TyCtxt, TypeFolder, TypeSuperVisitable, Upcast};
 use rustc_middle::ty::{GenericArgs, GenericArgsRef};
 use rustc_span::def_id::DefId;
 use rustc_span::Span;
@@ -41,16 +43,17 @@ use rustc_span::Span;
 use std::fmt::Debug;
 use std::ops::ControlFlow;
 
-pub use self::coherence::{add_placeholder_note, orphan_check, overlapping_impls};
-pub use self::coherence::{IsFirstInputType, OrphanCheckErr, OverlapResult};
+pub use self::coherence::{add_placeholder_note, orphan_check_trait_ref, overlapping_impls};
+pub use self::coherence::{InCrate, IsFirstInputType, UncoveredTyParams};
+pub use self::coherence::{OrphanCheckErr, OrphanCheckMode, OverlapResult};
 pub use self::engine::{ObligationCtxt, TraitEngineExt};
-pub use self::fulfill::{FulfillmentContext, PendingPredicateObligation};
+pub use self::fulfill::{FulfillmentContext, OldSolverError, PendingPredicateObligation};
 pub use self::normalize::NormalizeExt;
 pub use self::object_safety::hir_ty_lowering_object_safety_violations;
 pub use self::object_safety::is_vtable_safe_method;
 pub use self::object_safety::object_safety_violations_for_assoc_item;
 pub use self::object_safety::ObjectSafetyViolation;
-pub use self::project::{normalize_inherent_projection, normalize_projection_type};
+pub use self::project::{normalize_inherent_projection, normalize_projection_ty};
 pub use self::select::{EvaluationCache, SelectionCache, SelectionContext};
 pub use self::select::{EvaluationResult, IntercrateAmbiguityCause, OverflowError};
 pub use self::specialize::specialization_graph::FutureCompatOverlapError;
@@ -63,13 +66,84 @@ pub use self::structural_normalize::StructurallyNormalizeExt;
 pub use self::util::elaborate;
 pub use self::util::{expand_trait_aliases, TraitAliasExpander, TraitAliasExpansionInfo};
 pub use self::util::{get_vtable_index_of_object_method, impl_item_is_final, upcast_choices};
-pub use self::util::{
-    supertrait_def_ids, supertraits, transitive_bounds, transitive_bounds_that_define_assoc_item,
-    SupertraitDefIds,
-};
+pub use self::util::{supertraits, transitive_bounds, transitive_bounds_that_define_assoc_item};
 pub use self::util::{with_replaced_escaping_bound_vars, BoundVarReplacer, PlaceholderReplacer};
 
 pub use rustc_infer::traits::*;
+
+pub struct FulfillmentError<'tcx> {
+    pub obligation: PredicateObligation<'tcx>,
+    pub code: FulfillmentErrorCode<'tcx>,
+    /// Diagnostics only: the 'root' obligation which resulted in
+    /// the failure to process `obligation`. This is the obligation
+    /// that was initially passed to `register_predicate_obligation`
+    pub root_obligation: PredicateObligation<'tcx>,
+}
+
+impl<'tcx> FulfillmentError<'tcx> {
+    pub fn new(
+        obligation: PredicateObligation<'tcx>,
+        code: FulfillmentErrorCode<'tcx>,
+        root_obligation: PredicateObligation<'tcx>,
+    ) -> FulfillmentError<'tcx> {
+        FulfillmentError { obligation, code, root_obligation }
+    }
+
+    pub fn is_true_error(&self) -> bool {
+        match self.code {
+            FulfillmentErrorCode::Select(_)
+            | FulfillmentErrorCode::Project(_)
+            | FulfillmentErrorCode::Subtype(_, _)
+            | FulfillmentErrorCode::ConstEquate(_, _) => true,
+            FulfillmentErrorCode::Cycle(_) | FulfillmentErrorCode::Ambiguity { overflow: _ } => {
+                false
+            }
+        }
+    }
+}
+
+impl<'tcx> Debug for FulfillmentError<'tcx> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FulfillmentError({:?},{:?})", self.obligation, self.code)
+    }
+}
+
+#[derive(Clone)]
+pub enum FulfillmentErrorCode<'tcx> {
+    /// Inherently impossible to fulfill; this trait is implemented if and only
+    /// if it is already implemented.
+    Cycle(Vec<PredicateObligation<'tcx>>),
+    Select(SelectionError<'tcx>),
+    Project(MismatchedProjectionTypes<'tcx>),
+    Subtype(ExpectedFound<Ty<'tcx>>, TypeError<'tcx>), // always comes from a SubtypePredicate
+    ConstEquate(ExpectedFound<ty::Const<'tcx>>, TypeError<'tcx>),
+    Ambiguity {
+        /// Overflow is only `Some(suggest_recursion_limit)` when using the next generation
+        /// trait solver `-Znext-solver`. With the old solver overflow is eagerly handled by
+        /// emitting a fatal error instead.
+        overflow: Option<bool>,
+    },
+}
+
+impl<'tcx> Debug for FulfillmentErrorCode<'tcx> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            FulfillmentErrorCode::Select(ref e) => write!(f, "{e:?}"),
+            FulfillmentErrorCode::Project(ref e) => write!(f, "{e:?}"),
+            FulfillmentErrorCode::Subtype(ref a, ref b) => {
+                write!(f, "CodeSubtypeError({a:?}, {b:?})")
+            }
+            FulfillmentErrorCode::ConstEquate(ref a, ref b) => {
+                write!(f, "CodeConstEquateError({a:?}, {b:?})")
+            }
+            FulfillmentErrorCode::Ambiguity { overflow: None } => write!(f, "Ambiguity"),
+            FulfillmentErrorCode::Ambiguity { overflow: Some(suggest_increasing_limit) } => {
+                write!(f, "Overflow({suggest_increasing_limit})")
+            }
+            FulfillmentErrorCode::Cycle(ref cycle) => write!(f, "Cycle({cycle:?})"),
+        }
+    }
+}
 
 /// Whether to skip the leak check, as part of a future compatibility warning step.
 ///
@@ -140,7 +214,7 @@ pub fn type_known_to_meet_bound_modulo_regions<'tcx>(
 fn pred_known_to_hold_modulo_regions<'tcx>(
     infcx: &InferCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
-    pred: impl ToPredicate<'tcx>,
+    pred: impl Upcast<TyCtxt<'tcx>, ty::Predicate<'tcx>>,
 ) -> bool {
     let obligation = Obligation::new(infcx.tcx, ObligationCause::dummy(), param_env, pred);
 
@@ -183,6 +257,7 @@ fn do_normalize_predicates<'tcx>(
     predicates: Vec<ty::Clause<'tcx>>,
 ) -> Result<Vec<ty::Clause<'tcx>>, ErrorGuaranteed> {
     let span = cause.span;
+
     // FIXME. We should really... do something with these region
     // obligations. But this call just continues the older
     // behavior (i.e., doesn't cause any new bugs), and it would
@@ -284,7 +359,7 @@ pub fn normalize_param_env_or_error<'tcx>(
                     // `ty::Const::normalize` can only work with properly preserved binders.
 
                     if c.has_escaping_bound_vars() {
-                        return ty::Const::new_misc_error(self.0, c.ty());
+                        return ty::Const::new_misc_error(self.0);
                     }
                     // While it is pretty sus to be evaluating things with an empty param env, it
                     // should actually be okay since without `feature(generic_const_exprs)` the only
@@ -407,7 +482,7 @@ pub fn fully_normalize<'tcx, T>(
 where
     T: TypeFoldable<TyCtxt<'tcx>>,
 {
-    let ocx = ObligationCtxt::new(infcx);
+    let ocx = ObligationCtxt::new_with_diagnostics(infcx);
     debug!(?value);
     let normalized_value = ocx.normalize(&cause, param_env, value);
     debug!(?normalized_value);
@@ -455,7 +530,7 @@ fn instantiate_and_check_impossible_predicates<'tcx>(
     // associated items.
     if let Some(trait_def_id) = tcx.trait_of_item(key.0) {
         let trait_ref = ty::TraitRef::from_method(tcx, trait_def_id, key.1);
-        predicates.push(ty::Binder::dummy(trait_ref).to_predicate(tcx));
+        predicates.push(trait_ref.upcast(tcx));
     }
 
     predicates.retain(|predicate| !predicate.has_param());
@@ -548,8 +623,8 @@ pub fn provide(providers: &mut Providers) {
     *providers = Providers {
         specialization_graph_of: specialize::specialization_graph_provider,
         specializes: specialize::specializes,
+        specialization_enabled_in: specialize::specialization_enabled_in,
         instantiate_and_check_impossible_predicates,
-        check_tys_might_be_eq: misc::check_tys_might_be_eq,
         is_impossible_associated_item,
         ..*providers
     };

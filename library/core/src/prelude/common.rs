@@ -14,6 +14,9 @@ pub use crate::ops::{Drop, Fn, FnMut, FnOnce};
 #[stable(feature = "core_prelude", since = "1.4.0")]
 #[doc(no_inline)]
 pub use crate::mem::drop;
+#[stable(feature = "size_of_prelude", since = "1.80.0")]
+#[doc(no_inline)]
+pub use crate::mem::{align_of, align_of_val, size_of, size_of_val};
 
 // Re-exported types and traits
 #[stable(feature = "core_prelude", since = "1.4.0")]
@@ -97,7 +100,6 @@ pub use crate::macros::builtin::cfg_eval;
 )]
 pub use crate::macros::builtin::type_ascribe;
 
-#[cfg(not(bootstrap))]
 #[unstable(
     feature = "deref_patterns",
     issue = "87121",

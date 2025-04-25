@@ -9,7 +9,7 @@ use rustc_hir::MatchSource::TryDesugar;
 use rustc_hir::{
     ArrayLen, BinOpKind, BindingMode, Block, BodyId, Closure, Expr, ExprField, ExprKind, FnRetTy, GenericArg,
     GenericArgs, HirId, HirIdMap, InlineAsmOperand, LetExpr, Lifetime, LifetimeName, Pat, PatField, PatKind, Path,
-    PathSegment, PrimTy, QPath, Stmt, StmtKind, Ty, TyKind, TypeBinding,
+    PathSegment, PrimTy, QPath, Stmt, StmtKind, Ty, TyKind, AssocItemConstraint,
 };
 use rustc_lexer::{tokenize, TokenKind};
 use rustc_lint::LateContext;
@@ -224,7 +224,7 @@ impl HirEqInterExpr<'_, '_, '_> {
         })
     }
 
-    pub fn eq_array_length(&mut self, left: ArrayLen, right: ArrayLen) -> bool {
+    pub fn eq_array_length(&mut self, left: ArrayLen<'_>, right: ArrayLen<'_>) -> bool {
         match (left, right) {
             (ArrayLen::Infer(..), ArrayLen::Infer(..)) => true,
             (ArrayLen::Body(l_ct), ArrayLen::Body(r_ct)) => self.eq_body(l_ct.body, r_ct.body),
@@ -486,7 +486,7 @@ impl HirEqInterExpr<'_, '_, '_> {
     fn eq_path_parameters(&mut self, left: &GenericArgs<'_>, right: &GenericArgs<'_>) -> bool {
         if left.parenthesized == right.parenthesized {
             over(left.args, right.args, |l, r| self.eq_generic_arg(l, r)) // FIXME(flip1995): may not work
-                && over(left.bindings, right.bindings, |l, r| self.eq_type_binding(l, r))
+                && over(left.constraints, right.constraints, |l, r| self.eq_assoc_type_binding(l, r))
         } else {
             false
         }
@@ -518,8 +518,8 @@ impl HirEqInterExpr<'_, '_, '_> {
         }
     }
 
-    fn eq_type_binding(&mut self, left: &TypeBinding<'_>, right: &TypeBinding<'_>) -> bool {
-        left.ident.name == right.ident.name && self.eq_ty(left.ty(), right.ty())
+    fn eq_assoc_type_binding(&mut self, left: &AssocItemConstraint<'_>, right: &AssocItemConstraint<'_>) -> bool {
+        left.ident.name == right.ident.name && self.eq_ty(left.ty().expect("expected assoc type binding"), right.ty().expect("expected assoc type binding"))
     }
 
     fn check_ctxt(&mut self, left: SyntaxContext, right: SyntaxContext) -> bool {
@@ -1082,7 +1082,7 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
                 mut_ty.mutbl.hash(&mut self.s);
             },
             TyKind::BareFn(bfn) => {
-                bfn.unsafety.hash(&mut self.s);
+                bfn.safety.hash(&mut self.s);
                 bfn.abi.hash(&mut self.s);
                 for arg in bfn.decl.inputs {
                     self.hash_ty(arg);
@@ -1116,7 +1116,7 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
         }
     }
 
-    pub fn hash_array_length(&mut self, length: ArrayLen) {
+    pub fn hash_array_length(&mut self, length: ArrayLen<'_>) {
         match length {
             ArrayLen::Infer(..) => {},
             ArrayLen::Body(anon_const) => self.hash_body(anon_const.body),

@@ -2,11 +2,13 @@ use crate::{ImplTraitContext, Resolver};
 use rustc_ast::visit::FnKind;
 use rustc_ast::*;
 use rustc_expand::expand::AstFragment;
+use rustc_hir as hir;
 use rustc_hir::def::{CtorKind, CtorOf, DefKind};
 use rustc_hir::def_id::LocalDefId;
 use rustc_span::hygiene::LocalExpnId;
 use rustc_span::symbol::{kw, sym, Symbol};
 use rustc_span::Span;
+use tracing::debug;
 
 pub(crate) fn collect_definitions(
     resolver: &mut Resolver<'_, '_>,
@@ -127,7 +129,11 @@ impl<'a, 'b, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'b, 'tcx> {
             ItemKind::Union(..) => DefKind::Union,
             ItemKind::ExternCrate(..) => DefKind::ExternCrate,
             ItemKind::TyAlias(..) => DefKind::TyAlias,
-            ItemKind::Static(s) => DefKind::Static { mutability: s.mutability, nested: false },
+            ItemKind::Static(s) => DefKind::Static {
+                safety: hir::Safety::Safe,
+                mutability: s.mutability,
+                nested: false,
+            },
             ItemKind::Const(..) => DefKind::Const,
             ItemKind::Fn(..) | ItemKind::Delegation(..) => DefKind::Fn,
             ItemKind::MacroDef(..) => {
@@ -139,6 +145,7 @@ impl<'a, 'b, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'b, 'tcx> {
             ItemKind::GlobalAsm(..) => DefKind::GlobalAsm,
             ItemKind::Use(..) => return visit::walk_item(self, i),
             ItemKind::MacCall(..) => return self.visit_macro_invoc(i.id),
+            ItemKind::DelegationMac(..) => unreachable!(),
         };
         let def_id = self.create_def(i.id, i.ident.name, def_kind, i.span);
 
@@ -209,8 +216,18 @@ impl<'a, 'b, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'b, 'tcx> {
 
     fn visit_foreign_item(&mut self, fi: &'a ForeignItem) {
         let def_kind = match fi.kind {
-            ForeignItemKind::Static(_, mutability, _) => {
-                DefKind::Static { mutability, nested: false }
+            ForeignItemKind::Static(box StaticForeignItem {
+                ty: _,
+                mutability,
+                expr: _,
+                safety,
+            }) => {
+                let safety = match safety {
+                    ast::Safety::Unsafe(_) | ast::Safety::Default => hir::Safety::Unsafe,
+                    ast::Safety::Safe(_) => hir::Safety::Safe,
+                };
+
+                DefKind::Static { safety, mutability, nested: false }
             }
             ForeignItemKind::Fn(_) => DefKind::Fn,
             ForeignItemKind::TyAlias(_) => DefKind::ForeignTy,
@@ -278,6 +295,7 @@ impl<'a, 'b, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'b, 'tcx> {
             AssocItemKind::Const(..) => DefKind::AssocConst,
             AssocItemKind::Type(..) => DefKind::AssocTy,
             AssocItemKind::MacCall(..) => return self.visit_macro_invoc(i.id),
+            AssocItemKind::DelegationMac(..) => unreachable!(),
         };
 
         let def = self.create_def(i.id, i.ident.name, def_kind, i.span);

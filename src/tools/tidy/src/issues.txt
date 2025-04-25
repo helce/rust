@@ -2122,7 +2122,6 @@ ui/issues/issue-33687.rs
 ui/issues/issue-33770.rs
 ui/issues/issue-3389.rs
 ui/issues/issue-33941.rs
-ui/issues/issue-33992.rs
 ui/issues/issue-34047.rs
 ui/issues/issue-34074.rs
 ui/issues/issue-34209.rs
@@ -2446,7 +2445,6 @@ ui/issues/issue-53300.rs
 ui/issues/issue-53333.rs
 ui/issues/issue-53348.rs
 ui/issues/issue-53419.rs
-ui/issues/issue-53498.rs
 ui/issues/issue-53568.rs
 ui/issues/issue-5358-1.rs
 ui/issues/issue-53728.rs
@@ -2915,7 +2913,6 @@ ui/macros/issue-95267.rs
 ui/macros/issue-95533.rs
 ui/macros/issue-98466-allow.rs
 ui/macros/issue-98466.rs
-ui/macros/issue-98790.rs
 ui/macros/issue-99261.rs
 ui/macros/issue-99265.rs
 ui/macros/issue-99907.rs
@@ -3862,7 +3859,6 @@ ui/statics/issue-91050-1.rs
 ui/statics/issue-91050-2.rs
 ui/std/issue-3563-3.rs
 ui/std/issue-81357-unsound-file-methods.rs
-ui/stdlib-unit-tests/issue-21058.rs
 ui/structs-enums/enum-rec/issue-17431-6.rs
 ui/structs-enums/enum-rec/issue-17431-7.rs
 ui/structs-enums/issue-103869.rs
@@ -3990,8 +3986,6 @@ ui/test-attrs/issue-52557.rs
 ui/test-attrs/issue-53675-a-test-called-panic.rs
 ui/threads-sendsync/issue-24313.rs
 ui/threads-sendsync/issue-29488.rs
-ui/threads-sendsync/issue-43733-2.rs
-ui/threads-sendsync/issue-43733.rs
 ui/threads-sendsync/issue-4446.rs
 ui/threads-sendsync/issue-4448.rs
 ui/threads-sendsync/issue-8827.rs

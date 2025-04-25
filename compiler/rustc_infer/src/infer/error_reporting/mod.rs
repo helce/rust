@@ -58,6 +58,7 @@ use crate::traits::{
     PredicateObligation,
 };
 
+use crate::infer::relate::{self, RelateResult, TypeRelation};
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_errors::{
     codes::*, pluralize, struct_span_code_err, Applicability, Diag, DiagCtxt, DiagStyledString,
@@ -68,10 +69,12 @@ use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::lang_items::LangItem;
+use rustc_macros::extension;
+use rustc_middle::bug;
 use rustc_middle::dep_graph::DepContext;
-use rustc_middle::ty::print::{with_forced_trimmed_paths, PrintError};
-use rustc_middle::ty::relate::{self, RelateResult, TypeRelation};
-use rustc_middle::ty::ToPredicate;
+use rustc_middle::ty::error::TypeErrorToStringExt;
+use rustc_middle::ty::print::{with_forced_trimmed_paths, PrintError, PrintTraitRefExt as _};
+use rustc_middle::ty::Upcast;
 use rustc_middle::ty::{
     self, error::TypeError, IsSuggestable, List, Region, Ty, TyCtxt, TypeFoldable,
     TypeSuperVisitable, TypeVisitable, TypeVisitableExt,
@@ -159,6 +162,7 @@ impl<'tcx> Deref for TypeErrCtxt<'_, 'tcx> {
 pub(super) fn note_and_explain_region<'tcx>(
     tcx: TyCtxt<'tcx>,
     err: &mut Diag<'_>,
+    generic_param_scope: LocalDefId,
     prefix: &str,
     region: ty::Region<'tcx>,
     suffix: &str,
@@ -166,16 +170,17 @@ pub(super) fn note_and_explain_region<'tcx>(
 ) {
     let (description, span) = match *region {
         ty::ReEarlyParam(_) | ty::ReLateParam(_) | ty::RePlaceholder(_) | ty::ReStatic => {
-            msg_span_from_named_region(tcx, region, alt_span)
+            msg_span_from_named_region(tcx, generic_param_scope, region, alt_span)
         }
 
         ty::ReError(_) => return,
 
-        // We shouldn't really be having unification failures with ReVar
-        // and ReBound though.
-        //
-        // FIXME(@lcnr): Figure out whether this is reachable and if so, why.
-        ty::ReVar(_) | ty::ReBound(..) | ty::ReErased => (format!("lifetime `{region}`"), alt_span),
+        // FIXME(#125431): `ReVar` shouldn't reach here.
+        ty::ReVar(_) => (format!("lifetime `{region}`"), alt_span),
+
+        ty::ReBound(..) | ty::ReErased => {
+            bug!("unexpected region for note_and_explain_region: {:?}", region);
+        }
     };
 
     emit_msg_span(err, prefix, description, span, suffix);
@@ -184,23 +189,27 @@ pub(super) fn note_and_explain_region<'tcx>(
 fn explain_free_region<'tcx>(
     tcx: TyCtxt<'tcx>,
     err: &mut Diag<'_>,
+    generic_param_scope: LocalDefId,
     prefix: &str,
     region: ty::Region<'tcx>,
     suffix: &str,
 ) {
-    let (description, span) = msg_span_from_named_region(tcx, region, None);
+    let (description, span) = msg_span_from_named_region(tcx, generic_param_scope, region, None);
 
     label_msg_span(err, prefix, description, span, suffix);
 }
 
 fn msg_span_from_named_region<'tcx>(
     tcx: TyCtxt<'tcx>,
+    generic_param_scope: LocalDefId,
     region: ty::Region<'tcx>,
     alt_span: Option<Span>,
 ) -> (String, Option<Span>) {
     match *region {
-        ty::ReEarlyParam(ref br) => {
-            let scope = region.free_region_binding_scope(tcx).expect_local();
+        ty::ReEarlyParam(br) => {
+            let scope = tcx
+                .parent(tcx.generics_of(generic_param_scope).region_param(br, tcx).def_id)
+                .expect_local();
             let span = if let Some(param) =
                 tcx.hir().get_generics(scope).and_then(|generics| generics.get_named(br.name))
             {
@@ -217,21 +226,21 @@ fn msg_span_from_named_region<'tcx>(
         }
         ty::ReLateParam(ref fr) => {
             if !fr.bound_region.is_named()
-                && let Some((ty, _)) = find_anon_type(tcx, region, &fr.bound_region)
+                && let Some((ty, _)) =
+                    find_anon_type(tcx, generic_param_scope, region, &fr.bound_region)
             {
                 ("the anonymous lifetime defined here".to_string(), Some(ty.span))
             } else {
-                let scope = region.free_region_binding_scope(tcx).expect_local();
                 match fr.bound_region {
                     ty::BoundRegionKind::BrNamed(_, name) => {
                         let span = if let Some(param) = tcx
                             .hir()
-                            .get_generics(scope)
+                            .get_generics(generic_param_scope)
                             .and_then(|generics| generics.get_named(name))
                         {
                             param.span
                         } else {
-                            tcx.def_span(scope)
+                            tcx.def_span(generic_param_scope)
                         };
                         let text = if name == kw::UnderscoreLifetime {
                             "the anonymous lifetime as defined here".to_string()
@@ -242,11 +251,11 @@ fn msg_span_from_named_region<'tcx>(
                     }
                     ty::BrAnon => (
                         "the anonymous lifetime as defined here".to_string(),
-                        Some(tcx.def_span(scope)),
+                        Some(tcx.def_span(generic_param_scope)),
                     ),
                     _ => (
                         format!("the lifetime `{region}` as defined here"),
-                        Some(tcx.def_span(scope)),
+                        Some(tcx.def_span(generic_param_scope)),
                     ),
                 }
             }
@@ -299,6 +308,7 @@ fn label_msg_span(
 #[instrument(level = "trace", skip(tcx))]
 pub fn unexpected_hidden_region_diagnostic<'tcx>(
     tcx: TyCtxt<'tcx>,
+    generic_param_scope: LocalDefId,
     span: Span,
     hidden_ty: Ty<'tcx>,
     hidden_region: ty::Region<'tcx>,
@@ -324,11 +334,12 @@ pub fn unexpected_hidden_region_diagnostic<'tcx>(
             explain_free_region(
                 tcx,
                 &mut err,
+                generic_param_scope,
                 &format!("hidden type `{hidden_ty}` captures "),
                 hidden_region,
                 "",
             );
-            if let Some(reg_info) = tcx.is_suitable_region(hidden_region) {
+            if let Some(reg_info) = tcx.is_suitable_region(generic_param_scope, hidden_region) {
                 let fn_returns = tcx.return_type_impl_or_dyn_traits(reg_info.def_id);
                 nice_region_error::suggest_new_region_bound(
                     tcx,
@@ -346,6 +357,7 @@ pub fn unexpected_hidden_region_diagnostic<'tcx>(
             explain_free_region(
                 tcx,
                 &mut err,
+                generic_param_scope,
                 &format!("hidden type `{}` captures ", hidden_ty),
                 hidden_region,
                 "",
@@ -373,6 +385,7 @@ pub fn unexpected_hidden_region_diagnostic<'tcx>(
             note_and_explain_region(
                 tcx,
                 &mut err,
+                generic_param_scope,
                 &format!("hidden type `{hidden_ty}` captures "),
                 hidden_region,
                 "",
@@ -411,9 +424,9 @@ impl<'tcx> InferCtxt<'tcx> {
                     .kind()
                     .map_bound(|kind| match kind {
                         ty::ClauseKind::Projection(projection_predicate)
-                            if projection_predicate.projection_ty.def_id == item_def_id =>
+                            if projection_predicate.projection_term.def_id == item_def_id =>
                         {
-                            projection_predicate.term.ty()
+                            projection_predicate.term.as_type()
                         }
                         _ => None,
                     })
@@ -447,7 +460,9 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         for error in errors {
             debug!("report_region_errors: error = {:?}", error);
 
-            guar = Some(if let Some(guar) = self.try_report_nice_region_error(&error) {
+            let e = if let Some(guar) =
+                self.try_report_nice_region_error(generic_param_scope, &error)
+            {
                 guar
             } else {
                 match error.clone() {
@@ -460,9 +475,11 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                     // general bit of code that displays the error information
                     RegionResolutionError::ConcreteFailure(origin, sub, sup) => {
                         if sub.is_placeholder() || sup.is_placeholder() {
-                            self.report_placeholder_failure(origin, sub, sup).emit()
+                            self.report_placeholder_failure(generic_param_scope, origin, sub, sup)
+                                .emit()
                         } else {
-                            self.report_concrete_failure(origin, sub, sup).emit()
+                            self.report_concrete_failure(generic_param_scope, origin, sub, sup)
+                                .emit()
                         }
                     }
 
@@ -485,12 +502,29 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                         _,
                     ) => {
                         if sub_r.is_placeholder() {
-                            self.report_placeholder_failure(sub_origin, sub_r, sup_r).emit()
+                            self.report_placeholder_failure(
+                                generic_param_scope,
+                                sub_origin,
+                                sub_r,
+                                sup_r,
+                            )
+                            .emit()
                         } else if sup_r.is_placeholder() {
-                            self.report_placeholder_failure(sup_origin, sub_r, sup_r).emit()
+                            self.report_placeholder_failure(
+                                generic_param_scope,
+                                sup_origin,
+                                sub_r,
+                                sup_r,
+                            )
+                            .emit()
                         } else {
                             self.report_sub_sup_conflict(
-                                var_origin, sub_origin, sub_r, sup_origin, sup_r,
+                                generic_param_scope,
+                                var_origin,
+                                sub_origin,
+                                sub_r,
+                                sup_origin,
+                                sup_r,
                             )
                         }
                     }
@@ -511,19 +545,27 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                         // value.
                         let sub_r = self.tcx.lifetimes.re_erased;
 
-                        self.report_placeholder_failure(sup_origin, sub_r, sup_r).emit()
+                        self.report_placeholder_failure(
+                            generic_param_scope,
+                            sup_origin,
+                            sub_r,
+                            sup_r,
+                        )
+                        .emit()
                     }
 
                     RegionResolutionError::CannotNormalize(clause, origin) => {
                         let clause: ty::Clause<'tcx> =
-                            clause.map_bound(ty::ClauseKind::TypeOutlives).to_predicate(self.tcx);
+                            clause.map_bound(ty::ClauseKind::TypeOutlives).upcast(self.tcx);
                         self.tcx
                             .dcx()
                             .struct_span_err(origin.span(), format!("cannot normalize `{clause}`"))
                             .emit()
                     }
                 }
-            })
+            };
+
+            guar = Some(e)
         }
 
         guar.unwrap()
@@ -884,9 +926,10 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 err.help("...or use `match` instead of `let...else`");
             }
             _ => {
-                if let ObligationCauseCode::BindingObligation(_, span)
-                | ObligationCauseCode::ExprBindingObligation(_, span, ..) =
+                if let ObligationCauseCode::WhereClause(_, span)
+                | ObligationCauseCode::WhereClauseInExpr(_, span, ..) =
                     cause.code().peel_derives()
+                    && !span.is_dummy()
                     && let TypeError::RegionsPlaceholderMismatch = terr
                 {
                     err.span_note(*span, "the lifetime requirement is introduced here");
@@ -1052,8 +1095,8 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
 
         // unsafe extern "C" for<'a> fn(&'a T) -> &'a T
         // ^^^^^^
-        values.0.push(sig1.unsafety.prefix_str(), sig1.unsafety != sig2.unsafety);
-        values.1.push(sig2.unsafety.prefix_str(), sig1.unsafety != sig2.unsafety);
+        values.0.push(sig1.safety.prefix_str(), sig1.safety != sig2.safety);
+        values.1.push(sig2.safety.prefix_str(), sig1.safety != sig2.safety);
 
         // unsafe extern "C" for<'a> fn(&'a T) -> &'a T
         //        ^^^^^^^^^^
@@ -1927,7 +1970,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                                     self.tcx
                                         .signature_unclosure(
                                             args.as_closure().sig(),
-                                            rustc_hir::Unsafety::Normal,
+                                            rustc_hir::Safety::Safe,
                                         )
                                         .to_string(),
                                 ),
@@ -2013,7 +2056,6 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         trace: &TypeTrace<'tcx>,
         terr: TypeError<'tcx>,
     ) -> Vec<TypeErrorAdditionalDiags> {
-        use crate::traits::ObligationCauseCode::{BlockTailExpression, MatchExpressionArm};
         let mut suggestions = Vec::new();
         let span = trace.cause.span();
         let values = self.resolve_vars_if_possible(trace.values);
@@ -2061,10 +2103,15 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 // If a string was expected and the found expression is a character literal,
                 // perhaps the user meant to write `"s"` to specify a string literal.
                 (ty::Ref(_, r, _), ty::Char) if r.is_str() => {
-                    suggestions.push(TypeErrorAdditionalDiags::MeantStrLiteral {
-                        start: span.with_hi(span.lo() + BytePos(1)),
-                        end: span.with_lo(span.hi() - BytePos(1)),
-                    })
+                    if let Ok(code) = self.tcx.sess().source_map().span_to_snippet(span)
+                        && code.starts_with("'")
+                        && code.ends_with("'")
+                    {
+                        suggestions.push(TypeErrorAdditionalDiags::MeantStrLiteral {
+                            start: span.with_hi(span.lo() + BytePos(1)),
+                            end: span.with_lo(span.hi() - BytePos(1)),
+                        });
+                    }
                 }
                 // For code `if Some(..) = expr `, the type mismatch may be expected `bool` but found `()`,
                 // we try to suggest to add the missing `let` for `if let Some(..) = expr`
@@ -2080,8 +2127,11 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             }
         }
         let code = trace.cause.code();
-        if let &(MatchExpressionArm(box MatchExpressionArmCause { source, .. })
-        | BlockTailExpression(.., source)) = code
+        if let &(ObligationCauseCode::MatchExpressionArm(box MatchExpressionArmCause {
+            source,
+            ..
+        })
+        | ObligationCauseCode::BlockTailExpression(.., source)) = code
             && let hir::MatchSource::TryDesugar(_) = source
             && let Some((expected_ty, found_ty, _)) = self.values_str(trace.values)
         {
@@ -2341,7 +2391,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         '_explain: {
             let (description, span) = match sub.kind() {
                 ty::ReEarlyParam(_) | ty::ReLateParam(_) | ty::ReStatic => {
-                    msg_span_from_named_region(self.tcx, sub, Some(span))
+                    msg_span_from_named_region(self.tcx, generic_param_scope, sub, Some(span))
                 }
                 _ => (format!("lifetime `{sub}`"), Some(span)),
             };
@@ -2392,7 +2442,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             let suggestion_scope = {
                 let lifetime_scope = match sub.kind() {
                     ty::ReStatic => hir::def_id::CRATE_DEF_ID,
-                    _ => match self.tcx.is_suitable_region(sub) {
+                    _ => match self.tcx.is_suitable_region(generic_param_scope, sub) {
                         Some(info) => info.def_id,
                         None => generic_param_scope,
                     },
@@ -2404,7 +2454,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             };
 
             let mut suggs = vec![];
-            let lt_name = self.suggest_name_region(sub, &mut suggs);
+            let lt_name = self.suggest_name_region(generic_param_scope, sub, &mut suggs);
 
             if let Some((sp, has_lifetimes, open_paren_sp)) = type_param_sugg_span
                 && suggestion_scope == type_scope
@@ -2449,6 +2499,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
 
     pub fn suggest_name_region(
         &self,
+        generic_param_scope: LocalDefId,
         lifetime: Region<'tcx>,
         add_lt_suggs: &mut Vec<(Span, String)>,
     ) -> String {
@@ -2495,18 +2546,19 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             }
         }
 
-        let (lifetime_def_id, lifetime_scope) = match self.tcx.is_suitable_region(lifetime) {
-            Some(info) if !lifetime.has_name() => {
-                (info.bound_region.get_id().unwrap().expect_local(), info.def_id)
-            }
-            _ => return lifetime.get_name_or_anon().to_string(),
-        };
+        let (lifetime_def_id, lifetime_scope) =
+            match self.tcx.is_suitable_region(generic_param_scope, lifetime) {
+                Some(info) if !lifetime.has_name() => {
+                    (info.bound_region.get_id().unwrap().expect_local(), info.def_id)
+                }
+                _ => return lifetime.get_name_or_anon().to_string(),
+            };
 
         let new_lt = {
             let generics = self.tcx.generics_of(lifetime_scope);
             let mut used_names =
                 iter::successors(Some(generics), |g| g.parent.map(|p| self.tcx.generics_of(p)))
-                    .flat_map(|g| &g.params)
+                    .flat_map(|g| &g.own_params)
                     .filter(|p| matches!(p.kind, ty::GenericParamDefKind::Lifetime))
                     .map(|p| p.name)
                     .collect::<Vec<_>>();
@@ -2551,6 +2603,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
 
     fn report_sub_sup_conflict(
         &self,
+        generic_param_scope: LocalDefId,
         var_origin: RegionVariableOrigin,
         sub_origin: SubregionOrigin<'tcx>,
         sub_region: Region<'tcx>,
@@ -2562,6 +2615,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         note_and_explain_region(
             self.tcx,
             &mut err,
+            generic_param_scope,
             "first, the lifetime cannot outlive ",
             sup_region,
             "...",
@@ -2584,6 +2638,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
             note_and_explain_region(
                 self.tcx,
                 &mut err,
+                generic_param_scope,
                 "...but the lifetime must also be valid for ",
                 sub_region,
                 "...",
@@ -2607,6 +2662,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         note_and_explain_region(
             self.tcx,
             &mut err,
+            generic_param_scope,
             "but, the lifetime must be valid for ",
             sub_region,
             "...",
@@ -2631,7 +2687,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
     /// with the other type. A TyVar inference type is compatible with any type, and an IntVar or
     /// FloatVar inference type are compatible with themselves or their concrete types (Int and
     /// Float types, respectively). When comparing two ADTs, these rules apply recursively.
-    pub fn same_type_modulo_infer<T: relate::Relate<'tcx>>(&self, a: T, b: T) -> bool {
+    pub fn same_type_modulo_infer<T: relate::Relate<TyCtxt<'tcx>>>(&self, a: T, b: T) -> bool {
         let (a, b) = self.resolve_vars_if_possible((a, b));
         SameTypeModuloInfer(self).relate(a, b).is_ok()
     }
@@ -2639,7 +2695,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
 
 struct SameTypeModuloInfer<'a, 'tcx>(&'a InferCtxt<'tcx>);
 
-impl<'tcx> TypeRelation<'tcx> for SameTypeModuloInfer<'_, 'tcx> {
+impl<'tcx> TypeRelation<TyCtxt<'tcx>> for SameTypeModuloInfer<'_, 'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.0.tcx
     }
@@ -2648,10 +2704,10 @@ impl<'tcx> TypeRelation<'tcx> for SameTypeModuloInfer<'_, 'tcx> {
         "SameTypeModuloInfer"
     }
 
-    fn relate_with_variance<T: relate::Relate<'tcx>>(
+    fn relate_with_variance<T: relate::Relate<TyCtxt<'tcx>>>(
         &mut self,
         _variance: ty::Variance,
-        _info: ty::VarianceDiagInfo<'tcx>,
+        _info: ty::VarianceDiagInfo<TyCtxt<'tcx>>,
         a: T,
         b: T,
     ) -> relate::RelateResult<'tcx, T> {
@@ -2699,7 +2755,7 @@ impl<'tcx> TypeRelation<'tcx> for SameTypeModuloInfer<'_, 'tcx> {
         b: ty::Binder<'tcx, T>,
     ) -> relate::RelateResult<'tcx, ty::Binder<'tcx, T>>
     where
-        T: relate::Relate<'tcx>,
+        T: relate::Relate<TyCtxt<'tcx>>,
     {
         Ok(a.rebind(self.relate(a.skip_binder(), b.skip_binder())?))
     }
@@ -2774,19 +2830,17 @@ pub enum FailureCode {
 #[extension(pub trait ObligationCauseExt<'tcx>)]
 impl<'tcx> ObligationCause<'tcx> {
     fn as_failure_code(&self, terr: TypeError<'tcx>) -> FailureCode {
-        use self::FailureCode::*;
-        use crate::traits::ObligationCauseCode::*;
         match self.code() {
-            IfExpressionWithNoElse => Error0317,
-            MainFunctionType => Error0580,
-            CompareImplItemObligation { .. }
-            | MatchExpressionArm(_)
-            | IfExpression { .. }
-            | LetElse
-            | StartFunctionType
-            | LangFunctionType(_)
-            | IntrinsicType
-            | MethodReceiver => Error0308,
+            ObligationCauseCode::IfExpressionWithNoElse => FailureCode::Error0317,
+            ObligationCauseCode::MainFunctionType => FailureCode::Error0580,
+            ObligationCauseCode::CompareImplItem { .. }
+            | ObligationCauseCode::MatchExpressionArm(_)
+            | ObligationCauseCode::IfExpression { .. }
+            | ObligationCauseCode::LetElse
+            | ObligationCauseCode::StartFunctionType
+            | ObligationCauseCode::LangFunctionType(_)
+            | ObligationCauseCode::IntrinsicType
+            | ObligationCauseCode::MethodReceiver => FailureCode::Error0308,
 
             // In the case where we have no more specific thing to
             // say, also take a look at the error code, maybe we can
@@ -2795,10 +2849,10 @@ impl<'tcx> ObligationCause<'tcx> {
                 TypeError::CyclicTy(ty)
                     if ty.is_closure() || ty.is_coroutine() || ty.is_coroutine_closure() =>
                 {
-                    Error0644
+                    FailureCode::Error0644
                 }
-                TypeError::IntrinsicCast => Error0308,
-                _ => Error0308,
+                TypeError::IntrinsicCast => FailureCode::Error0308,
+                _ => FailureCode::Error0308,
             },
         }
     }
@@ -2808,36 +2862,51 @@ impl<'tcx> ObligationCause<'tcx> {
         span: Span,
         subdiags: Vec<TypeErrorAdditionalDiags>,
     ) -> ObligationCauseFailureCode {
-        use crate::traits::ObligationCauseCode::*;
         match self.code() {
-            CompareImplItemObligation { kind: ty::AssocKind::Fn, .. } => {
+            ObligationCauseCode::CompareImplItem { kind: ty::AssocKind::Fn, .. } => {
                 ObligationCauseFailureCode::MethodCompat { span, subdiags }
             }
-            CompareImplItemObligation { kind: ty::AssocKind::Type, .. } => {
+            ObligationCauseCode::CompareImplItem { kind: ty::AssocKind::Type, .. } => {
                 ObligationCauseFailureCode::TypeCompat { span, subdiags }
             }
-            CompareImplItemObligation { kind: ty::AssocKind::Const, .. } => {
+            ObligationCauseCode::CompareImplItem { kind: ty::AssocKind::Const, .. } => {
                 ObligationCauseFailureCode::ConstCompat { span, subdiags }
             }
-            BlockTailExpression(.., hir::MatchSource::TryDesugar(_)) => {
+            ObligationCauseCode::BlockTailExpression(.., hir::MatchSource::TryDesugar(_)) => {
                 ObligationCauseFailureCode::TryCompat { span, subdiags }
             }
-            MatchExpressionArm(box MatchExpressionArmCause { source, .. }) => match source {
+            ObligationCauseCode::MatchExpressionArm(box MatchExpressionArmCause {
+                source, ..
+            }) => match source {
                 hir::MatchSource::TryDesugar(_) => {
                     ObligationCauseFailureCode::TryCompat { span, subdiags }
                 }
                 _ => ObligationCauseFailureCode::MatchCompat { span, subdiags },
             },
-            IfExpression { .. } => ObligationCauseFailureCode::IfElseDifferent { span, subdiags },
-            IfExpressionWithNoElse => ObligationCauseFailureCode::NoElse { span },
-            LetElse => ObligationCauseFailureCode::NoDiverge { span, subdiags },
-            MainFunctionType => ObligationCauseFailureCode::FnMainCorrectType { span },
-            StartFunctionType => ObligationCauseFailureCode::FnStartCorrectType { span, subdiags },
-            &LangFunctionType(lang_item_name) => {
+            ObligationCauseCode::IfExpression { .. } => {
+                ObligationCauseFailureCode::IfElseDifferent { span, subdiags }
+            }
+            ObligationCauseCode::IfExpressionWithNoElse => {
+                ObligationCauseFailureCode::NoElse { span }
+            }
+            ObligationCauseCode::LetElse => {
+                ObligationCauseFailureCode::NoDiverge { span, subdiags }
+            }
+            ObligationCauseCode::MainFunctionType => {
+                ObligationCauseFailureCode::FnMainCorrectType { span }
+            }
+            ObligationCauseCode::StartFunctionType => {
+                ObligationCauseFailureCode::FnStartCorrectType { span, subdiags }
+            }
+            &ObligationCauseCode::LangFunctionType(lang_item_name) => {
                 ObligationCauseFailureCode::FnLangCorrectType { span, subdiags, lang_item_name }
             }
-            IntrinsicType => ObligationCauseFailureCode::IntrinsicCorrectType { span, subdiags },
-            MethodReceiver => ObligationCauseFailureCode::MethodCorrectType { span, subdiags },
+            ObligationCauseCode::IntrinsicType => {
+                ObligationCauseFailureCode::IntrinsicCorrectType { span, subdiags }
+            }
+            ObligationCauseCode::MethodReceiver => {
+                ObligationCauseFailureCode::MethodCorrectType { span, subdiags }
+            }
 
             // In the case where we have no more specific thing to
             // say, also take a look at the error code, maybe we can
@@ -2857,22 +2926,21 @@ impl<'tcx> ObligationCause<'tcx> {
     }
 
     fn as_requirement_str(&self) -> &'static str {
-        use crate::traits::ObligationCauseCode::*;
         match self.code() {
-            CompareImplItemObligation { kind: ty::AssocKind::Fn, .. } => {
+            ObligationCauseCode::CompareImplItem { kind: ty::AssocKind::Fn, .. } => {
                 "method type is compatible with trait"
             }
-            CompareImplItemObligation { kind: ty::AssocKind::Type, .. } => {
+            ObligationCauseCode::CompareImplItem { kind: ty::AssocKind::Type, .. } => {
                 "associated type is compatible with trait"
             }
-            CompareImplItemObligation { kind: ty::AssocKind::Const, .. } => {
+            ObligationCauseCode::CompareImplItem { kind: ty::AssocKind::Const, .. } => {
                 "const is compatible with trait"
             }
-            MainFunctionType => "`main` function has the correct type",
-            StartFunctionType => "`#[start]` function has the correct type",
-            LangFunctionType(_) => "lang item function has the correct type",
-            IntrinsicType => "intrinsic has the correct type",
-            MethodReceiver => "method receiver has the correct type",
+            ObligationCauseCode::MainFunctionType => "`main` function has the correct type",
+            ObligationCauseCode::StartFunctionType => "`#[start]` function has the correct type",
+            ObligationCauseCode::LangFunctionType(_) => "lang item function has the correct type",
+            ObligationCauseCode::IntrinsicType => "intrinsic has the correct type",
+            ObligationCauseCode::MethodReceiver => "method receiver has the correct type",
             _ => "types are compatible",
         }
     }
@@ -2883,16 +2951,17 @@ pub struct ObligationCauseAsDiagArg<'tcx>(pub ObligationCause<'tcx>);
 
 impl IntoDiagArg for ObligationCauseAsDiagArg<'_> {
     fn into_diag_arg(self) -> rustc_errors::DiagArgValue {
-        use crate::traits::ObligationCauseCode::*;
         let kind = match self.0.code() {
-            CompareImplItemObligation { kind: ty::AssocKind::Fn, .. } => "method_compat",
-            CompareImplItemObligation { kind: ty::AssocKind::Type, .. } => "type_compat",
-            CompareImplItemObligation { kind: ty::AssocKind::Const, .. } => "const_compat",
-            MainFunctionType => "fn_main_correct_type",
-            StartFunctionType => "fn_start_correct_type",
-            LangFunctionType(_) => "fn_lang_correct_type",
-            IntrinsicType => "intrinsic_correct_type",
-            MethodReceiver => "method_correct_type",
+            ObligationCauseCode::CompareImplItem { kind: ty::AssocKind::Fn, .. } => "method_compat",
+            ObligationCauseCode::CompareImplItem { kind: ty::AssocKind::Type, .. } => "type_compat",
+            ObligationCauseCode::CompareImplItem { kind: ty::AssocKind::Const, .. } => {
+                "const_compat"
+            }
+            ObligationCauseCode::MainFunctionType => "fn_main_correct_type",
+            ObligationCauseCode::StartFunctionType => "fn_start_correct_type",
+            ObligationCauseCode::LangFunctionType(_) => "fn_lang_correct_type",
+            ObligationCauseCode::IntrinsicType => "intrinsic_correct_type",
+            ObligationCauseCode::MethodReceiver => "method_correct_type",
             _ => "other",
         }
         .into();

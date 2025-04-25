@@ -94,7 +94,7 @@ pub struct TestProps {
     // Extra flags to pass to the compiler
     pub compile_flags: Vec<String>,
     // Extra flags to pass when the compiled code is run (such as --bench)
-    pub run_flags: Option<String>,
+    pub run_flags: Vec<String>,
     // If present, the name of a file that this test should match when
     // pretty-printed
     pub pp_exact: Option<PathBuf>,
@@ -208,6 +208,8 @@ pub struct TestProps {
     pub llvm_cov_flags: Vec<String>,
     /// Extra flags to pass to LLVM's `filecheck` tool, in tests that use it.
     pub filecheck_flags: Vec<String>,
+    /// Don't automatically insert any `--check-cfg` args
+    pub no_auto_check_cfg: bool,
 }
 
 mod directives {
@@ -249,6 +251,7 @@ mod directives {
     pub const COMPARE_OUTPUT_LINES_BY_SUBSET: &'static str = "compare-output-lines-by-subset";
     pub const LLVM_COV_FLAGS: &'static str = "llvm-cov-flags";
     pub const FILECHECK_FLAGS: &'static str = "filecheck-flags";
+    pub const NO_AUTO_CHECK_CFG: &'static str = "no-auto-check-cfg";
     // This isn't a real directive, just one that is probably mistyped often
     pub const INCORRECT_COMPILER_FLAGS: &'static str = "compiler-flags";
 }
@@ -259,7 +262,7 @@ impl TestProps {
             error_patterns: vec![],
             regex_error_patterns: vec![],
             compile_flags: vec![],
-            run_flags: None,
+            run_flags: vec![],
             pp_exact: None,
             aux_builds: vec![],
             aux_bins: vec![],
@@ -304,6 +307,7 @@ impl TestProps {
             remap_src_base: false,
             llvm_cov_flags: vec![],
             filecheck_flags: vec![],
+            no_auto_check_cfg: false,
         }
     }
 
@@ -395,7 +399,9 @@ impl TestProps {
 
                     config.parse_and_update_revisions(ln, &mut self.revisions);
 
-                    config.set_name_value_directive(ln, RUN_FLAGS, &mut self.run_flags, |r| r);
+                    if let Some(flags) = config.parse_name_value_directive(ln, RUN_FLAGS) {
+                        self.run_flags.extend(split_flags(&flags));
+                    }
 
                     if self.pp_exact.is_none() {
                         self.pp_exact = config.parse_pp_exact(ln, testfile);
@@ -567,6 +573,8 @@ impl TestProps {
                     if let Some(flags) = config.parse_name_value_directive(ln, FILECHECK_FLAGS) {
                         self.filecheck_flags.extend(split_flags(&flags));
                     }
+
+                    config.set_name_directive(ln, NO_AUTO_CHECK_CFG, &mut self.no_auto_check_cfg);
                 },
             );
 
@@ -741,6 +749,7 @@ const KNOWN_DIRECTIVE_NAMES: &[&str] = &[
     "ignore-aarch64",
     "ignore-aarch64-unknown-linux-gnu",
     "ignore-android",
+    "ignore-apple",
     "ignore-arm",
     "ignore-avr",
     "ignore-beta",
@@ -793,6 +802,7 @@ const KNOWN_DIRECTIVE_NAMES: &[&str] = &[
     "ignore-none",
     "ignore-nto",
     "ignore-nvptx64",
+    "ignore-nvptx64-nvidia-cuda",
     "ignore-openbsd",
     "ignore-pass",
     "ignore-remote",
@@ -824,7 +834,6 @@ const KNOWN_DIRECTIVE_NAMES: &[&str] = &[
     "ignore-x32",
     "ignore-x86",
     "ignore-x86_64",
-    "ignore-x86_64-apple-darwin",
     "ignore-x86_64-unknown-linux-gnu",
     "incremental",
     "known-bug",
@@ -861,6 +870,7 @@ const KNOWN_DIRECTIVE_NAMES: &[&str] = &[
     "needs-unwind",
     "needs-wasmtime",
     "needs-xray",
+    "no-auto-check-cfg",
     "no-prefer-dynamic",
     "normalize-stderr-32bit",
     "normalize-stderr-64bit",
@@ -870,6 +880,7 @@ const KNOWN_DIRECTIVE_NAMES: &[&str] = &[
     "only-32bit",
     "only-64bit",
     "only-aarch64",
+    "only-apple",
     "only-arm",
     "only-avr",
     "only-beta",
@@ -926,6 +937,8 @@ const KNOWN_DIRECTIVE_NAMES: &[&str] = &[
     "test-mir-pass",
     "unset-exec-env",
     "unset-rustc-env",
+    // Used by the tidy check `unknown_revision`.
+    "unused-revision-names",
     // tidy-alphabetical-end
 ];
 
@@ -1258,6 +1271,8 @@ fn expand_variables(mut value: String, config: &Config) -> String {
     const CWD: &str = "{{cwd}}";
     const SRC_BASE: &str = "{{src-base}}";
     const BUILD_BASE: &str = "{{build-base}}";
+    const SYSROOT_BASE: &str = "{{sysroot-base}}";
+    const TARGET_LINKER: &str = "{{target-linker}}";
 
     if value.contains(CWD) {
         let cwd = env::current_dir().unwrap();
@@ -1270,6 +1285,14 @@ fn expand_variables(mut value: String, config: &Config) -> String {
 
     if value.contains(BUILD_BASE) {
         value = value.replace(BUILD_BASE, &config.build_base.to_string_lossy());
+    }
+
+    if value.contains(SYSROOT_BASE) {
+        value = value.replace(SYSROOT_BASE, &config.sysroot_base.to_string_lossy());
+    }
+
+    if value.contains(TARGET_LINKER) {
+        value = value.replace(TARGET_LINKER, config.target_linker.as_deref().unwrap_or(""));
     }
 
     value
@@ -1427,7 +1450,7 @@ pub fn make_test_description<R: Read>(
             if config.target == "wasm32-unknown-unknown" {
                 if config.parse_name_directive(ln, directives::CHECK_RUN_RESULTS) {
                     decision!(IgnoreDecision::Ignore {
-                        reason: "ignored when checking the run results on WASM".into(),
+                        reason: "ignored on WASM as the run results cannot be checked there".into(),
                     });
                 }
             }
@@ -1568,8 +1591,11 @@ fn ignore_llvm(config: &Config, line: &str) -> IgnoreDecision {
             .split_whitespace()
             .find(|needed_component| !components.contains(needed_component))
         {
-            if env::var_os("COMPILETEST_NEEDS_ALL_LLVM_COMPONENTS").is_some() {
-                panic!("missing LLVM component: {}", missing_component);
+            if env::var_os("COMPILETEST_REQUIRE_ALL_LLVM_COMPONENTS").is_some() {
+                panic!(
+                    "missing LLVM component {}, and COMPILETEST_REQUIRE_ALL_LLVM_COMPONENTS is set",
+                    missing_component
+                );
             }
             return IgnoreDecision::Ignore {
                 reason: format!("ignored when the {missing_component} LLVM component is missing"),

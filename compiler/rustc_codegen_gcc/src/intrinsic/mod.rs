@@ -670,11 +670,7 @@ impl<'a, 'gcc, 'tcx> Builder<'a, 'gcc, 'tcx> {
                 let step3 = self.or(left, right);
 
                 // Fourth step.
-                if width == 8 {
-                    step3
-                } else {
-                    self.gcc_bswap(step3, width)
-                }
+                if width == 8 { step3 } else { self.gcc_bswap(step3, width) }
             }
             128 => {
                 // TODO(antoyo): find a more efficient implementation?
@@ -1223,9 +1219,9 @@ fn get_rust_try_fn<'a, 'gcc, 'tcx>(
         tcx,
         ty::Binder::dummy(tcx.mk_fn_sig(
             iter::once(i8p),
-            Ty::new_unit(tcx),
+            tcx.types.unit,
             false,
-            rustc_hir::Unsafety::Unsafe,
+            rustc_hir::Safety::Unsafe,
             Abi::Rust,
         )),
     );
@@ -1234,9 +1230,9 @@ fn get_rust_try_fn<'a, 'gcc, 'tcx>(
         tcx,
         ty::Binder::dummy(tcx.mk_fn_sig(
             [i8p, i8p].iter().cloned(),
-            Ty::new_unit(tcx),
+            tcx.types.unit,
             false,
-            rustc_hir::Unsafety::Unsafe,
+            rustc_hir::Safety::Unsafe,
             Abi::Rust,
         )),
     );
@@ -1245,7 +1241,7 @@ fn get_rust_try_fn<'a, 'gcc, 'tcx>(
         [try_fn_ty, i8p, catch_fn_ty],
         tcx.types.i32,
         false,
-        rustc_hir::Unsafety::Unsafe,
+        rustc_hir::Safety::Unsafe,
         Abi::Rust,
     ));
     let rust_try = gen_fn(cx, "__rust_try", rust_fn_sig, codegen);

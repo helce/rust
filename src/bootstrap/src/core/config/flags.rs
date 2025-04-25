@@ -284,8 +284,8 @@ pub enum Subcommand {
         name = "fmt",
         long_about = "\n
     Arguments:
-        This subcommand optionally accepts a `--check` flag which succeeds if formatting is correct and
-        fails if it is not. For example:
+        This subcommand optionally accepts a `--check` flag which succeeds if
+        formatting is correct and fails if it is not. For example:
             ./x.py fmt
             ./x.py fmt --check"
     )]
@@ -294,6 +294,10 @@ pub enum Subcommand {
         /// check formatting instead of applying
         #[arg(long)]
         check: bool,
+
+        /// apply to all appropriate files, not just those that have been modified
+        #[arg(long)]
+        all: bool,
     },
     #[command(aliases = ["d"], long_about = "\n
     Arguments:
@@ -420,7 +424,7 @@ pub enum Subcommand {
     Arguments:
         This subcommand accepts a number of paths to tools to build and run. For
         example:
-            ./x.py run src/tools/expand-yaml-anchors
+            ./x.py run src/tools/bump-stage0
         At least a tool needs to be called.")]
     /// Run tools contained in this repository
     Run {

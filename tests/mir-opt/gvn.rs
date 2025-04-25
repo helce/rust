@@ -6,9 +6,11 @@
 #![feature(rustc_attrs)]
 #![feature(custom_mir)]
 #![feature(core_intrinsics)]
+#![feature(freeze)]
 #![allow(unconditional_panic)]
 
 use std::intrinsics::mir::*;
+use std::marker::Freeze;
 use std::mem::transmute;
 
 struct S<T>(T);
@@ -537,7 +539,7 @@ fn slices() {
 #[custom_mir(dialect = "analysis")]
 fn duplicate_slice() -> (bool, bool) {
     // CHECK-LABEL: fn duplicate_slice(
-    mir!(
+    mir! {
         let au: u128;
         let bu: u128;
         let cu: u128;
@@ -583,7 +585,7 @@ fn duplicate_slice() -> (bool, bool) {
             RET = (direct, indirect);
             Return()
         }
-    )
+    }
 }
 
 fn repeat() {
@@ -621,11 +623,13 @@ fn fn_pointers() {
 fn indirect_static() {
     static A: Option<u8> = None;
 
-    mir!({
-        let ptr = Static(A);
-        let out = Field::<u8>(Variant(*ptr, 1), 0);
-        Return()
-    })
+    mir! {
+        {
+            let ptr = Static(A);
+            let out = Field::<u8>(Variant(*ptr, 1), 0);
+            Return()
+        }
+    }
 }
 
 /// Verify that having constant index `u64::MAX` does not yield to an overflow in rustc.
@@ -720,6 +724,65 @@ fn wide_ptr_integer() {
     opaque(a >= b);
 }
 
+#[custom_mir(dialect = "analysis", phase = "post-cleanup")]
+fn borrowed<T: Copy + Freeze>(x: T) {
+    // CHECK-LABEL: fn borrowed(
+    // CHECK: bb0: {
+    // CHECK-NEXT: _2 = _1;
+    // CHECK-NEXT: _3 = &_1;
+    // CHECK-NEXT: _0 = opaque::<&T>(_3)
+    // CHECK: bb1: {
+    // CHECK-NEXT: _0 = opaque::<T>(_1)
+    // CHECK: bb2: {
+    // CHECK-NEXT: _0 = opaque::<T>(_1)
+    mir! {
+        {
+            let a = x;
+            let r1 = &x;
+            Call(RET = opaque(r1), ReturnTo(next), UnwindContinue())
+        }
+        next = {
+            Call(RET = opaque(a), ReturnTo(deref), UnwindContinue())
+        }
+        deref = {
+            Call(RET = opaque(*r1), ReturnTo(ret), UnwindContinue())
+        }
+        ret = {
+            Return()
+        }
+    }
+}
+
+/// Generic type `T` is not known to be `Freeze`, so shared borrows may be mutable.
+#[custom_mir(dialect = "analysis", phase = "post-cleanup")]
+fn non_freeze<T: Copy>(x: T) {
+    // CHECK-LABEL: fn non_freeze(
+    // CHECK: bb0: {
+    // CHECK-NEXT: _2 = _1;
+    // CHECK-NEXT: _3 = &_1;
+    // CHECK-NEXT: _0 = opaque::<&T>(_3)
+    // CHECK: bb1: {
+    // CHECK-NEXT: _0 = opaque::<T>(_2)
+    // CHECK: bb2: {
+    // CHECK-NEXT: _0 = opaque::<T>((*_3))
+    mir! {
+        {
+            let a = x;
+            let r1 = &x;
+            Call(RET = opaque(r1), ReturnTo(next), UnwindContinue())
+        }
+        next = {
+            Call(RET = opaque(a), ReturnTo(deref), UnwindContinue())
+        }
+        deref = {
+            Call(RET = opaque(*r1), ReturnTo(ret), UnwindContinue())
+        }
+        ret = {
+            Return()
+        }
+    }
+}
+
 fn main() {
     subexpression_elimination(2, 4, 5);
     wrap_unwrap(5);
@@ -742,6 +805,8 @@ fn main() {
     constant_index_overflow(&[5, 3]);
     wide_ptr_provenance();
     wide_ptr_integer();
+    borrowed(5);
+    non_freeze(5);
 }
 
 #[inline(never)]
@@ -773,3 +838,5 @@ fn identity<T>(x: T) -> T {
 // EMIT_MIR gvn.wide_ptr_provenance.GVN.diff
 // EMIT_MIR gvn.wide_ptr_same_provenance.GVN.diff
 // EMIT_MIR gvn.wide_ptr_integer.GVN.diff
+// EMIT_MIR gvn.borrowed.GVN.diff
+// EMIT_MIR gvn.non_freeze.GVN.diff

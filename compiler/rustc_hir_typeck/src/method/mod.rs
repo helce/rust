@@ -3,11 +3,10 @@
 //! [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/method-lookup.html
 
 mod confirm;
-mod prelude2021;
+mod prelude_edition_lints;
 pub mod probe;
 mod suggest;
 
-pub use self::suggest::SelfSource;
 pub use self::MethodError::*;
 
 use crate::FnCtxt;
@@ -20,6 +19,7 @@ use rustc_middle::query::Providers;
 use rustc_middle::traits::ObligationCause;
 use rustc_middle::ty::{self, GenericParamDefKind, Ty, TypeVisitableExt};
 use rustc_middle::ty::{GenericArgs, GenericArgsRef};
+use rustc_middle::{bug, span_bug};
 use rustc_span::symbol::Ident;
 use rustc_span::Span;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
@@ -185,7 +185,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let pick =
             self.lookup_probe(segment.ident, self_ty, call_expr, ProbeScope::TraitsInScope)?;
 
-        self.lint_dot_call_from_2018(self_ty, segment, span, call_expr, self_expr, &pick, args);
+        self.lint_edition_dependent_dot_call(
+            self_ty, segment, span, call_expr, self_expr, &pick, args,
+        );
 
         for &import_id in &pick.import_ids {
             debug!("used_trait_import: {:?}", import_id);
@@ -315,7 +317,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         trait_def_id: DefId,
         self_ty: Ty<'tcx>,
         opt_input_types: Option<&[Ty<'tcx>]>,
-    ) -> (traits::PredicateObligation<'tcx>, &'tcx ty::List<ty::GenericArg<'tcx>>) {
+    ) -> (traits::PredicateObligation<'tcx>, ty::GenericArgsRef<'tcx>) {
         // Construct a trait-reference `self_ty : Trait<input_tys>`
         let args = GenericArgs::for_item(self.tcx, trait_def_id, |param, _| {
             match param.kind {
@@ -365,7 +367,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         m_name: Ident,
         trait_def_id: DefId,
         obligation: traits::PredicateObligation<'tcx>,
-        args: &'tcx ty::List<ty::GenericArg<'tcx>>,
+        args: ty::GenericArgsRef<'tcx>,
     ) -> Option<InferOk<'tcx, MethodCallee<'tcx>>> {
         debug!(?obligation);
 

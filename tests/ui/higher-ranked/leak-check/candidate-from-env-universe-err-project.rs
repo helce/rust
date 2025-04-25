@@ -1,8 +1,8 @@
 //@ revisions: next current
 //@[next] compile-flags: -Znext-solver
 
-// cc #119820 the previous behavior here was inconsistent as we discarded
-// the where-bound candidate for trait goals due to the leak check, but did
+// cc #119820 the behavior is inconsistent as we discard the where-bound
+// candidate for trait goals due to the leak check, but did
 // not do so for projection candidates and during normalization.
 //
 // This results in an inconsistency between `Trait` and `Projection` goals as
@@ -47,7 +47,7 @@ fn function3<T: Trait<'static, Assoc = usize>>() {
     // Trying to normalize the type `for<'a> fn(<T as Trait<'a>>::Assoc)`
     // only gets to `<T as Trait<'a>>::Assoc` once `'a` has been already
     // instantiated, causing us to prefer the where-bound over the impl
-    // resulting in a placeholder error. Even if were were to also use the
+    // resulting in a placeholder error. Even if we were to also use the
     // leak check during candidate selection for normalization, this
     // case would still not compile.
     let _higher_ranked_norm: for<'a> fn(<T as Trait<'a>>::Assoc) = |_| ();

@@ -2,15 +2,16 @@ use std::collections::BTreeMap;
 
 use super::NormalizeExt;
 use super::{ObligationCause, PredicateObligation, SelectionContext};
-use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
+use rustc_data_structures::fx::FxIndexMap;
 use rustc_errors::Diag;
 use rustc_hir::def_id::DefId;
 use rustc_infer::infer::{InferCtxt, InferOk};
+use rustc_middle::bug;
 use rustc_middle::ty::GenericArgsRef;
-use rustc_middle::ty::{self, ImplSubject, ToPredicate, Ty, TyCtxt, TypeVisitableExt};
+use rustc_middle::ty::{self, ImplSubject, Ty, TyCtxt, TypeVisitableExt, Upcast};
 use rustc_middle::ty::{TypeFoldable, TypeFolder, TypeSuperFoldable};
 use rustc_span::Span;
-use smallvec::SmallVec;
+use smallvec::{smallvec, SmallVec};
 
 pub use rustc_infer::traits::util::*;
 
@@ -104,7 +105,7 @@ impl<'tcx> TraitAliasExpander<'tcx> {
     fn expand(&mut self, item: &TraitAliasExpansionInfo<'tcx>) -> bool {
         let tcx = self.tcx;
         let trait_ref = item.trait_ref();
-        let pred = trait_ref.to_predicate(tcx);
+        let pred = trait_ref.upcast(tcx);
 
         debug!("expand_trait_aliases: trait_ref={:?}", trait_ref);
 
@@ -121,7 +122,7 @@ impl<'tcx> TraitAliasExpander<'tcx> {
             .iter()
             .rev()
             .skip(1)
-            .any(|&(tr, _)| anonymize_predicate(tcx, tr.to_predicate(tcx)) == anon_pred)
+            .any(|&(tr, _)| anonymize_predicate(tcx, tr.upcast(tcx)) == anon_pred)
         {
             return false;
         }
@@ -157,43 +158,6 @@ impl<'tcx> Iterator for TraitAliasExpander<'tcx> {
             }
         }
         None
-    }
-}
-
-///////////////////////////////////////////////////////////////////////////
-// Iterator over def-IDs of supertraits
-///////////////////////////////////////////////////////////////////////////
-
-pub struct SupertraitDefIds<'tcx> {
-    tcx: TyCtxt<'tcx>,
-    stack: Vec<DefId>,
-    visited: FxHashSet<DefId>,
-}
-
-pub fn supertrait_def_ids(tcx: TyCtxt<'_>, trait_def_id: DefId) -> SupertraitDefIds<'_> {
-    SupertraitDefIds {
-        tcx,
-        stack: vec![trait_def_id],
-        visited: Some(trait_def_id).into_iter().collect(),
-    }
-}
-
-impl Iterator for SupertraitDefIds<'_> {
-    type Item = DefId;
-
-    fn next(&mut self) -> Option<DefId> {
-        let def_id = self.stack.pop()?;
-        let predicates = self.tcx.super_predicates_of(def_id);
-        let visited = &mut self.visited;
-        self.stack.extend(
-            predicates
-                .predicates
-                .iter()
-                .filter_map(|(pred, _)| pred.as_trait_clause())
-                .map(|trait_ref| trait_ref.def_id())
-                .filter(|&super_def_id| visited.insert(super_def_id)),
-        );
-        Some(def_id)
     }
 }
 
@@ -294,7 +258,7 @@ pub fn coroutine_trait_ref_and_outputs<'tcx>(
     tcx: TyCtxt<'tcx>,
     fn_trait_def_id: DefId,
     self_ty: Ty<'tcx>,
-    sig: ty::GenSig<'tcx>,
+    sig: ty::GenSig<TyCtxt<'tcx>>,
 ) -> (ty::TraitRef<'tcx>, Ty<'tcx>, Ty<'tcx>) {
     assert!(!self_ty.has_escaping_bound_vars());
     let trait_ref = ty::TraitRef::new(tcx, fn_trait_def_id, [self_ty, sig.resume_ty]);
@@ -305,7 +269,7 @@ pub fn future_trait_ref_and_outputs<'tcx>(
     tcx: TyCtxt<'tcx>,
     fn_trait_def_id: DefId,
     self_ty: Ty<'tcx>,
-    sig: ty::GenSig<'tcx>,
+    sig: ty::GenSig<TyCtxt<'tcx>>,
 ) -> (ty::TraitRef<'tcx>, Ty<'tcx>) {
     assert!(!self_ty.has_escaping_bound_vars());
     let trait_ref = ty::TraitRef::new(tcx, fn_trait_def_id, [self_ty]);
@@ -316,7 +280,7 @@ pub fn iterator_trait_ref_and_outputs<'tcx>(
     tcx: TyCtxt<'tcx>,
     iterator_def_id: DefId,
     self_ty: Ty<'tcx>,
-    sig: ty::GenSig<'tcx>,
+    sig: ty::GenSig<TyCtxt<'tcx>>,
 ) -> (ty::TraitRef<'tcx>, Ty<'tcx>) {
     assert!(!self_ty.has_escaping_bound_vars());
     let trait_ref = ty::TraitRef::new(tcx, iterator_def_id, [self_ty]);
@@ -327,7 +291,7 @@ pub fn async_iterator_trait_ref_and_outputs<'tcx>(
     tcx: TyCtxt<'tcx>,
     async_iterator_def_id: DefId,
     self_ty: Ty<'tcx>,
-    sig: ty::GenSig<'tcx>,
+    sig: ty::GenSig<TyCtxt<'tcx>>,
 ) -> (ty::TraitRef<'tcx>, Ty<'tcx>) {
     assert!(!self_ty.has_escaping_bound_vars());
     let trait_ref = ty::TraitRef::new(tcx, async_iterator_def_id, [self_ty]);
@@ -519,7 +483,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for BoundVarReplacer<'_, 'tcx> {
                 let universe = self.universe_for(debruijn);
                 let p = ty::PlaceholderConst { universe, bound: bound_const };
                 self.mapped_consts.insert(p, bound_const);
-                ty::Const::new_placeholder(self.infcx.tcx, p, ct.ty())
+                ty::Const::new_placeholder(self.infcx.tcx, p)
             }
             _ => ct.super_fold_with(self),
         }
@@ -662,7 +626,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for PlaceholderReplacer<'_, 'tcx> {
                     let db = ty::DebruijnIndex::from_usize(
                         self.universe_indices.len() - index + self.current_index.as_usize() - 1,
                     );
-                    ty::Const::new_bound(self.infcx.tcx, db, *replace_var, ct.ty())
+                    ty::Const::new_bound(self.infcx.tcx, db, *replace_var)
                 }
                 None => {
                     if ct.has_infer() {

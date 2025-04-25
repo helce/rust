@@ -100,7 +100,7 @@ pub(crate) fn codegen_const_value<'tcx>(
     assert!(layout.is_sized(), "unsized const value");
 
     if layout.is_zst() {
-        return CValue::by_ref(crate::Pointer::dangling(layout.align.pref), layout);
+        return CValue::zst(layout);
     }
 
     match const_val {
@@ -258,7 +258,7 @@ fn data_id_for_static(
 ) -> DataId {
     let attrs = tcx.codegen_fn_attrs(def_id);
 
-    let instance = Instance::mono(tcx, def_id).polymorphize(tcx);
+    let instance = Instance::mono(tcx, def_id);
     let symbol_name = tcx.symbol_name(instance).name;
 
     if let Some(import_linkage) = attrs.import_linkage {

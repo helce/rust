@@ -3,11 +3,14 @@ use super::error_reporting::OverflowCause;
 use super::error_reporting::TypeErrCtxtExt;
 use super::SelectionContext;
 use super::{project, with_replaced_escaping_bound_vars, BoundVarReplacer, PlaceholderReplacer};
+use crate::solve::NextSolverError;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_infer::infer::at::At;
 use rustc_infer::infer::InferOk;
+use rustc_infer::traits::FromSolverError;
 use rustc_infer::traits::PredicateObligation;
-use rustc_infer::traits::{FulfillmentError, Normalized, Obligation, TraitEngine};
+use rustc_infer::traits::{Normalized, Obligation, TraitEngine};
+use rustc_macros::extension;
 use rustc_middle::traits::{ObligationCause, ObligationCauseCode, Reveal};
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeFolder};
 use rustc_middle::ty::{TypeFoldable, TypeSuperFoldable, TypeVisitable, TypeVisitableExt};
@@ -43,11 +46,15 @@ impl<'tcx> At<'_, 'tcx> {
     /// existing fulfillment context in the old solver. Once we also eagerly prove goals with
     /// the old solver or have removed the old solver, remove `traits::fully_normalize` and
     /// rename this function to `At::fully_normalize`.
-    fn deeply_normalize<T: TypeFoldable<TyCtxt<'tcx>>>(
+    fn deeply_normalize<T, E>(
         self,
         value: T,
-        fulfill_cx: &mut dyn TraitEngine<'tcx>,
-    ) -> Result<T, Vec<FulfillmentError<'tcx>>> {
+        fulfill_cx: &mut dyn TraitEngine<'tcx, E>,
+    ) -> Result<T, Vec<E>>
+    where
+        T: TypeFoldable<TyCtxt<'tcx>>,
+        E: FromSolverError<'tcx, NextSolverError<'tcx>>,
+    {
         if self.infcx.next_trait_solver() {
             crate::solve::deeply_normalize(self, value)
         } else {
@@ -212,7 +219,7 @@ impl<'a, 'b, 'tcx> TypeFolder<TyCtxt<'tcx>> for AssocTypeNormalizer<'a, 'b, 'tcx
                         let recursion_limit = self.interner().recursion_limit();
                         if !recursion_limit.value_within_limit(self.depth) {
                             self.selcx.infcx.err_ctxt().report_overflow_error(
-                                OverflowCause::DeeplyNormalize(data),
+                                OverflowCause::DeeplyNormalize(data.into()),
                                 self.cause.span,
                                 true,
                                 |_| {},
@@ -237,7 +244,7 @@ impl<'a, 'b, 'tcx> TypeFolder<TyCtxt<'tcx>> for AssocTypeNormalizer<'a, 'b, 'tcx
                 // register an obligation to *later* project, since we know
                 // there won't be bound vars there.
                 let data = data.fold_with(self);
-                let normalized_ty = project::normalize_projection_type(
+                let normalized_ty = project::normalize_projection_ty(
                     self.selcx,
                     self.param_env,
                     data,
@@ -252,7 +259,7 @@ impl<'a, 'b, 'tcx> TypeFolder<TyCtxt<'tcx>> for AssocTypeNormalizer<'a, 'b, 'tcx
                     obligations.len = ?self.obligations.len(),
                     "AssocTypeNormalizer: normalized type"
                 );
-                normalized_ty.ty().unwrap()
+                normalized_ty.expect_type()
             }
 
             ty::Projection => {
@@ -272,17 +279,17 @@ impl<'a, 'b, 'tcx> TypeFolder<TyCtxt<'tcx>> for AssocTypeNormalizer<'a, 'b, 'tcx
                 let (data, mapped_regions, mapped_types, mapped_consts) =
                     BoundVarReplacer::replace_bound_vars(infcx, &mut self.universes, data);
                 let data = data.fold_with(self);
-                let normalized_ty = project::opt_normalize_projection_type(
+                let normalized_ty = project::opt_normalize_projection_term(
                     self.selcx,
                     self.param_env,
-                    data,
+                    data.into(),
                     self.cause.clone(),
                     self.depth,
                     self.obligations,
                 )
                 .ok()
                 .flatten()
-                .map(|term| term.ty().unwrap())
+                .map(|term| term.expect_type())
                 .map(|normalized_ty| {
                     PlaceholderReplacer::replace_placeholders(
                         infcx,
@@ -308,7 +315,7 @@ impl<'a, 'b, 'tcx> TypeFolder<TyCtxt<'tcx>> for AssocTypeNormalizer<'a, 'b, 'tcx
                 let recursion_limit = self.interner().recursion_limit();
                 if !recursion_limit.value_within_limit(self.depth) {
                     self.selcx.infcx.err_ctxt().report_overflow_error(
-                        OverflowCause::DeeplyNormalize(data),
+                        OverflowCause::DeeplyNormalize(data.into()),
                         self.cause.span,
                         false,
                         |diag| {

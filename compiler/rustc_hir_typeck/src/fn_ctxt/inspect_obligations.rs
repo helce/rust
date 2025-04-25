@@ -1,9 +1,8 @@
 //! A utility module to inspect currently ambiguous obligations in the current context.
-use crate::rustc_middle::ty::TypeVisitableExt;
 use crate::FnCtxt;
-use rustc_infer::traits::solve::Goal;
 use rustc_infer::traits::{self, ObligationCause};
-use rustc_middle::ty::{self, Ty};
+use rustc_middle::traits::solve::Goal;
+use rustc_middle::ty::{self, Ty, TypeVisitableExt};
 use rustc_span::Span;
 use rustc_trait_selection::solve::inspect::ProofTreeInferCtxtExt;
 use rustc_trait_selection::solve::inspect::{InspectConfig, InspectGoal, ProofTreeVisitor};
@@ -39,7 +38,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 self.type_matches_expected_vid(expected_vid, data.self_ty())
             }
             ty::PredicateKind::Clause(ty::ClauseKind::Projection(data)) => {
-                self.type_matches_expected_vid(expected_vid, data.projection_ty.self_ty())
+                self.type_matches_expected_vid(expected_vid, data.projection_term.self_ty())
             }
             ty::PredicateKind::Clause(ty::ClauseKind::ConstArgHasType(..))
             | ty::PredicateKind::Subtype(..)

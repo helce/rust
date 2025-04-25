@@ -15,6 +15,7 @@ use rustc_codegen_ssa::errors as ssa_errors;
 use rustc_codegen_ssa::{CodegenResults, CompiledModule, CrateInfo, ModuleKind};
 use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_data_structures::sync::{par_map, IntoDynSyncSend};
 use rustc_metadata::fs::copy_to_stdout;
 use rustc_metadata::EncodedMetadata;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
@@ -199,7 +200,7 @@ fn produce_final_output_artifacts(
     // to get rid of it.
     for output_type in crate_output.outputs.keys() {
         match *output_type {
-            OutputType::Bitcode => {
+            OutputType::Bitcode | OutputType::ThinLinkBitcode => {
                 // Cranelift doesn't have bitcode
                 // user_wants_bitcode = true;
                 // // Copy to .bc, but always keep the .0.bc. There is a later
@@ -283,6 +284,29 @@ fn produce_final_output_artifacts(
                 if let Some(ref path) = allocator_module.bytecode {
                     ensure_removed(sess.dcx(), path);
                 }
+            }
+        }
+    }
+
+    if sess.opts.json_artifact_notifications {
+        if codegen_results.modules.len() == 1 {
+            codegen_results.modules[0].for_each_output(|_path, ty| {
+                if sess.opts.output_types.contains_key(&ty) {
+                    let descr = ty.shorthand();
+                    // for single cgu file is renamed to drop cgu specific suffix
+                    // so we regenerate it the same way
+                    let path = crate_output.path(ty);
+                    sess.dcx().emit_artifact_notification(path.as_path(), descr);
+                }
+            });
+        } else {
+            for module in &codegen_results.modules {
+                module.for_each_output(|path, ty| {
+                    if sess.opts.output_types.contains_key(&ty) {
+                        let descr = ty.shorthand();
+                        sess.dcx().emit_artifact_notification(&path, descr);
+                    }
+                });
             }
         }
     }
@@ -481,15 +505,16 @@ fn module_codegen(
             for (mono_item, _) in mono_items {
                 match mono_item {
                     MonoItem::Fn(inst) => {
-                        let codegened_function = crate::base::codegen_fn(
+                        if let Some(codegened_function) = crate::base::codegen_fn(
                             tcx,
                             &mut cx,
                             &mut type_dbg,
                             Function::new(),
                             &mut module,
                             inst,
-                        );
-                        codegened_functions.push(codegened_function);
+                        ) {
+                            codegened_functions.push(codegened_function);
+                        }
                     }
                     MonoItem::Static(def_id) => {
                         let data_id = crate::constant::codegen_static(tcx, &mut module, def_id);
@@ -604,39 +629,39 @@ pub(crate) fn run_aot(
 
     let global_asm_config = Arc::new(crate::global_asm::GlobalAsmConfig::new(tcx));
 
-    let mut concurrency_limiter = ConcurrencyLimiter::new(tcx.sess, cgus.len());
+    let (todo_cgus, done_cgus) =
+        cgus.into_iter().enumerate().partition::<Vec<_>, _>(|&(i, _)| match cgu_reuse[i] {
+            _ if backend_config.disable_incr_cache => true,
+            CguReuse::No => true,
+            CguReuse::PreLto | CguReuse::PostLto => false,
+        });
+
+    let concurrency_limiter = IntoDynSyncSend(ConcurrencyLimiter::new(tcx.sess, todo_cgus.len()));
 
     let modules = tcx.sess.time("codegen mono items", || {
-        cgus.iter()
-            .enumerate()
-            .map(|(i, cgu)| {
-                let cgu_reuse =
-                    if backend_config.disable_incr_cache { CguReuse::No } else { cgu_reuse[i] };
-                match cgu_reuse {
-                    CguReuse::No => {
-                        let dep_node = cgu.codegen_dep_node(tcx);
-                        tcx.dep_graph
-                            .with_task(
-                                dep_node,
-                                tcx,
-                                (
-                                    backend_config.clone(),
-                                    global_asm_config.clone(),
-                                    cgu.name(),
-                                    concurrency_limiter.acquire(tcx.dcx()),
-                                ),
-                                module_codegen,
-                                Some(rustc_middle::dep_graph::hash_result),
-                            )
-                            .0
-                    }
-                    CguReuse::PreLto | CguReuse::PostLto => {
-                        concurrency_limiter.job_already_done();
-                        OngoingModuleCodegen::Sync(reuse_workproduct_for_cgu(tcx, cgu))
-                    }
-                }
-            })
-            .collect::<Vec<_>>()
+        let mut modules: Vec<_> = par_map(todo_cgus, |(_, cgu)| {
+            let dep_node = cgu.codegen_dep_node(tcx);
+            tcx.dep_graph
+                .with_task(
+                    dep_node,
+                    tcx,
+                    (
+                        backend_config.clone(),
+                        global_asm_config.clone(),
+                        cgu.name(),
+                        concurrency_limiter.acquire(tcx.dcx()),
+                    ),
+                    module_codegen,
+                    Some(rustc_middle::dep_graph::hash_result),
+                )
+                .0
+        });
+        modules.extend(
+            done_cgus
+                .into_iter()
+                .map(|(_, cgu)| OngoingModuleCodegen::Sync(reuse_workproduct_for_cgu(tcx, cgu))),
+        );
+        modules
     });
 
     let mut allocator_module = make_module(tcx.sess, &backend_config, "allocator_shim".to_string());
@@ -705,6 +730,6 @@ pub(crate) fn run_aot(
         metadata_module,
         metadata,
         crate_info: CrateInfo::new(tcx, target_cpu),
-        concurrency_limiter,
+        concurrency_limiter: concurrency_limiter.0,
     })
 }

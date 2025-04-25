@@ -7,6 +7,7 @@ use rustc_index::IndexVec;
 use rustc_middle::span_bug;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::{Span, DUMMY_SP};
+use tracing::{debug, instrument};
 
 /// A visitor that walks over the HIR and collects `Node`s into a HIR map.
 struct NodeCollector<'a, 'hir> {
@@ -61,7 +62,7 @@ pub(super) fn index_hir<'hir>(
         if let Node::Err(span) = node.node {
             let hir_id = HirId { owner: item.def_id(), local_id };
             let msg = format!("ID {hir_id} not encountered when visiting item HIR");
-            tcx.dcx().span_delayed_bug(*span, msg);
+            tcx.dcx().span_delayed_bug(span, msg);
         }
     }
 
@@ -332,10 +333,10 @@ impl<'a, 'hir> Visitor<'hir> for NodeCollector<'a, 'hir> {
         });
     }
 
-    fn visit_assoc_type_binding(&mut self, type_binding: &'hir TypeBinding<'hir>) {
-        self.insert(type_binding.span, type_binding.hir_id, Node::TypeBinding(type_binding));
-        self.with_parent(type_binding.hir_id, |this| {
-            intravisit::walk_assoc_type_binding(this, type_binding)
+    fn visit_assoc_item_constraint(&mut self, constraint: &'hir AssocItemConstraint<'hir>) {
+        self.insert(constraint.span, constraint.hir_id, Node::AssocItemConstraint(constraint));
+        self.with_parent(constraint.hir_id, |this| {
+            intravisit::walk_assoc_item_constraint(this, constraint)
         })
     }
 
@@ -375,7 +376,7 @@ impl<'a, 'hir> Visitor<'hir> for NodeCollector<'a, 'hir> {
         }
     }
 
-    fn visit_array_length(&mut self, len: &'hir ArrayLen) {
+    fn visit_array_length(&mut self, len: &'hir ArrayLen<'hir>) {
         match len {
             ArrayLen::Infer(inf) => self.insert(inf.span, inf.hir_id, Node::ArrayLenInfer(inf)),
             ArrayLen::Body(..) => intravisit::walk_array_len(self, len),

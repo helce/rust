@@ -1,8 +1,8 @@
 use crate::code_stats::CodeStats;
 pub use crate::code_stats::{DataTypeKind, FieldInfo, FieldKind, SizeKind, VariantInfo};
 use crate::config::{
-    self, CrateType, FunctionReturn, InstrumentCoverage, OptLevel, OutFileName, OutputType,
-    RemapPathScopeComponents, SwitchWithOptPath,
+    self, CoverageLevel, CrateType, FunctionReturn, InstrumentCoverage, OptLevel, OutFileName,
+    OutputType, RemapPathScopeComponents, SwitchWithOptPath,
 };
 use crate::config::{ErrorOutputType, Input};
 use crate::errors;
@@ -349,11 +349,18 @@ impl Session {
     }
 
     pub fn instrument_coverage_branch(&self) -> bool {
-        self.instrument_coverage() && self.opts.unstable_opts.coverage_options.branch
+        self.instrument_coverage()
+            && self.opts.unstable_opts.coverage_options.level >= CoverageLevel::Branch
+    }
+
+    pub fn instrument_coverage_condition(&self) -> bool {
+        self.instrument_coverage()
+            && self.opts.unstable_opts.coverage_options.level >= CoverageLevel::Condition
     }
 
     pub fn instrument_coverage_mcdc(&self) -> bool {
-        self.instrument_coverage() && self.opts.unstable_opts.coverage_options.mcdc
+        self.instrument_coverage()
+            && self.opts.unstable_opts.coverage_options.level >= CoverageLevel::Mcdc
     }
 
     pub fn is_sanitizer_cfi_enabled(&self) -> bool {
@@ -447,15 +454,24 @@ impl Session {
         )
     }
 
-    /// Returns a list of directories where target-specific tool binaries are located.
+    /// Returns a list of directories where target-specific tool binaries are located. Some fallback
+    /// directories are also returned, for example if `--sysroot` is used but tools are missing
+    /// (#125246): we also add the bin directories to the sysroot where rustc is located.
     pub fn get_tools_search_paths(&self, self_contained: bool) -> Vec<PathBuf> {
-        let rustlib_path = rustc_target::target_rustlib_path(&self.sysroot, config::host_triple());
-        let p = PathBuf::from_iter([
-            Path::new(&self.sysroot),
-            Path::new(&rustlib_path),
-            Path::new("bin"),
-        ]);
-        if self_contained { vec![p.clone(), p.join("self-contained")] } else { vec![p] }
+        let bin_path = filesearch::make_target_bin_path(&self.sysroot, config::host_triple());
+        let fallback_sysroot_paths = filesearch::sysroot_candidates()
+            .into_iter()
+            .map(|sysroot| filesearch::make_target_bin_path(&sysroot, config::host_triple()));
+        let search_paths = std::iter::once(bin_path).chain(fallback_sysroot_paths);
+
+        if self_contained {
+            // The self-contained tools are expected to be e.g. in `bin/self-contained` in the
+            // sysroot's `rustlib` path, so we add such a subfolder to the bin path, and the
+            // fallback paths.
+            search_paths.flat_map(|path| [path.clone(), path.join("self-contained")]).collect()
+        } else {
+            search_paths.collect()
+        }
     }
 
     pub fn init_incr_comp_session(&self, session_dir: PathBuf, lock_file: flock::Lock) {
@@ -1181,9 +1197,9 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
             });
         }
     }
-    // Cannot mix and match sanitizers.
-    let mut sanitizer_iter = sess.opts.unstable_opts.sanitizer.into_iter();
-    if let (Some(first), Some(second)) = (sanitizer_iter.next(), sanitizer_iter.next()) {
+
+    // Cannot mix and match mutually-exclusive sanitizers.
+    if let Some((first, second)) = sess.opts.unstable_opts.sanitizer.mutually_exclusive() {
         sess.dcx().emit_err(errors::CannotMixAndMatchSanitizers {
             first: first.to_string(),
             second: second.to_string(),
@@ -1216,14 +1232,6 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
         && (sess.codegen_units().as_usize() != 1)
     {
         sess.dcx().emit_err(errors::SanitizerCfiRequiresSingleCodegenUnit);
-    }
-
-    // LLVM CFI is incompatible with LLVM KCFI.
-    if sess.is_sanitizer_cfi_enabled() && sess.is_sanitizer_kcfi_enabled() {
-        sess.dcx().emit_err(errors::CannotMixAndMatchSanitizers {
-            first: "cfi".to_string(),
-            second: "kcfi".to_string(),
-        });
     }
 
     // Canonical jump tables requires CFI.

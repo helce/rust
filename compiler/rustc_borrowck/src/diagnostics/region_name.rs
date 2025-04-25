@@ -11,7 +11,8 @@ use rustc_hir::def::{DefKind, Res};
 use rustc_middle::ty::print::RegionHighlightMode;
 use rustc_middle::ty::{self, RegionVid, Ty};
 use rustc_middle::ty::{GenericArgKind, GenericArgsRef};
-use rustc_span::symbol::{kw, sym, Ident, Symbol};
+use rustc_middle::{bug, span_bug};
+use rustc_span::symbol::{kw, sym, Symbol};
 use rustc_span::{Span, DUMMY_SP};
 
 use crate::{universal_regions::DefiningTy, MirBorrowckCtxt};
@@ -288,7 +289,8 @@ impl<'tcx> MirBorrowckCtxt<'_, 'tcx> {
         debug!("give_region_a_name: error_region = {:?}", error_region);
         match *error_region {
             ty::ReEarlyParam(ebr) => ebr.has_name().then(|| {
-                let span = tcx.hir().span_if_local(ebr.def_id).unwrap_or(DUMMY_SP);
+                let def_id = tcx.generics_of(self.mir_def_id()).region_param(ebr, tcx).def_id;
+                let span = tcx.hir().span_if_local(def_id).unwrap_or(DUMMY_SP);
                 RegionName { name: ebr.name, source: RegionNameSource::NamedEarlyParamRegion(span) }
             }),
 
@@ -841,13 +843,9 @@ impl<'tcx> MirBorrowckCtxt<'_, 'tcx> {
         }) = opaque_ty.kind
             && let Some(segment) = trait_ref.trait_ref.path.segments.last()
             && let Some(args) = segment.args
-            && let [
-                hir::TypeBinding {
-                    ident: Ident { name: sym::Output, .. },
-                    kind: hir::TypeBindingKind::Equality { term: hir::Term::Ty(ty) },
-                    ..
-                },
-            ] = args.bindings
+            && let [constraint] = args.constraints
+            && constraint.ident.name == sym::Output
+            && let Some(ty) = constraint.ty()
         {
             ty
         } else {
@@ -911,7 +909,8 @@ impl<'tcx> MirBorrowckCtxt<'_, 'tcx> {
         };
 
         let tcx = self.infcx.tcx;
-        let region_parent = tcx.parent(region.def_id);
+        let region_def = tcx.generics_of(self.mir_def_id()).region_param(region, tcx).def_id;
+        let region_parent = tcx.parent(region_def);
         let DefKind::Impl { .. } = tcx.def_kind(region_parent) else {
             return None;
         };
@@ -924,7 +923,7 @@ impl<'tcx> MirBorrowckCtxt<'_, 'tcx> {
         Some(RegionName {
             name: self.synthesize_region_name(),
             source: RegionNameSource::AnonRegionFromImplSignature(
-                tcx.def_span(region.def_id),
+                tcx.def_span(region_def),
                 // FIXME(compiler-errors): Does this ever actually show up
                 // anywhere other than the self type? I couldn't create an
                 // example of a `'_` in the impl's trait being referenceable.
@@ -1009,7 +1008,8 @@ impl<'tcx> MirBorrowckCtxt<'_, 'tcx> {
                 clauses.iter().any(|pred| {
                     match pred.kind().skip_binder() {
                         ty::ClauseKind::Trait(data) if data.self_ty() == ty => {}
-                        ty::ClauseKind::Projection(data) if data.projection_ty.self_ty() == ty => {}
+                        ty::ClauseKind::Projection(data)
+                            if data.projection_term.self_ty() == ty => {}
                         _ => return false,
                     }
                     tcx.any_free_region_meets(pred, |r| *r == ty::ReEarlyParam(region))

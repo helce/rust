@@ -299,7 +299,7 @@ pub trait Visitor<'v>: Sized {
         walk_item(self, i)
     }
 
-    fn visit_body(&mut self, b: &'v Body<'v>) -> Self::Result {
+    fn visit_body(&mut self, b: &Body<'v>) -> Self::Result {
         walk_body(self, b)
     }
 
@@ -338,7 +338,7 @@ pub trait Visitor<'v>: Sized {
     fn visit_pat_field(&mut self, f: &'v PatField<'v>) -> Self::Result {
         walk_pat_field(self, f)
     }
-    fn visit_array_length(&mut self, len: &'v ArrayLen) -> Self::Result {
+    fn visit_array_length(&mut self, len: &'v ArrayLen<'v>) -> Self::Result {
         walk_array_len(self, len)
     }
     fn visit_anon_const(&mut self, c: &'v AnonConst) -> Self::Result {
@@ -456,8 +456,11 @@ pub trait Visitor<'v>: Sized {
     fn visit_generic_args(&mut self, generic_args: &'v GenericArgs<'v>) -> Self::Result {
         walk_generic_args(self, generic_args)
     }
-    fn visit_assoc_type_binding(&mut self, type_binding: &'v TypeBinding<'v>) -> Self::Result {
-        walk_assoc_type_binding(self, type_binding)
+    fn visit_assoc_item_constraint(
+        &mut self,
+        constraint: &'v AssocItemConstraint<'v>,
+    ) -> Self::Result {
+        walk_assoc_item_constraint(self, constraint)
     }
     fn visit_attribute(&mut self, _attr: &'v Attribute) -> Self::Result {
         Self::Result::output()
@@ -533,7 +536,7 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item<'v>) -> V::
             try_visit!(visitor.visit_id(item.hir_id()));
             try_visit!(walk_generics(visitor, generics));
             walk_list!(visitor, visit_param_bound, bounds);
-            if let Some(precise_capturing_args) = precise_capturing_args {
+            if let Some((precise_capturing_args, _)) = precise_capturing_args {
                 for arg in precise_capturing_args {
                     try_visit!(visitor.visit_precise_capturing_arg(arg));
                 }
@@ -545,7 +548,7 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item<'v>) -> V::
             try_visit!(visitor.visit_enum_def(enum_definition, item.hir_id()));
         }
         ItemKind::Impl(Impl {
-            unsafety: _,
+            safety: _,
             defaultness: _,
             polarity: _,
             defaultness_span: _,
@@ -581,7 +584,7 @@ pub fn walk_item<'v, V: Visitor<'v>>(visitor: &mut V, item: &'v Item<'v>) -> V::
     V::Result::output()
 }
 
-pub fn walk_body<'v, V: Visitor<'v>>(visitor: &mut V, body: &'v Body<'v>) -> V::Result {
+pub fn walk_body<'v, V: Visitor<'v>>(visitor: &mut V, body: &Body<'v>) -> V::Result {
     walk_list!(visitor, visit_param, body.params);
     visitor.visit_expr(body.value)
 }
@@ -608,12 +611,14 @@ pub fn walk_foreign_item<'v, V: Visitor<'v>>(
     try_visit!(visitor.visit_ident(foreign_item.ident));
 
     match foreign_item.kind {
-        ForeignItemKind::Fn(ref function_declaration, param_names, ref generics) => {
+        ForeignItemKind::Fn(ref function_declaration, param_names, ref generics, _) => {
             try_visit!(visitor.visit_generics(generics));
             try_visit!(visitor.visit_fn_decl(function_declaration));
             walk_list!(visitor, visit_ident, param_names.iter().copied());
         }
-        ForeignItemKind::Static(ref typ, _) => try_visit!(visitor.visit_ty(typ)),
+        ForeignItemKind::Static(ref typ, _, _) => {
+            try_visit!(visitor.visit_ty(typ));
+        }
         ForeignItemKind::Type => (),
     }
     V::Result::output()
@@ -703,7 +708,7 @@ pub fn walk_pat_field<'v, V: Visitor<'v>>(visitor: &mut V, field: &'v PatField<'
     visitor.visit_pat(field.pat)
 }
 
-pub fn walk_array_len<'v, V: Visitor<'v>>(visitor: &mut V, len: &'v ArrayLen) -> V::Result {
+pub fn walk_array_len<'v, V: Visitor<'v>>(visitor: &mut V, len: &'v ArrayLen<'v>) -> V::Result {
     match len {
         // FIXME: Use `visit_infer` here.
         ArrayLen::Infer(InferArg { hir_id, span: _ }) => visitor.visit_id(*hir_id),
@@ -768,7 +773,7 @@ pub fn walk_expr<'v, V: Visitor<'v>>(visitor: &mut V, expression: &'v Expr<'v>) 
         ExprKind::DropTemps(ref subexpression) => {
             try_visit!(visitor.visit_expr(subexpression));
         }
-        ExprKind::Let(LetExpr { span: _, pat, ty, init, is_recovered: _ }) => {
+        ExprKind::Let(LetExpr { span: _, pat, ty, init, recovered: _ }) => {
             // match the visit order in walk_local
             try_visit!(visitor.visit_expr(init));
             try_visit!(visitor.visit_pat(pat));
@@ -1259,23 +1264,25 @@ pub fn walk_generic_args<'v, V: Visitor<'v>>(
     generic_args: &'v GenericArgs<'v>,
 ) -> V::Result {
     walk_list!(visitor, visit_generic_arg, generic_args.args);
-    walk_list!(visitor, visit_assoc_type_binding, generic_args.bindings);
+    walk_list!(visitor, visit_assoc_item_constraint, generic_args.constraints);
     V::Result::output()
 }
 
-pub fn walk_assoc_type_binding<'v, V: Visitor<'v>>(
+pub fn walk_assoc_item_constraint<'v, V: Visitor<'v>>(
     visitor: &mut V,
-    type_binding: &'v TypeBinding<'v>,
+    constraint: &'v AssocItemConstraint<'v>,
 ) -> V::Result {
-    try_visit!(visitor.visit_id(type_binding.hir_id));
-    try_visit!(visitor.visit_ident(type_binding.ident));
-    try_visit!(visitor.visit_generic_args(type_binding.gen_args));
-    match type_binding.kind {
-        TypeBindingKind::Equality { ref term } => match term {
+    try_visit!(visitor.visit_id(constraint.hir_id));
+    try_visit!(visitor.visit_ident(constraint.ident));
+    try_visit!(visitor.visit_generic_args(constraint.gen_args));
+    match constraint.kind {
+        AssocItemConstraintKind::Equality { ref term } => match term {
             Term::Ty(ref ty) => try_visit!(visitor.visit_ty(ty)),
             Term::Const(ref c) => try_visit!(visitor.visit_anon_const(c)),
         },
-        TypeBindingKind::Constraint { bounds } => walk_list!(visitor, visit_param_bound, bounds),
+        AssocItemConstraintKind::Bound { bounds } => {
+            walk_list!(visitor, visit_param_bound, bounds)
+        }
     }
     V::Result::output()
 }

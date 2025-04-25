@@ -8,7 +8,8 @@ use rustc_hir::LangItem;
 use rustc_middle::bug;
 use rustc_middle::ty::fold::{TypeFolder, TypeSuperFoldable};
 use rustc_middle::ty::{
-    self, Instance, IntTy, List, Ty, TyCtxt, TypeFoldable, TypeVisitableExt, UintTy,
+    self, ExistentialPredicateStableCmpExt as _, Instance, IntTy, List, Ty, TyCtxt, TypeFoldable,
+    TypeVisitableExt, UintTy,
 };
 use rustc_span::sym;
 use rustc_trait_selection::traits;
@@ -268,7 +269,7 @@ fn trait_object_ty<'tcx>(tcx: TyCtxt<'tcx>, poly_trait_ref: ty::PolyTraitRef<'tc
 /// if a function is member of the group derived from this type id. Therefore, in the first call to
 /// typeid_for_fnabi (when type ids are attached to functions and methods), it can only include at
 /// most as much information that would be available in the second call (i.e., during code
-/// generation at call sites); otherwise, the type ids would not not match.
+/// generation at call sites); otherwise, the type ids would not match.
 ///
 /// For this, it:
 ///
@@ -366,7 +367,7 @@ pub fn transform_instance<'tcx>(
             let trait_method = tcx.associated_item(method_id);
             let trait_id = trait_ref.skip_binder().def_id;
             if traits::is_vtable_safe_method(tcx, trait_id, trait_method)
-                && tcx.object_safety_violations(trait_id).is_empty()
+                && tcx.is_object_safe(trait_id)
             {
                 // Trait methods will have a Self polymorphic parameter, where the concreteized
                 // implementatation will not. We need to walk back to the more general trait method

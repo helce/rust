@@ -51,7 +51,7 @@ pub(crate) struct NllOutput<'tcx> {
 /// `compute_regions`.
 #[instrument(skip(infcx, param_env, body, promoted), level = "debug")]
 pub(crate) fn replace_regions_in_mir<'tcx>(
-    infcx: &BorrowckInferCtxt<'_, 'tcx>,
+    infcx: &BorrowckInferCtxt<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
     body: &mut Body<'tcx>,
     promoted: &mut IndexSlice<Promoted, Body<'tcx>>,
@@ -75,7 +75,7 @@ pub(crate) fn replace_regions_in_mir<'tcx>(
 ///
 /// This may result in errors being reported.
 pub(crate) fn compute_regions<'cx, 'tcx>(
-    infcx: &BorrowckInferCtxt<'_, 'tcx>,
+    infcx: &BorrowckInferCtxt<'tcx>,
     universal_regions: UniversalRegions<'tcx>,
     body: &Body<'tcx>,
     promoted: &IndexSlice<Promoted, Body<'tcx>>,
@@ -125,8 +125,8 @@ pub(crate) fn compute_regions<'cx, 'tcx>(
         placeholder_indices,
         placeholder_index_to_region: _,
         liveness_constraints,
-        outlives_constraints,
-        member_constraints,
+        mut outlives_constraints,
+        mut member_constraints,
         universe_causes,
         type_tests,
     } = constraints;
@@ -143,6 +143,16 @@ pub(crate) fn compute_regions<'cx, 'tcx>(
         &universal_regions,
         &universal_region_relations,
     );
+
+    if let Some(guar) = universal_regions.tainted_by_errors() {
+        // Suppress unhelpful extra errors in `infer_opaque_types` by clearing out all
+        // outlives bounds that we may end up checking.
+        outlives_constraints = Default::default();
+        member_constraints = Default::default();
+
+        // Also taint the entire scope.
+        infcx.set_tainted_by_errors(guar);
+    }
 
     let mut regioncx = RegionInferenceContext::new(
         infcx,
@@ -202,7 +212,7 @@ pub(crate) fn compute_regions<'cx, 'tcx>(
 }
 
 pub(super) fn dump_mir_results<'tcx>(
-    infcx: &BorrowckInferCtxt<'_, 'tcx>,
+    infcx: &BorrowckInferCtxt<'tcx>,
     body: &Body<'tcx>,
     regioncx: &RegionInferenceContext<'tcx>,
     closure_region_requirements: &Option<ClosureRegionRequirements<'tcx>>,
@@ -254,7 +264,7 @@ pub(super) fn dump_mir_results<'tcx>(
 #[allow(rustc::diagnostic_outside_of_impl)]
 #[allow(rustc::untranslatable_diagnostic)]
 pub(super) fn dump_annotation<'tcx>(
-    infcx: &BorrowckInferCtxt<'_, 'tcx>,
+    infcx: &BorrowckInferCtxt<'tcx>,
     body: &Body<'tcx>,
     regioncx: &RegionInferenceContext<'tcx>,
     closure_region_requirements: &Option<ClosureRegionRequirements<'tcx>>,

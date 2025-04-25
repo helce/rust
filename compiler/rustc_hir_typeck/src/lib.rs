@@ -10,9 +10,6 @@
 #[macro_use]
 extern crate tracing;
 
-#[macro_use]
-extern crate rustc_middle;
-
 mod _match;
 mod autoderef;
 mod callee;
@@ -32,7 +29,6 @@ mod fallback;
 mod fn_ctxt;
 mod gather_locals;
 mod intrinsicck;
-mod mem_categorization;
 mod method;
 mod op;
 mod pat;
@@ -60,11 +56,10 @@ use rustc_hir::intravisit::Visitor;
 use rustc_hir::{HirId, HirIdMap, Node};
 use rustc_hir_analysis::check::check_abi;
 use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer;
-use rustc_infer::infer::type_variable::TypeVariableOrigin;
 use rustc_infer::traits::{ObligationCauseCode, ObligationInspector, WellFormedLoc};
 use rustc_middle::query::Providers;
-use rustc_middle::traits;
 use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::{bug, span_bug};
 use rustc_session::config;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::Span;
@@ -150,7 +145,7 @@ fn typeck_with_fallback<'tcx>(
 
     if let Some(hir::FnSig { header, decl, .. }) = node.fn_sig() {
         let fn_sig = if decl.output.get_infer_ret_ty().is_some() {
-            fcx.lowerer().lower_fn_ty(id, header.unsafety, header.abi, decl, None, None)
+            fcx.lowerer().lower_fn_ty(id, header.safety, header.abi, decl, None, None)
         } else {
             tcx.fn_sig(def_id).instantiate_identity()
         };
@@ -171,7 +166,7 @@ fn typeck_with_fallback<'tcx>(
         let wf_code = ObligationCauseCode::WellFormed(Some(WellFormedLoc::Ty(def_id)));
         fcx.register_wf_obligation(expected_type.into(), body.value.span, wf_code);
 
-        fcx.require_type_is_sized(expected_type, body.value.span, traits::ConstSized);
+        fcx.require_type_is_sized(expected_type, body.value.span, ObligationCauseCode::ConstSized);
 
         // Gather locals in statics (because of block expressions).
         GatherLocalsVisitor::new(&fcx).visit_body(body);
@@ -240,13 +235,19 @@ fn infer_type_if_missing<'tcx>(fcx: &FnCtxt<'_, 'tcx>, node: Node<'tcx>) -> Opti
         if let Some(item) = tcx.opt_associated_item(def_id.into())
             && let ty::AssocKind::Const = item.kind
             && let ty::ImplContainer = item.container
-            && let Some(trait_item) = item.trait_item_def_id
+            && let Some(trait_item_def_id) = item.trait_item_def_id
         {
-            let args =
-                tcx.impl_trait_ref(item.container_id(tcx)).unwrap().instantiate_identity().args;
-            Some(tcx.type_of(trait_item).instantiate(tcx, args))
+            let impl_def_id = item.container_id(tcx);
+            let impl_trait_ref = tcx.impl_trait_ref(impl_def_id).unwrap().instantiate_identity();
+            let args = ty::GenericArgs::identity_for_item(tcx, def_id).rebase_onto(
+                tcx,
+                impl_def_id,
+                impl_trait_ref.args,
+            );
+            tcx.check_args_compatible(trait_item_def_id, args)
+                .then(|| tcx.type_of(trait_item_def_id).instantiate(tcx, args))
         } else {
-            Some(fcx.next_ty_var(TypeVariableOrigin { span, param_def_id: None }))
+            Some(fcx.next_ty_var(span))
         }
     } else if let Node::AnonConst(_) = node {
         let id = tcx.local_def_id_to_hir_id(def_id);
@@ -254,7 +255,7 @@ fn infer_type_if_missing<'tcx>(fcx: &FnCtxt<'_, 'tcx>, node: Node<'tcx>) -> Opti
             Node::Ty(&hir::Ty { kind: hir::TyKind::Typeof(ref anon_const), span, .. })
                 if anon_const.hir_id == id =>
             {
-                Some(fcx.next_ty_var(TypeVariableOrigin { span, param_def_id: None }))
+                Some(fcx.next_ty_var(span))
             }
             Node::Expr(&hir::Expr { kind: hir::ExprKind::InlineAsm(asm), span, .. })
             | Node::Item(&hir::Item { kind: hir::ItemKind::GlobalAsm(asm), span, .. }) => {
@@ -264,7 +265,7 @@ fn infer_type_if_missing<'tcx>(fcx: &FnCtxt<'_, 'tcx>, node: Node<'tcx>) -> Opti
                         Some(fcx.next_int_var())
                     }
                     hir::InlineAsmOperand::SymFn { anon_const } if anon_const.hir_id == id => {
-                        Some(fcx.next_ty_var(TypeVariableOrigin { span, param_def_id: None }))
+                        Some(fcx.next_ty_var(span))
                     }
                     _ => None,
                 })

@@ -8,8 +8,6 @@
 //@ needs-rust-lld
 //@ only-x86_64-unknown-linux-gnu
 
-extern crate run_make_support;
-
 use run_make_support::regex::Regex;
 use run_make_support::rustc;
 use std::process::Output;
@@ -25,8 +23,9 @@ fn main() {
         .input("lib.rs")
         .run();
     assert!(
-        find_lld_version_in_logs(output),
-        "the LLD version string should be present in the output logs"
+        find_lld_version_in_logs(&output),
+        "the LLD version string should be present in the output logs:\n{}",
+        std::str::from_utf8(&output.stderr).unwrap()
     );
 
     // But it can also be disabled via linker features.
@@ -39,13 +38,14 @@ fn main() {
         .input("lib.rs")
         .run();
     assert!(
-        !find_lld_version_in_logs(output),
-        "the LLD version string should not be present in the output logs"
+        !find_lld_version_in_logs(&output),
+        "the LLD version string should not be present in the output logs:\n{}",
+        std::str::from_utf8(&output.stderr).unwrap()
     );
 }
 
-fn find_lld_version_in_logs(output: Output) -> bool {
+fn find_lld_version_in_logs(output: &Output) -> bool {
     let lld_version_re = Regex::new(r"^LLD [0-9]+\.[0-9]+\.[0-9]+").unwrap();
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    stderr.lines().any(|line| lld_version_re.is_match(line))
+    stderr.lines().any(|line| lld_version_re.is_match(line.trim()))
 }

@@ -84,13 +84,14 @@ const EXTRA_CHECK_CFGS: &[(Option<Mode>, &str, Option<&[&'static str]>)] = &[
     (Some(Mode::ToolRustc), "rust_analyzer", None),
     (Some(Mode::ToolStd), "rust_analyzer", None),
     (Some(Mode::Codegen), "parallel_compiler", None),
+    // NOTE: consider updating `check-cfg` entries in `std/Cargo.toml` too.
+    // cfg(bootstrap) remove these once the bootstrap compiler supports
+    // `lints.rust.unexpected_cfgs.check-cfg`
     (Some(Mode::Std), "stdarch_intel_sde", None),
     (Some(Mode::Std), "no_fp_fmt_parse", None),
     (Some(Mode::Std), "no_global_oom_handling", None),
     (Some(Mode::Std), "no_rc", None),
     (Some(Mode::Std), "no_sync", None),
-    (Some(Mode::Std), "netbsd10", None),
-    (Some(Mode::Std), "backtrace_in_libstd", None),
     /* Extra values not defined in the built-in targets yet, but used in std */
     (Some(Mode::Std), "target_env", Some(&["libnx", "p2"])),
     (Some(Mode::Std), "target_os", Some(&["visionos"])),
@@ -376,11 +377,16 @@ impl Build {
             .expect("failed to read src/version");
         let version = version.trim();
 
-        let bootstrap_out = std::env::current_exe()
+        let mut bootstrap_out = std::env::current_exe()
             .expect("could not determine path to running process")
             .parent()
             .unwrap()
             .to_path_buf();
+        // Since bootstrap is hardlink to deps/bootstrap-*, Solaris can sometimes give
+        // path with deps/ which is bad and needs to be avoided.
+        if bootstrap_out.ends_with("deps") {
+            bootstrap_out.pop();
+        }
         if !bootstrap_out.join(exe("rustc", config.build)).exists() && !cfg!(test) {
             // this restriction can be lifted whenever https://github.com/rust-lang/rfcs/pull/3028 is implemented
             panic!(
@@ -463,7 +469,8 @@ impl Build {
 
             // Make sure we update these before gathering metadata so we don't get an error about missing
             // Cargo.toml files.
-            let rust_submodules = ["src/tools/cargo", "library/backtrace", "library/stdarch"];
+            let rust_submodules =
+                ["src/tools/cargo", "src/doc/book", "library/backtrace", "library/stdarch"];
             for s in rust_submodules {
                 build.update_submodule(Path::new(s));
             }
@@ -654,10 +661,11 @@ impl Build {
 
         // hardcoded subcommands
         match &self.config.cmd {
-            Subcommand::Format { check } => {
+            Subcommand::Format { check, all } => {
                 return core::build_steps::format::format(
                     &builder::Builder::new(self),
                     *check,
+                    *all,
                     &self.config.paths,
                 );
             }
@@ -678,6 +686,8 @@ impl Build {
 
         if !self.config.dry_run() {
             {
+                // We first do a dry-run. This is a sanity-check to ensure that
+                // steps don't do anything expensive in the dry-run.
                 self.config.dry_run = DryRun::SelfCheck;
                 let builder = builder::Builder::new(self);
                 builder.execute_cli();
@@ -1718,7 +1728,7 @@ impl Build {
             return;
         }
         let _ = fs::remove_file(dst);
-        let metadata = t!(src.symlink_metadata());
+        let metadata = t!(src.symlink_metadata(), format!("src = {}", src.display()));
         let mut src = src.to_path_buf();
         if metadata.file_type().is_symlink() {
             if dereference_symlinks {

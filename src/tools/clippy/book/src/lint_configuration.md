@@ -101,6 +101,16 @@ Whether to allow `r#""#` when `r""` can be used
 * [`unnecessary_raw_string_hashes`](https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_raw_string_hashes)
 
 
+## `allow-panic-in-tests`
+Whether `panic` should be allowed in test functions or `#[cfg(test)]`
+
+**Default Value:** `false`
+
+---
+**Affected lints:**
+* [`panic`](https://rust-lang.github.io/rust-clippy/master/index.html#panic)
+
+
 ## `allow-print-in-tests`
 Whether print macros (ex. `println!`) should be allowed in test functions or `#[cfg(test)]`
 
@@ -122,6 +132,28 @@ Whether to allow module inception if it's not public.
 * [`module_inception`](https://rust-lang.github.io/rust-clippy/master/index.html#module_inception)
 
 
+## `allow-renamed-params-for`
+List of trait paths to ignore when checking renamed function parameters.
+
+#### Example
+
+```toml
+allow-renamed-params-for = [ "std::convert::From" ]
+```
+
+#### Noteworthy
+
+- By default, the following traits are ignored: `From`, `TryFrom`, `FromStr`
+- `".."` can be used as part of the list to indicate that the configured values should be appended to the
+default configuration of Clippy. By default, any configuration will replace the default value.
+
+**Default Value:** `["core::convert::From", "core::convert::TryFrom", "core::str::FromStr"]`
+
+---
+**Affected lints:**
+* [`renamed_function_params`](https://rust-lang.github.io/rust-clippy/master/index.html#renamed_function_params)
+
+
 ## `allow-unwrap-in-tests`
 Whether `unwrap` should be allowed in test functions or `#[cfg(test)]`
 
@@ -130,6 +162,16 @@ Whether `unwrap` should be allowed in test functions or `#[cfg(test)]`
 ---
 **Affected lints:**
 * [`unwrap_used`](https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used)
+
+
+## `allow-useless-vec-in-tests`
+Whether `useless_vec` should ignore test functions or `#[cfg(test)]`
+
+**Default Value:** `false`
+
+---
+**Affected lints:**
+* [`useless_vec`](https://rust-lang.github.io/rust-clippy/master/index.html#useless_vec)
 
 
 ## `allowed-dotfiles`
@@ -506,13 +548,14 @@ The maximum byte size a `Future` can have, before it triggers the `clippy::large
 
 
 ## `ignore-interior-mutability`
-A list of paths to types that should be treated like `Arc`, i.e. ignored but
-for the generic parameters for determining interior mutability
+A list of paths to types that should be treated as if they do not contain interior mutability
 
 **Default Value:** `["bytes::Bytes"]`
 
 ---
 **Affected lints:**
+* [`borrow_interior_mutable_const`](https://rust-lang.github.io/rust-clippy/master/index.html#borrow_interior_mutable_const)
+* [`declare_interior_mutable_const`](https://rust-lang.github.io/rust-clippy/master/index.html#declare_interior_mutable_const)
 * [`ifs_same_cond`](https://rust-lang.github.io/rust-clippy/master/index.html#ifs_same_cond)
 * [`mutable_key_type`](https://rust-lang.github.io/rust-clippy/master/index.html#mutable_key_type)
 
@@ -887,5 +930,15 @@ Whether to allow certain wildcard imports (prelude, super in tests).
 ---
 **Affected lints:**
 * [`wildcard_imports`](https://rust-lang.github.io/rust-clippy/master/index.html#wildcard_imports)
+
+
+## `warn-unsafe-macro-metavars-in-private-macros`
+Whether to also emit warnings for unsafe blocks with metavariable expansions in **private** macros.
+
+**Default Value:** `false`
+
+---
+**Affected lints:**
+* [`macro_metavars_in_unsafe`](https://rust-lang.github.io/rust-clippy/master/index.html#macro_metavars_in_unsafe)
 
 

@@ -8,12 +8,14 @@ mod socket;
 mod sync;
 mod thread;
 
+mod android;
 mod freebsd;
 mod linux;
 mod macos;
+mod solarish;
 
 pub use env::UnixEnvVars;
-pub use fd::{FdTable, FileDescriptor};
+pub use fd::{FdTable, FileDescription};
 pub use fs::DirTable;
 // All the Unix-specific extension traits
 pub use env::EvalContextExt as _;

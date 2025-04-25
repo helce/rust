@@ -29,6 +29,7 @@ use rustc_session::lint::builtin::{LEGACY_DERIVE_HELPERS, SOFT_UNSTABLE};
 use rustc_session::lint::builtin::{UNUSED_MACROS, UNUSED_MACRO_RULES};
 use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::parse::feature_err;
+use rustc_span::edit_distance::edit_distance;
 use rustc_span::edition::Edition;
 use rustc_span::hygiene::{self, ExpnData, ExpnKind, LocalExpnId};
 use rustc_span::hygiene::{AstPass, MacroKind};
@@ -141,7 +142,7 @@ pub(crate) fn registered_tools(tcx: TyCtxt<'_>, (): ()) -> RegisteredTools {
     }
     // We implicitly add `rustfmt`, `clippy`, `diagnostic` to known tools,
     // but it's not an error to register them explicitly.
-    let predefined_tools = [sym::clippy, sym::rustfmt, sym::diagnostic];
+    let predefined_tools = [sym::clippy, sym::rustfmt, sym::diagnostic, sym::miri];
     registered_tools.extend(predefined_tools.iter().cloned().map(Ident::with_dummy_span));
     registered_tools
 }
@@ -314,7 +315,7 @@ impl<'a, 'tcx> ResolverExpand for Resolver<'a, 'tcx> {
                 UNUSED_MACROS,
                 node_id,
                 ident.span,
-                format!("unused macro definition: `{}`", ident.name),
+                BuiltinLintDiag::UnusedMacroDefinition(ident.name),
             );
         }
         for (&(def_id, arm_i), &(ident, rule_span)) in self.unused_macro_rules.iter() {
@@ -327,11 +328,7 @@ impl<'a, 'tcx> ResolverExpand for Resolver<'a, 'tcx> {
                 UNUSED_MACRO_RULES,
                 node_id,
                 rule_span,
-                format!(
-                    "{} rule of macro `{}` is never used",
-                    crate::diagnostics::ordinalize(arm_i + 1),
-                    ident.name
-                ),
+                BuiltinLintDiag::MacroRuleNeverUsed(arm_i, ident.name),
             );
         }
     }
@@ -555,28 +552,46 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
 
         // We are trying to avoid reporting this error if other related errors were reported.
         if res != Res::Err && inner_attr && !self.tcx.features().custom_inner_attributes {
-            let msg = match res {
-                Res::Def(..) => "inner macro attributes are unstable",
-                Res::NonMacroAttr(..) => "custom inner attributes are unstable",
+            let is_macro = match res {
+                Res::Def(..) => true,
+                Res::NonMacroAttr(..) => false,
                 _ => unreachable!(),
             };
             if soft_custom_inner_attributes_gate {
-                self.tcx.sess.psess.buffer_lint(SOFT_UNSTABLE, path.span, node_id, msg);
+                self.tcx.sess.psess.buffer_lint(
+                    SOFT_UNSTABLE,
+                    path.span,
+                    node_id,
+                    BuiltinLintDiag::InnerAttributeUnstable { is_macro },
+                );
             } else {
+                // FIXME: deduplicate with rustc_lint (`BuiltinLintDiag::InnerAttributeUnstable`)
+                let msg = if is_macro {
+                    "inner macro attributes are unstable"
+                } else {
+                    "custom inner attributes are unstable"
+                };
                 feature_err(&self.tcx.sess, sym::custom_inner_attributes, path.span, msg).emit();
             }
         }
 
         if res == Res::NonMacroAttr(NonMacroAttrKind::Tool)
-            && path.segments.len() >= 2
-            && path.segments[0].ident.name == sym::diagnostic
-            && path.segments[1].ident.name != sym::on_unimplemented
+            && let [namespace, attribute, ..] = &*path.segments
+            && namespace.ident.name == sym::diagnostic
+            && !(attribute.ident.name == sym::on_unimplemented
+                || (attribute.ident.name == sym::do_not_recommend
+                    && self.tcx.features().do_not_recommend))
         {
+            let distance =
+                edit_distance(attribute.ident.name.as_str(), sym::on_unimplemented.as_str(), 5);
+
+            let typo_name = distance.map(|_| sym::on_unimplemented);
+
             self.tcx.sess.psess.buffer_lint(
                 UNKNOWN_OR_MALFORMED_DIAGNOSTIC_ATTRIBUTES,
-                path.segments[1].span(),
+                attribute.span(),
                 node_id,
-                "unknown diagnostic attribute",
+                BuiltinLintDiag::UnknownDiagnosticAttribute { span: attribute.span(), typo_name },
             );
         }
 
@@ -776,11 +791,10 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                             .invocation_parents
                             .get(&parent_scope.expansion)
                             .map_or(ast::CRATE_NODE_ID, |id| self.def_id_to_node_id[id.0]);
-                        self.lint_buffer.buffer_lint_with_diagnostic(
+                        self.lint_buffer.buffer_lint(
                             LEGACY_DERIVE_HELPERS,
                             node_id,
                             ident.span,
-                            "derive helper attribute is used before it is introduced",
                             BuiltinLintDiag::LegacyDeriveHelpers(binding.span),
                         );
                     }
@@ -830,8 +844,17 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                 let allowed_by_implication = implied_by.is_some_and(|feature| is_allowed(feature));
                 if !is_allowed(feature) && !allowed_by_implication {
                     let lint_buffer = &mut self.lint_buffer;
-                    let soft_handler =
-                        |lint, span, msg: String| lint_buffer.buffer_lint(lint, node_id, span, msg);
+                    let soft_handler = |lint, span, msg: String| {
+                        lint_buffer.buffer_lint(
+                            lint,
+                            node_id,
+                            span,
+                            BuiltinLintDiag::UnstableFeature(
+                                // FIXME make this translatable
+                                msg.into(),
+                            ),
+                        )
+                    };
                     stability::report_unstable(
                         self.tcx.sess,
                         feature,
@@ -847,14 +870,12 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         }
         if let Some(depr) = &ext.deprecation {
             let path = pprust::path_to_string(path);
-            let (message, lint) = stability::deprecation_message_and_lint(depr, "macro", &path);
-            stability::early_report_deprecation(
+            stability::early_report_macro_deprecation(
                 &mut self.lint_buffer,
-                message,
-                depr.suggestion,
-                lint,
+                depr,
                 span,
                 node_id,
+                path,
             );
         }
     }

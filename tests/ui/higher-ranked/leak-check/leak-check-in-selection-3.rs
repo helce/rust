@@ -1,9 +1,9 @@
 //@ revisions: old next
 //@[next] compile-flags: -Znext-solver
 
-// cc #119820, the previous behavior here was inconsistent,
+// cc #119820, the behavior here is  inconsistent,
 // using the leak check to guide inference for `for<'a> Box<_>: Leak<'a>`
-// but not for `for<'a> Box<_>: IndirectLeak<'a>`
+// but not for `for<'a> Box<_>: IndirectLeak<'a>`.
 
 trait Leak<'a> {}
 impl Leak<'_> for Box<u32> {}

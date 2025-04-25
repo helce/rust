@@ -9,7 +9,7 @@ use rustc_span::DUMMY_SP;
 use smallvec::{smallvec, SmallVec};
 use thin_vec::ThinVec;
 
-pub fn placeholder(
+pub(crate) fn placeholder(
     kind: AstFragmentKind,
     id: ast::NodeId,
     vis: Option<ast::Visibility>,
@@ -174,7 +174,10 @@ pub fn placeholder(
         }]),
         AstFragmentKind::Variants => AstFragment::Variants(smallvec![ast::Variant {
             attrs: Default::default(),
-            data: ast::VariantData::Struct { fields: Default::default(), recovered: false },
+            data: ast::VariantData::Struct {
+                fields: Default::default(),
+                recovered: ast::Recovered::No
+            },
             disr_expr: None,
             id,
             ident,

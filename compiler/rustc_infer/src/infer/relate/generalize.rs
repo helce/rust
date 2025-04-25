@@ -1,14 +1,16 @@
 use std::mem;
 
 use super::StructurallyRelateAliases;
-use crate::infer::type_variable::{TypeVariableOrigin, TypeVariableValue};
-use crate::infer::{InferCtxt, ObligationEmittingRelation, RegionVariableOrigin};
+use super::{ObligationEmittingRelation, Relate, RelateResult, TypeRelation};
+use crate::infer::relate;
+use crate::infer::type_variable::TypeVariableValue;
+use crate::infer::{InferCtxt, RegionVariableOrigin};
 use rustc_data_structures::sso::SsoHashMap;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir::def_id::DefId;
+use rustc_middle::bug;
 use rustc_middle::infer::unify_key::ConstVariableValue;
 use rustc_middle::ty::error::TypeError;
-use rustc_middle::ty::relate::{self, Relate, RelateResult, TypeRelation};
 use rustc_middle::ty::visit::MaxUniverse;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::ty::{AliasRelationDirection, InferConst, Term, TypeVisitable, TypeVisitableExt};
@@ -101,7 +103,7 @@ impl<'tcx> InferCtxt<'tcx> {
                         // instead create a new inference variable `?normalized_source`, emitting
                         // `Projection(normalized_source, ?ty_normalized)` and `?normalized_source <: generalized_ty`.
                         relation.register_predicates([ty::ProjectionPredicate {
-                            projection_ty: data,
+                            projection_term: data.into(),
                             term: generalized_ty.into(),
                         }]);
                     }
@@ -227,7 +229,7 @@ impl<'tcx> InferCtxt<'tcx> {
 
     /// Attempts to generalize `source_term` for the type variable `target_vid`.
     /// This checks for cycles -- that is, whether `source_term` references `target_vid`.
-    fn generalize<T: Into<Term<'tcx>> + Relate<'tcx>>(
+    fn generalize<T: Into<Term<'tcx>> + Relate<TyCtxt<'tcx>>>(
         &self,
         span: Span,
         structurally_relate_aliases: StructurallyRelateAliases,
@@ -328,6 +330,14 @@ impl<'tcx> Generalizer<'_, 'tcx> {
         }
     }
 
+    /// Create a new type variable in the universe of the target when
+    /// generalizing an alias. This has to set `has_unconstrained_ty_var`
+    /// if we're currently in a bivariant context.
+    fn next_ty_var_for_alias(&mut self) -> Ty<'tcx> {
+        self.has_unconstrained_ty_var |= self.ambient_variance == ty::Bivariant;
+        self.infcx.next_ty_var_in_universe(self.span, self.for_universe)
+    }
+
     /// An occurs check failure inside of an alias does not mean
     /// that the types definitely don't unify. We may be able
     /// to normalize the alias after all.
@@ -350,11 +360,14 @@ impl<'tcx> Generalizer<'_, 'tcx> {
         &mut self,
         alias: ty::AliasTy<'tcx>,
     ) -> Result<Ty<'tcx>, TypeError<'tcx>> {
-        if self.infcx.next_trait_solver() && !alias.has_escaping_bound_vars() {
-            return Ok(self.infcx.next_ty_var_in_universe(
-                TypeVariableOrigin { param_def_id: None, span: self.span },
-                self.for_universe,
-            ));
+        // We do not eagerly replace aliases with inference variables if they have
+        // escaping bound vars, see the method comment for details. However, when we
+        // are inside of an alias with escaping bound vars replacing nested aliases
+        // with inference variables can cause incorrect ambiguity.
+        //
+        // cc trait-system-refactor-initiative#110
+        if self.infcx.next_trait_solver() && !alias.has_escaping_bound_vars() && !self.in_alias {
+            return Ok(self.next_ty_var_for_alias());
         }
 
         let is_nested_alias = mem::replace(&mut self.in_alias, true);
@@ -374,10 +387,7 @@ impl<'tcx> Generalizer<'_, 'tcx> {
                     }
 
                     debug!("generalization failure in alias");
-                    Ok(self.infcx.next_ty_var_in_universe(
-                        TypeVariableOrigin { param_def_id: None, span: self.span },
-                        self.for_universe,
-                    ))
+                    Ok(self.next_ty_var_for_alias())
                 }
             }
         };
@@ -386,7 +396,7 @@ impl<'tcx> Generalizer<'_, 'tcx> {
     }
 }
 
-impl<'tcx> TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
+impl<'tcx> TypeRelation<TyCtxt<'tcx>> for Generalizer<'_, 'tcx> {
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.infcx.tcx
     }
@@ -421,10 +431,10 @@ impl<'tcx> TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
     }
 
     #[instrument(level = "debug", skip(self, variance, b), ret)]
-    fn relate_with_variance<T: Relate<'tcx>>(
+    fn relate_with_variance<T: Relate<TyCtxt<'tcx>>>(
         &mut self,
         variance: ty::Variance,
-        _info: ty::VarianceDiagInfo<'tcx>,
+        _info: ty::VarianceDiagInfo<TyCtxt<'tcx>>,
         a: T,
         b: T,
     ) -> RelateResult<'tcx, T> {
@@ -492,9 +502,30 @@ impl<'tcx> TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
                             let origin = inner.type_variables().var_origin(vid);
                             let new_var_id =
                                 inner.type_variables().new_var(self.for_universe, origin);
-                            let u = Ty::new_var(self.tcx(), new_var_id);
-                            debug!("replacing original vid={:?} with new={:?}", vid, u);
-                            Ok(u)
+                            // If we're in the new solver and create a new inference
+                            // variable inside of an alias we eagerly constrain that
+                            // inference variable to prevent unexpected ambiguity errors.
+                            //
+                            // This is incomplete as it pulls down the universe of the
+                            // original inference variable, even though the alias could
+                            // normalize to a type which does not refer to that type at
+                            // all. I don't expect this to cause unexpected errors in
+                            // practice.
+                            //
+                            // We only need to do so for type and const variables, as
+                            // region variables do not impact normalization, and will get
+                            // correctly constrained by `AliasRelate` later on.
+                            //
+                            // cc trait-system-refactor-initiative#108
+                            if self.infcx.next_trait_solver()
+                                && !self.infcx.intercrate
+                                && self.in_alias
+                            {
+                                inner.type_variables().equate(vid, new_var_id);
+                            }
+
+                            debug!("replacing original vid={:?} with new={:?}", vid, new_var_id);
+                            Ok(Ty::new_var(self.tcx(), new_var_id))
                         }
                     }
                 }
@@ -614,7 +645,16 @@ impl<'tcx> TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
                                     universe: self.for_universe,
                                 })
                                 .vid;
-                            Ok(ty::Const::new_var(self.tcx(), new_var_id, c.ty()))
+
+                            // See the comment for type inference variables
+                            // for more details.
+                            if self.infcx.next_trait_solver()
+                                && !self.infcx.intercrate
+                                && self.in_alias
+                            {
+                                variable_table.union(vid, new_var_id);
+                            }
+                            Ok(ty::Const::new_var(self.tcx(), new_var_id))
                         }
                     }
                 }
@@ -632,11 +672,7 @@ impl<'tcx> TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
                     args,
                     args,
                 )?;
-                Ok(ty::Const::new_unevaluated(
-                    self.tcx(),
-                    ty::UnevaluatedConst { def, args },
-                    c.ty(),
-                ))
+                Ok(ty::Const::new_unevaluated(self.tcx(), ty::UnevaluatedConst { def, args }))
             }
             ty::ConstKind::Placeholder(placeholder) => {
                 if self.for_universe.can_name(placeholder.universe) {
@@ -660,7 +696,7 @@ impl<'tcx> TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
         _: ty::Binder<'tcx, T>,
     ) -> RelateResult<'tcx, ty::Binder<'tcx, T>>
     where
-        T: Relate<'tcx>,
+        T: Relate<TyCtxt<'tcx>>,
     {
         let result = self.relate(a.skip_binder(), a.skip_binder())?;
         Ok(a.rebind(result))

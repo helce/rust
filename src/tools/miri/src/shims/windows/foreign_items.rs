@@ -5,17 +5,15 @@ use std::path::{self, Path, PathBuf};
 use std::str;
 
 use rustc_span::Symbol;
-use rustc_target::abi::Size;
+use rustc_target::abi::{Align, Size};
 use rustc_target::spec::abi::Abi;
 
-use crate::shims::alloc::EvalContextExt as _;
 use crate::shims::os_str::bytes_to_os_str;
 use crate::shims::windows::*;
 use crate::*;
-use shims::foreign_items::EmulateForeignItemResult;
 use shims::windows::handle::{Handle, PseudoHandle};
 
-fn is_dyn_sym(name: &str) -> bool {
+pub fn is_dyn_sym(name: &str) -> bool {
     // std does dynamic detection for these symbols
     matches!(
         name,
@@ -78,15 +76,15 @@ fn win_absolute<'tcx>(path: &Path) -> InterpResult<'tcx, io::Result<PathBuf>> {
     Ok(path::absolute(bytes_to_os_str(&result)?))
 }
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn emulate_foreign_item_inner(
         &mut self,
         link_name: Symbol,
         abi: Abi,
         args: &[OpTy<'tcx, Provenance>],
         dest: &MPlaceTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, EmulateForeignItemResult> {
+    ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
 
         // See `fn emulate_foreign_item_inner` in `shims/foreign_items.rs` for the general pattern.
@@ -226,7 +224,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let filename = this.read_path_from_wide_str(filename)?;
                 let result = match win_absolute(&filename)? {
                     Err(err) => {
-                        this.set_last_error_from_io_error(err.kind())?;
+                        this.set_last_error_from_io_error(err)?;
                         Scalar::from_u32(0) // return zero upon failure
                     }
                     Ok(abs_filename) => {
@@ -249,8 +247,21 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let size = this.read_target_usize(size)?;
                 let heap_zero_memory = 0x00000008; // HEAP_ZERO_MEMORY
                 let zero_init = (flags & heap_zero_memory) == heap_zero_memory;
-                let res = this.malloc(size, zero_init, MiriMemoryKind::WinHeap)?;
-                this.write_pointer(res, dest)?;
+                // Alignment is twice the pointer size.
+                // Source: <https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapalloc>
+                let align = this.tcx.pointer_size().bytes().strict_mul(2);
+                let ptr = this.allocate_ptr(
+                    Size::from_bytes(size),
+                    Align::from_bytes(align).unwrap(),
+                    MiriMemoryKind::WinHeap.into(),
+                )?;
+                if zero_init {
+                    this.write_bytes_ptr(
+                        ptr.into(),
+                        iter::repeat(0u8).take(usize::try_from(size).unwrap()),
+                    )?;
+                }
+                this.write_pointer(ptr, dest)?;
             }
             "HeapFree" => {
                 let [handle, flags, ptr] =
@@ -258,23 +269,41 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 this.read_target_isize(handle)?;
                 this.read_scalar(flags)?.to_u32()?;
                 let ptr = this.read_pointer(ptr)?;
-                this.free(ptr, MiriMemoryKind::WinHeap)?;
+                // "This pointer can be NULL." It doesn't say what happens then, but presumably nothing.
+                // (https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapfree)
+                if !this.ptr_is_null(ptr)? {
+                    this.deallocate_ptr(ptr, None, MiriMemoryKind::WinHeap.into())?;
+                }
                 this.write_scalar(Scalar::from_i32(1), dest)?;
             }
             "HeapReAlloc" => {
-                let [handle, flags, ptr, size] =
+                let [handle, flags, old_ptr, size] =
                     this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
                 this.read_target_isize(handle)?;
                 this.read_scalar(flags)?.to_u32()?;
-                let ptr = this.read_pointer(ptr)?;
+                let old_ptr = this.read_pointer(old_ptr)?;
                 let size = this.read_target_usize(size)?;
-                let res = this.realloc(ptr, size, MiriMemoryKind::WinHeap)?;
-                this.write_pointer(res, dest)?;
+                let align = this.tcx.pointer_size().bytes().strict_mul(2); // same as above
+                // The docs say that `old_ptr` must come from an earlier HeapAlloc or HeapReAlloc,
+                // so unlike C `realloc` we do *not* allow a NULL here.
+                // (https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heaprealloc)
+                let new_ptr = this.reallocate_ptr(
+                    old_ptr,
+                    None,
+                    Size::from_bytes(size),
+                    Align::from_bytes(align).unwrap(),
+                    MiriMemoryKind::WinHeap.into(),
+                )?;
+                this.write_pointer(new_ptr, dest)?;
             }
             "LocalFree" => {
                 let [ptr] = this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
-                this.free(ptr, MiriMemoryKind::WinLocal)?;
+                // "If the hMem parameter is NULL, LocalFree ignores the parameter and returns NULL."
+                // (https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-localfree)
+                if !this.ptr_is_null(ptr)? {
+                    this.deallocate_ptr(ptr, None, MiriMemoryKind::WinLocal.into())?;
+                }
                 this.write_null(dest)?;
             }
 
@@ -325,7 +354,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             "TlsGetValue" => {
                 let [key] = this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
                 let key = u128::from(this.read_scalar(key)?.to_u32()?);
-                let active_thread = this.get_active_thread();
+                let active_thread = this.active_thread();
                 let ptr = this.machine.tls.load_tls(key, active_thread, this)?;
                 this.write_scalar(ptr, dest)?;
             }
@@ -333,7 +362,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let [key, new_ptr] =
                     this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
                 let key = u128::from(this.read_scalar(key)?.to_u32()?);
-                let active_thread = this.get_active_thread();
+                let active_thread = this.active_thread();
                 let new_data = this.read_scalar(new_ptr)?;
                 this.machine.tls.store_tls(key, active_thread, new_data, &*this.tcx)?;
 
@@ -394,8 +423,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             "InitOnceBeginInitialize" => {
                 let [ptr, flags, pending, context] =
                     this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
-                let result = this.InitOnceBeginInitialize(ptr, flags, pending, context)?;
-                this.write_scalar(result, dest)?;
+                this.InitOnceBeginInitialize(ptr, flags, pending, context, dest)?;
             }
             "InitOnceComplete" => {
                 let [ptr, flags, context] =
@@ -473,7 +501,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
                 let thread = match Handle::from_scalar(handle, this)? {
                     Some(Handle::Thread(thread)) => thread,
-                    Some(Handle::Pseudo(PseudoHandle::CurrentThread)) => this.get_active_thread(),
+                    Some(Handle::Pseudo(PseudoHandle::CurrentThread)) => this.active_thread(),
                     _ => this.invalid_handle("SetThreadDescription")?,
                 };
 
@@ -491,7 +519,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
                 let thread = match Handle::from_scalar(handle, this)? {
                     Some(Handle::Thread(thread)) => thread,
-                    Some(Handle::Pseudo(PseudoHandle::CurrentThread)) => this.get_active_thread(),
+                    Some(Handle::Pseudo(PseudoHandle::CurrentThread)) => this.active_thread(),
                     _ => this.invalid_handle("SetThreadDescription")?,
                 };
                 // Looks like the default thread name is empty.
@@ -507,7 +535,14 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             }
 
             // Miscellaneous
+            "ExitProcess" => {
+                let [code] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+                let code = this.read_scalar(code)?.to_u32()?;
+                throw_machine_stop!(TerminationInfo::Exit { code: code.into(), leak_check: false });
+            }
             "SystemFunction036" => {
+                // used by getrandom 0.1
                 // This is really 'RtlGenRandom'.
                 let [ptr, len] =
                     this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
@@ -517,6 +552,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 this.write_scalar(Scalar::from_bool(true), dest)?;
             }
             "ProcessPrng" => {
+                // used by `std`
                 let [ptr, len] =
                     this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
                 let ptr = this.read_pointer(ptr)?;
@@ -525,6 +561,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 this.write_scalar(Scalar::from_i32(1), dest)?;
             }
             "BCryptGenRandom" => {
+                // used by getrandom 0.2
                 let [algorithm, ptr, len, flags] =
                     this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
                 let algorithm = this.read_scalar(algorithm)?;
@@ -721,9 +758,9 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 this.write_null(dest)?;
             }
 
-            _ => return Ok(EmulateForeignItemResult::NotSupported),
+            _ => return Ok(EmulateItemResult::NotSupported),
         }
 
-        Ok(EmulateForeignItemResult::NeedsJumping)
+        Ok(EmulateItemResult::NeedsReturn)
     }
 }

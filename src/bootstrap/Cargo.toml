@@ -7,6 +7,7 @@ default-run = "bootstrap"
 
 [features]
 build-metrics = ["sysinfo"]
+bootstrap-self-test = [] # enabled in the bootstrap unit tests
 
 [lib]
 path = "src/lib.rs"
@@ -33,10 +34,10 @@ path = "src/bin/sccache-plus-cl.rs"
 test = false
 
 [dependencies]
-# Most of the time updating these dependencies requires modifications
-# to the bootstrap codebase; otherwise, some targets will fail. That's
-# why these dependencies are explicitly pinned.
-cc = "=1.0.73"
+# Most of the time updating these dependencies requires modifications to the
+# bootstrap codebase(e.g., https://github.com/rust-lang/rust/issues/124565);
+# otherwise, some targets will fail. That's why these dependencies are explicitly pinned.
+cc = "=1.0.97"
 cmake = "=0.1.48"
 
 build_helper = { path = "../tools/build_helper" }

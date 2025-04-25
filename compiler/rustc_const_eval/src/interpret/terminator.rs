@@ -1,7 +1,9 @@
 use std::borrow::Cow;
 
 use either::Either;
+use tracing::trace;
 
+use rustc_middle::span_bug;
 use rustc_middle::{
     mir,
     ty::{
@@ -19,8 +21,9 @@ use rustc_target::abi::{
 use rustc_target::spec::abi::Abi;
 
 use super::{
-    CtfeProvenance, FnVal, ImmTy, InterpCx, InterpResult, MPlaceTy, Machine, OpTy, PlaceTy,
-    Projectable, Provenance, Scalar, StackPopCleanup,
+    throw_ub, throw_ub_custom, throw_unsup_format, CtfeProvenance, FnVal, ImmTy, InterpCx,
+    InterpResult, MPlaceTy, Machine, OpTy, PlaceTy, Projectable, Provenance, Scalar,
+    StackPopCleanup,
 };
 use crate::fluent_generated as fluent;
 
@@ -43,7 +46,7 @@ impl<'tcx, Prov: Provenance> FnArg<'tcx, Prov> {
     }
 }
 
-impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
+impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     /// Make a copy of the given fn_arg. Any `InPlace` are degenerated to copies, no protection of the
     /// original memory occurs.
     pub fn copy_fn_arg(&self, arg: &FnArg<'tcx, M::Provenance>) -> OpTy<'tcx, M::Provenance> {
@@ -95,7 +98,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 for (const_int, target) in targets.iter() {
                     // Compare using MIR BinOp::Eq, to also support pointer values.
                     // (Avoiding `self.binary_op` as that does some redundant layout computation.)
-                    let res = self.wrapping_binary_op(
+                    let res = self.binary_op(
                         mir::BinOp::Eq,
                         &discr,
                         &ImmTy::from_uint(const_int, discr.layout),
@@ -169,10 +172,8 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             }
 
             Drop { place, target, unwind, replace: _ } => {
-                let frame = self.frame();
-                let ty = place.ty(&frame.body.local_decls, *self.tcx).ty;
-                let ty = self.instantiate_from_frame_and_normalize_erasing_regions(frame, ty)?;
-                let instance = Instance::resolve_drop_in_place(*self.tcx, ty);
+                let place = self.eval_place(place)?;
+                let instance = Instance::resolve_drop_in_place(*self.tcx, place.layout.ty);
                 if let ty::InstanceDef::DropGlue(_, None) = instance.def {
                     // This is the branch we enter if and only if the dropped type has no drop glue
                     // whatsoever. This can happen as a result of monomorphizing a drop of a
@@ -181,8 +182,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     self.go_to_block(target);
                     return Ok(());
                 }
-                let place = self.eval_place(place)?;
-                trace!("TerminatorKind::drop: {:?}, type {}", place, ty);
+                trace!("TerminatorKind::drop: {:?}, type {}", place, place.layout.ty);
                 self.drop_in_place(&place, instance, target, unwind)?;
             }
 
@@ -294,17 +294,30 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 
     /// Unwrap types that are guaranteed a null-pointer-optimization
     fn unfold_npo(&self, layout: TyAndLayout<'tcx>) -> InterpResult<'tcx, TyAndLayout<'tcx>> {
-        // Check if this is `Option` wrapping some type.
-        let inner = match layout.ty.kind() {
-            ty::Adt(def, args) if self.tcx.is_diagnostic_item(sym::Option, def.did()) => {
-                args[0].as_type().unwrap()
-            }
-            _ => {
-                // Not an `Option`.
-                return Ok(layout);
-            }
+        // Check if this is `Option` wrapping some type or if this is `Result` wrapping a 1-ZST and
+        // another type.
+        let ty::Adt(def, args) = layout.ty.kind() else {
+            // Not an ADT, so definitely no NPO.
+            return Ok(layout);
         };
-        let inner = self.layout_of(inner)?;
+        let inner = if self.tcx.is_diagnostic_item(sym::Option, def.did()) {
+            // The wrapped type is the only arg.
+            self.layout_of(args[0].as_type().unwrap())?
+        } else if self.tcx.is_diagnostic_item(sym::Result, def.did()) {
+            // We want to extract which (if any) of the args is not a 1-ZST.
+            let lhs = self.layout_of(args[0].as_type().unwrap())?;
+            let rhs = self.layout_of(args[1].as_type().unwrap())?;
+            if lhs.is_1zst() {
+                rhs
+            } else if rhs.is_1zst() {
+                lhs
+            } else {
+                return Ok(layout); // no NPO
+            }
+        } else {
+            return Ok(layout); // no NPO
+        };
+
         // Check if the inner type is one of the NPO-guaranteed ones.
         // For that we first unpeel transparent *structs* (but not unions).
         let is_npo = |def: AdtDef<'tcx>| {
@@ -539,14 +552,28 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             ty::InstanceDef::Intrinsic(def_id) => {
                 assert!(self.tcx.intrinsic(def_id).is_some());
                 // FIXME: Should `InPlace` arguments be reset to uninit?
-                M::call_intrinsic(
+                if let Some(fallback) = M::call_intrinsic(
                     self,
                     instance,
                     &self.copy_fn_args(args),
                     destination,
                     target,
                     unwind,
-                )
+                )? {
+                    assert!(!self.tcx.intrinsic(fallback.def_id()).unwrap().must_be_overridden);
+                    assert!(matches!(fallback.def, ty::InstanceDef::Item(_)));
+                    return self.eval_fn_call(
+                        FnVal::Instance(fallback),
+                        (caller_abi, caller_fn_abi),
+                        args,
+                        with_caller_location,
+                        destination,
+                        target,
+                        unwind,
+                    );
+                } else {
+                    Ok(())
+                }
             }
             ty::InstanceDef::VTableShim(..)
             | ty::InstanceDef::ReifyShim(..)
@@ -938,6 +965,12 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         // implementation fail -- a problem shared by rustc.
         let place = self.force_allocation(place)?;
 
+        // We behave a bit different from codegen here.
+        // Codegen creates an `InstanceDef::Virtual` with index 0 (the slot of the drop method) and
+        // then dispatches that to the normal call machinery. However, our call machinery currently
+        // only supports calling `VtblEntry::Method`; it would choke on a `MetadataDropInPlace`. So
+        // instead we do the virtual call stuff ourselves. It's easier here than in `eval_fn_call`
+        // since we can just get a place of the underlying type and use `mplace_to_ref`.
         let place = match place.layout.ty.kind() {
             ty::Dynamic(data, _, ty::Dyn) => {
                 // Dropping a trait object. Need to find actual drop fn.

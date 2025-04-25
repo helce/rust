@@ -14,9 +14,6 @@
 
 #![deny(warnings)]
 
-extern crate run_make_support;
-
-use run_make_support::object;
 use run_make_support::object::read::archive::ArchiveFile;
 use run_make_support::object::read::Object;
 use run_make_support::object::ObjectSection;
@@ -24,6 +21,7 @@ use run_make_support::object::ObjectSymbol;
 use run_make_support::object::RelocationTarget;
 use run_make_support::set_host_rpath;
 use run_make_support::tmp_dir;
+use run_make_support::{env_var, object};
 use std::collections::HashSet;
 
 const MANIFEST: &str = r#"
@@ -37,7 +35,7 @@ path = "lib.rs""#;
 
 fn main() {
     let target_dir = tmp_dir().join("target");
-    let target = std::env::var("TARGET").unwrap();
+    let target = env_var("TARGET");
 
     println!("Testing compiler_builtins for {}", target);
 
@@ -46,27 +44,26 @@ fn main() {
     std::fs::write(&manifest_path, MANIFEST.as_bytes()).unwrap();
     std::fs::write(tmp_dir().join("lib.rs"), b"#![no_std]").unwrap();
 
-    let path = std::env::var("PATH").unwrap();
-    let rustc = std::env::var("RUSTC").unwrap();
-    let bootstrap_cargo = std::env::var("BOOTSTRAP_CARGO").unwrap();
+    let path = env_var("PATH");
+    let rustc = env_var("RUSTC");
+    let bootstrap_cargo = env_var("BOOTSTRAP_CARGO");
     let mut cmd = std::process::Command::new(bootstrap_cargo);
     cmd.args([
-            "build",
-            "--manifest-path",
-            manifest_path.to_str().unwrap(),
-            "-Zbuild-std=core",
-            "--target",
-            &target,
-        ])
-        .env_clear()
-        .env("PATH", path)
-        .env("RUSTC", rustc)
-        .env("RUSTFLAGS", "-Copt-level=0 -Cdebug-assertions=yes")
-        .env("CARGO_TARGET_DIR", &target_dir)
-        .env("RUSTC_BOOTSTRAP", "1")
-        // Visual Studio 2022 requires that the LIB env var be set so it can
-        // find the Windows SDK.
-        .env("LIB", std::env::var("LIB").unwrap_or_default());
+        "build",
+        "--manifest-path",
+        manifest_path.to_str().unwrap(),
+        "-Zbuild-std=core",
+        "--target",
+        &target,
+    ])
+    .env("PATH", path)
+    .env("RUSTC", rustc)
+    .env("RUSTFLAGS", "-Copt-level=0 -Cdebug-assertions=yes")
+    .env("CARGO_TARGET_DIR", &target_dir)
+    .env("RUSTC_BOOTSTRAP", "1")
+    // Visual Studio 2022 requires that the LIB env var be set so it can
+    // find the Windows SDK.
+    .env("LIB", std::env::var("LIB").unwrap_or_default());
     set_host_rpath(&mut cmd);
 
     let status = cmd.status().unwrap();

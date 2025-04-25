@@ -6,10 +6,10 @@ use std::ops::ControlFlow;
 use rustc_ast::Mutability;
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::fx::IndexEntry;
-use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::LangItem;
+use rustc_middle::bug;
 use rustc_middle::mir;
 use rustc_middle::mir::AssertMessage;
 use rustc_middle::query::TyCtxtAt;
@@ -20,12 +20,14 @@ use rustc_span::symbol::{sym, Symbol};
 use rustc_span::Span;
 use rustc_target::abi::{Align, Size};
 use rustc_target::spec::abi::Abi as CallAbi;
+use tracing::debug;
 
 use crate::errors::{LongRunning, LongRunningWarn};
 use crate::fluent_generated as fluent;
 use crate::interpret::{
-    self, compile_time_machine, AllocId, AllocRange, ConstAllocation, CtfeProvenance, FnArg, FnVal,
-    Frame, ImmTy, InterpCx, InterpResult, MPlaceTy, OpTy, Pointer, PointerArithmetic, Scalar,
+    self, compile_time_machine, err_ub, throw_exhaust, throw_inval, throw_ub_custom, throw_unsup,
+    throw_unsup_format, AllocId, AllocRange, ConstAllocation, CtfeProvenance, FnArg, FnVal, Frame,
+    GlobalAlloc, ImmTy, InterpCx, InterpResult, MPlaceTy, OpTy, Pointer, PointerArithmetic, Scalar,
 };
 
 use super::error::*;
@@ -42,7 +44,7 @@ const TINY_LINT_TERMINATOR_LIMIT: usize = 20;
 const PROGRESS_INDICATOR_START: usize = 4_000_000;
 
 /// Extra machine state for CTFE, and the Machine instance
-pub struct CompileTimeInterpreter<'mir, 'tcx> {
+pub struct CompileTimeInterpreter<'tcx> {
     /// The number of terminators that have been evaluated.
     ///
     /// This is used to produce lints informing the user that the compiler is not stuck.
@@ -50,7 +52,7 @@ pub struct CompileTimeInterpreter<'mir, 'tcx> {
     pub(super) num_evaluated_steps: usize,
 
     /// The virtual call stack.
-    pub(super) stack: Vec<Frame<'mir, 'tcx>>,
+    pub(super) stack: Vec<Frame<'tcx>>,
 
     /// Pattern matching on consts with references would be unsound if those references
     /// could point to anything mutable. Therefore, when evaluating consts and when constructing valtrees,
@@ -87,7 +89,7 @@ impl From<bool> for CanAccessMutGlobal {
     }
 }
 
-impl<'mir, 'tcx> CompileTimeInterpreter<'mir, 'tcx> {
+impl<'tcx> CompileTimeInterpreter<'tcx> {
     pub(crate) fn new(
         can_access_mut_global: CanAccessMutGlobal,
         check_alignment: CheckAlignment,
@@ -161,8 +163,7 @@ impl<K: Hash + Eq, V> interpret::AllocMap<K, V> for FxIndexMap<K, V> {
     }
 }
 
-pub(crate) type CompileTimeEvalContext<'mir, 'tcx> =
-    InterpCx<'mir, 'tcx, CompileTimeInterpreter<'mir, 'tcx>>;
+pub(crate) type CompileTimeEvalContext<'tcx> = InterpCx<'tcx, CompileTimeInterpreter<'tcx>>;
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum MemoryKind {
@@ -194,7 +195,7 @@ impl interpret::MayLeak for ! {
     }
 }
 
-impl<'mir, 'tcx: 'mir> CompileTimeEvalContext<'mir, 'tcx> {
+impl<'tcx> CompileTimeEvalContext<'tcx> {
     fn location_triple_for_span(&self, span: Span) -> (Symbol, u32, u32) {
         let topmost = span.ctxt().outer_expn().expansion_cause().unwrap_or(span);
         let caller = self.tcx.sess.source_map().lookup_char_pos(topmost.lo());
@@ -368,53 +369,42 @@ impl<'mir, 'tcx: 'mir> CompileTimeEvalContext<'mir, 'tcx> {
     }
 }
 
-impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir, 'tcx> {
-    compile_time_machine!(<'mir, 'tcx>);
+impl<'tcx> interpret::Machine<'tcx> for CompileTimeInterpreter<'tcx> {
+    compile_time_machine!(<'tcx>);
 
     type MemoryKind = MemoryKind;
 
     const PANIC_ON_ALLOC_FAIL: bool = false; // will be raised as a proper error
 
     #[inline(always)]
-    fn enforce_alignment(ecx: &InterpCx<'mir, 'tcx, Self>) -> bool {
+    fn enforce_alignment(ecx: &InterpCx<'tcx, Self>) -> bool {
         matches!(ecx.machine.check_alignment, CheckAlignment::Error)
     }
 
     #[inline(always)]
-    fn enforce_validity(ecx: &InterpCx<'mir, 'tcx, Self>, layout: TyAndLayout<'tcx>) -> bool {
+    fn enforce_validity(ecx: &InterpCx<'tcx, Self>, layout: TyAndLayout<'tcx>) -> bool {
         ecx.tcx.sess.opts.unstable_opts.extra_const_ub_checks || layout.abi.is_uninhabited()
     }
 
     fn load_mir(
-        ecx: &InterpCx<'mir, 'tcx, Self>,
+        ecx: &InterpCx<'tcx, Self>,
         instance: ty::InstanceDef<'tcx>,
     ) -> InterpResult<'tcx, &'tcx mir::Body<'tcx>> {
         match instance {
-            ty::InstanceDef::Item(def) => {
-                if ecx.tcx.is_ctfe_mir_available(def) {
-                    Ok(ecx.tcx.mir_for_ctfe(def))
-                } else if ecx.tcx.def_kind(def) == DefKind::AssocConst {
-                    ecx.tcx.dcx().bug("This is likely a const item that is missing from its impl");
-                } else {
-                    // `find_mir_or_eval_fn` checks that this is a const fn before even calling us,
-                    // so this should be unreachable.
-                    let path = ecx.tcx.def_path_str(def);
-                    bug!("trying to call extern function `{path}` at compile-time");
-                }
-            }
+            ty::InstanceDef::Item(def) => Ok(ecx.tcx.mir_for_ctfe(def)),
             _ => Ok(ecx.tcx.instance_mir(instance)),
         }
     }
 
     fn find_mir_or_eval_fn(
-        ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        ecx: &mut InterpCx<'tcx, Self>,
         orig_instance: ty::Instance<'tcx>,
         _abi: CallAbi,
         args: &[FnArg<'tcx>],
         dest: &MPlaceTy<'tcx>,
         ret: Option<mir::BasicBlock>,
         _unwind: mir::UnwindAction, // unwinding is not supported in consts
-    ) -> InterpResult<'tcx, Option<(&'mir mir::Body<'tcx>, ty::Instance<'tcx>)>> {
+    ) -> InterpResult<'tcx, Option<(&'tcx mir::Body<'tcx>, ty::Instance<'tcx>)>> {
         debug!("find_mir_or_eval_fn: {:?}", orig_instance);
 
         // Replace some functions.
@@ -445,7 +435,7 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir,
         Ok(Some((ecx.load_mir(instance.def, None)?, orig_instance)))
     }
 
-    fn panic_nounwind(ecx: &mut InterpCx<'mir, 'tcx, Self>, msg: &str) -> InterpResult<'tcx> {
+    fn panic_nounwind(ecx: &mut InterpCx<'tcx, Self>, msg: &str) -> InterpResult<'tcx> {
         let msg = Symbol::intern(msg);
         let span = ecx.find_closest_untracked_caller_location();
         let (file, line, col) = ecx.location_triple_for_span(span);
@@ -453,23 +443,20 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir,
     }
 
     fn call_intrinsic(
-        ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        ecx: &mut InterpCx<'tcx, Self>,
         instance: ty::Instance<'tcx>,
         args: &[OpTy<'tcx>],
         dest: &MPlaceTy<'tcx, Self::Provenance>,
         target: Option<mir::BasicBlock>,
         _unwind: mir::UnwindAction,
-    ) -> InterpResult<'tcx> {
+    ) -> InterpResult<'tcx, Option<ty::Instance<'tcx>>> {
         // Shared intrinsics.
         if ecx.emulate_intrinsic(instance, args, dest, target)? {
-            return Ok(());
+            return Ok(None);
         }
         let intrinsic_name = ecx.tcx.item_name(instance.def_id());
 
         // CTFE-specific intrinsics.
-        let Some(ret) = target else {
-            throw_unsup_format!("intrinsic `{intrinsic_name}` is not supported at compile-time");
-        };
         match intrinsic_name {
             sym::ptr_guaranteed_cmp => {
                 let a = ecx.read_scalar(&args[0])?;
@@ -536,18 +523,26 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir,
             // not the optimization stage.)
             sym::is_val_statically_known => ecx.write_scalar(Scalar::from_bool(false), dest)?,
             _ => {
-                throw_unsup_format!(
-                    "intrinsic `{intrinsic_name}` is not supported at compile-time"
-                );
+                // We haven't handled the intrinsic, let's see if we can use a fallback body.
+                if ecx.tcx.intrinsic(instance.def_id()).unwrap().must_be_overridden {
+                    throw_unsup_format!(
+                        "intrinsic `{intrinsic_name}` is not supported at compile-time"
+                    );
+                }
+                return Ok(Some(ty::Instance {
+                    def: ty::InstanceDef::Item(instance.def_id()),
+                    args: instance.args,
+                }));
             }
         }
 
-        ecx.go_to_block(ret);
-        Ok(())
+        // Intrinsic is done, jump to next block.
+        ecx.return_to_block(target)?;
+        Ok(None)
     }
 
     fn assert_panic(
-        ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        ecx: &mut InterpCx<'tcx, Self>,
         msg: &AssertMessage<'tcx>,
         _unwind: mir::UnwindAction,
     ) -> InterpResult<'tcx> {
@@ -578,15 +573,15 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir,
     }
 
     fn binary_ptr_op(
-        _ecx: &InterpCx<'mir, 'tcx, Self>,
+        _ecx: &InterpCx<'tcx, Self>,
         _bin_op: mir::BinOp,
         _left: &ImmTy<'tcx>,
         _right: &ImmTy<'tcx>,
-    ) -> InterpResult<'tcx, (ImmTy<'tcx>, bool)> {
+    ) -> InterpResult<'tcx, ImmTy<'tcx>> {
         throw_unsup_format!("pointer arithmetic or comparison is not supported at compile-time");
     }
 
-    fn increment_const_eval_counter(ecx: &mut InterpCx<'mir, 'tcx, Self>) -> InterpResult<'tcx> {
+    fn increment_const_eval_counter(ecx: &mut InterpCx<'tcx, Self>) -> InterpResult<'tcx> {
         // The step limit has already been hit in a previous call to `increment_const_eval_counter`.
 
         if let Some(new_steps) = ecx.machine.num_evaluated_steps.checked_add(1) {
@@ -642,16 +637,16 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir,
     }
 
     #[inline(always)]
-    fn expose_ptr(_ecx: &mut InterpCx<'mir, 'tcx, Self>, _ptr: Pointer) -> InterpResult<'tcx> {
+    fn expose_ptr(_ecx: &mut InterpCx<'tcx, Self>, _ptr: Pointer) -> InterpResult<'tcx> {
         // This is only reachable with -Zunleash-the-miri-inside-of-you.
         throw_unsup_format!("exposing pointers is not possible at compile-time")
     }
 
     #[inline(always)]
-    fn init_frame_extra(
-        ecx: &mut InterpCx<'mir, 'tcx, Self>,
-        frame: Frame<'mir, 'tcx>,
-    ) -> InterpResult<'tcx, Frame<'mir, 'tcx>> {
+    fn init_frame(
+        ecx: &mut InterpCx<'tcx, Self>,
+        frame: Frame<'tcx>,
+    ) -> InterpResult<'tcx, Frame<'tcx>> {
         // Enforce stack size limit. Add 1 because this is run before the new frame is pushed.
         if !ecx.recursion_limit.value_within_limit(ecx.stack().len() + 1) {
             throw_exhaust!(StackFrameLimitReached)
@@ -662,15 +657,15 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir,
 
     #[inline(always)]
     fn stack<'a>(
-        ecx: &'a InterpCx<'mir, 'tcx, Self>,
-    ) -> &'a [Frame<'mir, 'tcx, Self::Provenance, Self::FrameExtra>] {
+        ecx: &'a InterpCx<'tcx, Self>,
+    ) -> &'a [Frame<'tcx, Self::Provenance, Self::FrameExtra>] {
         &ecx.machine.stack
     }
 
     #[inline(always)]
     fn stack_mut<'a>(
-        ecx: &'a mut InterpCx<'mir, 'tcx, Self>,
-    ) -> &'a mut Vec<Frame<'mir, 'tcx, Self::Provenance, Self::FrameExtra>> {
+        ecx: &'a mut InterpCx<'tcx, Self>,
+    ) -> &'a mut Vec<Frame<'tcx, Self::Provenance, Self::FrameExtra>> {
         &mut ecx.machine.stack
     }
 
@@ -707,7 +702,7 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir,
     }
 
     fn retag_ptr_value(
-        ecx: &mut InterpCx<'mir, 'tcx, Self>,
+        ecx: &mut InterpCx<'tcx, Self>,
         _kind: mir::RetagKind,
         val: &ImmTy<'tcx, CtfeProvenance>,
     ) -> InterpResult<'tcx, ImmTy<'tcx, CtfeProvenance>> {
@@ -748,15 +743,22 @@ impl<'mir, 'tcx> interpret::Machine<'mir, 'tcx> for CompileTimeInterpreter<'mir,
         Ok(())
     }
 
-    fn before_alloc_read(
-        ecx: &InterpCx<'mir, 'tcx, Self>,
-        alloc_id: AllocId,
-    ) -> InterpResult<'tcx> {
+    fn before_alloc_read(ecx: &InterpCx<'tcx, Self>, alloc_id: AllocId) -> InterpResult<'tcx> {
+        // Check if this is the currently evaluated static.
         if Some(alloc_id) == ecx.machine.static_root_ids.map(|(id, _)| id) {
-            Err(ConstEvalErrKind::RecursiveStatic.into())
-        } else {
-            Ok(())
+            return Err(ConstEvalErrKind::RecursiveStatic.into());
         }
+        // If this is another static, make sure we fire off the query to detect cycles.
+        // But only do that when checks for static recursion are enabled.
+        if ecx.machine.static_root_ids.is_some() {
+            if let Some(GlobalAlloc::Static(def_id)) = ecx.tcx.try_get_global_alloc(alloc_id) {
+                if ecx.tcx.is_foreign_item(def_id) {
+                    throw_unsup!(ExternStatic(def_id));
+                }
+                ecx.ctfe_query(|tcx| tcx.eval_static_initializer(def_id))?;
+            }
+        }
+        Ok(())
     }
 }
 

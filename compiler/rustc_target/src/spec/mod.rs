@@ -40,6 +40,7 @@ use crate::json::{Json, ToJson};
 use crate::spec::abi::Abi;
 use crate::spec::crt_objects::CrtObjects;
 use rustc_fs_util::try_canonicalize;
+use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_span::symbol::{kw, sym, Symbol};
 use serde_json::Value;
@@ -50,8 +51,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fmt, io};
-
-use rustc_macros::HashStable_Generic;
+use tracing::debug;
 
 pub mod abi;
 pub mod crt_objects;
@@ -603,19 +603,6 @@ impl LinkSelfContainedDefault {
         self == LinkSelfContainedDefault::False
     }
 
-    /// Returns whether the target spec explicitly requests self-contained linking, i.e. not via
-    /// inference.
-    pub fn is_linker_enabled(self) -> bool {
-        match self {
-            LinkSelfContainedDefault::True => true,
-            LinkSelfContainedDefault::False => false,
-            LinkSelfContainedDefault::WithComponents(c) => {
-                c.contains(LinkSelfContainedComponents::LINKER)
-            }
-            _ => false,
-        }
-    }
-
     /// Returns the key to use when serializing the setting to json:
     /// - individual components in a `link-self-contained` object value
     /// - the other variants as a backwards-compatible `crt-objects-fallback` string
@@ -624,6 +611,12 @@ impl LinkSelfContainedDefault {
             LinkSelfContainedDefault::WithComponents(_) => "link-self-contained",
             _ => "crt-objects-fallback",
         }
+    }
+
+    /// Creates a `LinkSelfContainedDefault` enabling the self-contained linker for target specs
+    /// (the equivalent of `-Clink-self-contained=+linker` on the CLI).
+    pub fn with_linker() -> LinkSelfContainedDefault {
+        LinkSelfContainedDefault::WithComponents(LinkSelfContainedComponents::LINKER)
     }
 }
 
@@ -776,6 +769,14 @@ impl LinkerFeatures {
 pub enum PanicStrategy {
     Unwind,
     Abort,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Hash, Encodable, Decodable, HashStable_Generic)]
+pub enum OnBrokenPipe {
+    Default,
+    Kill,
+    Error,
+    Inherit,
 }
 
 impl PanicStrategy {
@@ -1316,6 +1317,34 @@ bitflags::bitflags! {
 rustc_data_structures::external_bitflags_debug! { SanitizerSet }
 
 impl SanitizerSet {
+    // Taken from LLVM's sanitizer compatibility logic:
+    // https://github.com/llvm/llvm-project/blob/release/18.x/clang/lib/Driver/SanitizerArgs.cpp#L512
+    const MUTUALLY_EXCLUSIVE: &'static [(SanitizerSet, SanitizerSet)] = &[
+        (SanitizerSet::ADDRESS, SanitizerSet::MEMORY),
+        (SanitizerSet::ADDRESS, SanitizerSet::THREAD),
+        (SanitizerSet::ADDRESS, SanitizerSet::HWADDRESS),
+        (SanitizerSet::ADDRESS, SanitizerSet::MEMTAG),
+        (SanitizerSet::ADDRESS, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::ADDRESS, SanitizerSet::SAFESTACK),
+        (SanitizerSet::LEAK, SanitizerSet::MEMORY),
+        (SanitizerSet::LEAK, SanitizerSet::THREAD),
+        (SanitizerSet::LEAK, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::LEAK, SanitizerSet::SAFESTACK),
+        (SanitizerSet::MEMORY, SanitizerSet::THREAD),
+        (SanitizerSet::MEMORY, SanitizerSet::HWADDRESS),
+        (SanitizerSet::MEMORY, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::MEMORY, SanitizerSet::SAFESTACK),
+        (SanitizerSet::THREAD, SanitizerSet::HWADDRESS),
+        (SanitizerSet::THREAD, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::THREAD, SanitizerSet::SAFESTACK),
+        (SanitizerSet::HWADDRESS, SanitizerSet::MEMTAG),
+        (SanitizerSet::HWADDRESS, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::HWADDRESS, SanitizerSet::SAFESTACK),
+        (SanitizerSet::CFI, SanitizerSet::KCFI),
+        (SanitizerSet::MEMTAG, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::KERNELADDRESS, SanitizerSet::SAFESTACK),
+    ];
+
     /// Return sanitizer's name
     ///
     /// Returns none if the flags is a set of sanitizers numbering not exactly one.
@@ -1335,6 +1364,13 @@ impl SanitizerSet {
             SanitizerSet::HWADDRESS => "hwaddress",
             _ => return None,
         })
+    }
+
+    pub fn mutually_exclusive(self) -> Option<(SanitizerSet, SanitizerSet)> {
+        Self::MUTUALLY_EXCLUSIVE
+            .into_iter()
+            .find(|&(a, b)| self.contains(*a) && self.contains(*b))
+            .copied()
     }
 }
 
@@ -1793,6 +1829,9 @@ supported_targets! {
     ("aarch64-unknown-linux-ohos", aarch64_unknown_linux_ohos),
     ("armv7-unknown-linux-ohos", armv7_unknown_linux_ohos),
     ("x86_64-unknown-linux-ohos", x86_64_unknown_linux_ohos),
+
+    ("x86_64-unknown-linux-none", x86_64_unknown_linux_none),
+
 }
 
 /// Cow-Vec-Str: Cow<'static, [Cow<'static, str>]>
@@ -3342,7 +3381,7 @@ impl Target {
 
                 // Additionally look in the sysroot under `lib/rustlib/<triple>/target.json`
                 // as a fallback.
-                let rustlib_path = crate::target_rustlib_path(sysroot, target_triple);
+                let rustlib_path = crate::relative_target_rustlib_path(sysroot, target_triple);
                 let p = PathBuf::from_iter([
                     Path::new(sysroot),
                     Path::new(&rustlib_path),

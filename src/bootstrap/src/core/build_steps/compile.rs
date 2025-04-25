@@ -1006,6 +1006,13 @@ pub fn rustc_cargo(
 
     cargo.rustdocflag("-Zcrate-attr=warn(rust_2018_idioms)");
 
+    // If the rustc output is piped to e.g. `head -n1` we want the process to be
+    // killed, rather than having an error bubble up and cause a panic.
+    // FIXME: Synthetic #[cfg(bootstrap)]. Remove when the bootstrap compiler supports it.
+    if compiler.stage != 0 {
+        cargo.rustflag("-Zon-broken-pipe=kill");
+    }
+
     // We currently don't support cross-crate LTO in stage0. This also isn't hugely necessary
     // and may just be a time sink.
     if compiler.stage != 0 {
@@ -1127,6 +1134,13 @@ pub fn rustc_cargo_env(
         cargo.env("CFG_DEFAULT_LINKER", s);
     } else if let Some(ref s) = builder.config.rustc_default_linker {
         cargo.env("CFG_DEFAULT_LINKER", s);
+    }
+
+    // Enable rustc's env var for `rust-lld` when requested.
+    if builder.config.lld_enabled
+        && (builder.config.channel == "dev" || builder.config.channel == "nightly")
+    {
+        cargo.env("CFG_USE_SELF_CONTAINED_LINKER", "1");
     }
 
     if builder.config.rust_verify_llvm_ir {

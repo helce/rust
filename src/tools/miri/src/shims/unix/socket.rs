@@ -3,31 +3,29 @@ use std::io;
 use crate::shims::unix::*;
 use crate::*;
 
+use self::fd::FileDescriptor;
+
 /// Pair of connected sockets.
 ///
 /// We currently don't allow sending any data through this pair, so this can be just a dummy.
 #[derive(Debug)]
 struct SocketPair;
 
-impl FileDescriptor for SocketPair {
+impl FileDescription for SocketPair {
     fn name(&self) -> &'static str {
         "socketpair"
-    }
-
-    fn dup(&mut self) -> io::Result<Box<dyn FileDescriptor>> {
-        Ok(Box::new(SocketPair))
     }
 
     fn close<'tcx>(
         self: Box<Self>,
         _communicate_allowed: bool,
-    ) -> InterpResult<'tcx, io::Result<i32>> {
-        Ok(Ok(0))
+    ) -> InterpResult<'tcx, io::Result<()>> {
+        Ok(Ok(()))
     }
 }
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     /// Currently this function this function is a stub. Eventually we need to
     /// properly implement an FD type for sockets and have this function create
     /// two sockets and associated FDs such that writing to one will produce
@@ -52,9 +50,9 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         // FIXME: fail on unsupported inputs
 
         let fds = &mut this.machine.fds;
-        let sv0 = fds.insert_fd(Box::new(SocketPair));
+        let sv0 = fds.insert_fd(FileDescriptor::new(SocketPair));
         let sv0 = Scalar::try_from_int(sv0, sv.layout.size).unwrap();
-        let sv1 = fds.insert_fd(Box::new(SocketPair));
+        let sv1 = fds.insert_fd(FileDescriptor::new(SocketPair));
         let sv1 = Scalar::try_from_int(sv1, sv.layout.size).unwrap();
 
         this.write_scalar(sv0, &sv)?;

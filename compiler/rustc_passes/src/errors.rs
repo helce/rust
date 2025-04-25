@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::fluent_generated as fluent;
-use rustc_ast::Label;
+use rustc_ast::{ast, Label};
 use rustc_errors::{
     codes::*, Applicability, Diag, DiagCtxt, DiagSymbolList, Diagnostic, EmissionGuarantee, Level,
     MultiSpan, SubdiagMessageOp, Subdiagnostic,
@@ -17,12 +17,9 @@ use rustc_span::{Span, Symbol, DUMMY_SP};
 use crate::check_attr::ProcMacroKind;
 use crate::lang_items::Duplicate;
 
-#[derive(Diagnostic)]
+#[derive(LintDiagnostic)]
 #[diag(passes_incorrect_do_not_recommend_location)]
-pub struct IncorrectDoNotRecommendLocation {
-    #[primary_span]
-    pub span: Span,
-}
+pub struct IncorrectDoNotRecommendLocation;
 
 #[derive(LintDiagnostic)]
 #[diag(passes_outer_crate_level_attr)]
@@ -866,6 +863,15 @@ pub struct InvalidAttrAtCrateLevel {
     pub item: Option<ItemFollowingInnerAttr>,
 }
 
+#[derive(Diagnostic)]
+#[diag(passes_invalid_attr_unsafe)]
+#[note]
+pub struct InvalidAttrUnsafe {
+    #[primary_span]
+    pub span: Span,
+    pub name: ast::Path,
+}
+
 #[derive(Clone, Copy)]
 pub struct ItemFollowingInnerAttr {
     pub span: Span,
@@ -1086,14 +1092,16 @@ pub struct BreakInsideClosure<'a> {
 }
 
 #[derive(Diagnostic)]
-#[diag(passes_break_inside_async_block, code = E0267)]
-pub struct BreakInsideAsyncBlock<'a> {
+#[diag(passes_break_inside_coroutine, code = E0267)]
+pub struct BreakInsideCoroutine<'a> {
     #[primary_span]
     #[label]
     pub span: Span,
-    #[label(passes_async_block_label)]
-    pub closure_span: Span,
+    #[label(passes_coroutine_label)]
+    pub coroutine_span: Span,
     pub name: &'a str,
+    pub kind: &'a str,
+    pub source: &'a str,
 }
 
 #[derive(Diagnostic)]
@@ -1101,7 +1109,7 @@ pub struct BreakInsideAsyncBlock<'a> {
 pub struct OutsideLoop<'a> {
     #[primary_span]
     #[label]
-    pub span: Span,
+    pub spans: Vec<Span>,
     pub name: &'a str,
     pub is_break: bool,
     #[subdiagnostic]
@@ -1113,7 +1121,7 @@ pub struct OutsideLoopSuggestion {
     #[suggestion_part(code = "'block: ")]
     pub block_span: Span,
     #[suggestion_part(code = " 'block")]
-    pub break_span: Span,
+    pub break_spans: Vec<Span>,
 }
 
 #[derive(Diagnostic)]
@@ -1207,22 +1215,6 @@ pub struct NakedFunctionsMustUseNoreturn {
 }
 
 #[derive(Diagnostic)]
-#[diag(passes_attr_only_on_main)]
-pub struct AttrOnlyOnMain {
-    #[primary_span]
-    pub span: Span,
-    pub attr: Symbol,
-}
-
-#[derive(Diagnostic)]
-#[diag(passes_attr_only_on_root_main)]
-pub struct AttrOnlyOnRootMain {
-    #[primary_span]
-    pub span: Span,
-    pub attr: Symbol,
-}
-
-#[derive(Diagnostic)]
 #[diag(passes_attr_only_in_functions)]
 pub struct AttrOnlyInFunctions {
     #[primary_span]
@@ -1255,13 +1247,6 @@ pub struct MultipleStartFunctions {
 #[derive(Diagnostic)]
 #[diag(passes_extern_main)]
 pub struct ExternMain {
-    #[primary_span]
-    pub span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(passes_unix_sigpipe_values)]
-pub struct UnixSigpipeValues {
     #[primary_span]
     pub span: Span,
 }

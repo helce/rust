@@ -7,6 +7,7 @@ use crate::hint;
 use crate::intrinsics;
 use crate::mem;
 use crate::str::FromStr;
+use crate::ub_checks::assert_unsafe_precondition;
 
 // Used because the `?` operator is not allowed in a const context.
 macro_rules! try_opt {
@@ -1412,11 +1413,9 @@ fn from_str_radix_panic_rt(radix: u32) -> ! {
 #[cfg_attr(feature = "panic_immediate_abort", inline)]
 #[cold]
 #[track_caller]
-const fn from_str_radix_assert(radix: u32) {
-    if 2 > radix || radix > 36 {
-        // The only difference between these two functions is their panic message.
-        intrinsics::const_eval_select((radix,), from_str_radix_panic_ct, from_str_radix_panic_rt);
-    }
+const fn from_str_radix_panic(radix: u32) {
+    // The only difference between these two functions is their panic message.
+    intrinsics::const_eval_select((radix,), from_str_radix_panic_ct, from_str_radix_panic_rt);
 }
 
 macro_rules! from_str_radix {
@@ -1450,7 +1449,9 @@ macro_rules! from_str_radix {
                 use self::IntErrorKind::*;
                 use self::ParseIntError as PIE;
 
-                from_str_radix_assert(radix);
+                if 2 > radix || radix > 36 {
+                    from_str_radix_panic(radix);
+                }
 
                 if src.is_empty() {
                     return Err(PIE { kind: Empty });

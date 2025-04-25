@@ -49,24 +49,18 @@ passes_attr_crate_level =
 passes_attr_only_in_functions =
     `{$attr}` attribute can only be used on functions
 
-passes_attr_only_on_main =
-    `{$attr}` attribute can only be used on `fn main()`
-
-passes_attr_only_on_root_main =
-    `{$attr}` attribute can only be used on root `fn main()`
-
 passes_both_ffi_const_and_pure =
     `#[ffi_const]` function cannot be `#[ffi_pure]`
-
-passes_break_inside_async_block =
-    `{$name}` inside of an `async` block
-    .label = cannot `{$name}` inside of an `async` block
-    .async_block_label = enclosing `async` block
 
 passes_break_inside_closure =
     `{$name}` inside of a closure
     .label = cannot `{$name}` inside of a closure
     .closure_label = enclosing closure
+
+passes_break_inside_coroutine =
+    `{$name}` inside `{$kind}` {$source}
+    .label = cannot `{$name}` inside `{$kind}` {$source}
+    .coroutine_label = enclosing `{$kind}` {$source}
 
 passes_break_non_loop =
     `break` with value from a `{$kind}` loop
@@ -347,7 +341,7 @@ passes_implied_feature_not_exist =
     feature `{$implied_by}` implying `{$feature}` does not exist
 
 passes_incorrect_do_not_recommend_location =
-    `#[do_not_recommend]` can only be placed on trait implementations
+    `#[diagnostic::do_not_recommend]` can only be placed on trait implementations
 
 passes_incorrect_meta_item = expected a quoted string literal
 passes_incorrect_meta_item_suggestion = consider surrounding this with quotes
@@ -389,6 +383,10 @@ passes_invalid_attr_at_crate_level =
 
 passes_invalid_attr_at_crate_level_item =
     the inner attribute doesn't annotate this {$kind}
+
+passes_invalid_attr_unsafe = `{$name}` is not an unsafe attribute
+    .suggestion = remove the `unsafe(...)`
+    .note = extraneous unsafe is not allowed in attributes
 
 passes_invalid_macro_export_arguments = `{$name}` isn't a valid `#[macro_export]` argument
 
@@ -694,9 +692,6 @@ passes_transparent_incompatible =
 
 passes_undefined_naked_function_abi =
     Rust ABI is unsupported in naked functions
-
-passes_unix_sigpipe_values =
-    valid values for `#[unix_sigpipe = "..."]` are `inherit`, `sig_ign`, or `sig_dfl`
 
 passes_unknown_external_lang_item =
     unknown external lang item: `{$lang_item}`

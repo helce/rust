@@ -12,11 +12,6 @@
 #![feature(map_try_insert)]
 #![feature(try_blocks)]
 
-#[macro_use]
-extern crate rustc_middle;
-#[macro_use]
-extern crate tracing;
-
 use rustc_middle::query::Providers;
 
 pub mod abi_test;

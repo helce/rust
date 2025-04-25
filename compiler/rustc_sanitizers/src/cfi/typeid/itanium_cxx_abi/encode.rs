@@ -4,7 +4,9 @@
 //!
 //! For more information about LLVM CFI and cross-language LLVM CFI support for the Rust compiler,
 //! see design document in the tracking issue #89653.
-use rustc_data_structures::base_n;
+use rustc_data_structures::base_n::ToBaseN;
+use rustc_data_structures::base_n::ALPHANUMERIC_ONLY;
+use rustc_data_structures::base_n::CASE_INSENSITIVE;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir as hir;
 use rustc_middle::bug;
@@ -66,6 +68,8 @@ fn compress<'tcx>(
 fn encode_args<'tcx>(
     tcx: TyCtxt<'tcx>,
     args: GenericArgsRef<'tcx>,
+    for_def: DefId,
+    has_erased_self: bool,
     dict: &mut FxHashMap<DictKey<'tcx>, usize>,
     options: EncodeTyOptions,
 ) -> String {
@@ -74,7 +78,8 @@ fn encode_args<'tcx>(
     let args: Vec<GenericArg<'_>> = args.iter().collect();
     if !args.is_empty() {
         s.push('I');
-        for arg in args {
+        let def_generics = tcx.generics_of(for_def);
+        for (n, arg) in args.iter().enumerate() {
             match arg.unpack() {
                 GenericArgKind::Lifetime(region) => {
                     s.push_str(&encode_region(region, dict));
@@ -83,7 +88,10 @@ fn encode_args<'tcx>(
                     s.push_str(&encode_ty(tcx, ty, dict, options));
                 }
                 GenericArgKind::Const(c) => {
-                    s.push_str(&encode_const(tcx, c, dict, options));
+                    let n = n + (has_erased_self as usize);
+                    let ct_ty =
+                        tcx.type_of(def_generics.param_at(n, tcx).def_id).instantiate_identity();
+                    s.push_str(&encode_const(tcx, c, ct_ty, dict, options));
                 }
             }
         }
@@ -97,6 +105,7 @@ fn encode_args<'tcx>(
 fn encode_const<'tcx>(
     tcx: TyCtxt<'tcx>,
     c: Const<'tcx>,
+    ct_ty: Ty<'tcx>,
     dict: &mut FxHashMap<DictKey<'tcx>, usize>,
     options: EncodeTyOptions,
 ) -> String {
@@ -109,20 +118,20 @@ fn encode_const<'tcx>(
             // L<element-type>E as literal argument
 
             // Element type
-            s.push_str(&encode_ty(tcx, c.ty(), dict, options));
+            s.push_str(&encode_ty(tcx, ct_ty, dict, options));
         }
 
         // Literal arguments
-        ty::ConstKind::Value(..) => {
+        ty::ConstKind::Value(ct_ty, ..) => {
             // L<element-type>[n]<element-value>E as literal argument
 
             // Element type
-            s.push_str(&encode_ty(tcx, c.ty(), dict, options));
+            s.push_str(&encode_ty(tcx, ct_ty, dict, options));
 
             // The only allowed types of const values are bool, u8, u16, u32,
             // u64, u128, usize i8, i16, i32, i64, i128, isize, and char. The
             // bool value false is encoded as 0 and true as 1.
-            match c.ty().kind() {
+            match ct_ty.kind() {
                 ty::Int(ity) => {
                     let bits = c.eval_bits(tcx, ty::ParamEnv::reveal_all());
                     let val = Integer::from_int_ty(&tcx, *ity).size().sign_extend(bits) as i128;
@@ -140,7 +149,7 @@ fn encode_const<'tcx>(
                     let _ = write!(s, "{val}");
                 }
                 _ => {
-                    bug!("encode_const: unexpected type `{:?}`", c.ty());
+                    bug!("encode_const: unexpected type `{:?}`", ct_ty);
                 }
             }
         }
@@ -229,15 +238,21 @@ fn encode_predicate<'tcx>(
         ty::ExistentialPredicate::Trait(trait_ref) => {
             let name = encode_ty_name(tcx, trait_ref.def_id);
             let _ = write!(s, "u{}{}", name.len(), &name);
-            s.push_str(&encode_args(tcx, trait_ref.args, dict, options));
+            s.push_str(&encode_args(tcx, trait_ref.args, trait_ref.def_id, true, dict, options));
         }
         ty::ExistentialPredicate::Projection(projection) => {
             let name = encode_ty_name(tcx, projection.def_id);
             let _ = write!(s, "u{}{}", name.len(), &name);
-            s.push_str(&encode_args(tcx, projection.args, dict, options));
+            s.push_str(&encode_args(tcx, projection.args, projection.def_id, true, dict, options));
             match projection.term.unpack() {
                 TermKind::Ty(ty) => s.push_str(&encode_ty(tcx, ty, dict, options)),
-                TermKind::Const(c) => s.push_str(&encode_const(tcx, c, dict, options)),
+                TermKind::Const(c) => s.push_str(&encode_const(
+                    tcx,
+                    c,
+                    tcx.type_of(projection.def_id).instantiate(tcx, projection.args),
+                    dict,
+                    options,
+                )),
             }
         }
         ty::ExistentialPredicate::AutoTrait(def_id) => {
@@ -483,7 +498,7 @@ pub fn encode_ty<'tcx>(
                 // <subst>, as vendor extended type.
                 let name = encode_ty_name(tcx, def_id);
                 let _ = write!(s, "u{}{}", name.len(), &name);
-                s.push_str(&encode_args(tcx, args, dict, options));
+                s.push_str(&encode_args(tcx, args, def_id, false, dict, options));
                 compress(dict, DictKey::Ty(ty, TyQ::None), &mut s);
             }
             typeid.push_str(&s);
@@ -527,7 +542,7 @@ pub fn encode_ty<'tcx>(
             let mut s = String::new();
             let name = encode_ty_name(tcx, *def_id);
             let _ = write!(s, "u{}{}", name.len(), &name);
-            s.push_str(&encode_args(tcx, args, dict, options));
+            s.push_str(&encode_args(tcx, args, *def_id, false, dict, options));
             compress(dict, DictKey::Ty(ty, TyQ::None), &mut s);
             typeid.push_str(&s);
         }
@@ -539,7 +554,7 @@ pub fn encode_ty<'tcx>(
             let name = encode_ty_name(tcx, *def_id);
             let _ = write!(s, "u{}{}", name.len(), &name);
             let parent_args = tcx.mk_args(args.as_coroutine_closure().parent_args());
-            s.push_str(&encode_args(tcx, parent_args, dict, options));
+            s.push_str(&encode_args(tcx, parent_args, *def_id, false, dict, options));
             compress(dict, DictKey::Ty(ty, TyQ::None), &mut s);
             typeid.push_str(&s);
         }
@@ -554,6 +569,8 @@ pub fn encode_ty<'tcx>(
             s.push_str(&encode_args(
                 tcx,
                 tcx.mk_args(args.as_coroutine().parent_args()),
+                *def_id,
+                false,
                 dict,
                 options,
             ));
@@ -736,7 +753,7 @@ fn encode_ty_name(tcx: TyCtxt<'_>, def_id: DefId) -> String {
 /// <https://rust-lang.github.io/rfcs/2603-rust-symbol-name-mangling-v0.html>).
 fn to_disambiguator(num: u64) -> String {
     if let Some(num) = num.checked_sub(1) {
-        format!("s{}_", base_n::encode(num as u128, base_n::ALPHANUMERIC_ONLY))
+        format!("s{}_", num.to_base(ALPHANUMERIC_ONLY))
     } else {
         "s_".to_string()
     }
@@ -746,7 +763,7 @@ fn to_disambiguator(num: u64) -> String {
 /// <https://itanium-cxx-abi.github.io/cxx-abi/abi.html#mangle.seq-id>).
 fn to_seq_id(num: usize) -> String {
     if let Some(num) = num.checked_sub(1) {
-        base_n::encode(num as u128, base_n::CASE_INSENSITIVE).to_uppercase()
+        (num as u64).to_base(CASE_INSENSITIVE).to_uppercase()
     } else {
         "".to_string()
     }

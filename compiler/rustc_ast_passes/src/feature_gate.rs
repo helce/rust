@@ -1,7 +1,7 @@
 use rustc_ast as ast;
 use rustc_ast::visit::{self, AssocCtxt, FnCtxt, FnKind, Visitor};
-use rustc_ast::{attr, AssocConstraint, AssocConstraintKind, NodeId};
-use rustc_ast::{token, PatKind, RangeEnd};
+use rustc_ast::{attr, AssocItemConstraint, AssocItemConstraintKind, NodeId};
+use rustc_ast::{token, PatKind};
 use rustc_feature::{AttributeGate, BuiltinAttribute, Features, GateIssue, BUILTIN_ATTRIBUTE_MAP};
 use rustc_session::parse::{feature_err, feature_err_issue, feature_warn};
 use rustc_session::Session;
@@ -344,7 +344,7 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
         for predicate in &g.where_clause.predicates {
             match predicate {
                 ast::WherePredicate::BoundPredicate(bound_pred) => {
-                    // A type binding, eg `for<'c> Foo: Send+Clone+'c`
+                    // A type bound (e.g., `for<'c> Foo: Send + Clone + 'c`).
                     self.check_late_bound_lifetime_defs(&bound_pred.bound_generic_params);
                 }
                 _ => {}
@@ -418,15 +418,6 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
             PatKind::Box(..) => {
                 gate!(&self, box_patterns, pattern.span, "box pattern syntax is experimental");
             }
-            PatKind::Range(_, Some(_), Spanned { node: RangeEnd::Excluded, .. }) => {
-                gate!(
-                    &self,
-                    exclusive_range_pattern,
-                    pattern.span,
-                    "exclusive range pattern syntax is experimental",
-                    "use an inclusive range pattern, like N..=M"
-                );
-            }
             _ => {}
         }
         visit::walk_pat(self, pattern)
@@ -454,21 +445,21 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
         visit::walk_fn(self, fn_kind)
     }
 
-    fn visit_assoc_constraint(&mut self, constraint: &'a AssocConstraint) {
-        if let AssocConstraintKind::Bound { .. } = constraint.kind {
-            if let Some(ast::GenericArgs::Parenthesized(args)) = constraint.gen_args.as_ref()
-                && args.inputs.is_empty()
-                && matches!(args.output, ast::FnRetTy::Default(..))
-            {
-                gate!(
-                    &self,
-                    return_type_notation,
-                    constraint.span,
-                    "return type notation is experimental"
-                );
-            }
+    fn visit_assoc_item_constraint(&mut self, constraint: &'a AssocItemConstraint) {
+        if let AssocItemConstraintKind::Bound { .. } = constraint.kind
+            && let Some(ast::GenericArgs::Parenthesized(args)) = constraint.gen_args.as_ref()
+            && args.inputs.is_empty()
+            && let ast::FnRetTy::Default(..) = args.output
+        {
+            gate!(
+                &self,
+                return_type_notation,
+                constraint.span,
+                "return type notation is experimental"
+            );
         }
-        visit::walk_assoc_constraint(self, constraint)
+
+        visit::walk_assoc_item_constraint(self, constraint)
     }
 
     fn visit_assoc_item(&mut self, i: &'a ast::AssocItem, ctxt: AssocCtxt) {
@@ -569,6 +560,12 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
     gate_all!(postfix_match, "postfix match is experimental");
     gate_all!(mut_ref, "mutable by-reference bindings are experimental");
     gate_all!(precise_capturing, "precise captures on `impl Trait` are experimental");
+    gate_all!(global_registration, "global registration is experimental");
+    gate_all!(unsafe_attributes, "`#[unsafe()]` markers for attributes are experimental");
+    gate_all!(
+        unsafe_extern_blocks,
+        "`unsafe extern {}` blocks and `safe` keyword are experimental"
+    );
 
     if !visitor.features.never_patterns {
         if let Some(spans) = spans.get(&sym::never_patterns) {
@@ -619,10 +616,6 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
     // be too.
     gate_all_legacy_dont_use!(return_type_notation, "return type notation is experimental");
     gate_all_legacy_dont_use!(decl_macro, "`macro` is experimental");
-    gate_all_legacy_dont_use!(
-        exclusive_range_pattern,
-        "exclusive range pattern syntax is experimental"
-    );
     gate_all_legacy_dont_use!(try_blocks, "`try` blocks are unstable");
     gate_all_legacy_dont_use!(auto_traits, "`auto` traits are unstable");
 

@@ -31,7 +31,8 @@ use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_middle::bug;
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::{
-    self, AdtKind, Instance, ParamEnv, PolyExistentialTraitRef, Ty, TyCtxt, Visibility,
+    self, AdtKind, CoroutineArgsExt, Instance, ParamEnv, PolyExistentialTraitRef, Ty, TyCtxt,
+    Visibility,
 };
 use rustc_session::config::{self, DebugInfo, Lto};
 use rustc_span::symbol::Symbol;
@@ -41,6 +42,7 @@ use rustc_symbol_mangling::typeid_for_trait_ref;
 use rustc_target::abi::{Align, Size};
 use rustc_target::spec::DebuginfoKind;
 use smallvec::smallvec;
+use tracing::{debug, instrument};
 
 use libc::{c_char, c_longlong, c_uint};
 use std::borrow::Cow;
@@ -1281,7 +1283,7 @@ fn build_generic_type_param_di_nodes<'ll, 'tcx>(
         let mut names = generics
             .parent
             .map_or_else(Vec::new, |def_id| get_parameter_names(cx, cx.tcx.generics_of(def_id)));
-        names.extend(generics.params.iter().map(|param| param.name));
+        names.extend(generics.own_params.iter().map(|param| param.name));
         names
     }
 }

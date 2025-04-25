@@ -11,6 +11,7 @@ use rustc_middle::mir::{self, Const};
 use rustc_middle::thir::{self, FieldPat, Pat, PatKind, PatRange, PatRangeBoundary};
 use rustc_middle::ty::layout::IntegerExt;
 use rustc_middle::ty::{self, FieldDef, OpaqueTypeKey, Ty, TyCtxt, TypeVisitableExt, VariantDef};
+use rustc_middle::{bug, span_bug};
 use rustc_session::lint;
 use rustc_span::{ErrorGuaranteed, Span, DUMMY_SP};
 use rustc_target::abi::{FieldIdx, Integer, VariantIdx, FIRST_VARIANT};
@@ -736,7 +737,7 @@ impl<'p, 'tcx: 'p> RustcPatCtxt<'p, 'tcx> {
                 // this). We show this to the user as `usize::MAX..` which is slightly incorrect but
                 // probably clear enough.
                 let c = ty.numeric_max_val(cx.tcx).unwrap();
-                let value = mir::Const::from_ty_const(c, cx.tcx);
+                let value = mir::Const::from_ty_const(c, ty.0, cx.tcx);
                 lo = PatRangeBoundary::Finite(value);
             }
             let hi = if let Some(hi) = range.hi.minus_one() {

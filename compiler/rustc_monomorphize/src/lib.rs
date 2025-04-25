@@ -1,13 +1,8 @@
 #![feature(array_windows)]
 #![feature(is_sorted)]
-#![allow(rustc::potential_query_instability)]
-
-#[macro_use]
-extern crate tracing;
-#[macro_use]
-extern crate rustc_middle;
 
 use rustc_hir::lang_items::LangItem;
+use rustc_middle::bug;
 use rustc_middle::query::{Providers, TyCtxtAt};
 use rustc_middle::traits;
 use rustc_middle::ty::adjustment::CustomCoerceUnsized;
@@ -33,10 +28,9 @@ fn custom_coerce_unsize_info<'tcx>(
     source_ty: Ty<'tcx>,
     target_ty: Ty<'tcx>,
 ) -> Result<CustomCoerceUnsized, ErrorGuaranteed> {
-    let trait_ref = ty::TraitRef::from_lang_item(
+    let trait_ref = ty::TraitRef::new(
         tcx.tcx,
-        LangItem::CoerceUnsized,
-        tcx.span,
+        tcx.require_lang_item(LangItem::CoerceUnsized, Some(tcx.span)),
         [source_ty, target_ty],
     );
 

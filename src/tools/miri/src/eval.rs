@@ -142,8 +142,8 @@ pub struct MiriConfig {
     /// Whether Stacked Borrows and Tree Borrows retagging should recurse into fields of datatypes.
     pub retag_fields: RetagFields,
     /// The location of a shared object file to load when calling external functions
-    /// FIXME! consider allowing users to specify paths to multiple SO files, or to a directory
-    pub external_so_file: Option<PathBuf>,
+    /// FIXME! consider allowing users to specify paths to multiple files, or to a directory
+    pub native_lib: Option<PathBuf>,
     /// Run a garbage collector for BorTags every N basic blocks.
     pub gc_interval: u32,
     /// The number of CPUs to be reported by miri.
@@ -188,7 +188,7 @@ impl Default for MiriConfig {
             preemption_rate: 0.01, // 1%
             report_progress: None,
             retag_fields: RetagFields::Yes,
-            external_so_file: None,
+            native_lib: None,
             gc_interval: 10_000,
             num_cpus: 1,
             page_size: None,
@@ -214,7 +214,7 @@ enum MainThreadState<'tcx> {
 impl<'tcx> MainThreadState<'tcx> {
     fn on_main_stack_empty(
         &mut self,
-        this: &mut MiriInterpCx<'_, 'tcx>,
+        this: &mut MiriInterpCx<'tcx>,
     ) -> InterpResult<'tcx, Poll<()>> {
         use MainThreadState::*;
         match self {
@@ -263,12 +263,12 @@ impl<'tcx> MainThreadState<'tcx> {
 
 /// Returns a freshly created `InterpCx`.
 /// Public because this is also used by `priroda`.
-pub fn create_ecx<'mir, 'tcx: 'mir>(
+pub fn create_ecx<'tcx>(
     tcx: TyCtxt<'tcx>,
     entry_id: DefId,
     entry_type: EntryFnType,
     config: &MiriConfig,
-) -> InterpResult<'tcx, InterpCx<'mir, 'tcx, MiriMachine<'mir, 'tcx>>> {
+) -> InterpResult<'tcx, InterpCx<'tcx, MiriMachine<'tcx>>> {
     let param_env = ty::ParamEnv::reveal_all();
     let layout_cx = LayoutCx { tcx, param_env };
     let mut ecx =
@@ -387,7 +387,7 @@ pub fn create_ecx<'mir, 'tcx: 'mir>(
             let main_ptr = ecx.fn_ptr(FnVal::Instance(entry_instance));
 
             // Always using DEFAULT is okay since we don't support signals in Miri anyway.
-            // (This means we are effectively ignoring `#[unix_sigpipe]`.)
+            // (This means we are effectively ignoring `-Zon-broken-pipe`.)
             let sigpipe = rustc_session::config::sigpipe::DEFAULT;
 
             ecx.call_function(

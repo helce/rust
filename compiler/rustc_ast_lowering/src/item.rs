@@ -20,6 +20,7 @@ use rustc_span::{DesugaringKind, Span, Symbol};
 use rustc_target::spec::abi;
 use smallvec::{smallvec, SmallVec};
 use thin_vec::ThinVec;
+use tracing::instrument;
 
 pub(super) struct ItemLowerer<'a, 'hir> {
     pub(super) tcx: TyCtxt<'hir>,
@@ -134,8 +135,8 @@ impl<'hir> LoweringContext<'_, 'hir> {
 
     fn lower_item_id_use_tree(&mut self, tree: &UseTree, vec: &mut SmallVec<[hir::ItemId; 1]>) {
         match &tree.kind {
-            UseTreeKind::Nested(nested_vec) => {
-                for &(ref nested, id) in nested_vec {
+            UseTreeKind::Nested { items, .. } => {
+                for &(ref nested, id) in items {
                     vec.push(hir::ItemId {
                         owner_id: hir::OwnerId { def_id: self.local_def_id(id) },
                     });
@@ -180,7 +181,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
 
                 self.lower_use_tree(use_tree, &prefix, id, vis_span, ident, attrs)
             }
-            ItemKind::Static(box ast::StaticItem { ty: t, mutability: m, expr: e }) => {
+            ItemKind::Static(box ast::StaticItem { ty: t, safety: _, mutability: m, expr: e }) => {
                 let (ty, body_id) =
                     self.lower_const_item(t, span, e.as_deref(), ImplTraitPosition::StaticTy);
                 hir::ItemKind::Static(ty, *m, body_id)
@@ -322,7 +323,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 hir::ItemKind::Union(vdata, generics)
             }
             ItemKind::Impl(box Impl {
-                unsafety,
+                safety,
                 polarity,
                 defaultness,
                 constness,
@@ -387,7 +388,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     ImplPolarity::Negative(s) => ImplPolarity::Negative(self.lower_span(*s)),
                 };
                 hir::ItemKind::Impl(self.arena.alloc(hir::Impl {
-                    unsafety: self.lower_unsafety(*unsafety),
+                    safety: self.lower_safety(*safety, hir::Safety::Safe),
                     polarity,
                     defaultness,
                     defaultness_span,
@@ -397,14 +398,14 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     items: new_impl_items,
                 }))
             }
-            ItemKind::Trait(box Trait { is_auto, unsafety, generics, bounds, items }) => {
+            ItemKind::Trait(box Trait { is_auto, safety, generics, bounds, items }) => {
                 // FIXME(const_trait_impl, effects, fee1-dead) this should be simplified if possible
                 let constness = attrs
                     .unwrap_or(&[])
                     .iter()
                     .find(|x| x.has_name(sym::const_trait))
                     .map_or(Const::No, |x| Const::Yes(x.span));
-                let (generics, (unsafety, items, bounds)) = self.lower_generics(
+                let (generics, (safety, items, bounds)) = self.lower_generics(
                     generics,
                     constness,
                     id,
@@ -417,11 +418,11 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         let items = this.arena.alloc_from_iter(
                             items.iter().map(|item| this.lower_trait_item_ref(item)),
                         );
-                        let unsafety = this.lower_unsafety(*unsafety);
-                        (unsafety, items, bounds)
+                        let safety = this.lower_safety(*safety, hir::Safety::Safe);
+                        (safety, items, bounds)
                     },
                 );
-                hir::ItemKind::Trait(*is_auto, unsafety, generics, bounds, items)
+                hir::ItemKind::Trait(*is_auto, safety, generics, bounds, items)
             }
             ItemKind::TraitAlias(generics, bounds) => {
                 let (generics, bounds) = self.lower_generics(
@@ -459,8 +460,8 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     delegation_results.body_id,
                 )
             }
-            ItemKind::MacCall(..) => {
-                panic!("`TyMac` should have been expanded by now")
+            ItemKind::MacCall(..) | ItemKind::DelegationMac(..) => {
+                panic!("macros should have been expanded by now")
             }
         }
     }
@@ -517,7 +518,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 let path = self.lower_use_path(res, &path, ParamMode::Explicit);
                 hir::ItemKind::Use(path, hir::UseKind::Glob)
             }
-            UseTreeKind::Nested(ref trees) => {
+            UseTreeKind::Nested { items: ref trees, .. } => {
                 // Nested imports are desugared into simple imports.
                 // So, if we start with
                 //
@@ -659,13 +660,21 @@ impl<'hir> LoweringContext<'_, 'hir> {
                                 this.lower_fn_params_to_names(fdec),
                             )
                         });
+                    let safety = self.lower_safety(sig.header.safety, hir::Safety::Unsafe);
 
-                    hir::ForeignItemKind::Fn(fn_dec, fn_args, generics)
+                    hir::ForeignItemKind::Fn(fn_dec, fn_args, generics, safety)
                 }
-                ForeignItemKind::Static(t, m, _) => {
-                    let ty =
-                        self.lower_ty(t, ImplTraitContext::Disallowed(ImplTraitPosition::StaticTy));
-                    hir::ForeignItemKind::Static(ty, *m)
+                ForeignItemKind::Static(box StaticForeignItem {
+                    ty,
+                    mutability,
+                    expr: _,
+                    safety,
+                }) => {
+                    let ty = self
+                        .lower_ty(ty, ImplTraitContext::Disallowed(ImplTraitPosition::StaticTy));
+                    let safety = self.lower_safety(*safety, hir::Safety::Unsafe);
+
+                    hir::ForeignItemKind::Static(ty, *mutability, safety)
                 }
                 ForeignItemKind::TyAlias(..) => hir::ForeignItemKind::Type,
                 ForeignItemKind::MacCall(_) => panic!("macro shouldn't exist here"),
@@ -844,7 +853,9 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 );
                 (delegation_results.generics, item_kind, true)
             }
-            AssocItemKind::MacCall(..) => panic!("macro item shouldn't exist at this point"),
+            AssocItemKind::MacCall(..) | AssocItemKind::DelegationMac(..) => {
+                panic!("macros should have been expanded by now")
+            }
         };
 
         let item = hir::TraitItem {
@@ -868,7 +879,9 @@ impl<'hir> LoweringContext<'_, 'hir> {
             AssocItemKind::Delegation(box delegation) => hir::AssocItemKind::Fn {
                 has_self: self.delegation_has_self(i.id, delegation.id, i.span),
             },
-            AssocItemKind::MacCall(..) => unimplemented!(),
+            AssocItemKind::MacCall(..) | AssocItemKind::DelegationMac(..) => {
+                panic!("macros should have been expanded by now")
+            }
         };
         let id = hir::TraitItemId { owner_id: hir::OwnerId { def_id: self.local_def_id(i.id) } };
         hir::TraitItemRef {
@@ -963,7 +976,9 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     hir::ImplItemKind::Fn(delegation_results.sig, delegation_results.body_id),
                 )
             }
-            AssocItemKind::MacCall(..) => panic!("`TyMac` should have been expanded by now"),
+            AssocItemKind::MacCall(..) | AssocItemKind::DelegationMac(..) => {
+                panic!("macros should have been expanded by now")
+            }
         };
 
         let item = hir::ImplItem {
@@ -992,7 +1007,9 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 AssocItemKind::Delegation(box delegation) => hir::AssocItemKind::Fn {
                     has_self: self.delegation_has_self(i.id, delegation.id, i.span),
                 },
-                AssocItemKind::MacCall(..) => unimplemented!(),
+                AssocItemKind::MacCall(..) | AssocItemKind::DelegationMac(..) => {
+                    panic!("macros should have been expanded by now")
+                }
             },
             trait_item_def_id: self
                 .resolver
@@ -1351,7 +1368,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             hir::IsAsync::NotAsync
         };
         hir::FnHeader {
-            unsafety: self.lower_unsafety(h.unsafety),
+            safety: self.lower_safety(h.safety, hir::Safety::Safe),
             asyncness: asyncness,
             constness: self.lower_constness(h.constness),
             abi: self.lower_extern(h.ext),
@@ -1401,10 +1418,11 @@ impl<'hir> LoweringContext<'_, 'hir> {
         }
     }
 
-    pub(super) fn lower_unsafety(&mut self, u: Unsafe) -> hir::Unsafety {
-        match u {
-            Unsafe::Yes(_) => hir::Unsafety::Unsafe,
-            Unsafe::No => hir::Unsafety::Normal,
+    pub(super) fn lower_safety(&mut self, s: Safety, default: hir::Safety) -> hir::Safety {
+        match s {
+            Safety::Unsafe(_) => hir::Safety::Unsafe,
+            Safety::Default => default,
+            Safety::Safe(_) => hir::Safety::Safe,
         }
     }
 
@@ -1588,11 +1606,12 @@ impl<'hir> LoweringContext<'_, 'hir> {
                             }),
                         )),
                     )),
-                    default: Some(hir::AnonConst {
+                    default: Some(self.arena.alloc(hir::AnonConst {
                         def_id: anon_const,
                         hir_id: const_id,
                         body: const_body,
-                    }),
+                        span,
+                    })),
                     is_host_effect: true,
                 },
                 colon_span: None,

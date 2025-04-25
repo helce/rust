@@ -5,9 +5,11 @@ use rustc_hir as hir;
 use rustc_middle::mir::interpret::ErrorHandled;
 use rustc_middle::mir::mono::MonoItem;
 use rustc_middle::mir::mono::{Linkage, Visibility};
+use rustc_middle::span_bug;
 use rustc_middle::ty;
 use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf};
 use rustc_middle::ty::Instance;
+use tracing::debug;
 
 pub trait MonoItemExt<'a, 'tcx> {
     fn define<Bx: BuilderMethods<'a, 'tcx>>(&self, cx: &'a Bx::CodegenCx);

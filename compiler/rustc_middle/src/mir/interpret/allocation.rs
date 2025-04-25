@@ -14,6 +14,7 @@ use either::{Left, Right};
 
 use rustc_ast::Mutability;
 use rustc_data_structures::intern::Interned;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable};
 use rustc_target::abi::{Align, HasDataLayout, Size};
 
 use super::{
@@ -28,9 +29,7 @@ use provenance_map::*;
 pub use init_mask::{InitChunk, InitChunkIter};
 
 /// Functionality required for the bytes of an `Allocation`.
-pub trait AllocBytes:
-    Clone + fmt::Debug + Eq + PartialEq + Hash + Deref<Target = [u8]> + DerefMut<Target = [u8]>
-{
+pub trait AllocBytes: Clone + fmt::Debug + Deref<Target = [u8]> + DerefMut<Target = [u8]> {
     /// Create an `AllocBytes` from a slice of `u8`.
     fn from_bytes<'a>(slice: impl Into<Cow<'a, [u8]>>, _align: Align) -> Self;
 
@@ -267,19 +266,6 @@ impl AllocRange {
 
 // The constructors are all without extra; the extra gets added by a machine hook later.
 impl<Prov: Provenance, Bytes: AllocBytes> Allocation<Prov, (), Bytes> {
-    /// Creates an allocation from an existing `Bytes` value - this is needed for miri FFI support
-    pub fn from_raw_bytes(bytes: Bytes, align: Align, mutability: Mutability) -> Self {
-        let size = Size::from_bytes(bytes.len());
-        Self {
-            bytes,
-            provenance: ProvenanceMap::new(),
-            init_mask: InitMask::new(size, true),
-            align,
-            mutability,
-            extra: (),
-        }
-    }
-
     /// Creates an allocation initialized by the given bytes
     pub fn from_bytes<'a>(
         slice: impl Into<Cow<'a, [u8]>>,
@@ -343,18 +329,30 @@ impl<Prov: Provenance, Bytes: AllocBytes> Allocation<Prov, (), Bytes> {
             Err(x) => x,
         }
     }
+
+    /// Add the extra.
+    pub fn with_extra<Extra>(self, extra: Extra) -> Allocation<Prov, Extra, Bytes> {
+        Allocation {
+            bytes: self.bytes,
+            provenance: self.provenance,
+            init_mask: self.init_mask,
+            align: self.align,
+            mutability: self.mutability,
+            extra,
+        }
+    }
 }
 
-impl<Bytes: AllocBytes> Allocation<CtfeProvenance, (), Bytes> {
+impl Allocation {
     /// Adjust allocation from the ones in `tcx` to a custom Machine instance
-    /// with a different `Provenance` and `Extra` type.
-    pub fn adjust_from_tcx<Prov: Provenance, Extra, Err>(
-        self,
+    /// with a different `Provenance` and `Byte` type.
+    pub fn adjust_from_tcx<Prov: Provenance, Bytes: AllocBytes, Err>(
+        &self,
         cx: &impl HasDataLayout,
-        extra: Extra,
         mut adjust_ptr: impl FnMut(Pointer<CtfeProvenance>) -> Result<Pointer<Prov>, Err>,
-    ) -> Result<Allocation<Prov, Extra, Bytes>, Err> {
-        let mut bytes = self.bytes;
+    ) -> Result<Allocation<Prov, (), Bytes>, Err> {
+        // Copy the data.
+        let mut bytes = Bytes::from_bytes(Cow::Borrowed(&*self.bytes), self.align);
         // Adjust provenance of pointers stored in this allocation.
         let mut new_provenance = Vec::with_capacity(self.provenance.ptrs().len());
         let ptr_size = cx.data_layout().pointer_size.bytes_usize();
@@ -372,10 +370,10 @@ impl<Bytes: AllocBytes> Allocation<CtfeProvenance, (), Bytes> {
         Ok(Allocation {
             bytes,
             provenance: ProvenanceMap::from_presorted_ptrs(new_provenance),
-            init_mask: self.init_mask,
+            init_mask: self.init_mask.clone(),
             align: self.align,
             mutability: self.mutability,
-            extra,
+            extra: self.extra,
         })
     }
 }

@@ -12,6 +12,7 @@ use rustc_span::{ErrorGuaranteed, FileNameDisplayPreference, Span};
 use std::assert_matches::assert_matches;
 use std::iter;
 use thin_vec::{thin_vec, ThinVec};
+use tracing::debug;
 
 /// #[test_case] is used by custom test authors to mark tests
 /// When building for test, it needs to make the item public and gensym the name
@@ -548,7 +549,7 @@ fn check_test_signature(
     let has_should_panic_attr = attr::contains_name(&i.attrs, sym::should_panic);
     let dcx = cx.dcx();
 
-    if let ast::Unsafe::Yes(span) = f.sig.header.unsafety {
+    if let ast::Safety::Unsafe(span) = f.sig.header.safety {
         return Err(dcx.emit_err(errors::TestBadFn { span: i.span, cause: span, kind: "unsafe" }));
     }
 

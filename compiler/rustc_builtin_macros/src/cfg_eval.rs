@@ -18,6 +18,7 @@ use rustc_session::Session;
 use rustc_span::symbol::sym;
 use rustc_span::Span;
 use smallvec::SmallVec;
+use tracing::instrument;
 
 pub(crate) fn expand(
     ecx: &mut ExtCtxt<'_>,
@@ -195,7 +196,7 @@ impl CfgEval<'_, '_> {
         // Re-parse the tokens, setting the `capture_cfg` flag to save extra information
         // to the captured `AttrTokenStream` (specifically, we capture
         // `AttrTokenTree::AttributesData` for all occurrences of `#[cfg]` and `#[cfg_attr]`)
-        let mut parser = rustc_parse::stream_to_parser(&self.cfg.sess.psess, orig_tokens, None);
+        let mut parser = Parser::new(&self.cfg.sess.psess, orig_tokens, None);
         parser.capture_cfg = true;
         match parse_annotatable_with(&mut parser) {
             Ok(a) => annotatable = a,

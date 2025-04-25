@@ -1,9 +1,3 @@
-/*!
-
-Rust MIR: a lowered representation of Rust.
-
-*/
-
 #![allow(internal_features)]
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![feature(rustdoc_internals)]
@@ -20,15 +14,10 @@ Rust MIR: a lowered representation of Rust.
 #![feature(yeet_expr)]
 #![feature(if_let_guard)]
 
-#[macro_use]
-extern crate tracing;
-#[macro_use]
-extern crate rustc_middle;
-
+pub mod check_consts;
 pub mod const_eval;
 mod errors;
 pub mod interpret;
-pub mod transform;
 pub mod util;
 
 use std::sync::atomic::AtomicBool;

@@ -52,16 +52,15 @@
 //@ revisions: m68k
 //@[m68k] compile-flags: --target m68k-unknown-linux-gnu
 //@[m68k] needs-llvm-components: m68k
+//@ revisions: csky
+//@[csky] compile-flags: --target csky-unknown-linux-gnuabiv2
+//@[csky] needs-llvm-components: csky
+
 // FIXME: disabled on nvptx64 since the target ABI fails the sanity check
 // see https://github.com/rust-lang/rust/issues/117480
 /* revisions: nvptx64
   [nvptx64] compile-flags: --target nvptx64-nvidia-cuda
   [nvptx64] needs-llvm-components: nvptx
-*/
-// FIXME: disabled since it fails on CI saying the csky component is missing
-/* revisions: csky
-  [csky] compile-flags: --target csky-unknown-linux-gnuabiv2
-  [csky] needs-llvm-components: csky
 */
 //@ revisions: e2k
 //@[e2k] compile-flags: --target e2k-unknown-linux-gnu
@@ -77,8 +76,7 @@
 
 #[cfg(host)]
 use std::{
-    any::Any, marker::PhantomData, mem::ManuallyDrop, num::NonZero, ptr::NonNull, rc::Rc,
-    sync::Arc,
+    any::Any, marker::PhantomData, mem::ManuallyDrop, num::NonZero, ptr::NonNull, rc::Rc, sync::Arc,
 };
 
 /// To work cross-target this test must be no_core.

@@ -2,7 +2,7 @@ use crate::error::UnsupportedFnAbi;
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use crate::query::TyCtxtAt;
 use crate::ty::normalize_erasing_regions::NormalizationError;
-use crate::ty::{self, Ty, TyCtxt, TypeVisitableExt};
+use crate::ty::{self, CoroutineArgsExt, Ty, TyCtxt, TypeVisitableExt};
 use rustc_error_messages::DiagMessage;
 use rustc_errors::{
     Diag, DiagArgValue, DiagCtxt, Diagnostic, EmissionGuarantee, IntoDiagArg, Level,
@@ -10,6 +10,7 @@ use rustc_errors::{
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_index::IndexVec;
+use rustc_macros::{extension, HashStable, TyDecodable, TyEncodable};
 use rustc_session::config::OptLevel;
 use rustc_span::symbol::{sym, Symbol};
 use rustc_span::{ErrorGuaranteed, Span, DUMMY_SP};
@@ -18,6 +19,7 @@ use rustc_target::abi::*;
 use rustc_target::spec::{
     abi::Abi as SpecAbi, HasTargetSpec, HasWasmCAbiOpt, PanicStrategy, Target, WasmCAbi,
 };
+use tracing::debug;
 
 use std::borrow::Cow;
 use std::cmp;
@@ -113,18 +115,37 @@ impl Integer {
     }
 }
 
+#[extension(pub trait FloatExt)]
+impl Float {
+    #[inline]
+    fn to_ty<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
+        match *self {
+            F16 => tcx.types.f16,
+            F32 => tcx.types.f32,
+            F64 => tcx.types.f64,
+            F128 => tcx.types.f128,
+        }
+    }
+
+    fn from_float_ty(fty: ty::FloatTy) -> Self {
+        match fty {
+            ty::FloatTy::F16 => F16,
+            ty::FloatTy::F32 => F32,
+            ty::FloatTy::F64 => F64,
+            ty::FloatTy::F128 => F128,
+        }
+    }
+}
+
 #[extension(pub trait PrimitiveExt)]
 impl Primitive {
     #[inline]
     fn to_ty<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
         match *self {
             Int(i, signed) => i.to_ty(tcx, signed),
-            F16 => tcx.types.f16,
-            F32 => tcx.types.f32,
-            F64 => tcx.types.f64,
-            F128 => tcx.types.f128,
+            Float(f) => f.to_ty(tcx),
             // FIXME(erikdesjardins): handle non-default addrspace ptr sizes
-            Pointer(_) => Ty::new_mut_ptr(tcx, Ty::new_unit(tcx)),
+            Pointer(_) => Ty::new_mut_ptr(tcx, tcx.types.unit),
         }
     }
 
@@ -139,7 +160,7 @@ impl Primitive {
                 let signed = false;
                 tcx.data_layout().ptr_sized_integer().to_ty(tcx, signed)
             }
-            F16 | F32 | F64 | F128 => bug!("floats do not have an int type"),
+            Float(_) => bug!("floats do not have an int type"),
         }
     }
 }
@@ -332,7 +353,23 @@ impl<'tcx> SizeSkeleton<'tcx> {
         match *ty.kind() {
             ty::Ref(_, pointee, _) | ty::RawPtr(pointee, _) => {
                 let non_zero = !ty.is_unsafe_ptr();
-                let tail = tcx.struct_tail_erasing_lifetimes(pointee, param_env);
+
+                let tail = tcx.struct_tail_with_normalize(
+                    pointee,
+                    |ty| match tcx.try_normalize_erasing_regions(param_env, ty) {
+                        Ok(ty) => ty,
+                        Err(e) => Ty::new_error_with_message(
+                            tcx,
+                            DUMMY_SP,
+                            format!(
+                                "normalization failed for {} but no errors reported",
+                                e.get_type_for_failure()
+                            ),
+                        ),
+                    },
+                    || {},
+                );
+
                 match tail.kind() {
                     ty::Param(_) | ty::Alias(ty::Projection | ty::Inherent, _) => {
                         debug_assert!(tail.has_non_region_param());
@@ -348,9 +385,7 @@ impl<'tcx> SizeSkeleton<'tcx> {
                     ),
                 }
             }
-            ty::Array(inner, len)
-                if len.ty() == tcx.types.usize && tcx.features().transmute_generic_consts =>
-            {
+            ty::Array(inner, len) if tcx.features().transmute_generic_consts => {
                 let len_eval = len.try_eval_target_usize(tcx, param_env);
                 if len_eval == Some(0) {
                     return Ok(SizeSkeleton::Known(Size::from_bytes(0)));
@@ -774,7 +809,7 @@ where
                     // (which may have no non-DST form), and will work as long
                     // as the `Abi` or `FieldsShape` is checked by users.
                     if i == 0 {
-                        let nil = Ty::new_unit(tcx);
+                        let nil = tcx.types.unit;
                         let unit_ptr_ty = if this.ty.is_unsafe_ptr() {
                             Ty::new_mut_ptr(tcx, nil)
                         } else {
@@ -790,25 +825,14 @@ where
                         });
                     }
 
-                    let mk_dyn_vtable = || {
+                    let mk_dyn_vtable = |principal: Option<ty::PolyExistentialTraitRef<'tcx>>| {
+                        let min_count = ty::vtable_min_entries(tcx, principal);
                         Ty::new_imm_ref(
                             tcx,
                             tcx.lifetimes.re_static,
-                            Ty::new_array(tcx, tcx.types.usize, 3),
+                            // FIXME: properly type (e.g. usize and fn pointers) the fields.
+                            Ty::new_array(tcx, tcx.types.usize, min_count.try_into().unwrap()),
                         )
-                        /* FIXME: use actual fn pointers
-                        Warning: naively computing the number of entries in the
-                        vtable by counting the methods on the trait + methods on
-                        all parent traits does not work, because some methods can
-                        be not object safe and thus excluded from the vtable.
-                        Increase this counter if you tried to implement this but
-                        failed to do it without duplicating a lot of code from
-                        other places in the compiler: 2
-                        Ty::new_tup(tcx,&[
-                            Ty::new_array(tcx,tcx.types.usize, 3),
-                            Ty::new_array(tcx,Option<fn()>),
-                        ])
-                        */
                     };
 
                     let metadata = if let Some(metadata_def_id) = tcx.lang_items().metadata_type()
@@ -827,16 +851,16 @@ where
                         // `std::mem::uninitialized::<&dyn Trait>()`, for example.
                         if let ty::Adt(def, args) = metadata.kind()
                             && Some(def.did()) == tcx.lang_items().dyn_metadata()
-                            && args.type_at(0).is_trait()
+                            && let ty::Dynamic(data, _, ty::Dyn) = args.type_at(0).kind()
                         {
-                            mk_dyn_vtable()
+                            mk_dyn_vtable(data.principal())
                         } else {
                             metadata
                         }
                     } else {
                         match tcx.struct_tail_erasing_lifetimes(pointee, cx.param_env()).kind() {
                             ty::Slice(_) | ty::Str => tcx.types.usize,
-                            ty::Dynamic(_, _, ty::Dyn) => mk_dyn_vtable(),
+                            ty::Dynamic(data, _, ty::Dyn) => mk_dyn_vtable(data.principal()),
                             _ => bug!("TyAndLayout::field({:?}): not applicable", this),
                         }
                     };

@@ -15,18 +15,13 @@
 //! The precise rules for validity are not determined yet. The guarantees that are
 //! provided at this point are very minimal:
 //!
-//! * A [null] pointer is *never* valid, not even for accesses of [size zero][zst].
+//! * For operations of [size zero][zst], *every* pointer is valid, including the [null] pointer.
+//!   The following points are only concerned with non-zero-sized accesses.
+//! * A [null] pointer is *never* valid.
 //! * For a pointer to be valid, it is necessary, but not always sufficient, that the pointer
 //!   be *dereferenceable*: the memory range of the given size starting at the pointer must all be
 //!   within the bounds of a single allocated object. Note that in Rust,
 //!   every (stack-allocated) variable is considered a separate allocated object.
-//! * Even for operations of [size zero][zst], the pointer must not be pointing to deallocated
-//!   memory, i.e., deallocation makes pointers invalid even for zero-sized operations. However,
-//!   casting any non-zero integer *literal* to a pointer is valid for zero-sized accesses, even if
-//!   some memory happens to exist at that address and gets deallocated. This corresponds to writing
-//!   your own allocator: allocating zero-sized objects is not very hard. The canonical way to
-//!   obtain a pointer that is valid for zero-sized accesses is [`NonNull::dangling`].
-//FIXME: mention `ptr::dangling` above, once it is stable.
 //! * All accesses performed by functions in this module are *non-atomic* in the sense
 //!   of [atomic operations] used to synchronize between threads. This means it is
 //!   undefined behavior to perform two concurrent accesses to the same location from different
@@ -63,11 +58,39 @@
 //!
 //! ## Allocated object
 //!
-//! For several operations, such as [`offset`] or field projections (`expr.field`), the notion of an
-//! "allocated object" becomes relevant. An allocated object is a contiguous region of memory.
-//! Common examples of allocated objects include stack-allocated variables (each variable is a
-//! separate allocated object), heap allocations (each allocation created by the global allocator is
-//! a separate allocated object), and `static` variables.
+//! An *allocated object* is a subset of program memory which is addressable
+//! from Rust, and within which pointer arithmetic is possible. Examples of
+//! allocated objects include heap allocations, stack-allocated variables,
+//! statics, and consts. The safety preconditions of some Rust operations -
+//! such as `offset` and field projections (`expr.field`) - are defined in
+//! terms of the allocated objects on which they operate.
+//!
+//! An allocated object has a base address, a size, and a set of memory
+//! addresses. It is possible for an allocated object to have zero size, but
+//! such an allocated object will still have a base address. The base address
+//! of an allocated object is not necessarily unique. While it is currently the
+//! case that an allocated object always has a set of memory addresses which is
+//! fully contiguous (i.e., has no "holes"), there is no guarantee that this
+//! will not change in the future.
+//!
+//! For any allocated object with `base` address, `size`, and a set of
+//! `addresses`, the following are guaranteed:
+//! - For all addresses `a` in `addresses`, `a` is in the range `base .. (base +
+//!   size)` (note that this requires `a < base + size`, not `a <= base + size`)
+//! - `base` is not equal to [`null()`] (i.e., the address with the numerical
+//!   value 0)
+//! - `base + size <= usize::MAX`
+//! - `size <= isize::MAX`
+//!
+//! As a consequence of these guarantees, given any address `a` within the set
+//! of addresses of an allocated object:
+//! - It is guaranteed that `a - base` does not overflow `isize`
+//! - It is guaranteed that `a - base` is non-negative
+//! - It is guaranteed that, given `o = a - base` (i.e., the offset of `a` within
+//!   the allocated object), `base + o` will not wrap around the address space (in
+//!   other words, will not overflow `usize`)
+//!
+//! [`null()`]: null
 //!
 //! # Strict Provenance
 //!
@@ -392,7 +415,7 @@ use crate::intrinsics;
 use crate::marker::FnPtr;
 use crate::ub_checks;
 
-use crate::mem::{self, align_of, size_of, MaybeUninit};
+use crate::mem::{self, MaybeUninit};
 
 mod alignment;
 #[unstable(feature = "ptr_alignment_type", issue = "102070")]
@@ -427,8 +450,13 @@ mod mut_ptr;
 
 /// Executes the destructor (if any) of the pointed-to value.
 ///
-/// This is semantically equivalent to calling [`ptr::read`] and discarding
+/// This is almost the same as calling [`ptr::read`] and discarding
 /// the result, but has the following advantages:
+// FIXME: say something more useful than "almost the same"?
+// There are open questions here: `read` requires the value to be fully valid, e.g. if `T` is a
+// `bool` it must be 0 or 1, if it is a reference then it must be dereferenceable. `drop_in_place`
+// only requires that `*to_drop` be "valid for dropping" and we have not defined what that means. In
+// Miri it currently (May 2024) requires nothing at all for types without drop glue.
 ///
 /// * It is *required* to use `drop_in_place` to drop unsized types like
 ///   trait objects, because they can't be read out onto the stack and
@@ -542,7 +570,7 @@ pub unsafe fn drop_in_place<T: ?Sized>(to_drop: *mut T) {
 #[rustc_allow_const_fn_unstable(ptr_metadata)]
 #[rustc_diagnostic_item = "ptr_null"]
 pub const fn null<T: ?Sized + Thin>() -> *const T {
-    from_raw_parts(without_provenance(0), ())
+    from_raw_parts(without_provenance::<()>(0), ())
 }
 
 /// Creates a null mutable raw pointer.
@@ -568,7 +596,7 @@ pub const fn null<T: ?Sized + Thin>() -> *const T {
 #[rustc_allow_const_fn_unstable(ptr_metadata)]
 #[rustc_diagnostic_item = "ptr_null_mut"]
 pub const fn null_mut<T: ?Sized + Thin>() -> *mut T {
-    from_raw_parts_mut(without_provenance_mut(0), ())
+    from_raw_parts_mut(without_provenance_mut::<()>(0), ())
 }
 
 /// Creates a pointer with the given address and no provenance.
@@ -812,7 +840,7 @@ pub const fn from_mut<T: ?Sized>(r: &mut T) -> *mut T {
 #[rustc_allow_const_fn_unstable(ptr_metadata)]
 #[rustc_diagnostic_item = "ptr_slice_from_raw_parts"]
 pub const fn slice_from_raw_parts<T>(data: *const T, len: usize) -> *const [T] {
-    from_raw_parts(data.cast(), len)
+    from_raw_parts(data, len)
 }
 
 /// Forms a raw mutable slice from a pointer and a length.
@@ -858,7 +886,7 @@ pub const fn slice_from_raw_parts<T>(data: *const T, len: usize) -> *const [T] {
 #[rustc_const_unstable(feature = "const_slice_from_raw_parts_mut", issue = "67456")]
 #[rustc_diagnostic_item = "ptr_slice_from_raw_parts_mut"]
 pub const fn slice_from_raw_parts_mut<T>(data: *mut T, len: usize) -> *mut [T] {
-    from_raw_parts_mut(data.cast(), len)
+    from_raw_parts_mut(data, len)
 }
 
 /// Swaps the values at two mutable locations of the same type, without
@@ -1784,15 +1812,6 @@ pub(crate) const unsafe fn align_offset<T: Sized>(p: *const T, a: usize) -> usiz
         assume, cttz_nonzero, exact_div, mul_with_overflow, unchecked_rem, unchecked_sub,
         wrapping_add, wrapping_mul, wrapping_sub,
     };
-    #[cfg(bootstrap)]
-    const unsafe fn unchecked_shl(value: usize, shift: usize) -> usize {
-        value << shift
-    }
-    #[cfg(bootstrap)]
-    const unsafe fn unchecked_shr(value: usize, shift: usize) -> usize {
-        value >> shift
-    }
-    #[cfg(not(bootstrap))]
     use intrinsics::{unchecked_shl, unchecked_shr};
 
     /// Calculate multiplicative modular inverse of `x` modulo `m`.

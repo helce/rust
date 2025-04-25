@@ -2,6 +2,7 @@ use itertools::{Either, Itertools};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_middle::mir::visit::{TyContext, Visitor};
 use rustc_middle::mir::{Body, Local, Location, SourceInfo};
+use rustc_middle::span_bug;
 use rustc_middle::ty::visit::TypeVisitable;
 use rustc_middle::ty::{GenericArgsRef, Region, RegionVid, Ty, TyCtxt};
 use rustc_mir_dataflow::impls::MaybeInitializedPlaces;
@@ -13,7 +14,6 @@ use std::rc::Rc;
 use crate::{
     constraints::OutlivesConstraintSet,
     facts::{AllFacts, AllFactsExt},
-    location::LocationTable,
     region_infer::values::LivenessValues,
     universal_regions::UniversalRegions,
 };
@@ -38,7 +38,6 @@ pub(super) fn generate<'mir, 'tcx>(
     elements: &Rc<DenseLocationMap>,
     flow_inits: &mut ResultsCursor<'mir, 'tcx, MaybeInitializedPlaces<'mir, 'tcx>>,
     move_data: &MoveData<'tcx>,
-    location_table: &LocationTable,
     use_polonius: bool,
 ) {
     debug!("liveness::generate");
@@ -52,11 +51,9 @@ pub(super) fn generate<'mir, 'tcx>(
         compute_relevant_live_locals(typeck.tcx(), &free_regions, body);
     let facts_enabled = use_polonius || AllFacts::enabled(typeck.tcx());
 
-    let polonius_drop_used = facts_enabled.then(|| {
-        let mut drop_used = Vec::new();
-        polonius::populate_access_facts(typeck, body, location_table, move_data, &mut drop_used);
-        drop_used
-    });
+    if facts_enabled {
+        polonius::populate_access_facts(typeck, body, move_data);
+    };
 
     trace::trace(
         typeck,
@@ -66,7 +63,6 @@ pub(super) fn generate<'mir, 'tcx>(
         move_data,
         relevant_live_locals,
         boring_locals,
-        polonius_drop_used,
     );
 
     // Mark regions that should be live where they appear within rvalues or within a call: like

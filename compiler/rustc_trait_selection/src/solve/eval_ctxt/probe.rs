@@ -1,23 +1,27 @@
 use crate::solve::assembly::Candidate;
 
 use super::EvalCtxt;
-use rustc_middle::traits::{
-    query::NoSolution,
-    solve::{inspect, CandidateSource, QueryResult},
-};
+use rustc_infer::infer::InferCtxt;
+use rustc_infer::traits::BuiltinImplSource;
+use rustc_middle::traits::query::NoSolution;
+use rustc_middle::traits::solve::{inspect, CandidateSource, QueryResult};
+use rustc_middle::ty::TyCtxt;
 use std::marker::PhantomData;
 
 pub(in crate::solve) struct ProbeCtxt<'me, 'a, 'tcx, F, T> {
-    ecx: &'me mut EvalCtxt<'a, 'tcx>,
+    ecx: &'me mut EvalCtxt<'a, InferCtxt<'tcx>>,
     probe_kind: F,
     _result: PhantomData<T>,
 }
 
 impl<'tcx, F, T> ProbeCtxt<'_, '_, 'tcx, F, T>
 where
-    F: FnOnce(&T) -> inspect::ProbeKind<'tcx>,
+    F: FnOnce(&T) -> inspect::ProbeKind<TyCtxt<'tcx>>,
 {
-    pub(in crate::solve) fn enter(self, f: impl FnOnce(&mut EvalCtxt<'_, 'tcx>) -> T) -> T {
+    pub(in crate::solve) fn enter(
+        self,
+        f: impl FnOnce(&mut EvalCtxt<'_, InferCtxt<'tcx>>) -> T,
+    ) -> T {
         let ProbeCtxt { ecx: outer_ecx, probe_kind, _result } = self;
 
         let infcx = outer_ecx.infcx;
@@ -50,56 +54,53 @@ where
 
 pub(in crate::solve) struct TraitProbeCtxt<'me, 'a, 'tcx, F> {
     cx: ProbeCtxt<'me, 'a, 'tcx, F, QueryResult<'tcx>>,
-    source: CandidateSource,
+    source: CandidateSource<'tcx>,
 }
 
 impl<'tcx, F> TraitProbeCtxt<'_, '_, 'tcx, F>
 where
-    F: FnOnce(&QueryResult<'tcx>) -> inspect::ProbeKind<'tcx>,
+    F: FnOnce(&QueryResult<'tcx>) -> inspect::ProbeKind<TyCtxt<'tcx>>,
 {
+    #[instrument(level = "debug", skip_all, fields(source = ?self.source))]
     pub(in crate::solve) fn enter(
         self,
-        f: impl FnOnce(&mut EvalCtxt<'_, 'tcx>) -> QueryResult<'tcx>,
+        f: impl FnOnce(&mut EvalCtxt<'_, InferCtxt<'tcx>>) -> QueryResult<'tcx>,
     ) -> Result<Candidate<'tcx>, NoSolution> {
         self.cx.enter(|ecx| f(ecx)).map(|result| Candidate { source: self.source, result })
     }
 }
 
-impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
+impl<'a, 'tcx> EvalCtxt<'a, InferCtxt<'tcx>> {
     /// `probe_kind` is only called when proof tree building is enabled so it can be
     /// as expensive as necessary to output the desired information.
     pub(in crate::solve) fn probe<F, T>(&mut self, probe_kind: F) -> ProbeCtxt<'_, 'a, 'tcx, F, T>
     where
-        F: FnOnce(&T) -> inspect::ProbeKind<'tcx>,
+        F: FnOnce(&T) -> inspect::ProbeKind<TyCtxt<'tcx>>,
     {
         ProbeCtxt { ecx: self, probe_kind, _result: PhantomData }
     }
 
-    pub(in crate::solve) fn probe_misc_candidate(
+    pub(in crate::solve) fn probe_builtin_trait_candidate(
         &mut self,
-        name: &'static str,
-    ) -> ProbeCtxt<
+        source: BuiltinImplSource,
+    ) -> TraitProbeCtxt<
         '_,
         'a,
         'tcx,
-        impl FnOnce(&QueryResult<'tcx>) -> inspect::ProbeKind<'tcx>,
-        QueryResult<'tcx>,
+        impl FnOnce(&QueryResult<'tcx>) -> inspect::ProbeKind<TyCtxt<'tcx>>,
     > {
-        ProbeCtxt {
-            ecx: self,
-            probe_kind: move |result: &QueryResult<'tcx>| inspect::ProbeKind::MiscCandidate {
-                name,
-                result: *result,
-            },
-            _result: PhantomData,
-        }
+        self.probe_trait_candidate(CandidateSource::BuiltinImpl(source))
     }
 
     pub(in crate::solve) fn probe_trait_candidate(
         &mut self,
-        source: CandidateSource,
-    ) -> TraitProbeCtxt<'_, 'a, 'tcx, impl FnOnce(&QueryResult<'tcx>) -> inspect::ProbeKind<'tcx>>
-    {
+        source: CandidateSource<'tcx>,
+    ) -> TraitProbeCtxt<
+        '_,
+        'a,
+        'tcx,
+        impl FnOnce(&QueryResult<'tcx>) -> inspect::ProbeKind<TyCtxt<'tcx>>,
+    > {
         TraitProbeCtxt {
             cx: ProbeCtxt {
                 ecx: self,

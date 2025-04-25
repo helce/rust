@@ -8,7 +8,7 @@ use rustc_data_structures::stable_hasher::{
     HashStable, StableCompare, StableHasher, ToStableHashKey,
 };
 use rustc_data_structures::sync::Lock;
-use rustc_macros::HashStable_Generic;
+use rustc_macros::{symbols, Decodable, Encodable, HashStable_Generic};
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -103,6 +103,7 @@ symbols! {
         MacroRules:         "macro_rules",
         Raw:                "raw",
         Reuse:              "reuse",
+        Safe:               "safe",
         Union:              "union",
         Yeet:               "yeet",
     }
@@ -210,7 +211,6 @@ symbols! {
         FsPermissions,
         FusedIterator,
         Future,
-        FutureOutput,
         GlobalAlloc,
         Hash,
         HashMap,
@@ -430,6 +430,7 @@ symbols! {
         async_drop,
         async_drop_chain,
         async_drop_defer,
+        async_drop_deferred_drop_in_place,
         async_drop_either,
         async_drop_fuse,
         async_drop_in_place,
@@ -439,8 +440,10 @@ symbols! {
         async_fn,
         async_fn_in_trait,
         async_fn_kind_helper,
+        async_fn_kind_upvars,
         async_fn_mut,
         async_fn_once,
+        async_fn_once_output,
         async_fn_track_caller,
         async_fn_traits,
         async_for_loop,
@@ -498,6 +501,8 @@ symbols! {
         call,
         call_mut,
         call_once,
+        call_once_future,
+        call_ref_future,
         caller_location,
         capture_disjoint_fields,
         catch_unwind,
@@ -754,6 +759,7 @@ symbols! {
         enable,
         encode,
         end,
+        enumerate_method,
         env,
         env_CFG_RELEASE: env!("CFG_RELEASE"),
         eprint_macro,
@@ -781,6 +787,8 @@ symbols! {
         explicit_tail_calls,
         export_name,
         expr,
+        expr_2021,
+        expr_fragment_specifier_2024,
         extended_key_value_attributes,
         extended_varargs_abi_support,
         extern_absolute_paths,
@@ -908,6 +916,7 @@ symbols! {
         fundamental,
         fused_iterator,
         future,
+        future_output,
         future_trait,
         gdb_script_file,
         ge,
@@ -927,6 +936,7 @@ symbols! {
         global_alloc_ty,
         global_allocator,
         global_asm,
+        global_registration,
         globs,
         gt,
         half_open_range_patterns,
@@ -1175,6 +1185,7 @@ symbols! {
         mir_make_place,
         mir_move,
         mir_offset,
+        mir_ptr_metadata,
         mir_retag,
         mir_return,
         mir_return_to,
@@ -1429,6 +1440,7 @@ symbols! {
         ptr_guaranteed_cmp,
         ptr_is_null,
         ptr_mask,
+        ptr_metadata,
         ptr_null,
         ptr_null_mut,
         ptr_offset_from,
@@ -1510,6 +1522,7 @@ symbols! {
         require,
         residual,
         result,
+        result_ffi_guarantees,
         resume,
         return_position_impl_trait_in_trait,
         return_type_notation,
@@ -1568,6 +1581,7 @@ symbols! {
         rustc_def_path,
         rustc_default_body_unstable,
         rustc_deny_explicit_impl,
+        rustc_deprecated_safe_2024,
         rustc_diagnostic_item,
         rustc_diagnostic_macros,
         rustc_dirty,
@@ -1628,7 +1642,7 @@ symbols! {
         rustc_reservation_impl,
         rustc_safe_intrinsic,
         rustc_serialize,
-        rustc_skip_array_during_method_dispatch,
+        rustc_skip_during_method_dispatch,
         rustc_specialization_trait,
         rustc_std_internal_symbol,
         rustc_strict_coherence,
@@ -1677,6 +1691,7 @@ symbols! {
         simd_cast_ptr,
         simd_ceil,
         simd_ctlz,
+        simd_ctpop,
         simd_cttz,
         simd_div,
         simd_eq,
@@ -1935,7 +1950,6 @@ symbols! {
         unit,
         universal_impl_trait,
         unix,
-        unix_sigpipe,
         unlikely,
         unmarked_api,
         unnamed_fields,
@@ -1948,9 +1962,11 @@ symbols! {
         unreachable_display,
         unreachable_macro,
         unrestricted_attribute_tokens,
+        unsafe_attributes,
         unsafe_block_in_unsafe_fn,
         unsafe_cell,
         unsafe_cell_raw_get,
+        unsafe_extern_blocks,
         unsafe_no_drop_flag,
         unsafe_pin_internals,
         unsize,
@@ -2200,6 +2216,7 @@ impl fmt::Display for IdentPrinter {
 pub struct MacroRulesNormalizedIdent(Ident);
 
 impl MacroRulesNormalizedIdent {
+    #[inline]
     pub fn new(ident: Ident) -> Self {
         Self(ident.normalize_to_macro_rules())
     }

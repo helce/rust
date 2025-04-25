@@ -18,6 +18,7 @@ use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::parse::ParseSess;
 use rustc_span::symbol::Symbol;
 use rustc_span::{edition::Edition, BytePos, Pos, Span};
+use tracing::debug;
 
 mod diagnostics;
 mod tokentrees;
@@ -41,7 +42,7 @@ pub(crate) struct UnmatchedDelim {
     pub candidate_span: Option<Span>,
 }
 
-pub(crate) fn parse_token_trees<'psess, 'src>(
+pub(crate) fn lex_token_trees<'psess, 'src>(
     psess: &'psess ParseSess,
     mut src: &'src str,
     mut start_pos: BytePos,
@@ -65,7 +66,7 @@ pub(crate) fn parse_token_trees<'psess, 'src>(
         last_lifetime: None,
     };
     let (stream, res, unmatched_delims) =
-        tokentrees::TokenTreesReader::parse_all_token_trees(string_reader);
+        tokentrees::TokenTreesReader::lex_all_token_trees(string_reader);
     match res {
         Ok(()) if unmatched_delims.is_empty() => Ok(stream),
         _ => {
@@ -112,7 +113,7 @@ struct StringReader<'psess, 'src> {
 }
 
 impl<'psess, 'src> StringReader<'psess, 'src> {
-    pub fn dcx(&self) -> &'psess DiagCtxt {
+    fn dcx(&self) -> &'psess DiagCtxt {
         &self.psess.dcx
     }
 
@@ -370,11 +371,10 @@ impl<'psess, 'src> StringReader<'psess, 'src> {
         let content = self.str_from(content_start);
         if contains_text_flow_control_chars(content) {
             let span = self.mk_sp(start, self.pos);
-            self.psess.buffer_lint_with_diagnostic(
+            self.psess.buffer_lint(
                 TEXT_DIRECTION_CODEPOINT_IN_COMMENT,
                 span,
                 ast::CRATE_NODE_ID,
-                "unicode codepoint changing visible direction of text present in comment",
                 BuiltinLintDiag::UnicodeTextFlow(span, content.to_string()),
             );
         }
@@ -723,12 +723,11 @@ impl<'psess, 'src> StringReader<'psess, 'src> {
             self.dcx().emit_err(errors::UnknownPrefix { span: prefix_span, prefix, sugg });
         } else {
             // Before Rust 2021, only emit a lint for migration.
-            self.psess.buffer_lint_with_diagnostic(
+            self.psess.buffer_lint(
                 RUST_2021_PREFIXES_INCOMPATIBLE_SYNTAX,
                 prefix_span,
                 ast::CRATE_NODE_ID,
-                format!("prefix `{prefix}` is unknown"),
-                BuiltinLintDiag::ReservedPrefix(prefix_span),
+                BuiltinLintDiag::ReservedPrefix(prefix_span, prefix.to_string()),
             );
         }
     }

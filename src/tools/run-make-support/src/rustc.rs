@@ -1,9 +1,9 @@
-use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
-use crate::{handle_failed_output, set_host_rpath, tmp_dir};
+use crate::{env_var, handle_failed_output, set_host_rpath, tmp_dir};
 
 /// Construct a new `rustc` invocation.
 pub fn rustc() -> Rustc {
@@ -19,12 +19,13 @@ pub fn aux_build() -> Rustc {
 #[derive(Debug)]
 pub struct Rustc {
     cmd: Command,
+    stdin: Option<Box<[u8]>>,
 }
 
 crate::impl_common_helpers!(Rustc);
 
 fn setup_common() -> Command {
-    let rustc = env::var("RUSTC").unwrap();
+    let rustc = env_var("RUSTC");
     let mut cmd = Command::new(rustc);
     set_host_rpath(&mut cmd);
     cmd.arg("--out-dir").arg(tmp_dir()).arg("-L").arg(tmp_dir());
@@ -37,14 +38,14 @@ impl Rustc {
     /// Construct a new `rustc` invocation.
     pub fn new() -> Self {
         let cmd = setup_common();
-        Self { cmd }
+        Self { cmd, stdin: None }
     }
 
     /// Construct a new `rustc` invocation with `aux_build` preset (setting `--crate-type=lib`).
     pub fn new_aux_build() -> Self {
         let mut cmd = setup_common();
         cmd.arg("--crate-type=lib");
-        Self { cmd }
+        Self { cmd, stdin: None }
     }
 
     // Argument provider methods
@@ -59,6 +60,18 @@ impl Rustc {
     /// Specify default optimization level `-O` (alias for `-C opt-level=2`).
     pub fn opt(&mut self) -> &mut Self {
         self.cmd.arg("-O");
+        self
+    }
+
+    /// Specify a specific optimization level.
+    pub fn opt_level(&mut self, option: &str) -> &mut Self {
+        self.cmd.arg(format!("-Copt-level={option}"));
+        self
+    }
+
+    /// Add a suffix in each output filename.
+    pub fn extra_filename(&mut self, suffix: &str) -> &mut Self {
+        self.cmd.arg(format!("-Cextra-filename={suffix}"));
         self
     }
 
@@ -85,6 +98,13 @@ impl Rustc {
 
     /// Specify path to the input file.
     pub fn input<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+        self.cmd.arg(path.as_ref());
+        self
+    }
+
+    /// Specify path to the output file. Equivalent to `-o`` in rustc.
+    pub fn output<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+        self.cmd.arg("-o");
         self.cmd.arg(path.as_ref());
         self
     }
@@ -141,6 +161,20 @@ impl Rustc {
         self
     }
 
+    /// Add a directory to the library search path. Equivalent to `-L` in rustc.
+    pub fn library_search_path<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+        self.cmd.arg("-L");
+        self.cmd.arg(path.as_ref());
+        self
+    }
+
+    /// Override the system root. Equivalent to `--sysroot` in rustc.
+    pub fn sysroot<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+        self.cmd.arg("--sysroot");
+        self.cmd.arg(path.as_ref());
+        self
+    }
+
     /// Specify the edition year.
     pub fn edition(&mut self, edition: &str) -> &mut Self {
         self.cmd.arg("--edition");
@@ -161,12 +195,53 @@ impl Rustc {
         self
     }
 
+    /// Specify a stdin input
+    pub fn stdin<I: AsRef<[u8]>>(&mut self, input: I) -> &mut Self {
+        self.stdin = Some(input.as_ref().to_vec().into_boxed_slice());
+        self
+    }
+
+    /// Specify the crate name.
+    pub fn crate_name<S: AsRef<OsStr>>(&mut self, name: S) -> &mut Self {
+        self.cmd.arg("--crate-name");
+        self.cmd.arg(name.as_ref());
+        self
+    }
+
+    /// Specify the linker
+    pub fn linker(&mut self, linker: &str) -> &mut Self {
+        self.cmd.arg(format!("-Clinker={linker}"));
+        self
+    }
+
+    /// Get the [`Output`] of the finished process.
+    #[track_caller]
+    pub fn command_output(&mut self) -> Output {
+        // let's make sure we piped all the input and outputs
+        self.cmd.stdin(Stdio::piped());
+        self.cmd.stdout(Stdio::piped());
+        self.cmd.stderr(Stdio::piped());
+
+        if let Some(input) = &self.stdin {
+            let mut child = self.cmd.spawn().unwrap();
+
+            {
+                let mut stdin = child.stdin.take().unwrap();
+                stdin.write_all(input.as_ref()).unwrap();
+            }
+
+            child.wait_with_output().expect("failed to get output of finished process")
+        } else {
+            self.cmd.output().expect("failed to get output of finished process")
+        }
+    }
+
     #[track_caller]
     pub fn run_fail_assert_exit_code(&mut self, code: i32) -> Output {
         let caller_location = std::panic::Location::caller();
         let caller_line_number = caller_location.line();
 
-        let output = self.cmd.output().unwrap();
+        let output = self.command_output();
         if output.status.code().unwrap() != code {
             handle_failed_output(&self.cmd, output, caller_line_number);
         }

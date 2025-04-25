@@ -14,6 +14,9 @@ pub use crate::ops::{Drop, Fn, FnMut, FnOnce};
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(no_inline)]
 pub use crate::mem::drop;
+#[stable(feature = "size_of_prelude", since = "1.80.0")]
+#[doc(no_inline)]
+pub use crate::mem::{align_of, align_of_val, size_of, size_of_val};
 
 // Re-exported types and traits
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -84,7 +87,6 @@ pub use core::prelude::v1::cfg_eval;
 )]
 pub use core::prelude::v1::type_ascribe;
 
-#[cfg(not(bootstrap))]
 // Do not `doc(no_inline)` either.
 #[unstable(
     feature = "deref_patterns",

@@ -12,9 +12,13 @@ pub mod rustc;
 pub mod rustdoc;
 
 use std::env;
+use std::ffi::OsString;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+pub use gimli;
 pub use object;
 pub use regex;
 pub use wasmparser;
@@ -27,30 +31,65 @@ pub use run::{run, run_fail};
 pub use rustc::{aux_build, rustc, Rustc};
 pub use rustdoc::{bare_rustdoc, rustdoc, Rustdoc};
 
+pub fn env_var(name: &str) -> String {
+    match env::var(name) {
+        Ok(v) => v,
+        Err(err) => panic!("failed to retrieve environment variable {name:?}: {err:?}"),
+    }
+}
+
+pub fn env_var_os(name: &str) -> OsString {
+    match env::var_os(name) {
+        Some(v) => v,
+        None => panic!("failed to retrieve environment variable {name:?}"),
+    }
+}
+
 /// Path of `TMPDIR` (a temporary build directory, not under `/tmp`).
 pub fn tmp_dir() -> PathBuf {
-    env::var_os("TMPDIR").unwrap().into()
+    env_var_os("TMPDIR").into()
 }
 
 /// `TARGET`
 pub fn target() -> String {
-    env::var("TARGET").unwrap()
+    env_var("TARGET")
 }
 
 /// Check if target is windows-like.
 pub fn is_windows() -> bool {
-    env::var_os("IS_WINDOWS").is_some()
+    target().contains("windows")
 }
 
 /// Check if target uses msvc.
 pub fn is_msvc() -> bool {
-    env::var_os("IS_MSVC").is_some()
+    target().contains("msvc")
+}
+
+/// Check if target uses macOS.
+pub fn is_darwin() -> bool {
+    target().contains("darwin")
 }
 
 /// Construct a path to a static library under `$TMPDIR` given the library name. This will return a
 /// path with `$TMPDIR` joined with platform-and-compiler-specific library name.
 pub fn static_lib(name: &str) -> PathBuf {
     tmp_dir().join(static_lib_name(name))
+}
+
+pub fn python_command() -> Command {
+    let python_path = env_var("PYTHON");
+    Command::new(python_path)
+}
+
+pub fn htmldocck() -> Command {
+    let mut python = python_command();
+    python.arg(source_root().join("src/etc/htmldocck.py"));
+    python
+}
+
+/// Path to the root rust-lang/rust source checkout.
+pub fn source_root() -> PathBuf {
+    env_var("SOURCE_ROOT").into()
 }
 
 /// Construct the static library name based on the platform.
@@ -72,9 +111,64 @@ pub fn static_lib_name(name: &str) -> String {
     //     endif
     // endif
     // ```
-    assert!(!name.contains(char::is_whitespace), "name cannot contain whitespace");
+    assert!(!name.contains(char::is_whitespace), "static library name cannot contain whitespace");
 
-    if target().contains("msvc") { format!("{name}.lib") } else { format!("lib{name}.a") }
+    if is_msvc() { format!("{name}.lib") } else { format!("lib{name}.a") }
+}
+
+/// Construct a path to a dynamic library under `$TMPDIR` given the library name. This will return a
+/// path with `$TMPDIR` joined with platform-and-compiler-specific library name.
+pub fn dynamic_lib(name: &str) -> PathBuf {
+    tmp_dir().join(dynamic_lib_name(name))
+}
+
+/// Construct the dynamic library name based on the platform.
+pub fn dynamic_lib_name(name: &str) -> String {
+    // See tools.mk (irrelevant lines omitted):
+    //
+    // ```makefile
+    // ifeq ($(UNAME),Darwin)
+    //     DYLIB = $(TMPDIR)/lib$(1).dylib
+    // else
+    //     ifdef IS_WINDOWS
+    //         DYLIB = $(TMPDIR)/$(1).dll
+    //     else
+    //         DYLIB = $(TMPDIR)/lib$(1).so
+    //     endif
+    // endif
+    // ```
+    assert!(!name.contains(char::is_whitespace), "dynamic library name cannot contain whitespace");
+
+    let extension = dynamic_lib_extension();
+    if is_darwin() {
+        format!("lib{name}.{extension}")
+    } else if is_windows() {
+        format!("{name}.{extension}")
+    } else {
+        format!("lib{name}.{extension}")
+    }
+}
+
+pub fn dynamic_lib_extension() -> &'static str {
+    if is_darwin() {
+        "dylib"
+    } else if is_windows() {
+        "dll"
+    } else {
+        "so"
+    }
+}
+
+/// Construct a path to a rust library (rlib) under `$TMPDIR` given the library name. This will return a
+/// path with `$TMPDIR` joined with the library name.
+pub fn rust_lib(name: &str) -> PathBuf {
+    tmp_dir().join(rust_lib_name(name))
+}
+
+/// Generate the name a rust library (rlib) would have. If you want the complete path, use
+/// [`rust_lib`] instead.
+pub fn rust_lib_name(name: &str) -> String {
+    format!("lib{name}.rlib")
 }
 
 /// Construct the binary name based on platform.
@@ -130,20 +224,99 @@ fn handle_failed_output(cmd: &Command, output: Output, caller_line_number: u32) 
 
 /// Set the runtime library path as needed for running the host rustc/rustdoc/etc.
 pub fn set_host_rpath(cmd: &mut Command) {
-    let ld_lib_path_envvar = env::var("LD_LIB_PATH_ENVVAR").unwrap();
+    let ld_lib_path_envvar = env_var("LD_LIB_PATH_ENVVAR");
     cmd.env(&ld_lib_path_envvar, {
         let mut paths = vec![];
-        paths.push(PathBuf::from(env::var("TMPDIR").unwrap()));
-        paths.push(PathBuf::from(env::var("HOST_RPATH_DIR").unwrap()));
-        for p in env::split_paths(&env::var(&ld_lib_path_envvar).unwrap()) {
+        paths.push(PathBuf::from(env_var("TMPDIR")));
+        paths.push(PathBuf::from(env_var("HOST_RPATH_DIR")));
+        for p in env::split_paths(&env_var(&ld_lib_path_envvar)) {
             paths.push(p.to_path_buf());
         }
         env::join_paths(paths.iter()).unwrap()
     });
 }
 
+/// Copy a directory into another.
+pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) {
+    fn copy_dir_all_inner(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
+        let dst = dst.as_ref();
+        if !dst.is_dir() {
+            fs::create_dir_all(&dst)?;
+        }
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            if ty.is_dir() {
+                copy_dir_all_inner(entry.path(), dst.join(entry.file_name()))?;
+            } else {
+                fs::copy(entry.path(), dst.join(entry.file_name()))?;
+            }
+        }
+        Ok(())
+    }
+
+    if let Err(e) = copy_dir_all_inner(&src, &dst) {
+        // Trying to give more context about what exactly caused the failure
+        panic!(
+            "failed to copy `{}` to `{}`: {:?}",
+            src.as_ref().display(),
+            dst.as_ref().display(),
+            e
+        );
+    }
+}
+
+/// Check that all files in `dir1` exist and have the same content in `dir2`. Panic otherwise.
+pub fn recursive_diff(dir1: impl AsRef<Path>, dir2: impl AsRef<Path>) {
+    fn read_file(path: &Path) -> Vec<u8> {
+        match fs::read(path) {
+            Ok(c) => c,
+            Err(e) => panic!("Failed to read `{}`: {:?}", path.display(), e),
+        }
+    }
+
+    let dir2 = dir2.as_ref();
+    read_dir(dir1, |entry_path| {
+        let entry_name = entry_path.file_name().unwrap();
+        if entry_path.is_dir() {
+            recursive_diff(&entry_path, &dir2.join(entry_name));
+        } else {
+            let path2 = dir2.join(entry_name);
+            let file1 = read_file(&entry_path);
+            let file2 = read_file(&path2);
+
+            // We don't use `assert_eq!` because they are `Vec<u8>`, so not great for display.
+            // Why not using String? Because there might be minified files or even potentially
+            // binary ones, so that would display useless output.
+            assert!(
+                file1 == file2,
+                "`{}` and `{}` have different content",
+                entry_path.display(),
+                path2.display(),
+            );
+        }
+    });
+}
+
+pub fn read_dir<F: Fn(&Path)>(dir: impl AsRef<Path>, callback: F) {
+    for entry in fs::read_dir(dir).unwrap() {
+        callback(&entry.unwrap().path());
+    }
+}
+
+/// Check that `haystack` does not contain `needle`. Panic otherwise.
+pub fn assert_not_contains(haystack: &str, needle: &str) {
+    if haystack.contains(needle) {
+        eprintln!("=== HAYSTACK ===");
+        eprintln!("{}", haystack);
+        eprintln!("=== NEEDLE ===");
+        eprintln!("{}", needle);
+        panic!("needle was unexpectedly found in haystack");
+    }
+}
+
 /// Implement common helpers for command wrappers. This assumes that the command wrapper is a struct
-/// containing a `cmd: Command` field. The provided helpers are:
+/// containing a `cmd: Command` field and a `output` function. The provided helpers are:
 ///
 /// 1. Generic argument acceptors: `arg` and `args` (delegated to [`Command`]). These are intended
 ///    to be *fallback* argument acceptors, when specific helpers don't make sense. Prefer to add
@@ -159,7 +332,12 @@ pub fn set_host_rpath(cmd: &mut Command) {
 /// Example usage:
 ///
 /// ```ignore (illustrative)
-/// struct CommandWrapper { cmd: Command }
+/// struct CommandWrapper { cmd: Command } // <- required `cmd` field
+///
+/// impl CommandWrapper {
+///     /// Get the [`Output`][::std::process::Output] of the finished process.
+///     pub fn command_output(&mut self) -> Output { /* ... */ } // <- required `command_output()` method
+/// }
 ///
 /// crate::impl_common_helpers!(CommandWrapper);
 ///
@@ -220,7 +398,7 @@ macro_rules! impl_common_helpers {
                 self
             }
 
-            /// Inspect what the underlying [`Command`][::std::process::Command] is up to the
+            /// Inspect what the underlying [`Command`] is up to the
             /// current construction.
             pub fn inspect<I>(&mut self, inspector: I) -> &mut Self
             where
@@ -230,18 +408,13 @@ macro_rules! impl_common_helpers {
                 self
             }
 
-            /// Get the [`Output`][::std::process::Output] of the finished process.
-            pub fn output(&mut self) -> ::std::process::Output {
-                self.cmd.output().expect("failed to get output of finished process")
-            }
-
             /// Run the constructed command and assert that it is successfully run.
             #[track_caller]
             pub fn run(&mut self) -> ::std::process::Output {
                 let caller_location = ::std::panic::Location::caller();
                 let caller_line_number = caller_location.line();
 
-                let output = self.cmd.output().unwrap();
+                let output = self.command_output();
                 if !output.status.success() {
                     handle_failed_output(&self.cmd, output, caller_line_number);
                 }
@@ -254,11 +427,17 @@ macro_rules! impl_common_helpers {
                 let caller_location = ::std::panic::Location::caller();
                 let caller_line_number = caller_location.line();
 
-                let output = self.cmd.output().unwrap();
+                let output = self.command_output();
                 if output.status.success() {
                     handle_failed_output(&self.cmd, output, caller_line_number);
                 }
                 output
+            }
+
+            /// Set the path where the command will be run.
+            pub fn current_dir<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+                self.cmd.current_dir(path);
+                self
             }
         }
     };

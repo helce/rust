@@ -721,8 +721,6 @@ impl str {
     /// # Examples
     ///
     /// ```
-    /// #![feature(split_at_checked)]
-    ///
     /// let s = "Per Martin-Löf";
     ///
     /// let (first, last) = s.split_at_checked(3).unwrap();
@@ -734,7 +732,7 @@ impl str {
     /// ```
     #[inline]
     #[must_use]
-    #[unstable(feature = "split_at_checked", reason = "new API", issue = "119128")]
+    #[stable(feature = "split_at_checked", since = "1.80.0")]
     pub fn split_at_checked(&self, mid: usize) -> Option<(&str, &str)> {
         // is_char_boundary checks that the index is in [0, .len()]
         if self.is_char_boundary(mid) {
@@ -761,8 +759,6 @@ impl str {
     /// # Examples
     ///
     /// ```
-    /// #![feature(split_at_checked)]
-    ///
     /// let mut s = "Per Martin-Löf".to_string();
     /// if let Some((first, last)) = s.split_at_mut_checked(3) {
     ///     first.make_ascii_uppercase();
@@ -776,7 +772,7 @@ impl str {
     /// ```
     #[inline]
     #[must_use]
-    #[unstable(feature = "split_at_checked", reason = "new API", issue = "119128")]
+    #[stable(feature = "split_at_checked", since = "1.80.0")]
     pub fn split_at_mut_checked(&mut self, mid: usize) -> Option<(&mut str, &mut str)> {
         // is_char_boundary checks that the index is in [0, .len()]
         if self.is_char_boundary(mid) {
@@ -987,7 +983,7 @@ impl str {
     #[cfg_attr(not(test), rustc_diagnostic_item = "str_split_whitespace")]
     #[inline]
     pub fn split_whitespace(&self) -> SplitWhitespace<'_> {
-        SplitWhitespace { inner: self.split(IsWhitespace).filter(IsNotEmpty) }
+        SplitWhitespace { inner: self.split(char::is_whitespace).filter(|s| !s.is_empty()) }
     }
 
     /// Splits a string slice by ASCII whitespace.
@@ -1036,8 +1032,13 @@ impl str {
     #[stable(feature = "split_ascii_whitespace", since = "1.34.0")]
     #[inline]
     pub fn split_ascii_whitespace(&self) -> SplitAsciiWhitespace<'_> {
-        let inner =
-            self.as_bytes().split(IsAsciiWhitespace).filter(BytesIsNotEmpty).map(UnsafeBytesToStr);
+        let inner = self
+            .as_bytes()
+            .split(u8::is_ascii_whitespace)
+            .filter(|s| !s.is_empty())
+            // SAFETY: the byte slice came from a string and was only split
+            // along character boundaries, so the resulting slices are strings.
+            .map(|bytes| unsafe { from_utf8_unchecked(bytes) });
         SplitAsciiWhitespace { inner }
     }
 
@@ -1089,7 +1090,11 @@ impl str {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn lines(&self) -> Lines<'_> {
-        Lines(self.split_inclusive('\n').map(LinesMap))
+        Lines(self.split_inclusive('\n').map(|line| {
+            let Some(line) = line.strip_suffix('\n') else { return line };
+            let Some(line) = line.strip_suffix('\r') else { return line };
+            line
+        }))
     }
 
     /// An iterator over the lines of a string.
@@ -2535,15 +2540,14 @@ impl str {
     /// # Examples
     ///
     /// ```
-    /// #![feature(byte_slice_trim_ascii)]
-    ///
     /// assert_eq!(" \t \u{3000}hello world\n".trim_ascii_start(), "\u{3000}hello world\n");
     /// assert_eq!("  ".trim_ascii_start(), "");
     /// assert_eq!("".trim_ascii_start(), "");
     /// ```
-    #[unstable(feature = "byte_slice_trim_ascii", issue = "94035")]
     #[must_use = "this returns the trimmed string as a new slice, \
                   without modifying the original"]
+    #[stable(feature = "byte_slice_trim_ascii", since = "1.80.0")]
+    #[rustc_const_stable(feature = "byte_slice_trim_ascii", since = "1.80.0")]
     #[inline]
     pub const fn trim_ascii_start(&self) -> &str {
         // SAFETY: Removing ASCII characters from a `&str` does not invalidate
@@ -2561,15 +2565,14 @@ impl str {
     /// # Examples
     ///
     /// ```
-    /// #![feature(byte_slice_trim_ascii)]
-    ///
     /// assert_eq!("\r hello world\u{3000}\n ".trim_ascii_end(), "\r hello world\u{3000}");
     /// assert_eq!("  ".trim_ascii_end(), "");
     /// assert_eq!("".trim_ascii_end(), "");
     /// ```
-    #[unstable(feature = "byte_slice_trim_ascii", issue = "94035")]
     #[must_use = "this returns the trimmed string as a new slice, \
                   without modifying the original"]
+    #[stable(feature = "byte_slice_trim_ascii", since = "1.80.0")]
+    #[rustc_const_stable(feature = "byte_slice_trim_ascii", since = "1.80.0")]
     #[inline]
     pub const fn trim_ascii_end(&self) -> &str {
         // SAFETY: Removing ASCII characters from a `&str` does not invalidate
@@ -2588,15 +2591,14 @@ impl str {
     /// # Examples
     ///
     /// ```
-    /// #![feature(byte_slice_trim_ascii)]
-    ///
     /// assert_eq!("\r hello world\n ".trim_ascii(), "hello world");
     /// assert_eq!("  ".trim_ascii(), "");
     /// assert_eq!("".trim_ascii(), "");
     /// ```
-    #[unstable(feature = "byte_slice_trim_ascii", issue = "94035")]
     #[must_use = "this returns the trimmed string as a new slice, \
                   without modifying the original"]
+    #[stable(feature = "byte_slice_trim_ascii", since = "1.80.0")]
+    #[rustc_const_stable(feature = "byte_slice_trim_ascii", since = "1.80.0")]
     #[inline]
     pub const fn trim_ascii(&self) -> &str {
         // SAFETY: Removing ASCII characters from a `&str` does not invalidate
@@ -2643,14 +2645,19 @@ impl str {
     #[stable(feature = "str_escape", since = "1.34.0")]
     pub fn escape_debug(&self) -> EscapeDebug<'_> {
         let mut chars = self.chars();
-        EscapeDebug {
-            inner: chars
-                .next()
-                .map(|first| first.escape_debug_ext(EscapeDebugExtArgs::ESCAPE_ALL))
-                .into_iter()
-                .flatten()
-                .chain(chars.flat_map(CharEscapeDebugContinue)),
-        }
+        let first = chars
+            .next()
+            .map(|first| first.escape_debug_ext(EscapeDebugExtArgs::ESCAPE_ALL))
+            .into_iter()
+            .flatten();
+        let inner = first.chain(chars.flat_map(|c| {
+            c.escape_debug_ext(EscapeDebugExtArgs {
+                escape_grapheme_extended: false,
+                escape_single_quote: true,
+                escape_double_quote: true,
+            })
+        }));
+        EscapeDebug { inner }
     }
 
     /// Return an iterator that escapes each char in `self` with [`char::escape_default`].
@@ -2688,7 +2695,7 @@ impl str {
                   without modifying the original"]
     #[stable(feature = "str_escape", since = "1.34.0")]
     pub fn escape_default(&self) -> EscapeDefault<'_> {
-        EscapeDefault { inner: self.chars().flat_map(CharEscapeDefault) }
+        EscapeDefault { inner: self.chars().flat_map(char::escape_default) }
     }
 
     /// Return an iterator that escapes each char in `self` with [`char::escape_unicode`].
@@ -2726,7 +2733,7 @@ impl str {
                   without modifying the original"]
     #[stable(feature = "str_escape", since = "1.34.0")]
     pub fn escape_unicode(&self) -> EscapeUnicode<'_> {
-        EscapeUnicode { inner: self.chars().flat_map(CharEscapeUnicode) }
+        EscapeUnicode { inner: self.chars().flat_map(char::escape_unicode) }
     }
 }
 
@@ -2757,59 +2764,15 @@ impl Default for &mut str {
     }
 }
 
-impl_fn_for_zst! {
-    /// A nameable, cloneable fn type
-    #[derive(Clone)]
-    struct LinesMap impl<'a> Fn = |line: &'a str| -> &'a str {
-        let Some(line) = line.strip_suffix('\n') else { return line };
-        let Some(line) = line.strip_suffix('\r') else { return line };
-        line
-    };
-
-    #[derive(Clone)]
-    struct CharEscapeDebugContinue impl Fn = |c: char| -> char::EscapeDebug {
-        c.escape_debug_ext(EscapeDebugExtArgs {
-            escape_grapheme_extended: false,
-            escape_single_quote: true,
-            escape_double_quote: true
-        })
-    };
-
-    #[derive(Clone)]
-    struct CharEscapeUnicode impl Fn = |c: char| -> char::EscapeUnicode {
-        c.escape_unicode()
-    };
-    #[derive(Clone)]
-    struct CharEscapeDefault impl Fn = |c: char| -> char::EscapeDefault {
-        c.escape_default()
-    };
-
-    #[derive(Clone)]
-    struct IsWhitespace impl Fn = |c: char| -> bool {
-        c.is_whitespace()
-    };
-
-    #[derive(Clone)]
-    struct IsAsciiWhitespace impl Fn = |byte: &u8| -> bool {
-        byte.is_ascii_whitespace()
-    };
-
-    #[derive(Clone)]
-    struct IsNotEmpty impl<'a, 'b> Fn = |s: &'a &'b str| -> bool {
-        !s.is_empty()
-    };
-
-    #[derive(Clone)]
-    struct BytesIsNotEmpty impl<'a, 'b> Fn = |s: &'a &'b [u8]| -> bool {
-        !s.is_empty()
-    };
-
-    #[derive(Clone)]
-    struct UnsafeBytesToStr impl<'a> Fn = |bytes: &'a [u8]| -> &'a str {
-        // SAFETY: not safe
-        unsafe { from_utf8_unchecked(bytes) }
-    };
-}
+type LinesMap = impl (Fn(&str) -> &str) + Copy;
+type CharEscapeDebugContinue = impl (FnMut(char) -> char::EscapeDebug) + Copy;
+type CharEscapeUnicode = impl (Fn(char) -> char::EscapeUnicode) + Copy;
+type CharEscapeDefault = impl (Fn(char) -> char::EscapeDefault) + Copy;
+type IsWhitespace = impl (Fn(char) -> bool) + Copy;
+type IsAsciiWhitespace = impl (Fn(&u8) -> bool) + Copy;
+type IsNotEmpty = impl (Fn(&&str) -> bool) + Copy;
+type BytesIsNotEmpty<'a> = impl (FnMut(&&'a [u8]) -> bool) + Copy;
+type UnsafeBytesToStr<'a> = impl (FnMut(&'a [u8]) -> &'a str) + Copy;
 
 // This is required to make `impl From<&str> for Box<dyn Error>` and `impl<E> From<E> for Box<dyn Error>` not overlap.
 #[stable(feature = "rust1", since = "1.0.0")]

@@ -133,6 +133,7 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
                 .expect_const()
                 .eval(fx.tcx, ty::ParamEnv::reveal_all(), span)
                 .unwrap()
+                .1
                 .unwrap_branch();
 
             assert_eq!(x.layout(), y.layout());
@@ -348,6 +349,7 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
         | sym::simd_bswap
         | sym::simd_bitreverse
         | sym::simd_ctlz
+        | sym::simd_ctpop
         | sym::simd_cttz => {
             intrinsic_args!(fx, args => (a); intrinsic);
 
@@ -367,6 +369,7 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
                 (ty::Uint(_) | ty::Int(_), sym::simd_bswap) => fx.bcx.ins().bswap(lane),
                 (ty::Uint(_) | ty::Int(_), sym::simd_bitreverse) => fx.bcx.ins().bitrev(lane),
                 (ty::Uint(_) | ty::Int(_), sym::simd_ctlz) => fx.bcx.ins().clz(lane),
+                (ty::Uint(_) | ty::Int(_), sym::simd_ctpop) => fx.bcx.ins().popcnt(lane),
                 (ty::Uint(_) | ty::Int(_), sym::simd_cttz) => fx.bcx.ins().ctz(lane),
 
                 _ => unreachable!(),
@@ -974,7 +977,7 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
             intrinsic_args!(fx, args => (ptr, offset); intrinsic);
 
             let (lane_count, ptr_lane_ty) = ptr.layout().ty.simd_size_and_type(fx.tcx);
-            let pointee_ty = ptr_lane_ty.builtin_deref(true).unwrap().ty;
+            let pointee_ty = ptr_lane_ty.builtin_deref(true).unwrap();
             let pointee_size = fx.layout_of(pointee_ty).size.bytes();
             let (ret_lane_count, ret_lane_ty) = ret.layout().ty.simd_size_and_type(fx.tcx);
             let ret_lane_layout = fx.layout_of(ret_lane_ty);

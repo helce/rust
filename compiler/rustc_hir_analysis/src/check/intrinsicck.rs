@@ -1,6 +1,7 @@
 use rustc_ast::InlineAsmTemplatePiece;
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_hir as hir;
+use rustc_middle::bug;
 use rustc_middle::ty::{self, Article, FloatTy, IntTy, Ty, TyCtxt, TypeVisitableExt, UintTy};
 use rustc_session::lint;
 use rustc_span::def_id::LocalDefId;
@@ -280,8 +281,8 @@ impl<'a, 'tcx> InlineAsmCtxt<'a, 'tcx> {
                     lint::builtin::ASM_SUB_REGISTER,
                     expr.hir_id,
                     spans,
-                    "formatting may not be suitable for sub-register argument",
                     |lint| {
+                        lint.primary_message("formatting may not be suitable for sub-register argument");
                         lint.span_label(expr.span, "for this argument");
                         lint.help(format!(
                             "use `{{{idx}:{suggested_modifier}}}` to have the register formatted as `{suggested_result}` (for {suggested_size}-bit values)",

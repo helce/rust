@@ -5,6 +5,8 @@ use rustc_errors::{codes::*, struct_span_code_err};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
+use rustc_middle::bug;
+use rustc_middle::ty::print::PrintTraitRefExt as _;
 use rustc_middle::ty::{self as ty, IsSuggestable, Ty, TyCtxt};
 use rustc_span::symbol::Ident;
 use rustc_span::{ErrorGuaranteed, Span, Symbol};
@@ -15,6 +17,8 @@ use smallvec::SmallVec;
 use crate::bounds::Bounds;
 use crate::errors;
 use crate::hir_ty_lowering::{HirTyLowerer, OnlySelfBounds, PredicateFilter};
+
+use super::RegionInferReason;
 
 impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
     /// Add a `Sized` bound to the `bounds` if appropriate.
@@ -164,7 +168,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                     );
                 }
                 hir::GenericBound::Outlives(lifetime) => {
-                    let region = self.lower_lifetime(lifetime, None);
+                    let region = self.lower_lifetime(lifetime, RegionInferReason::OutlivesBound);
                     bounds.push_region_bound(
                         self.tcx(),
                         ty::Binder::bind_with_vars(
@@ -228,32 +232,34 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         bounds
     }
 
-    /// Lower an associated item binding from HIR into `bounds`.
+    /// Lower an associated item constraint from the HIR into `bounds`.
     ///
     /// ### A Note on Binders
     ///
     /// Given something like `T: for<'a> Iterator<Item = &'a u32>`,
     /// the `trait_ref` here will be `for<'a> T: Iterator`.
-    /// The `binding` data however is from *inside* the binder
+    /// The `constraint` data however is from *inside* the binder
     /// (e.g., `&'a u32`) and hence may reference bound regions.
-    #[instrument(level = "debug", skip(self, bounds, dup_bindings, path_span))]
-    pub(super) fn lower_assoc_item_binding(
+    #[instrument(level = "debug", skip(self, bounds, duplicates, path_span))]
+    pub(super) fn lower_assoc_item_constraint(
         &self,
         hir_ref_id: hir::HirId,
         trait_ref: ty::PolyTraitRef<'tcx>,
-        binding: &hir::TypeBinding<'tcx>,
+        constraint: &hir::AssocItemConstraint<'tcx>,
         bounds: &mut Bounds<'tcx>,
-        dup_bindings: &mut FxIndexMap<DefId, Span>,
+        duplicates: &mut FxIndexMap<DefId, Span>,
         path_span: Span,
         only_self_bounds: OnlySelfBounds,
     ) -> Result<(), ErrorGuaranteed> {
         let tcx = self.tcx();
 
-        let assoc_kind = if binding.gen_args.parenthesized
+        let assoc_kind = if constraint.gen_args.parenthesized
             == hir::GenericArgsParentheses::ReturnTypeNotation
         {
             ty::AssocKind::Fn
-        } else if let hir::TypeBindingKind::Equality { term: hir::Term::Const(_) } = binding.kind {
+        } else if let hir::AssocItemConstraintKind::Equality { term: hir::Term::Const(_) } =
+            constraint.kind
+        {
             ty::AssocKind::Const
         } else {
             ty::AssocKind::Type
@@ -270,7 +276,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         let candidate = if self.probe_trait_that_defines_assoc_item(
             trait_ref.def_id(),
             assoc_kind,
-            binding.ident,
+            constraint.ident,
         ) {
             // Simple case: The assoc item is defined in the current trait.
             trait_ref
@@ -282,14 +288,14 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 trait_ref.skip_binder().print_only_trait_name(),
                 None,
                 assoc_kind,
-                binding.ident,
+                constraint.ident,
                 path_span,
-                Some(binding),
+                Some(constraint),
             )?
         };
 
         let (assoc_ident, def_scope) =
-            tcx.adjust_ident_and_get_scope(binding.ident, candidate.def_id(), hir_ref_id);
+            tcx.adjust_ident_and_get_scope(constraint.ident, candidate.def_id(), hir_ref_id);
 
         // We have already adjusted the item name above, so compare with `.normalize_to_macros_2_0()`
         // instead of calling `filter_by_name_and_kind` which would needlessly normalize the
@@ -304,28 +310,28 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
             let reported = tcx
                 .dcx()
                 .struct_span_err(
-                    binding.span,
-                    format!("{} `{}` is private", assoc_item.kind, binding.ident),
+                    constraint.span,
+                    format!("{} `{}` is private", assoc_item.kind, constraint.ident),
                 )
-                .with_span_label(binding.span, format!("private {}", assoc_item.kind))
+                .with_span_label(constraint.span, format!("private {}", assoc_item.kind))
                 .emit();
             self.set_tainted_by_errors(reported);
         }
-        tcx.check_stability(assoc_item.def_id, Some(hir_ref_id), binding.span, None);
+        tcx.check_stability(assoc_item.def_id, Some(hir_ref_id), constraint.span, None);
 
-        dup_bindings
+        duplicates
             .entry(assoc_item.def_id)
             .and_modify(|prev_span| {
                 tcx.dcx().emit_err(errors::ValueOfAssociatedStructAlreadySpecified {
-                    span: binding.span,
+                    span: constraint.span,
                     prev_span: *prev_span,
-                    item_name: binding.ident,
+                    item_name: constraint.ident,
                     def_path: tcx.def_path_str(assoc_item.container_id(tcx)),
                 });
             })
-            .or_insert(binding.span);
+            .or_insert(constraint.span);
 
-        let projection_ty = if let ty::AssocKind::Fn = assoc_kind {
+        let projection_term = if let ty::AssocKind::Fn = assoc_kind {
             let mut emitted_bad_param_err = None;
             // If we have an method return type bound, then we need to instantiate
             // the method's early bound params with suitable late-bound params.
@@ -362,11 +368,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                                     },
                                 )
                             });
-                            let ty = tcx
-                                .type_of(param.def_id)
-                                .no_bound_vars()
-                                .expect("ct params cannot have early bound vars");
-                            ty::Const::new_error(tcx, guar, ty).into()
+                            ty::Const::new_error(tcx, guar).into()
                         }
                     };
                     num_bound_vars += 1;
@@ -379,10 +381,10 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
             let output = if let ty::Alias(ty::Projection, alias_ty) = *output.skip_binder().kind()
                 && tcx.is_impl_trait_in_trait(alias_ty.def_id)
             {
-                alias_ty
+                alias_ty.into()
             } else {
                 return Err(tcx.dcx().emit_err(crate::errors::ReturnTypeNotationOnNonRpitit {
-                    span: binding.span,
+                    span: constraint.span,
                     ty: tcx.liberate_late_bound_regions(assoc_item.def_id, output),
                     fn_span: tcx.hir().span_if_local(assoc_item.def_id),
                     note: (),
@@ -396,19 +398,19 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
             let shifted_output = tcx.shift_bound_var_indices(num_bound_vars, output);
             let instantiation_output = ty::EarlyBinder::bind(shifted_output).instantiate(tcx, args);
 
-            let bound_vars = tcx.late_bound_vars(binding.hir_id);
+            let bound_vars = tcx.late_bound_vars(constraint.hir_id);
             ty::Binder::bind_with_vars(instantiation_output, bound_vars)
         } else {
             // Create the generic arguments for the associated type or constant by joining the
             // parent arguments (the arguments of the trait) and the own arguments (the ones of
             // the associated item itself) and construct an alias type using them.
             let alias_ty = candidate.map_bound(|trait_ref| {
-                let ident = Ident::new(assoc_item.name, binding.ident.span);
+                let ident = Ident::new(assoc_item.name, constraint.ident.span);
                 let item_segment = hir::PathSegment {
                     ident,
-                    hir_id: binding.hir_id,
+                    hir_id: constraint.hir_id,
                     res: Res::Err,
-                    args: Some(binding.gen_args),
+                    args: Some(constraint.gen_args),
                     infer_args: false,
                 };
 
@@ -420,33 +422,30 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 );
                 debug!(?alias_args);
 
-                // Note that we're indeed also using `AliasTy` (alias *type*) for associated
-                // *constants* to represent *const projections*. Alias *term* would be a more
-                // appropriate name but alas.
-                ty::AliasTy::new(tcx, assoc_item.def_id, alias_args)
+                ty::AliasTerm::new(tcx, assoc_item.def_id, alias_args)
             });
 
             // Provide the resolved type of the associated constant to `type_of(AnonConst)`.
-            if let hir::TypeBindingKind::Equality { term: hir::Term::Const(anon_const) } =
-                binding.kind
+            if let hir::AssocItemConstraintKind::Equality { term: hir::Term::Const(anon_const) } =
+                constraint.kind
             {
                 let ty = alias_ty.map_bound(|ty| tcx.type_of(ty.def_id).instantiate(tcx, ty.args));
-                let ty = check_assoc_const_binding_type(tcx, assoc_ident, ty, binding.hir_id);
+                let ty = check_assoc_const_binding_type(tcx, assoc_ident, ty, constraint.hir_id);
                 tcx.feed_anon_const_type(anon_const.def_id, ty::EarlyBinder::bind(ty));
             }
 
             alias_ty
         };
 
-        match binding.kind {
-            hir::TypeBindingKind::Equality { .. } if let ty::AssocKind::Fn = assoc_kind => {
+        match constraint.kind {
+            hir::AssocItemConstraintKind::Equality { .. } if let ty::AssocKind::Fn = assoc_kind => {
                 return Err(tcx.dcx().emit_err(crate::errors::ReturnTypeNotationEqualityBound {
-                    span: binding.span,
+                    span: constraint.span,
                 }));
             }
             // Lower an equality constraint like `Item = u32` as found in HIR bound `T: Iterator<Item = u32>`
             // to a projection predicate: `<T as Iterator>::Item = u32`.
-            hir::TypeBindingKind::Equality { term } => {
+            hir::AssocItemConstraintKind::Equality { term } => {
                 let term = match term {
                     hir::Term::Ty(ty) => self.lower_ty(ty).into(),
                     hir::Term::Const(ct) => ty::Const::from_anon_const(tcx, ct.def_id).into(),
@@ -460,7 +459,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 //     for<'a> <T as Iterator>::Item = &'a str // <-- 'a is bad
                 //     for<'a> <T as FnMut<(&'a u32,)>>::Output = &'a str // <-- 'a is ok
                 let late_bound_in_projection_ty =
-                    tcx.collect_constrained_late_bound_regions(projection_ty);
+                    tcx.collect_constrained_late_bound_regions(projection_term);
                 let late_bound_in_term =
                     tcx.collect_referenced_late_bound_regions(trait_ref.rebind(term));
                 debug!(?late_bound_in_projection_ty);
@@ -470,18 +469,18 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 // struct S1<F: for<'a> Fn(&i32, &i32) -> &'a i32>(F);
                 //                         ----  ----     ^^^^^^^
                 // NOTE(associated_const_equality): This error should be impossible to trigger
-                //                                  with associated const equality bounds.
+                //                                  with associated const equality constraints.
                 self.validate_late_bound_regions(
                     late_bound_in_projection_ty,
                     late_bound_in_term,
                     |br_name| {
                         struct_span_code_err!(
                             tcx.dcx(),
-                            binding.span,
+                            constraint.span,
                             E0582,
                             "binding for associated type `{}` references {}, \
-                                which does not appear in the trait input types",
-                            binding.ident,
+                             which does not appear in the trait input types",
+                            constraint.ident,
                             br_name
                         )
                     },
@@ -489,17 +488,21 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
 
                 bounds.push_projection_bound(
                     tcx,
-                    projection_ty
-                        .map_bound(|projection_ty| ty::ProjectionPredicate { projection_ty, term }),
-                    binding.span,
+                    projection_term.map_bound(|projection_term| ty::ProjectionPredicate {
+                        projection_term,
+                        term,
+                    }),
+                    constraint.span,
                 );
             }
             // Lower a constraint like `Item: Debug` as found in HIR bound `T: Iterator<Item: Debug>`
             // to a bound involving a projection: `<T as Iterator>::Item: Debug`.
-            hir::TypeBindingKind::Constraint { bounds: hir_bounds } => {
+            hir::AssocItemConstraintKind::Bound { bounds: hir_bounds } => {
                 // NOTE: If `only_self_bounds` is true, do NOT expand this associated type bound into
                 // a trait predicate, since we only want to add predicates for the `Self` type.
                 if !only_self_bounds.0 {
+                    let projection_ty = projection_term
+                        .map_bound(|projection_term| projection_term.expect_ty(self.tcx()));
                     // Calling `skip_binder` is okay, because `lower_bounds` expects the `param_ty`
                     // parameter to have a skipped binder.
                     let param_ty = Ty::new_alias(tcx, ty::Projection, projection_ty.skip_binder());

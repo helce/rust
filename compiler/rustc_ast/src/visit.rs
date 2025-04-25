@@ -246,8 +246,11 @@ pub trait Visitor<'ast>: Sized {
     fn visit_generic_arg(&mut self, generic_arg: &'ast GenericArg) -> Self::Result {
         walk_generic_arg(self, generic_arg)
     }
-    fn visit_assoc_constraint(&mut self, constraint: &'ast AssocConstraint) -> Self::Result {
-        walk_assoc_constraint(self, constraint)
+    fn visit_assoc_item_constraint(
+        &mut self,
+        constraint: &'ast AssocItemConstraint,
+    ) -> Self::Result {
+        walk_assoc_item_constraint(self, constraint)
     }
     fn visit_attribute(&mut self, attr: &'ast Attribute) -> Self::Result {
         walk_attribute(self, attr)
@@ -331,7 +334,7 @@ impl WalkItemKind for ItemKind {
         match self {
             ItemKind::ExternCrate(_) => {}
             ItemKind::Use(use_tree) => try_visit!(visitor.visit_use_tree(use_tree, item.id, false)),
-            ItemKind::Static(box StaticItem { ty, mutability: _, expr }) => {
+            ItemKind::Static(box StaticItem { ty, safety: _, mutability: _, expr }) => {
                 try_visit!(visitor.visit_ty(ty));
                 visit_opt!(visitor, visit_expr, expr);
             }
@@ -366,7 +369,7 @@ impl WalkItemKind for ItemKind {
             }
             ItemKind::Impl(box Impl {
                 defaultness: _,
-                unsafety: _,
+                safety: _,
                 generics,
                 constness: _,
                 polarity: _,
@@ -384,7 +387,7 @@ impl WalkItemKind for ItemKind {
                 try_visit!(visitor.visit_generics(generics));
                 try_visit!(visitor.visit_variant_data(struct_definition));
             }
-            ItemKind::Trait(box Trait { unsafety: _, is_auto: _, generics, bounds, items }) => {
+            ItemKind::Trait(box Trait { safety: _, is_auto: _, generics, bounds, items }) => {
                 try_visit!(visitor.visit_generics(generics));
                 walk_list!(visitor, visit_param_bound, bounds, BoundKind::SuperTraits);
                 walk_list!(visitor, visit_assoc_item, items, AssocCtxt::Trait);
@@ -401,6 +404,19 @@ impl WalkItemKind for ItemKind {
                 }
                 try_visit!(visitor.visit_path(path, *id));
                 visit_opt!(visitor, visit_ident, *rename);
+                visit_opt!(visitor, visit_block, body);
+            }
+            ItemKind::DelegationMac(box DelegationMac { qself, prefix, suffixes, body }) => {
+                if let Some(qself) = qself {
+                    try_visit!(visitor.visit_ty(&qself.ty));
+                }
+                try_visit!(visitor.visit_path(prefix, item.id));
+                for (ident, rename) in suffixes {
+                    visitor.visit_ident(*ident);
+                    if let Some(rename) = rename {
+                        visitor.visit_ident(*rename);
+                    }
+                }
                 visit_opt!(visitor, visit_block, body);
             }
         }
@@ -517,8 +533,8 @@ pub fn walk_use_tree<'a, V: Visitor<'a>>(
             visit_opt!(visitor, visit_ident, rename);
         }
         UseTreeKind::Glob => {}
-        UseTreeKind::Nested(ref use_trees) => {
-            for &(ref nested_tree, nested_id) in use_trees {
+        UseTreeKind::Nested { ref items, .. } => {
+            for &(ref nested_tree, nested_id) in items {
                 try_visit!(visitor.visit_use_tree(nested_tree, nested_id, true));
             }
         }
@@ -545,7 +561,7 @@ where
                 match arg {
                     AngleBracketedArg::Arg(a) => try_visit!(visitor.visit_generic_arg(a)),
                     AngleBracketedArg::Constraint(c) => {
-                        try_visit!(visitor.visit_assoc_constraint(c))
+                        try_visit!(visitor.visit_assoc_item_constraint(c))
                     }
                 }
             }
@@ -569,18 +585,18 @@ where
     }
 }
 
-pub fn walk_assoc_constraint<'a, V: Visitor<'a>>(
+pub fn walk_assoc_item_constraint<'a, V: Visitor<'a>>(
     visitor: &mut V,
-    constraint: &'a AssocConstraint,
+    constraint: &'a AssocItemConstraint,
 ) -> V::Result {
     try_visit!(visitor.visit_ident(constraint.ident));
     visit_opt!(visitor, visit_generic_args, &constraint.gen_args);
     match &constraint.kind {
-        AssocConstraintKind::Equality { term } => match term {
+        AssocItemConstraintKind::Equality { term } => match term {
             Term::Ty(ty) => try_visit!(visitor.visit_ty(ty)),
             Term::Const(c) => try_visit!(visitor.visit_anon_const(c)),
         },
-        AssocConstraintKind::Bound { bounds } => {
+        AssocItemConstraintKind::Bound { bounds } => {
             walk_list!(visitor, visit_param_bound, bounds, BoundKind::Bound);
         }
     }
@@ -642,7 +658,12 @@ impl WalkItemKind for ForeignItemKind {
     ) -> V::Result {
         let &Item { id, span, ident, ref vis, .. } = item;
         match self {
-            ForeignItemKind::Static(ty, _, expr) => {
+            ForeignItemKind::Static(box StaticForeignItem {
+                ty,
+                mutability: _,
+                expr,
+                safety: _,
+            }) => {
                 try_visit!(visitor.visit_ty(ty));
                 visit_opt!(visitor, visit_expr, expr);
             }
@@ -813,6 +834,19 @@ impl WalkItemKind for AssocItemKind {
                 }
                 try_visit!(visitor.visit_path(path, *id));
                 visit_opt!(visitor, visit_ident, *rename);
+                visit_opt!(visitor, visit_block, body);
+            }
+            AssocItemKind::DelegationMac(box DelegationMac { qself, prefix, suffixes, body }) => {
+                if let Some(qself) = qself {
+                    try_visit!(visitor.visit_ty(&qself.ty));
+                }
+                try_visit!(visitor.visit_path(prefix, item.id));
+                for (ident, rename) in suffixes {
+                    visitor.visit_ident(*ident);
+                    if let Some(rename) = rename {
+                        visitor.visit_ident(*rename);
+                    }
+                }
                 visit_opt!(visitor, visit_block, body);
             }
         }

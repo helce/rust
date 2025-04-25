@@ -17,12 +17,14 @@ use rustc_middle::mir::{self, AssertKind, BasicBlock, SwitchTargets, UnwindTermi
 use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf, ValidityRequirement};
 use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
 use rustc_middle::ty::{self, Instance, Ty};
+use rustc_middle::{bug, span_bug};
 use rustc_monomorphize::is_call_from_compiler_builtins_to_upstream_monomorphization;
 use rustc_session::config::OptLevel;
 use rustc_span::{source_map::Spanned, sym, Span};
 use rustc_target::abi::call::{ArgAbi, FnAbi, PassMode, Reg};
 use rustc_target::abi::{self, HasDataLayout, WrappingRange};
 use rustc_target::spec::abi::Abi;
+use tracing::{debug, info};
 
 use std::cmp;
 
@@ -498,6 +500,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         &mut self,
         helper: TerminatorCodegenHelper<'tcx>,
         bx: &mut Bx,
+        source_info: &mir::SourceInfo,
         location: mir::Place<'tcx>,
         target: mir::BasicBlock,
         unwind: mir::UnwindAction,
@@ -521,90 +524,106 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             args1 = [place.val.llval];
             &args1[..]
         };
-        let (drop_fn, fn_abi, drop_instance) =
-            match ty.kind() {
-                // FIXME(eddyb) perhaps move some of this logic into
-                // `Instance::resolve_drop_in_place`?
-                ty::Dynamic(_, _, ty::Dyn) => {
-                    // IN THIS ARM, WE HAVE:
-                    // ty = *mut (dyn Trait)
-                    // which is: exists<T> ( *mut T,    Vtable<T: Trait> )
-                    //                       args[0]    args[1]
-                    //
-                    // args = ( Data, Vtable )
-                    //                  |
-                    //                  v
-                    //                /-------\
-                    //                | ...   |
-                    //                \-------/
-                    //
-                    let virtual_drop = Instance {
-                        def: ty::InstanceDef::Virtual(drop_fn.def_id(), 0),
-                        args: drop_fn.args,
-                    };
-                    debug!("ty = {:?}", ty);
-                    debug!("drop_fn = {:?}", drop_fn);
-                    debug!("args = {:?}", args);
-                    let fn_abi = bx.fn_abi_of_instance(virtual_drop, ty::List::empty());
-                    let vtable = args[1];
-                    // Truncate vtable off of args list
-                    args = &args[..1];
-                    (
-                        meth::VirtualIndex::from_index(ty::COMMON_VTABLE_ENTRIES_DROPINPLACE)
-                            .get_fn(bx, vtable, ty, fn_abi),
-                        fn_abi,
-                        virtual_drop,
-                    )
-                }
-                ty::Dynamic(_, _, ty::DynStar) => {
-                    // IN THIS ARM, WE HAVE:
-                    // ty = *mut (dyn* Trait)
-                    // which is: *mut exists<T: sizeof(T) == sizeof(usize)> (T, Vtable<T: Trait>)
-                    //
-                    // args = [ * ]
-                    //          |
-                    //          v
-                    //      ( Data, Vtable )
-                    //                |
-                    //                v
-                    //              /-------\
-                    //              | ...   |
-                    //              \-------/
-                    //
-                    //
-                    // WE CAN CONVERT THIS INTO THE ABOVE LOGIC BY DOING
-                    //
-                    // data = &(*args[0]).0    // gives a pointer to Data above (really the same pointer)
-                    // vtable = (*args[0]).1   // loads the vtable out
-                    // (data, vtable)          // an equivalent Rust `*mut dyn Trait`
-                    //
-                    // SO THEN WE CAN USE THE ABOVE CODE.
-                    let virtual_drop = Instance {
-                        def: ty::InstanceDef::Virtual(drop_fn.def_id(), 0),
-                        args: drop_fn.args,
-                    };
-                    debug!("ty = {:?}", ty);
-                    debug!("drop_fn = {:?}", drop_fn);
-                    debug!("args = {:?}", args);
-                    let fn_abi = bx.fn_abi_of_instance(virtual_drop, ty::List::empty());
-                    let meta_ptr = place.project_field(bx, 1);
-                    let meta = bx.load_operand(meta_ptr);
-                    // Truncate vtable off of args list
-                    args = &args[..1];
-                    debug!("args' = {:?}", args);
-                    (
-                        meth::VirtualIndex::from_index(ty::COMMON_VTABLE_ENTRIES_DROPINPLACE)
-                            .get_fn(bx, meta.immediate(), ty, fn_abi),
-                        fn_abi,
-                        virtual_drop,
-                    )
-                }
-                _ => (
-                    bx.get_fn_addr(drop_fn),
-                    bx.fn_abi_of_instance(drop_fn, ty::List::empty()),
-                    drop_fn,
-                ),
-            };
+        let (maybe_null, drop_fn, fn_abi, drop_instance) = match ty.kind() {
+            // FIXME(eddyb) perhaps move some of this logic into
+            // `Instance::resolve_drop_in_place`?
+            ty::Dynamic(_, _, ty::Dyn) => {
+                // IN THIS ARM, WE HAVE:
+                // ty = *mut (dyn Trait)
+                // which is: exists<T> ( *mut T,    Vtable<T: Trait> )
+                //                       args[0]    args[1]
+                //
+                // args = ( Data, Vtable )
+                //                  |
+                //                  v
+                //                /-------\
+                //                | ...   |
+                //                \-------/
+                //
+                let virtual_drop = Instance {
+                    def: ty::InstanceDef::Virtual(drop_fn.def_id(), 0), // idx 0: the drop function
+                    args: drop_fn.args,
+                };
+                debug!("ty = {:?}", ty);
+                debug!("drop_fn = {:?}", drop_fn);
+                debug!("args = {:?}", args);
+                let fn_abi = bx.fn_abi_of_instance(virtual_drop, ty::List::empty());
+                let vtable = args[1];
+                // Truncate vtable off of args list
+                args = &args[..1];
+                (
+                    true,
+                    meth::VirtualIndex::from_index(ty::COMMON_VTABLE_ENTRIES_DROPINPLACE)
+                        .get_optional_fn(bx, vtable, ty, fn_abi),
+                    fn_abi,
+                    virtual_drop,
+                )
+            }
+            ty::Dynamic(_, _, ty::DynStar) => {
+                // IN THIS ARM, WE HAVE:
+                // ty = *mut (dyn* Trait)
+                // which is: *mut exists<T: sizeof(T) == sizeof(usize)> (T, Vtable<T: Trait>)
+                //
+                // args = [ * ]
+                //          |
+                //          v
+                //      ( Data, Vtable )
+                //                |
+                //                v
+                //              /-------\
+                //              | ...   |
+                //              \-------/
+                //
+                //
+                // WE CAN CONVERT THIS INTO THE ABOVE LOGIC BY DOING
+                //
+                // data = &(*args[0]).0    // gives a pointer to Data above (really the same pointer)
+                // vtable = (*args[0]).1   // loads the vtable out
+                // (data, vtable)          // an equivalent Rust `*mut dyn Trait`
+                //
+                // SO THEN WE CAN USE THE ABOVE CODE.
+                let virtual_drop = Instance {
+                    def: ty::InstanceDef::Virtual(drop_fn.def_id(), 0), // idx 0: the drop function
+                    args: drop_fn.args,
+                };
+                debug!("ty = {:?}", ty);
+                debug!("drop_fn = {:?}", drop_fn);
+                debug!("args = {:?}", args);
+                let fn_abi = bx.fn_abi_of_instance(virtual_drop, ty::List::empty());
+                let meta_ptr = place.project_field(bx, 1);
+                let meta = bx.load_operand(meta_ptr);
+                // Truncate vtable off of args list
+                args = &args[..1];
+                debug!("args' = {:?}", args);
+                (
+                    true,
+                    meth::VirtualIndex::from_index(ty::COMMON_VTABLE_ENTRIES_DROPINPLACE)
+                        .get_optional_fn(bx, meta.immediate(), ty, fn_abi),
+                    fn_abi,
+                    virtual_drop,
+                )
+            }
+            _ => (
+                false,
+                bx.get_fn_addr(drop_fn),
+                bx.fn_abi_of_instance(drop_fn, ty::List::empty()),
+                drop_fn,
+            ),
+        };
+
+        // We generate a null check for the drop_fn. This saves a bunch of relocations being
+        // generated for no-op drops.
+        if maybe_null {
+            let is_not_null = bx.append_sibling_block("is_not_null");
+            let llty = bx.fn_ptr_backend_type(fn_abi);
+            let null = bx.const_null(llty);
+            let non_null =
+                bx.icmp(base::bin_op_to_icmp_predicate(mir::BinOp::Ne, false), drop_fn, null);
+            bx.cond_br(non_null, is_not_null, helper.llbb_with_cleanup(self, target));
+            bx.switch_to_block(is_not_null);
+            self.set_debug_loc(bx, *source_info);
+        }
+
         helper.do_call(
             self,
             bx,
@@ -615,7 +634,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             unwind,
             &[],
             Some(drop_instance),
-            mergeable_succ,
+            !maybe_null && mergeable_succ,
         )
     }
 
@@ -648,8 +667,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             return helper.funclet_br(self, bx, target, mergeable_succ);
         }
 
-        // Pass the condition through llvm.expect for branch hinting.
-        let cond = bx.expect(cond, expected);
+        // Because we're branching to a panic block (either a `#[cold]` one
+        // or an inlined abort), there's no need to `expect` it.
 
         // Create the failure block and the conditional branch to it.
         let lltarget = helper.llbb_with_cleanup(self, target);
@@ -1059,7 +1078,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
                         // Make sure that we've actually unwrapped the rcvr down
                         // to a pointer or ref to `dyn* Trait`.
-                        if !op.layout.ty.builtin_deref(true).unwrap().ty.is_dyn_star() {
+                        if !op.layout.ty.builtin_deref(true).unwrap().is_dyn_star() {
                             span_bug!(span, "can't codegen a virtual call on {:#?}", op);
                         }
                         let place = op.deref(bx.cx());
@@ -1344,9 +1363,16 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 MergingSucc::False
             }
 
-            mir::TerminatorKind::Drop { place, target, unwind, replace: _ } => {
-                self.codegen_drop_terminator(helper, bx, place, target, unwind, mergeable_succ())
-            }
+            mir::TerminatorKind::Drop { place, target, unwind, replace: _ } => self
+                .codegen_drop_terminator(
+                    helper,
+                    bx,
+                    &terminator.source_info,
+                    place,
+                    target,
+                    unwind,
+                    mergeable_succ(),
+                ),
 
             mir::TerminatorKind::Assert { ref cond, expected, ref msg, target, unwind } => self
                 .codegen_assert_terminator(
@@ -1453,9 +1479,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         Some(pointee_align) => cmp::max(pointee_align, arg.layout.align.abi),
                         None => arg.layout.align.abi,
                     };
-                    let scratch = PlaceRef::alloca_aligned(bx, arg.layout, required_align);
-                    op.val.store(bx, scratch);
-                    (scratch.val.llval, scratch.val.align, true)
+                    let scratch = PlaceValue::alloca(bx, arg.layout.size, required_align);
+                    op.val.store(bx, scratch.with_type(arg.layout));
+                    (scratch.llval, scratch.align, true)
                 }
                 PassMode::Cast { .. } => {
                     let scratch = PlaceRef::alloca(bx, arg.layout);
@@ -1474,10 +1500,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         // For `foo(packed.large_field)`, and types with <4 byte alignment on x86,
                         // alignment requirements may be higher than the type's alignment, so copy
                         // to a higher-aligned alloca.
-                        let scratch = PlaceRef::alloca_aligned(bx, arg.layout, required_align);
-                        let op_place = PlaceRef { val: op_place_val, layout: op.layout };
-                        bx.typed_place_copy(scratch, op_place);
-                        (scratch.val.llval, scratch.val.align, true)
+                        let scratch = PlaceValue::alloca(bx, arg.layout.size, required_align);
+                        bx.typed_place_copy(scratch, op_place_val, op.layout);
+                        (scratch.llval, scratch.align, true)
                     } else {
                         (op_place_val.llval, op_place_val.align, true)
                     }
@@ -1566,7 +1591,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             if place_val.llextra.is_some() {
                 bug!("closure arguments must be sized");
             }
-            let tuple_ptr = PlaceRef { val: place_val, layout: tuple.layout };
+            let tuple_ptr = place_val.with_type(tuple.layout);
             for i in 0..tuple.layout.fields.count() {
                 let field_ptr = tuple_ptr.project_field(bx, i);
                 let field = bx.load_operand(field_ptr);

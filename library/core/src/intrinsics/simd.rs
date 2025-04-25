@@ -152,7 +152,7 @@ extern "rust-intrinsic" {
     #[rustc_nounwind]
     pub fn simd_fabs<T>(x: T) -> T;
 
-    /// Elementwise minimum of a vector.
+    /// Elementwise minimum of two vectors.
     ///
     /// `T` must be a vector of floating-point primitive types.
     ///
@@ -160,7 +160,7 @@ extern "rust-intrinsic" {
     #[rustc_nounwind]
     pub fn simd_fmin<T>(x: T, y: T) -> T;
 
-    /// Elementwise maximum of a vector.
+    /// Elementwise maximum of two vectors.
     ///
     /// `T` must be a vector of floating-point primitive types.
     ///
@@ -387,7 +387,7 @@ extern "rust-intrinsic" {
     #[rustc_nounwind]
     pub fn simd_reduce_mul_ordered<T, U>(x: T, y: U) -> U;
 
-    /// Add elements within a vector in arbitrary order. May also be re-associated with
+    /// Multiply elements within a vector in arbitrary order. May also be re-associated with
     /// unordered additions on the inputs/outputs.
     ///
     /// `T` must be a vector of integer or floating-point primitive types.
@@ -405,7 +405,7 @@ extern "rust-intrinsic" {
     #[rustc_nounwind]
     pub fn simd_reduce_all<T>(x: T) -> bool;
 
-    /// Check if all mask values are true.
+    /// Check if any mask value is true.
     ///
     /// `T` must be a vector of integer primitive types.
     ///
@@ -540,12 +540,8 @@ extern "rust-intrinsic" {
     /// `T` must be a vector of pointers.
     ///
     /// `U` must be a vector of `usize` with the same length as `T`.
-    #[cfg(not(bootstrap))]
     #[rustc_nounwind]
     pub fn simd_expose_provenance<T, U>(ptr: T) -> U;
-    #[cfg(bootstrap)]
-    #[rustc_nounwind]
-    pub fn simd_expose_addr<T, U>(ptr: T) -> U;
 
     /// Create a vector of pointers from a vector of addresses.
     ///
@@ -553,11 +549,7 @@ extern "rust-intrinsic" {
     ///
     /// `U` must be a vector of pointers, with the same length as `T`.
     #[rustc_nounwind]
-    #[cfg(not(bootstrap))]
     pub fn simd_with_exposed_provenance<T, U>(addr: T) -> U;
-    #[rustc_nounwind]
-    #[cfg(bootstrap)]
-    pub fn simd_from_exposed_addr<T, U>(addr: T) -> U;
 
     /// Swap bytes of each element.
     ///
@@ -576,6 +568,13 @@ extern "rust-intrinsic" {
     /// `T` must be a vector of integers.
     #[rustc_nounwind]
     pub fn simd_ctlz<T>(x: T) -> T;
+
+    /// Count the number of ones in each element.
+    ///
+    /// `T` must be a vector of integers.
+    #[rustc_nounwind]
+    #[cfg(not(bootstrap))]
+    pub fn simd_ctpop<T>(x: T) -> T;
 
     /// Count the trailing zeros of each element.
     ///
@@ -663,8 +662,3 @@ extern "rust-intrinsic" {
     #[rustc_nounwind]
     pub fn simd_flog<T>(a: T) -> T;
 }
-
-#[cfg(bootstrap)]
-pub use simd_expose_addr as simd_expose_provenance;
-#[cfg(bootstrap)]
-pub use simd_from_exposed_addr as simd_with_exposed_provenance;

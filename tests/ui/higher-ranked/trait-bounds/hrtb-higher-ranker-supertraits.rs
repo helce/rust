@@ -12,7 +12,7 @@ trait Bar<'ccx>: for<'tcx> Foo<'tcx> {
 fn want_foo_for_some_tcx<'x, F: Foo<'x>>(f: &'x F) {
     want_foo_for_some_tcx(f);
     want_foo_for_any_tcx(f);
-    //~^ ERROR  the trait bound `for<'tcx> F: Foo<'tcx>` is not satisfied
+    //~^ ERROR the trait bound `for<'tcx> F: Foo<'tcx>` is not satisfied
 }
 
 fn want_foo_for_any_tcx<F: for<'tcx> Foo<'tcx>>(f: &F) {

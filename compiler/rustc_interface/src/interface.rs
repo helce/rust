@@ -11,11 +11,10 @@ use rustc_data_structures::sync::Lrc;
 use rustc_errors::registry::Registry;
 use rustc_errors::{DiagCtxt, ErrorGuaranteed};
 use rustc_lint::LintStore;
-
 use rustc_middle::ty;
 use rustc_middle::ty::CurrentGcx;
 use rustc_middle::util::Providers;
-use rustc_parse::maybe_new_parser_from_source_str;
+use rustc_parse::new_parser_from_source_str;
 use rustc_query_impl::QueryCtxt;
 use rustc_query_system::query::print_query_stack;
 use rustc_session::config::{self, Cfg, CheckCfg, ExpectedValues, Input, OutFileName};
@@ -28,6 +27,7 @@ use rustc_span::FileName;
 use std::path::PathBuf;
 use std::result;
 use std::sync::Arc;
+use tracing::trace;
 
 pub type Result<T> = result::Result<T, ErrorGuaranteed>;
 
@@ -67,7 +67,7 @@ pub(crate) fn parse_cfg(dcx: &DiagCtxt, cfgs: Vec<String>) -> Cfg {
                 };
             }
 
-            match maybe_new_parser_from_source_str(&psess, filename, s.to_string()) {
+            match new_parser_from_source_str(&psess, filename, s.to_string()) {
                 Ok(mut parser) => match parser.parse_meta_item() {
                     Ok(meta_item) if parser.token == token::Eof => {
                         if meta_item.path.segments.len() != 1 {
@@ -120,14 +120,45 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
         );
         let filename = FileName::cfg_spec_source_code(&s);
 
+        const VISIT: &str =
+            "visit <https://doc.rust-lang.org/nightly/rustc/check-cfg.html> for more details";
+
         macro_rules! error {
             ($reason:expr) => {
                 #[allow(rustc::untranslatable_diagnostic)]
                 #[allow(rustc::diagnostic_outside_of_impl)]
-                dcx.fatal(format!(
-                    concat!("invalid `--check-cfg` argument: `{}` (", $reason, ")"),
-                    s
-                ))
+                {
+                    let mut diag =
+                        dcx.struct_fatal(format!("invalid `--check-cfg` argument: `{s}`"));
+                    diag.note($reason);
+                    diag.note(VISIT);
+                    diag.emit()
+                }
+            };
+            (in $arg:expr, $reason:expr) => {
+                #[allow(rustc::untranslatable_diagnostic)]
+                #[allow(rustc::diagnostic_outside_of_impl)]
+                {
+                    let mut diag =
+                        dcx.struct_fatal(format!("invalid `--check-cfg` argument: `{s}`"));
+
+                    let pparg = rustc_ast_pretty::pprust::meta_list_item_to_string($arg);
+                    if let Some(lit) = $arg.lit() {
+                        let (lit_kind_article, lit_kind_descr) = {
+                            let lit_kind = lit.as_token_lit().kind;
+                            (lit_kind.article(), lit_kind.descr())
+                        };
+                        diag.note(format!(
+                            "`{pparg}` is {lit_kind_article} {lit_kind_descr} literal"
+                        ));
+                    } else {
+                        diag.note(format!("`{pparg}` is invalid"));
+                    }
+
+                    diag.note($reason);
+                    diag.note(VISIT);
+                    diag.emit()
+                }
             };
         }
 
@@ -135,7 +166,7 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
             error!("expected `cfg(name, values(\"value1\", \"value2\", ... \"valueN\"))`")
         };
 
-        let mut parser = match maybe_new_parser_from_source_str(&psess, filename, s.to_string()) {
+        let mut parser = match new_parser_from_source_str(&psess, filename, s.to_string()) {
             Ok(parser) => parser,
             Err(errs) => {
                 errs.into_iter().for_each(|err| err.cancel());
@@ -183,7 +214,7 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
                 }
                 any_specified = true;
                 if !args.is_empty() {
-                    error!("`any()` must be empty");
+                    error!(in arg, "`any()` takes no argument");
                 }
             } else if arg.has_name(sym::values)
                 && let Some(args) = arg.meta_item_list()
@@ -202,25 +233,25 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
                         && let Some(args) = arg.meta_item_list()
                     {
                         if values_any_specified {
-                            error!("`any()` in `values()` cannot be specified multiple times");
+                            error!(in arg, "`any()` in `values()` cannot be specified multiple times");
                         }
                         values_any_specified = true;
                         if !args.is_empty() {
-                            error!("`any()` must be empty");
+                            error!(in arg, "`any()` in `values()` takes no argument");
                         }
                     } else if arg.has_name(sym::none)
                         && let Some(args) = arg.meta_item_list()
                     {
                         values.insert(None);
                         if !args.is_empty() {
-                            error!("`none()` must be empty");
+                            error!(in arg, "`none()` in `values()` takes no argument");
                         }
                     } else {
-                        error!("`values()` arguments must be string literals, `none()` or `any()`");
+                        error!(in arg, "`values()` arguments must be string literals, `none()` or `any()`");
                     }
                 }
             } else {
-                error!("`cfg()` arguments must be simple identifiers, `any()` or `values(...)`");
+                error!(in arg, "`cfg()` arguments must be simple identifiers, `any()` or `values(...)`");
             }
         }
 
@@ -358,6 +389,7 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
     let hash_kind = config.opts.unstable_opts.src_hash_algorithm(&target);
 
     util::run_in_thread_pool_with_globals(
+        &early_dcx,
         config.opts.edition,
         config.opts.unstable_opts.threads,
         SourceMapInputs { file_loader, path_mapping, hash_kind },

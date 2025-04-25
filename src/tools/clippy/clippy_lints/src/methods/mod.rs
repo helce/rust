@@ -133,6 +133,7 @@ use bind_instead_of_map::BindInsteadOfMap;
 use clippy_config::msrvs::{self, Msrv};
 use clippy_utils::consts::{constant, Constant};
 use clippy_utils::diagnostics::{span_lint, span_lint_and_help};
+use clippy_utils::macros::FormatArgsStorage;
 use clippy_utils::ty::{contains_ty_adt_constructor_opaque, implements_trait, is_copy, is_type_diagnostic_item};
 use clippy_utils::{contains_return, is_bool, is_trait_method, iter_input_pats, peel_blocks, return_ty};
 pub use path_ends_with_ext::DEFAULT_ALLOWED_DOTFILES;
@@ -256,7 +257,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for `.unwrap()` or `.unwrap_err()` calls on `Result`s and `.unwrap()` call on `Option`s.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// It is better to handle the `None` or `Err` case,
     /// or at least call `.expect(_)` with a more helpful message. Still, for a lot of
     /// quick-and-dirty code, `unwrap` is a good choice, which is why this lint is
@@ -332,7 +333,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for `.expect()` or `.expect_err()` calls on `Result`s and `.expect()` call on `Option`s.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Usually it is better to handle the `None` or `Err` case.
     /// Still, for a lot of quick-and-dirty code, `expect` is a good choice, which is why
     /// this lint is `Allow` by default.
@@ -1028,8 +1029,8 @@ declare_clippy_lint! {
     /// (`Rc`, `Arc`, `rc::Weak`, or `sync::Weak`), and suggests calling Clone via unified
     /// function syntax instead (e.g., `Rc::clone(foo)`).
     ///
-    /// ### Why is this bad?
-    /// Calling '.clone()' on an Rc, Arc, or Weak
+    /// ### Why restrict this?
+    /// Calling `.clone()` on an `Rc`, `Arc`, or `Weak`
     /// can obscure the fact that only the pointer is being cloned, not the underlying
     /// data.
     ///
@@ -1050,7 +1051,7 @@ declare_clippy_lint! {
     #[clippy::version = "pre 1.29.0"]
     pub CLONE_ON_REF_PTR,
     restriction,
-    "using 'clone' on a ref-counted pointer"
+    "using `clone` on a ref-counted pointer"
 }
 
 declare_clippy_lint! {
@@ -1145,11 +1146,16 @@ declare_clippy_lint! {
     /// `str` as an argument, e.g., `_.split("x")`.
     ///
     /// ### Why is this bad?
-    /// Performing these methods using a `char` is faster than
-    /// using a `str`.
+    /// While this can make a perf difference on some systems,
+    /// benchmarks have proven inconclusive. But at least using a
+    /// char literal makes it clear that we are looking at a single
+    /// character.
     ///
     /// ### Known problems
-    /// Does not catch multi-byte unicode characters.
+    /// Does not catch multi-byte unicode characters. This is by
+    /// design, on many machines, splitting by a non-ascii char is
+    /// actually slower. Please do your own measurements instead of
+    /// relying solely on the results of this lint.
     ///
     /// ### Example
     /// ```rust,ignore
@@ -1162,7 +1168,7 @@ declare_clippy_lint! {
     /// ```
     #[clippy::version = "pre 1.29.0"]
     pub SINGLE_CHAR_PATTERN,
-    perf,
+    pedantic,
     "using a single-character str where a char could be used, e.g., `_.split(\"x\")`"
 }
 
@@ -1353,7 +1359,7 @@ declare_clippy_lint! {
     /// Checks for usage of `.get().unwrap()` (or
     /// `.get_mut().unwrap`) on a standard library type which implements `Index`
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Using the Index trait (`[]`) is more clear and more
     /// concise.
     ///
@@ -1737,7 +1743,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for `FileType::is_file()`.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// When people testing a file type with `FileType::is_file`
     /// they are testing whether a path is something they can get bytes from. But
     /// `is_file` doesn't cover special file types in unix-like systems, and doesn't cover
@@ -2682,8 +2688,9 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for instances of `map_err(|_| Some::Enum)`
     ///
-    /// ### Why is this bad?
-    /// This `map_err` throws away the original error rather than allowing the enum to contain and report the cause of the error
+    /// ### Why restrict this?
+    /// This `map_err` throws away the original error rather than allowing the enum to
+    /// contain and report the cause of the error.
     ///
     /// ### Example
     /// Before:
@@ -3139,7 +3146,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for usage of File::read_to_end and File::read_to_string.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// `fs::{read, read_to_string}` provide the same functionality when `buf` is empty with fewer imports and no intermediate values.
     /// See also: [fs::read docs](https://doc.rust-lang.org/std/fs/fn.read.html), [fs::read_to_string docs](https://doc.rust-lang.org/std/fs/fn.read_to_string.html)
     ///
@@ -3988,7 +3995,7 @@ declare_clippy_lint! {
     /// let x: Result<u32, ()> = Ok(0);
     /// let y = x.unwrap_or_else(|err| handle_error(err));
     /// ```
-    #[clippy::version = "1.77.0"]
+    #[clippy::version = "1.78.0"]
     pub UNNECESSARY_RESULT_MAP_OR_ELSE,
     suspicious,
     "making no use of the \"map closure\" when calling `.map_or_else(|err| handle_error(err), |n| n)`"
@@ -4022,7 +4029,7 @@ declare_clippy_lint! {
     /// needs_cstr(c"Hello");
     /// unsafe { libc::puts(c"World".as_ptr()) }
     /// ```
-    #[clippy::version = "1.76.0"]
+    #[clippy::version = "1.78.0"]
     pub MANUAL_C_STR_LITERALS,
     pedantic,
     r#"creating a `CStr` through functions when `c""` literals can be used"#
@@ -4082,12 +4089,14 @@ declare_clippy_lint! {
     suspicious,
     "is_empty() called on strings known at compile time"
 }
+
 pub struct Methods {
     avoid_breaking_exported_api: bool,
     msrv: Msrv,
     allow_expect_in_tests: bool,
     allow_unwrap_in_tests: bool,
     allowed_dotfiles: FxHashSet<String>,
+    format_args: FormatArgsStorage,
 }
 
 impl Methods {
@@ -4098,6 +4107,7 @@ impl Methods {
         allow_expect_in_tests: bool,
         allow_unwrap_in_tests: bool,
         mut allowed_dotfiles: FxHashSet<String>,
+        format_args: FormatArgsStorage,
     ) -> Self {
         allowed_dotfiles.extend(DEFAULT_ALLOWED_DOTFILES.iter().map(ToString::to_string));
 
@@ -4107,6 +4117,7 @@ impl Methods {
             allow_expect_in_tests,
             allow_unwrap_in_tests,
             allowed_dotfiles,
+            format_args,
         }
     }
 }
@@ -4276,7 +4287,15 @@ impl<'tcx> LateLintPass<'tcx> for Methods {
             ExprKind::MethodCall(method_call, receiver, args, _) => {
                 let method_span = method_call.ident.span;
                 or_fun_call::check(cx, expr, method_span, method_call.ident.as_str(), receiver, args);
-                expect_fun_call::check(cx, expr, method_span, method_call.ident.as_str(), receiver, args);
+                expect_fun_call::check(
+                    cx,
+                    &self.format_args,
+                    expr,
+                    method_span,
+                    method_call.ident.as_str(),
+                    receiver,
+                    args,
+                );
                 clone_on_copy::check(cx, expr, method_call.ident.name, receiver, args);
                 clone_on_ref_ptr::check(cx, expr, method_call.ident.name, receiver, args);
                 inefficient_to_string::check(cx, expr, method_call.ident.name, receiver, args);
@@ -5033,7 +5052,7 @@ fn lint_binary_expr_with_method_call(cx: &LateContext<'_>, info: &mut BinaryExpr
 }
 
 const FN_HEADER: hir::FnHeader = hir::FnHeader {
-    unsafety: hir::Unsafety::Normal,
+    safety: hir::Safety::Safe,
     constness: hir::Constness::NotConst,
     asyncness: hir::IsAsync::NotAsync,
     abi: rustc_target::spec::abi::Abi::Rust,
@@ -5209,7 +5228,5 @@ impl OutType {
 }
 
 fn fn_header_equals(expected: hir::FnHeader, actual: hir::FnHeader) -> bool {
-    expected.constness == actual.constness
-        && expected.unsafety == actual.unsafety
-        && expected.asyncness == actual.asyncness
+    expected.constness == actual.constness && expected.safety == actual.safety && expected.asyncness == actual.asyncness
 }

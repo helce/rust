@@ -16,6 +16,7 @@ use rustc_infer::traits::ObligationCause;
 use rustc_infer::traits::{Obligation, PolyTraitObligation, SelectionError};
 use rustc_middle::ty::fast_reject::{DeepRejectCtxt, TreatParams};
 use rustc_middle::ty::{self, ToPolyTraitRef, Ty, TypeVisitableExt};
+use rustc_middle::{bug, span_bug};
 
 use crate::traits;
 use crate::traits::query::evaluate_obligation::InferCtxtExt;
@@ -417,20 +418,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     // Ambiguity if upvars haven't been constrained yet
                     && !args.tupled_upvars_ty().is_ty_var()
                 {
-                    let no_borrows = match args.tupled_upvars_ty().kind() {
-                        ty::Tuple(tys) => tys.is_empty(),
-                        ty::Error(_) => false,
-                        _ => bug!("tuple_fields called on non-tuple"),
-                    };
                     // A coroutine-closure implements `FnOnce` *always*, since it may
                     // always be called once. It additionally implements `Fn`/`FnMut`
-                    // only if it has no upvars (therefore no borrows from the closure
-                    // that would need to be represented with a lifetime) and if the
-                    // closure kind permits it.
-                    // FIXME(async_closures): Actually, it could also implement `Fn`/`FnMut`
-                    // if it takes all of its upvars by copy, and none by ref. This would
-                    // require us to record a bit more information during upvar analysis.
-                    if no_borrows && closure_kind.extends(kind) {
+                    // only if it has no upvars referencing the closure-env lifetime,
+                    // and if the closure kind permits it.
+                    if closure_kind.extends(kind) && !args.has_self_borrows() {
                         candidates.vec.push(ClosureCandidate { is_const });
                     } else if kind == ty::ClosureKind::FnOnce {
                         candidates.vec.push(ClosureCandidate { is_const });
@@ -878,7 +870,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         if let Some(principal) = data.principal() {
                             if !self.infcx.tcx.features().object_safe_for_dispatch {
                                 principal.with_self_ty(self.tcx(), self_ty)
-                            } else if self.tcx().check_is_object_safe(principal.def_id()) {
+                            } else if self.tcx().is_object_safe(principal.def_id()) {
                                 principal.with_self_ty(self.tcx(), self_ty)
                             } else {
                                 return;
@@ -929,6 +921,12 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         param_env: ty::ParamEnv<'tcx>,
         cause: &ObligationCause<'tcx>,
     ) -> Option<ty::PolyExistentialTraitRef<'tcx>> {
+        // Don't drop any candidates in intercrate mode, as it's incomplete.
+        // (Not that it matters, since `Unsize` is not a stable trait.)
+        if self.infcx.intercrate {
+            return None;
+        }
+
         let tcx = self.tcx();
         if tcx.features().trait_upcasting {
             return None;
@@ -944,7 +942,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         }
 
         self.infcx.probe(|_| {
-            let ty = traits::normalize_projection_type(
+            let ty = traits::normalize_projection_ty(
                 self,
                 param_env,
                 ty::AliasTy::new(tcx, tcx.lang_items().deref_target()?, trait_ref.args),
@@ -954,7 +952,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 // since we don't actually use them.
                 &mut vec![],
             )
-            .ty()
+            .as_type()
             .unwrap();
 
             if let ty::Dynamic(data, ..) = ty.kind() { data.principal() } else { None }
@@ -1012,7 +1010,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     let a_auto_traits: FxIndexSet<DefId> = a_data
                         .auto_traits()
                         .chain(principal_def_id_a.into_iter().flat_map(|principal_def_id| {
-                            util::supertrait_def_ids(self.tcx(), principal_def_id)
+                            self.tcx()
+                                .supertrait_def_ids(principal_def_id)
                                 .filter(|def_id| self.tcx().trait_is_auto(*def_id))
                         }))
                         .collect();

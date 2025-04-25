@@ -1,6 +1,8 @@
 use crate::fluent_generated as fluent;
 use crate::infer::error_reporting::nice_region_error::find_anon_type;
 use rustc_errors::{Diag, EmissionGuarantee, IntoDiagArg, SubdiagMessageOp, Subdiagnostic};
+use rustc_hir::def_id::LocalDefId;
+use rustc_middle::bug;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::{symbol::kw, Span};
 
@@ -13,12 +15,15 @@ struct DescriptionCtx<'a> {
 impl<'a> DescriptionCtx<'a> {
     fn new<'tcx>(
         tcx: TyCtxt<'tcx>,
+        generic_param_scope: LocalDefId,
         region: ty::Region<'tcx>,
         alt_span: Option<Span>,
     ) -> Option<Self> {
         let (span, kind, arg) = match *region {
-            ty::ReEarlyParam(ref br) => {
-                let scope = region.free_region_binding_scope(tcx).expect_local();
+            ty::ReEarlyParam(br) => {
+                let scope = tcx
+                    .parent(tcx.generics_of(generic_param_scope).region_param(br, tcx).def_id)
+                    .expect_local();
                 let span = if let Some(param) =
                     tcx.hir().get_generics(scope).and_then(|generics| generics.get_named(br.name))
                 {
@@ -34,11 +39,12 @@ impl<'a> DescriptionCtx<'a> {
             }
             ty::ReLateParam(ref fr) => {
                 if !fr.bound_region.is_named()
-                    && let Some((ty, _)) = find_anon_type(tcx, region, &fr.bound_region)
+                    && let Some((ty, _)) =
+                        find_anon_type(tcx, generic_param_scope, region, &fr.bound_region)
                 {
                     (Some(ty.span), "defined_here", String::new())
                 } else {
-                    let scope = region.free_region_binding_scope(tcx).expect_local();
+                    let scope = fr.scope.expect_local();
                     match fr.bound_region {
                         ty::BoundRegionKind::BrNamed(_, name) => {
                             let span = if let Some(param) = tcx
@@ -69,16 +75,8 @@ impl<'a> DescriptionCtx<'a> {
 
             ty::RePlaceholder(_) | ty::ReError(_) => return None,
 
-            // FIXME(#13998) RePlaceholder should probably print like
-            // ReLateParam rather than dumping Debug output on the user.
-            //
-            // We shouldn't really be having unification failures with ReVar
-            // and ReBound though.
-            //
-            // FIXME(@lcnr): figure out why we have to handle `ReBound`
-            // here, this feels somewhat off.
             ty::ReVar(_) | ty::ReBound(..) | ty::ReErased => {
-                (alt_span, "revar", format!("{region:?}"))
+                bug!("unexpected region for DescriptionCtx: {:?}", region);
             }
         };
         Some(DescriptionCtx { span, kind, arg })
@@ -150,12 +148,17 @@ pub struct RegionExplanation<'a> {
 impl RegionExplanation<'_> {
     pub fn new<'tcx>(
         tcx: TyCtxt<'tcx>,
+        generic_param_scope: LocalDefId,
         region: ty::Region<'tcx>,
         alt_span: Option<Span>,
         prefix: PrefixKind,
         suffix: SuffixKind,
     ) -> Option<Self> {
-        Some(Self { desc: DescriptionCtx::new(tcx, region, alt_span)?, prefix, suffix })
+        Some(Self {
+            desc: DescriptionCtx::new(tcx, generic_param_scope, region, alt_span)?,
+            prefix,
+            suffix,
+        })
     }
 }
 

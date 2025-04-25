@@ -8,21 +8,19 @@ use rustc_middle::ty::layout::{LayoutOf as _, ValidityRequirement};
 use rustc_middle::ty::GenericArgsRef;
 use rustc_middle::ty::{Ty, TyCtxt};
 use rustc_middle::{
-    mir::{
-        self,
-        interpret::{
-            Allocation, ConstAllocation, GlobalId, InterpResult, PointerArithmetic, Scalar,
-        },
-        BinOp, ConstValue, NonDivergingIntrinsic,
-    },
+    bug,
+    mir::{self, BinOp, ConstValue, NonDivergingIntrinsic},
     ty::layout::TyAndLayout,
 };
 use rustc_span::symbol::{sym, Symbol};
 use rustc_target::abi::Size;
+use tracing::trace;
 
 use super::{
-    memory::MemoryKind, util::ensure_monomorphic_enough, CheckInAllocMsg, ImmTy, InterpCx,
-    MPlaceTy, Machine, OpTy, Pointer,
+    err_inval, err_ub_custom, err_unsup_format, memory::MemoryKind, throw_inval, throw_ub_custom,
+    throw_ub_format, util::ensure_monomorphic_enough, Allocation, CheckInAllocMsg, ConstAllocation,
+    GlobalId, ImmTy, InterpCx, InterpResult, MPlaceTy, Machine, OpTy, Pointer, PointerArithmetic,
+    Scalar,
 };
 
 use crate::fluent_generated as fluent;
@@ -100,7 +98,7 @@ pub(crate) fn eval_nullary_intrinsic<'tcx>(
     })
 }
 
-impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
+impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     /// Returns `true` if emulation happened.
     /// Here we implement the intrinsics that are common to all Miri instances; individual machines can add their own
     /// intrinsic handling.
@@ -113,10 +111,6 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
     ) -> InterpResult<'tcx, bool> {
         let instance_args = instance.args;
         let intrinsic_name = self.tcx.item_name(instance.def_id());
-        let Some(ret) = ret else {
-            // We don't support any intrinsic without return place.
-            return Ok(false);
-        };
 
         match intrinsic_name {
             sym::caller_location => {
@@ -253,14 +247,23 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     match (self.ptr_try_get_alloc_id(a), self.ptr_try_get_alloc_id(b)) {
                         (Err(a), Err(b)) => {
                             // Neither pointer points to an allocation.
-                            // If these are inequal or null, this *will* fail the deref check below.
+                            // This is okay only if they are the same.
+                            if a != b {
+                                // We'd catch this below in the "dereferenceable" check, but
+                                // show a nicer error for this particular case.
+                                throw_ub_custom!(
+                                    fluent::const_eval_offset_from_different_integers,
+                                    name = intrinsic_name,
+                                );
+                            }
+                            // This will always return 0.
                             (a, b)
                         }
                         (Err(_), _) | (_, Err(_)) => {
                             // We managed to find a valid allocation for one pointer, but not the other.
                             // That means they are definitely not pointing to the same allocation.
                             throw_ub_custom!(
-                                fluent::const_eval_different_allocations,
+                                fluent::const_eval_offset_from_different_allocations,
                                 name = intrinsic_name,
                             );
                         }
@@ -268,7 +271,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                             // Found allocation for both. They must be into the same allocation.
                             if a_alloc_id != b_alloc_id {
                                 throw_ub_custom!(
-                                    fluent::const_eval_different_allocations,
+                                    fluent::const_eval_offset_from_different_allocations,
                                     name = intrinsic_name,
                                 );
                             }
@@ -284,13 +287,14 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     let (val, overflowed) = {
                         let a_offset = ImmTy::from_uint(a_offset, usize_layout);
                         let b_offset = ImmTy::from_uint(b_offset, usize_layout);
-                        self.overflowing_binary_op(BinOp::Sub, &a_offset, &b_offset)?
+                        self.binary_op(BinOp::SubWithOverflow, &a_offset, &b_offset)?
+                            .to_scalar_pair()
                     };
-                    if overflowed {
+                    if overflowed.to_bool()? {
                         // a < b
                         if intrinsic_name == sym::ptr_offset_from_unsigned {
                             throw_ub_custom!(
-                                fluent::const_eval_unsigned_offset_from_overflow,
+                                fluent::const_eval_offset_from_unsigned_overflow,
                                 a_offset = a_offset,
                                 b_offset = b_offset,
                             );
@@ -298,7 +302,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                         // The signed form of the intrinsic allows this. If we interpret the
                         // difference as isize, we'll get the proper signed difference. If that
                         // seems *positive*, they were more than isize::MAX apart.
-                        let dist = val.to_scalar().to_target_isize(self)?;
+                        let dist = val.to_target_isize(self)?;
                         if dist >= 0 {
                             throw_ub_custom!(
                                 fluent::const_eval_offset_from_underflow,
@@ -308,7 +312,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                         dist
                     } else {
                         // b >= a
-                        let dist = val.to_scalar().to_target_isize(self)?;
+                        let dist = val.to_target_isize(self)?;
                         // If converting to isize produced a *negative* result, we had an overflow
                         // because they were more than isize::MAX apart.
                         if dist < 0 {
@@ -376,7 +380,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     };
 
                     M::panic_nounwind(self, &msg)?;
-                    // Skip the `go_to_block` at the end.
+                    // Skip the `return_to_block` at the end (we panicked, we do not return).
                     return Ok(true);
                 }
             }
@@ -414,7 +418,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 }
                 self.copy_op(&self.project_index(&input, index)?, dest)?;
             }
-            sym::likely | sym::unlikely | sym::black_box => {
+            sym::black_box => {
                 // These just return their argument
                 self.copy_op(&args[0], dest)?;
             }
@@ -437,11 +441,12 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 self.write_scalar(Scalar::from_target_usize(align.bytes(), self), dest)?;
             }
 
+            // Unsupported intrinsic: skip the return_to_block below.
             _ => return Ok(false),
         }
 
         trace!("{:?}", self.dump_place(&dest.clone().into()));
-        self.go_to_block(ret);
+        self.return_to_block(ret)?;
         Ok(true)
     }
 
@@ -513,9 +518,8 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         // Performs an exact division, resulting in undefined behavior where
         // `x % y != 0` or `y == 0` or `x == T::MIN && y == -1`.
         // First, check x % y != 0 (or if that computation overflows).
-        let (res, overflow) = self.overflowing_binary_op(BinOp::Rem, a, b)?;
-        assert!(!overflow); // All overflow is UB, so this should never return on overflow.
-        if res.to_scalar().assert_bits(a.layout.size) != 0 {
+        let rem = self.binary_op(BinOp::Rem, a, b)?;
+        if rem.to_scalar().assert_bits(a.layout.size) != 0 {
             throw_ub_custom!(
                 fluent::const_eval_exact_div_has_remainder,
                 a = format!("{a}"),
@@ -523,7 +527,8 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             )
         }
         // `Rem` says this is all right, so we can let `Div` do its job.
-        self.binop_ignore_overflow(BinOp::Div, a, b, &dest.clone().into())
+        let res = self.binary_op(BinOp::Div, a, b)?;
+        self.write_immediate(*res, dest)
     }
 
     pub fn saturating_arith(
@@ -536,8 +541,9 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         assert!(matches!(l.layout.ty.kind(), ty::Int(..) | ty::Uint(..)));
         assert!(matches!(mir_op, BinOp::Add | BinOp::Sub));
 
-        let (val, overflowed) = self.overflowing_binary_op(mir_op, l, r)?;
-        Ok(if overflowed {
+        let (val, overflowed) =
+            self.binary_op(mir_op.wrapping_to_overflowing().unwrap(), l, r)?.to_scalar_pair();
+        Ok(if overflowed.to_bool()? {
             let size = l.layout.size;
             let num_bits = size.bits();
             if l.layout.abi.is_signed() {
@@ -568,7 +574,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 }
             }
         } else {
-            val.to_scalar()
+            val
         })
     }
 
@@ -599,13 +605,13 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
     /// Copy `count*size_of::<T>()` many bytes from `*src` to `*dst`.
     pub(crate) fn copy_intrinsic(
         &mut self,
-        src: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
-        dst: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
-        count: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
+        src: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
+        dst: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
+        count: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
         nonoverlapping: bool,
     ) -> InterpResult<'tcx> {
         let count = self.read_target_usize(count)?;
-        let layout = self.layout_of(src.layout.ty.builtin_deref(true).unwrap().ty)?;
+        let layout = self.layout_of(src.layout.ty.builtin_deref(true).unwrap())?;
         let (size, align) = (layout.size, layout.align.abi);
         // `checked_mul` enforces a too small bound (the correct one would probably be target_isize_max),
         // but no actual allocation can be big enough for the difference to be noticeable.
@@ -628,8 +634,8 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
     /// Does a *typed* swap of `*left` and `*right`.
     fn typed_swap_intrinsic(
         &mut self,
-        left: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
-        right: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
+        left: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
+        right: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
     ) -> InterpResult<'tcx> {
         let left = self.deref_pointer(left)?;
         let right = self.deref_pointer(right)?;
@@ -645,11 +651,11 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 
     pub(crate) fn write_bytes_intrinsic(
         &mut self,
-        dst: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
-        byte: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
-        count: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
+        dst: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
+        byte: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
+        count: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
     ) -> InterpResult<'tcx> {
-        let layout = self.layout_of(dst.layout.ty.builtin_deref(true).unwrap().ty)?;
+        let layout = self.layout_of(dst.layout.ty.builtin_deref(true).unwrap())?;
 
         let dst = self.read_pointer(dst)?;
         let byte = self.read_scalar(byte)?.to_u8()?;
@@ -667,9 +673,9 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 
     pub(crate) fn compare_bytes_intrinsic(
         &mut self,
-        left: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
-        right: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
-        byte_count: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
+        left: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
+        right: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
+        byte_count: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
     ) -> InterpResult<'tcx, Scalar<M::Provenance>> {
         let left = self.read_pointer(left)?;
         let right = self.read_pointer(right)?;
@@ -685,14 +691,14 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 
     pub(crate) fn raw_eq_intrinsic(
         &mut self,
-        lhs: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
-        rhs: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
+        lhs: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
+        rhs: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
     ) -> InterpResult<'tcx, Scalar<M::Provenance>> {
-        let layout = self.layout_of(lhs.layout.ty.builtin_deref(true).unwrap().ty)?;
+        let layout = self.layout_of(lhs.layout.ty.builtin_deref(true).unwrap())?;
         assert!(layout.is_sized());
 
-        let get_bytes = |this: &InterpCx<'mir, 'tcx, M>,
-                         op: &OpTy<'tcx, <M as Machine<'mir, 'tcx>>::Provenance>,
+        let get_bytes = |this: &InterpCx<'tcx, M>,
+                         op: &OpTy<'tcx, <M as Machine<'tcx>>::Provenance>,
                          size|
          -> InterpResult<'tcx, &[u8]> {
             let ptr = this.read_pointer(op)?;

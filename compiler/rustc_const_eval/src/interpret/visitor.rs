@@ -6,17 +6,18 @@ use rustc_middle::mir::interpret::InterpResult;
 use rustc_middle::ty::{self, Ty};
 use rustc_target::abi::FieldIdx;
 use rustc_target::abi::{FieldsShape, VariantIdx, Variants};
+use tracing::trace;
 
 use std::num::NonZero;
 
-use super::{InterpCx, MPlaceTy, Machine, Projectable};
+use super::{throw_inval, InterpCx, MPlaceTy, Machine, Projectable};
 
 /// How to traverse a value and what to do when we are at the leaves.
-pub trait ValueVisitor<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>>: Sized {
+pub trait ValueVisitor<'tcx, M: Machine<'tcx>>: Sized {
     type V: Projectable<'tcx, M::Provenance> + From<MPlaceTy<'tcx, M::Provenance>>;
 
     /// The visitor must have an `InterpCx` in it.
-    fn ecx(&self) -> &InterpCx<'mir, 'tcx, M>;
+    fn ecx(&self) -> &InterpCx<'tcx, M>;
 
     /// `read_discriminant` can be hooked for better error messages.
     #[inline(always)]

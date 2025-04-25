@@ -8,11 +8,12 @@ use crate::infer::{InferCtxt, InferOk};
 use crate::traits::error_reporting::OverflowCause;
 use crate::traits::error_reporting::TypeErrCtxtExt;
 use crate::traits::normalize::needs_normalization;
-use crate::traits::{BoundVarReplacer, PlaceholderReplacer};
+use crate::traits::Normalized;
+use crate::traits::{BoundVarReplacer, PlaceholderReplacer, ScrubbedTraitError};
 use crate::traits::{ObligationCause, PredicateObligation, Reveal};
 use rustc_data_structures::sso::SsoHashMap;
 use rustc_data_structures::stack::ensure_sufficient_stack;
-use rustc_infer::traits::Normalized;
+use rustc_macros::extension;
 use rustc_middle::ty::fold::{FallibleTypeFolder, TypeFoldable, TypeSuperFoldable};
 use rustc_middle::ty::visit::{TypeSuperVisitable, TypeVisitable, TypeVisitableExt};
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitor};
@@ -75,7 +76,9 @@ impl<'cx, 'tcx> At<'cx, 'tcx> {
         };
 
         if self.infcx.next_trait_solver() {
-            match crate::solve::deeply_normalize_with_skipped_universes(self, value, universes) {
+            match crate::solve::deeply_normalize_with_skipped_universes::<_, ScrubbedTraitError<'tcx>>(
+                self, value, universes,
+            ) {
                 Ok(value) => return Ok(Normalized { value, obligations: vec![] }),
                 Err(_errors) => {
                     return Err(NoSolution);
@@ -221,7 +224,7 @@ impl<'cx, 'tcx> FallibleTypeFolder<TyCtxt<'tcx>> for QueryNormalizer<'cx, 'tcx> 
                                 .infcx
                                 .err_ctxt()
                                 .build_overflow_error(
-                                    OverflowCause::DeeplyNormalize(data),
+                                    OverflowCause::DeeplyNormalize(data.into()),
                                     self.cause.span,
                                     true,
                                 )

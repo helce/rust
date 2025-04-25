@@ -25,8 +25,10 @@ use crate::core::build_steps::llvm;
 use crate::core::build_steps::tool::{self, Tool};
 use crate::core::builder::{Builder, Kind, RunConfig, ShouldRun, Step};
 use crate::core::config::TargetSelection;
-use crate::utils::channel;
-use crate::utils::helpers::{exe, is_dylib, output, t, target_supports_cranelift_backend, timeit};
+use crate::utils::channel::{self, Info};
+use crate::utils::helpers::{
+    exe, is_dylib, move_file, output, t, target_supports_cranelift_backend, timeit,
+};
 use crate::utils::tarball::{GeneratedTarball, OverlayKind, Tarball};
 use crate::{Compiler, DependencyType, Mode, LLVM_TOOLS};
 
@@ -991,16 +993,26 @@ impl Step for PlainSourceTarball {
 
         // Create the version file
         builder.create(&plain_dst_src.join("version"), &builder.rust_version());
-        if let Some(info) = builder.rust_info().info() {
-            channel::write_commit_hash_file(plain_dst_src, &info.sha);
-            channel::write_commit_info_file(plain_dst_src, info);
-        }
+
+        // Create the files containing git info, to ensure --version outputs the same.
+        let write_git_info = |info: Option<&Info>, path: &Path| {
+            if let Some(info) = info {
+                t!(std::fs::create_dir_all(path));
+                channel::write_commit_hash_file(path, &info.sha);
+                channel::write_commit_info_file(path, info);
+            }
+        };
+        write_git_info(builder.rust_info().info(), plain_dst_src);
+        write_git_info(builder.cargo_info.info(), &plain_dst_src.join("./src/tools/cargo"));
 
         // If we're building from git or tarball sources, we need to vendor
         // a complete distribution.
         if builder.rust_info().is_managed_git_subrepository()
             || builder.rust_info().is_from_tarball()
         {
+            // FIXME: This code looks _very_ similar to what we have in `src/core/build_steps/vendor.rs`
+            // perhaps it should be removed in favor of making `dist` perform the `vendor` step?
+
             // Ensure we have all submodules from src and other directories checked out.
             for submodule in builder.get_all_submodules() {
                 builder.update_submodule(Path::new(submodule));
@@ -1020,6 +1032,10 @@ impl Step for PlainSourceTarball {
                 .arg(builder.src.join("./compiler/rustc_codegen_gcc/Cargo.toml"))
                 .arg("--sync")
                 .arg(builder.src.join("./src/bootstrap/Cargo.toml"))
+                .arg("--sync")
+                .arg(builder.src.join("./src/tools/opt-dist/Cargo.toml"))
+                .arg("--sync")
+                .arg(builder.src.join("./src/tools/rustc-perf/Cargo.toml"))
                 // Will read the libstd Cargo.toml
                 // which uses the unstable `public-dependency` feature.
                 .env("RUSTC_BOOTSTRAP", "1")
@@ -2017,7 +2033,7 @@ impl Step for Extended {
             builder.run(&mut cmd);
 
             if !builder.config.dry_run() {
-                t!(fs::rename(exe.join(&filename), distdir(builder).join(&filename)));
+                t!(move_file(exe.join(&filename), distdir(builder).join(&filename)));
             }
         }
     }

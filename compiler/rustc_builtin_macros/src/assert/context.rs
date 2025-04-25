@@ -57,7 +57,6 @@ impl<'cx, 'a> Context<'cx, 'a> {
     /// Builds the whole `assert!` expression. For example, `let elem = 1; assert!(elem == 1);` expands to:
     ///
     /// ```rust
-    /// #![feature(generic_assert_internals)]
     /// let elem = 1;
     /// {
     ///   #[allow(unused_imports)]
@@ -120,10 +119,13 @@ impl<'cx, 'a> Context<'cx, 'a> {
                 thin_vec![self.cx.attr_nested_word(sym::allow, sym::unused_imports, self.span)],
                 ItemKind::Use(UseTree {
                     prefix: self.cx.path(self.span, self.cx.std_path(&[sym::asserting])),
-                    kind: UseTreeKind::Nested(thin_vec![
-                        nested_tree(self, sym::TryCaptureGeneric),
-                        nested_tree(self, sym::TryCapturePrintable),
-                    ]),
+                    kind: UseTreeKind::Nested {
+                        items: thin_vec![
+                            nested_tree(self, sym::TryCaptureGeneric),
+                            nested_tree(self, sym::TryCapturePrintable),
+                        ],
+                        span: self.span,
+                    },
                     span: self.span,
                 }),
             ),
@@ -150,7 +152,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
     fn build_panic(&self, expr_str: &str, panic_path: Path) -> P<Expr> {
         let escaped_expr_str = escape_to_fmt(expr_str);
         let initial = [
-            TokenTree::token_joint_hidden(
+            TokenTree::token_joint(
                 token::Literal(token::Lit {
                     kind: token::LitKind::Str,
                     symbol: Symbol::intern(&if self.fmt_string.is_empty() {
@@ -169,7 +171,7 @@ impl<'cx, 'a> Context<'cx, 'a> {
         ];
         let captures = self.capture_decls.iter().flat_map(|cap| {
             [
-                TokenTree::token_joint_hidden(
+                TokenTree::token_joint(
                     token::Ident(cap.ident.name, IdentIsRaw::No),
                     cap.ident.span,
                 ),

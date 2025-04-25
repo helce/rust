@@ -1569,7 +1569,12 @@ pub(crate) mod builtin {
     #[rustc_builtin_macro]
     #[macro_export]
     #[rustc_diagnostic_item = "assert_macro"]
-    #[allow_internal_unstable(panic_internals, edition_panic, generic_assert_internals)]
+    #[allow_internal_unstable(
+        core_intrinsics,
+        panic_internals,
+        edition_panic,
+        generic_assert_internals
+    )]
     macro_rules! assert {
         ($cond:expr $(,)?) => {{ /* compiler built-in */ }};
         ($cond:expr, $($arg:tt)+) => {{ /* compiler built-in */ }};
@@ -1711,11 +1716,11 @@ pub(crate) mod builtin {
         issue = "23416",
         reason = "placeholder syntax for type ascription"
     )]
+    #[rustfmt::skip]
     pub macro type_ascribe($expr:expr, $ty:ty) {
         builtin # type_ascribe($expr, $ty)
     }
 
-    #[cfg(not(bootstrap))]
     /// Unstable placeholder for deref patterns.
     #[allow_internal_unstable(builtin_syntax)]
     #[unstable(
