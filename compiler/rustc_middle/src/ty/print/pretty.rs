@@ -1,13 +1,12 @@
 use crate::mir::interpret::{AllocRange, GlobalAlloc, Pointer, Provenance, Scalar};
 use crate::query::IntoQueryParam;
 use crate::query::Providers;
-use crate::traits::util::{super_predicates_for_pretty_printing, supertraits_for_pretty_printing};
 use crate::ty::GenericArgKind;
 use crate::ty::{
     ConstInt, Expr, ParamConst, ScalarInt, Term, TermKind, TypeFoldable, TypeSuperFoldable,
     TypeSuperVisitable, TypeVisitable, TypeVisitableExt,
 };
-use rustc_apfloat::ieee::{Double, Single};
+use rustc_apfloat::ieee::{Double, Half, Quad, Single};
 use rustc_apfloat::Float;
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_data_structures::unord::UnordMap;
@@ -23,6 +22,7 @@ use rustc_span::symbol::{kw, Ident, Symbol};
 use rustc_span::FileNameDisplayPreference;
 use rustc_target::abi::Size;
 use rustc_target::spec::abi::Abi;
+use rustc_type_ir::{elaborate, Upcast as _};
 use smallvec::SmallVec;
 
 use std::cell::Cell;
@@ -999,7 +999,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                     let trait_ref = bound_predicate.rebind(pred.trait_ref);
 
                     // Don't print `+ Sized`, but rather `+ ?Sized` if absent.
-                    if Some(trait_ref.def_id()) == tcx.lang_items().sized_trait() {
+                    if tcx.is_lang_item(trait_ref.def_id(), LangItem::Sized) {
                         match pred.polarity {
                             ty::PredicatePolarity::Positive => {
                                 has_sized_bound = true;
@@ -1214,11 +1214,14 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             && let ty::Alias(_, alias_ty) =
                 self.tcx().fn_sig(fn_def_id).skip_binder().output().skip_binder().kind()
             && alias_ty.def_id == def_id
+            && let generics = self.tcx().generics_of(fn_def_id)
+            // FIXME(return_type_notation): We only support lifetime params for now.
+            && generics.own_params.iter().all(|param| matches!(param.kind, ty::GenericParamDefKind::Lifetime))
         {
-            let num_args = self.tcx().generics_of(fn_def_id).count();
+            let num_args = generics.count();
             write!(self, " {{ ")?;
             self.print_def_path(fn_def_id, &args[..num_args])?;
-            write!(self, "() }}")?;
+            write!(self, "(..) }}")?;
         }
 
         Ok(())
@@ -1254,15 +1257,15 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                 }
                 entry.has_fn_once = true;
                 return;
-            } else if Some(trait_def_id) == self.tcx().lang_items().fn_mut_trait() {
-                let super_trait_ref = supertraits_for_pretty_printing(self.tcx(), trait_ref)
+            } else if self.tcx().is_lang_item(trait_def_id, LangItem::FnMut) {
+                let super_trait_ref = elaborate::supertraits(self.tcx(), trait_ref)
                     .find(|super_trait_ref| super_trait_ref.def_id() == fn_once_trait)
                     .unwrap();
 
                 fn_traits.entry(super_trait_ref).or_default().fn_mut_trait_ref = Some(trait_ref);
                 return;
-            } else if Some(trait_def_id) == self.tcx().lang_items().fn_trait() {
-                let super_trait_ref = supertraits_for_pretty_printing(self.tcx(), trait_ref)
+            } else if self.tcx().is_lang_item(trait_def_id, LangItem::Fn) {
+                let super_trait_ref = elaborate::supertraits(self.tcx(), trait_ref)
                     .find(|super_trait_ref| super_trait_ref.def_id() == fn_once_trait)
                     .unwrap();
 
@@ -1343,10 +1346,11 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                     let bound_principal_with_self = bound_principal
                         .with_self_ty(cx.tcx(), cx.tcx().types.trait_object_dummy_self);
 
-                    let super_projections: Vec<_> =
-                        super_predicates_for_pretty_printing(cx.tcx(), bound_principal_with_self)
-                            .filter_map(|clause| clause.as_projection_clause())
-                            .collect();
+                    let clause: ty::Clause<'tcx> = bound_principal_with_self.upcast(cx.tcx());
+                    let super_projections: Vec<_> = elaborate::elaborate(cx.tcx(), [clause])
+                        .filter_only_self()
+                        .filter_map(|clause| clause.as_projection_clause())
+                        .collect();
 
                     let mut projections: Vec<_> = predicates
                         .projection_bounds()
@@ -1652,7 +1656,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                         if let ty::ConstKind::Value(_, ty::ValTree::Leaf(int)) = len.kind() {
                             match self.tcx().try_get_global_alloc(prov.alloc_id()) {
                                 Some(GlobalAlloc::Memory(alloc)) => {
-                                    let len = int.assert_bits(self.tcx().data_layout.pointer_size);
+                                    let len = int.to_bits(self.tcx().data_layout.pointer_size);
                                     let range =
                                         AllocRange { start: offset, size: Size::from_bytes(len) };
                                     if let Ok(byte_str) =
@@ -1667,7 +1671,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                                 Some(GlobalAlloc::Static(def_id)) => {
                                     p!(write("<static({:?})>", def_id))
                                 }
-                                Some(GlobalAlloc::Function(_)) => p!("<function>"),
+                                Some(GlobalAlloc::Function { .. }) => p!("<function>"),
                                 Some(GlobalAlloc::VTable(..)) => p!("<vtable>"),
                                 None => p!("<dangling pointer>"),
                             }
@@ -1679,7 +1683,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             ty::FnPtr(_) => {
                 // FIXME: We should probably have a helper method to share code with the "Byte strings"
                 // printing above (which also has to handle pointers to all sorts of things).
-                if let Some(GlobalAlloc::Function(instance)) =
+                if let Some(GlobalAlloc::Function { instance, .. }) =
                     self.tcx().try_get_global_alloc(prov.alloc_id())
                 {
                     self.typed_value(
@@ -1710,14 +1714,24 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             ty::Bool if int == ScalarInt::FALSE => p!("false"),
             ty::Bool if int == ScalarInt::TRUE => p!("true"),
             // Float
-            ty::Float(ty::FloatTy::F32) => {
-                let val = Single::try_from(int).unwrap();
-                p!(write("{}{}f32", val, if val.is_finite() { "" } else { "_" }))
-            }
-            ty::Float(ty::FloatTy::F64) => {
-                let val = Double::try_from(int).unwrap();
-                p!(write("{}{}f64", val, if val.is_finite() { "" } else { "_" }))
-            }
+            ty::Float(fty) => match fty {
+                ty::FloatTy::F16 => {
+                    let val = Half::try_from(int).unwrap();
+                    p!(write("{}{}f16", val, if val.is_finite() { "" } else { "_" }))
+                }
+                ty::FloatTy::F32 => {
+                    let val = Single::try_from(int).unwrap();
+                    p!(write("{}{}f32", val, if val.is_finite() { "" } else { "_" }))
+                }
+                ty::FloatTy::F64 => {
+                    let val = Double::try_from(int).unwrap();
+                    p!(write("{}{}f64", val, if val.is_finite() { "" } else { "_" }))
+                }
+                ty::FloatTy::F128 => {
+                    let val = Quad::try_from(int).unwrap();
+                    p!(write("{}{}f128", val, if val.is_finite() { "" } else { "_" }))
+                }
+            },
             // Int
             ty::Uint(_) | ty::Int(_) => {
                 let int =
@@ -1730,7 +1744,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             }
             // Pointer types
             ty::Ref(..) | ty::RawPtr(_, _) | ty::FnPtr(_) => {
-                let data = int.assert_bits(self.tcx().data_layout.pointer_size);
+                let data = int.to_bits(self.tcx().data_layout.pointer_size);
                 self.typed_value(
                     |this| {
                         write!(this, "0x{data:x}")?;
@@ -2521,7 +2535,7 @@ struct RegionFolder<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> ty::TypeFolder<TyCtxt<'tcx>> for RegionFolder<'a, 'tcx> {
-    fn interner(&self) -> TyCtxt<'tcx> {
+    fn cx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
 
@@ -2613,7 +2627,7 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
             self.prepare_region_info(value);
         }
 
-        debug!("self.used_region_names: {:?}", &self.used_region_names);
+        debug!("self.used_region_names: {:?}", self.used_region_names);
 
         let mut empty = true;
         let mut start_or_continue = |cx: &mut Self, start: &str, cont: &str| {

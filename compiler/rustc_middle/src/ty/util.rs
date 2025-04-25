@@ -565,42 +565,6 @@ impl<'tcx> TyCtxt<'tcx> {
         Ok(())
     }
 
-    /// Checks whether each generic argument is simply a unique generic placeholder.
-    ///
-    /// This is used in the new solver, which canonicalizes params to placeholders
-    /// for better caching.
-    pub fn uses_unique_placeholders_ignoring_regions(
-        self,
-        args: GenericArgsRef<'tcx>,
-    ) -> Result<(), NotUniqueParam<'tcx>> {
-        let mut seen = GrowableBitSet::default();
-        for arg in args {
-            match arg.unpack() {
-                // Ignore regions, since we can't resolve those in a canonicalized
-                // query in the trait solver.
-                GenericArgKind::Lifetime(_) => {}
-                GenericArgKind::Type(t) => match t.kind() {
-                    ty::Placeholder(p) => {
-                        if !seen.insert(p.bound.var) {
-                            return Err(NotUniqueParam::DuplicateParam(t.into()));
-                        }
-                    }
-                    _ => return Err(NotUniqueParam::NotParam(t.into())),
-                },
-                GenericArgKind::Const(c) => match c.kind() {
-                    ty::ConstKind::Placeholder(p) => {
-                        if !seen.insert(p.bound) {
-                            return Err(NotUniqueParam::DuplicateParam(c.into()));
-                        }
-                    }
-                    _ => return Err(NotUniqueParam::NotParam(c.into())),
-                },
-            }
-        }
-
-        Ok(())
-    }
-
     /// Returns `true` if `def_id` refers to a closure, coroutine, or coroutine-closure
     /// (i.e. an async closure). These are all represented by `hir::Closure`, and all
     /// have the same `DefKind`.
@@ -1119,7 +1083,7 @@ impl<'tcx> OpaqueTypeExpander<'tcx> {
 }
 
 impl<'tcx> TypeFolder<TyCtxt<'tcx>> for OpaqueTypeExpander<'tcx> {
-    fn interner(&self) -> TyCtxt<'tcx> {
+    fn cx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
 
@@ -1166,7 +1130,7 @@ struct WeakAliasTypeExpander<'tcx> {
 }
 
 impl<'tcx> TypeFolder<TyCtxt<'tcx>> for WeakAliasTypeExpander<'tcx> {
-    fn interner(&self) -> TyCtxt<'tcx> {
+    fn cx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
 
@@ -1232,7 +1196,7 @@ impl<'tcx> Ty<'tcx> {
     /// Returns the minimum and maximum values for the given numeric type (including `char`s) or
     /// returns `None` if the type is not numeric.
     pub fn numeric_min_and_max_as_bits(self, tcx: TyCtxt<'tcx>) -> Option<(u128, u128)> {
-        use rustc_apfloat::ieee::{Double, Single};
+        use rustc_apfloat::ieee::{Double, Half, Quad, Single};
         Some(match self.kind() {
             ty::Int(_) | ty::Uint(_) => {
                 let (size, signed) = self.int_size_and_signed(tcx);
@@ -1242,12 +1206,14 @@ impl<'tcx> Ty<'tcx> {
                 (min, max)
             }
             ty::Char => (0, std::char::MAX as u128),
+            ty::Float(ty::FloatTy::F16) => ((-Half::INFINITY).to_bits(), Half::INFINITY.to_bits()),
             ty::Float(ty::FloatTy::F32) => {
                 ((-Single::INFINITY).to_bits(), Single::INFINITY.to_bits())
             }
             ty::Float(ty::FloatTy::F64) => {
                 ((-Double::INFINITY).to_bits(), Double::INFINITY.to_bits())
             }
+            ty::Float(ty::FloatTy::F128) => ((-Quad::INFINITY).to_bits(), Quad::INFINITY.to_bits()),
             _ => return None,
         })
     }
@@ -1831,7 +1797,7 @@ where
             for t in iter {
                 new_list.push(t.try_fold_with(folder)?)
             }
-            Ok(intern(folder.interner(), &new_list))
+            Ok(intern(folder.cx(), &new_list))
         }
         Some((_, Err(err))) => {
             return Err(err);

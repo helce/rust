@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use either::Either;
 use rustc_errors::{
-    codes::*, Diag, DiagArgValue, DiagCtxt, DiagMessage, Diagnostic, EmissionGuarantee, Level,
+    codes::*, Diag, DiagArgValue, DiagCtxtHandle, DiagMessage, Diagnostic, EmissionGuarantee, Level,
 };
 use rustc_hir::ConstContext;
 use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
@@ -425,7 +425,7 @@ pub struct ValidationFailure {
     #[primary_span]
     pub span: Span,
     #[note(const_eval_validation_failure_note)]
-    pub ub_note: Option<()>,
+    pub ub_note: (),
     #[subdiagnostic]
     pub frames: Vec<FrameNote>,
     #[subdiagnostic]
@@ -453,7 +453,7 @@ pub trait ReportErrorExt {
     }
 }
 
-fn bad_pointer_message(msg: CheckInAllocMsg, dcx: &DiagCtxt) -> String {
+fn bad_pointer_message(msg: CheckInAllocMsg, dcx: DiagCtxtHandle<'_>) -> String {
     use crate::fluent_generated::*;
 
     let msg = match msg {
@@ -640,9 +640,6 @@ impl<'tcx> ReportErrorExt for ValidationErrorInfo<'tcx> {
                 const_eval_validation_ref_to_uninhabited
             }
 
-            PtrToStatic { ptr_kind: PointerKind::Box } => const_eval_validation_box_to_static,
-            PtrToStatic { ptr_kind: PointerKind::Ref(_) } => const_eval_validation_ref_to_static,
-
             PointerAsInt { .. } => const_eval_validation_pointer_as_int,
             PartialPointer => const_eval_validation_partial_pointer,
             ConstRefToMutable => const_eval_validation_const_ref_to_mutable,
@@ -807,7 +804,6 @@ impl<'tcx> ReportErrorExt for ValidationErrorInfo<'tcx> {
                 );
             }
             NullPtr { .. }
-            | PtrToStatic { .. }
             | ConstRefToMutable
             | ConstRefToExtern
             | MutableRefToImmutable
@@ -829,6 +825,7 @@ impl ReportErrorExt for UnsupportedOpInfo {
         use crate::fluent_generated::*;
         match self {
             UnsupportedOpInfo::Unsupported(s) => s.clone().into(),
+            UnsupportedOpInfo::ExternTypeField => const_eval_extern_type_field,
             UnsupportedOpInfo::UnsizedLocal => const_eval_unsized_local,
             UnsupportedOpInfo::OverwritePartialPointer(_) => const_eval_partial_pointer_overwrite,
             UnsupportedOpInfo::ReadPartialPointer(_) => const_eval_partial_pointer_copy,
@@ -849,7 +846,10 @@ impl ReportErrorExt for UnsupportedOpInfo {
             // `ReadPointerAsInt(Some(info))` is never printed anyway, it only serves as an error to
             // be further processed by validity checking which then turns it into something nice to
             // print. So it's not worth the effort of having diagnostics that can print the `info`.
-            UnsizedLocal | Unsupported(_) | ReadPointerAsInt(_) => {}
+            UnsizedLocal
+            | UnsupportedOpInfo::ExternTypeField
+            | Unsupported(_)
+            | ReadPointerAsInt(_) => {}
             OverwritePartialPointer(ptr) | ReadPartialPointer(ptr) => {
                 diag.arg("ptr", ptr);
             }

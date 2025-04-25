@@ -20,8 +20,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         &mut self,
         link_name: Symbol,
         abi: Abi,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
 
@@ -177,19 +177,6 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let [] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
 
                 this.write_scalar(Scalar::from_i32(SIGRTMAX), dest)?;
-            }
-            "sched_getaffinity" => {
-                // This shim isn't useful, aside from the fact that it makes `num_cpus`
-                // fall back to `sysconf` where it will successfully determine the number of CPUs.
-                let [pid, cpusetsize, mask] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
-                this.read_scalar(pid)?.to_i32()?;
-                this.read_target_usize(cpusetsize)?;
-                this.deref_pointer_as(mask, this.libc_ty_layout("cpu_set_t"))?;
-                // FIXME: we just return an error.
-                let einval = this.eval_libc("EINVAL");
-                this.set_last_error(einval)?;
-                this.write_scalar(Scalar::from_i32(-1), dest)?;
             }
 
             // Incomplete shims that we "stub out" just to get pre-main initialization code to work.

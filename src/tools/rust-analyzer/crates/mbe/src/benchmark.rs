@@ -170,7 +170,7 @@ fn invocation_fixtures(
             Op::Literal(it) => token_trees.push(tt::Leaf::from(it.clone()).into()),
             Op::Ident(it) => token_trees.push(tt::Leaf::from(it.clone()).into()),
             Op::Punct(puncts) => {
-                for punct in puncts {
+                for punct in puncts.as_slice() {
                     token_trees.push(tt::Leaf::from(*punct).into());
                 }
             }
@@ -187,7 +187,7 @@ fn invocation_fixtures(
                     }
                     if i + 1 != cnt {
                         if let Some(sep) = separator {
-                            match sep {
+                            match &**sep {
                                 Separator::Literal(it) => {
                                     token_trees.push(tt::Leaf::Literal(it.clone()).into())
                                 }
@@ -215,7 +215,7 @@ fn invocation_fixtures(
 
                 token_trees.push(subtree.into());
             }
-            Op::Ignore { .. } | Op::Index { .. } | Op::Count { .. } | Op::Length { .. } => {}
+            Op::Ignore { .. } | Op::Index { .. } | Op::Count { .. } | Op::Len { .. } => {}
         };
 
         // Simple linear congruential generator for deterministic result

@@ -298,6 +298,7 @@ impl<'a> Validator<'a> {
                 generic_params.iter().for_each(|gpd| self.check_generic_param_def(gpd));
             }
             GenericBound::Outlives(_) => {}
+            GenericBound::Use(_) => {}
         }
     }
 
@@ -374,8 +375,8 @@ impl<'a> Validator<'a> {
                 bounds.iter().for_each(|b| self.check_generic_bound(b));
                 generic_params.iter().for_each(|gpd| self.check_generic_param_def(gpd));
             }
-            WherePredicate::RegionPredicate { lifetime: _, bounds } => {
-                bounds.iter().for_each(|b| self.check_generic_bound(b));
+            WherePredicate::LifetimePredicate { lifetime: _, outlives: _ } => {
+                // nop, all strings.
             }
             WherePredicate::EqPredicate { lhs, rhs } => {
                 self.check_type(lhs);
@@ -418,15 +419,13 @@ impl<'a> Validator<'a> {
             } else {
                 self.fail_expecting(id, expected);
             }
-        } else {
-            if !self.missing_ids.contains(id) {
-                self.missing_ids.insert(id);
+        } else if !self.missing_ids.contains(id) {
+            self.missing_ids.insert(id);
 
-                let sels = json_find::find_selector(&self.krate_json, &Value::String(id.0.clone()));
-                assert_ne!(sels.len(), 0);
+            let sels = json_find::find_selector(&self.krate_json, &Value::String(id.0.clone()));
+            assert_ne!(sels.len(), 0);
 
-                self.fail(id, ErrorKind::NotFound(sels))
-            }
+            self.fail(id, ErrorKind::NotFound(sels))
         }
     }
 

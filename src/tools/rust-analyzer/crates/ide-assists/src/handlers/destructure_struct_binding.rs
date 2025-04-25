@@ -90,6 +90,7 @@ fn collect_data(ident_pat: ast::IdentPat, ctx: &AssistContext<'_>) -> Option<Str
     let cfg = ImportPathConfig {
         prefer_no_std: ctx.config.prefer_no_std,
         prefer_prelude: ctx.config.prefer_prelude,
+        prefer_absolute: ctx.config.prefer_absolute,
     };
 
     let module = ctx.sema.scope(ident_pat.syntax())?.module();
@@ -242,7 +243,7 @@ fn generate_field_names(ctx: &AssistContext<'_>, data: &StructEditData) -> Vec<(
             .iter()
             .enumerate()
             .map(|(index, _)| {
-                let new_name = new_field_name((format!("_{}", index)).into(), &data.names_in_scope);
+                let new_name = new_field_name((format!("_{index}")).into(), &data.names_in_scope);
                 (index.to_string().into(), new_name)
             })
             .collect(),

@@ -79,7 +79,7 @@ pub(crate) fn merge_bounds(
     !bounds.iter_mut().any(|b| {
         let trait_ref = match *b {
             clean::GenericBound::TraitBound(ref mut tr, _) => tr,
-            clean::GenericBound::Outlives(..) => return false,
+            clean::GenericBound::Outlives(..) | clean::GenericBound::Use(_) => return false,
         };
         // If this QPath's trait `trait_did` is the same as, or a supertrait
         // of, the bound's trait `did` then we can keep going, otherwise
@@ -113,7 +113,7 @@ fn trait_is_same_or_supertrait(cx: &DocContext<'_>, child: DefId, trait_: DefId)
     if child == trait_ {
         return true;
     }
-    let predicates = cx.tcx.super_predicates_of(child);
+    let predicates = cx.tcx.explicit_super_predicates_of(child);
     debug_assert!(cx.tcx.generics_of(child).has_self);
     let self_ty = cx.tcx.types.self_param;
     predicates

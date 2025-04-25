@@ -484,7 +484,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_add(self, rhs: Self) -> Self {
             let (a, b) = self.overflowing_add(rhs);
-            if unlikely!(b) { overflow_panic::add() } else { a }
+            if b { overflow_panic::add() } else { a }
         }
 
         /// Unchecked integer addition. Computes `self + rhs`, assuming overflow
@@ -580,7 +580,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_add_unsigned(self, rhs: $UnsignedT) -> Self {
             let (a, b) = self.overflowing_add_unsigned(rhs);
-            if unlikely!(b) { overflow_panic::add() } else { a }
+            if b { overflow_panic::add() } else { a }
         }
 
         /// Checked integer subtraction. Computes `self - rhs`, returning `None` if
@@ -636,7 +636,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_sub(self, rhs: Self) -> Self {
             let (a, b) = self.overflowing_sub(rhs);
-            if unlikely!(b) { overflow_panic::sub() } else { a }
+            if b { overflow_panic::sub() } else { a }
         }
 
         /// Unchecked integer subtraction. Computes `self - rhs`, assuming overflow
@@ -732,7 +732,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_sub_unsigned(self, rhs: $UnsignedT) -> Self {
             let (a, b) = self.overflowing_sub_unsigned(rhs);
-            if unlikely!(b) { overflow_panic::sub() } else { a }
+            if b { overflow_panic::sub() } else { a }
         }
 
         /// Checked integer multiplication. Computes `self * rhs`, returning `None` if
@@ -788,7 +788,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_mul(self, rhs: Self) -> Self {
             let (a, b) = self.overflowing_mul(rhs);
-            if unlikely!(b) { overflow_panic::mul() } else { a }
+            if b { overflow_panic::mul() } else { a }
         }
 
         /// Unchecked integer multiplication. Computes `self * rhs`, assuming overflow
@@ -902,7 +902,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_div(self, rhs: Self) -> Self {
             let (a, b) = self.overflowing_div(rhs);
-            if unlikely!(b) { overflow_panic::div() } else { a }
+            if b { overflow_panic::div() } else { a }
         }
 
         /// Checked Euclidean division. Computes `self.div_euclid(rhs)`,
@@ -976,7 +976,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_div_euclid(self, rhs: Self) -> Self {
             let (a, b) = self.overflowing_div_euclid(rhs);
-            if unlikely!(b) { overflow_panic::div() } else { a }
+            if b { overflow_panic::div() } else { a }
         }
 
         /// Checked integer remainder. Computes `self % rhs`, returning `None` if
@@ -1049,7 +1049,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_rem(self, rhs: Self) -> Self {
             let (a, b) = self.overflowing_rem(rhs);
-            if unlikely!(b) { overflow_panic::rem() } else { a }
+            if b { overflow_panic::rem() } else { a }
         }
 
         /// Checked Euclidean remainder. Computes `self.rem_euclid(rhs)`, returning `None`
@@ -1122,7 +1122,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_rem_euclid(self, rhs: Self) -> Self {
             let (a, b) = self.overflowing_rem_euclid(rhs);
-            if unlikely!(b) { overflow_panic::rem() } else { a }
+            if b { overflow_panic::rem() } else { a }
         }
 
         /// Checked negation. Computes `-self`, returning `None` if `self == MIN`.
@@ -1165,17 +1165,13 @@ macro_rules! int_impl {
         #[inline(always)]
         #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
         pub const unsafe fn unchecked_neg(self) -> Self {
-            // ICE resolved by #125184 isn't in bootstrap compiler
-            #[cfg(not(bootstrap))]
-            {
-                assert_unsafe_precondition!(
-                    check_language_ub,
-                    concat!(stringify!($SelfT), "::unchecked_neg cannot overflow"),
-                    (
-                        lhs: $SelfT = self,
-                    ) => !lhs.overflowing_neg().1,
-                );
-            }
+            assert_unsafe_precondition!(
+                check_language_ub,
+                concat!(stringify!($SelfT), "::unchecked_neg cannot overflow"),
+                (
+                    lhs: $SelfT = self,
+                ) => !lhs.overflowing_neg().1,
+            );
 
             // SAFETY: this is guaranteed to be safe by the caller.
             unsafe {
@@ -1214,7 +1210,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_neg(self) -> Self {
             let (a, b) = self.overflowing_neg();
-            if unlikely!(b) { overflow_panic::neg() } else { a }
+            if b { overflow_panic::neg() } else { a }
         }
 
         /// Checked shift left. Computes `self << rhs`, returning `None` if `rhs` is larger
@@ -1277,7 +1273,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_shl(self, rhs: u32) -> Self {
             let (a, b) = self.overflowing_shl(rhs);
-            if unlikely!(b) { overflow_panic::shl() } else { a }
+            if b { overflow_panic::shl() } else { a }
         }
 
         /// Unchecked shift left. Computes `self << rhs`, assuming that
@@ -1375,7 +1371,7 @@ macro_rules! int_impl {
         #[track_caller]
         pub const fn strict_shr(self, rhs: u32) -> Self {
             let (a, b) = self.overflowing_shr(rhs);
-            if unlikely!(b) { overflow_panic::shr() } else { a }
+            if b { overflow_panic::shr() } else { a }
         }
 
         /// Unchecked shift right. Computes `self >> rhs`, assuming that
@@ -2788,8 +2784,10 @@ macro_rules! int_impl {
         ///
         /// In other words, the result is `self / rhs` rounded to the integer `q`
         /// such that `self >= q * rhs`.
-        /// If `self > 0`, this is equal to round towards zero (the default in Rust);
-        /// if `self < 0`, this is equal to round towards +/- infinity.
+        /// If `self > 0`, this is equal to rounding towards zero (the default in Rust);
+        /// if `self < 0`, this is equal to rounding away from zero (towards +/- infinity).
+        /// If `rhs > 0`, this is equal to rounding towards -infinity;
+        /// if `rhs < 0`, this is equal to rounding towards +infinity.
         ///
         /// # Panics
         ///
@@ -2827,8 +2825,8 @@ macro_rules! int_impl {
         /// Calculates the least nonnegative remainder of `self (mod rhs)`.
         ///
         /// This is done as if by the Euclidean division algorithm -- given
-        /// `r = self.rem_euclid(rhs)`, `self = rhs * self.div_euclid(rhs) + r`, and
-        /// `0 <= r < abs(rhs)`.
+        /// `r = self.rem_euclid(rhs)`, the result satisfies
+        /// `self = rhs * self.div_euclid(rhs) + r` and `0 <= r < abs(rhs)`.
         ///
         /// # Panics
         ///

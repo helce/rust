@@ -2,13 +2,14 @@
 
 use crate::fluent_generated as fluent;
 use rustc_errors::{
-    codes::*, Applicability, Diag, DiagCtxt, Diagnostic, EmissionGuarantee, Level, MultiSpan,
+    codes::*, Applicability, Diag, DiagCtxtHandle, Diagnostic, EmissionGuarantee, Level, MultiSpan,
 };
 use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::ty::Ty;
 use rustc_span::{symbol::Ident, Span, Symbol};
 mod pattern_types;
 pub use pattern_types::*;
+pub mod wrong_number_of_generic_args;
 
 mod precise_captures;
 pub(crate) use precise_captures::*;
@@ -53,6 +54,18 @@ pub struct AssocKindMismatchWrapInBracesSugg {
     pub lo: Span,
     #[suggestion_part(code = " }}")]
     pub hi: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_assoc_item_is_private, code = E0624)]
+pub struct AssocItemIsPrivate {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+    pub kind: &'static str,
+    pub name: Ident,
+    #[label(hir_analysis_defined_here_label)]
+    pub defined_here_label: Span,
 }
 
 #[derive(Diagnostic)]
@@ -390,6 +403,17 @@ pub struct TaitForwardCompat {
     pub item_span: Span,
 }
 
+#[derive(Diagnostic)]
+#[diag(hir_analysis_tait_forward_compat2)]
+#[note]
+pub struct TaitForwardCompat2 {
+    #[primary_span]
+    pub span: Span,
+    #[note(hir_analysis_opaque)]
+    pub opaque_type_span: Span,
+    pub opaque_type: String,
+}
+
 pub struct MissingTypeParams {
     pub span: Span,
     pub def_span: Span,
@@ -401,7 +425,7 @@ pub struct MissingTypeParams {
 // Manual implementation of `Diagnostic` to be able to call `span_to_snippet`.
 impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for MissingTypeParams {
     #[track_caller]
-    fn into_diag(self, dcx: &'a DiagCtxt, level: Level) -> Diag<'a, G> {
+    fn into_diag(self, dcx: DiagCtxtHandle<'a>, level: Level) -> Diag<'a, G> {
         let mut err = Diag::new(dcx, level, fluent::hir_analysis_missing_type_params);
         err.span(self.span);
         err.code(E0393);
@@ -430,12 +454,11 @@ impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for MissingTypeParams {
             } else {
                 // The user wrote `Iterator`, so we don't have a type we can suggest, but at
                 // least we can clue them to the correct syntax `Iterator<Type>`.
-                err.span_suggestion(
-                    self.span,
+                err.span_suggestion_verbose(
+                    self.span.shrink_to_hi(),
                     fluent::hir_analysis_suggestion,
                     format!(
-                        "{}<{}>",
-                        snippet,
+                        "<{}>",
                         self.missing_type_params
                             .iter()
                             .map(|n| n.to_string())
@@ -659,7 +682,7 @@ pub(crate) enum CannotCaptureLateBound {
 pub(crate) struct VariancesOf {
     #[primary_span]
     pub span: Span,
-    pub variances_of: String,
+    pub variances: String,
 }
 
 #[derive(Diagnostic)]
@@ -667,30 +690,7 @@ pub(crate) struct VariancesOf {
 pub(crate) struct TypeOf<'tcx> {
     #[primary_span]
     pub span: Span,
-    pub type_of: Ty<'tcx>,
-}
-
-#[derive(Diagnostic)]
-#[diag(hir_analysis_pass_to_variadic_function, code = E0617)]
-pub(crate) struct PassToVariadicFunction<'tcx, 'a> {
-    #[primary_span]
-    pub span: Span,
     pub ty: Ty<'tcx>,
-    pub cast_ty: &'a str,
-    #[suggestion(code = "{replace}", applicability = "machine-applicable")]
-    pub sugg_span: Option<Span>,
-    pub replace: String,
-    #[help]
-    pub help: Option<()>,
-}
-
-#[derive(Diagnostic)]
-#[diag(hir_analysis_cast_thin_pointer_to_fat_pointer, code = E0607)]
-pub(crate) struct CastThinPointerToFatPointer<'tcx> {
-    #[primary_span]
-    pub span: Span,
-    pub expr_ty: Ty<'tcx>,
-    pub cast_ty: String,
 }
 
 #[derive(Diagnostic)]
@@ -1500,33 +1500,33 @@ pub struct StaticMutRef<'a> {
     #[label]
     pub span: Span,
     #[subdiagnostic]
-    pub sugg: StaticMutRefSugg,
+    pub sugg: MutRefSugg,
     pub shared: &'a str,
 }
 
 #[derive(Subdiagnostic)]
-pub enum StaticMutRefSugg {
-    #[suggestion(
+pub enum MutRefSugg {
+    #[multipart_suggestion(
         hir_analysis_suggestion,
         style = "verbose",
-        code = "addr_of!({var})",
         applicability = "maybe-incorrect"
     )]
     Shared {
-        #[primary_span]
-        span: Span,
-        var: String,
+        #[suggestion_part(code = "addr_of!(")]
+        lo: Span,
+        #[suggestion_part(code = ")")]
+        hi: Span,
     },
-    #[suggestion(
+    #[multipart_suggestion(
         hir_analysis_suggestion_mut,
         style = "verbose",
-        code = "addr_of_mut!({var})",
         applicability = "maybe-incorrect"
     )]
     Mut {
-        #[primary_span]
-        span: Span,
-        var: String,
+        #[suggestion_part(code = "addr_of_mut!(")]
+        lo: Span,
+        #[suggestion_part(code = ")")]
+        hi: Span,
     },
 }
 
@@ -1539,34 +1539,8 @@ pub struct RefOfMutStatic<'a> {
     #[label]
     pub span: Span,
     #[subdiagnostic]
-    pub sugg: RefOfMutStaticSugg,
+    pub sugg: MutRefSugg,
     pub shared: &'a str,
-}
-
-#[derive(Subdiagnostic)]
-pub enum RefOfMutStaticSugg {
-    #[suggestion(
-        hir_analysis_suggestion,
-        style = "verbose",
-        code = "addr_of!({var})",
-        applicability = "maybe-incorrect"
-    )]
-    Shared {
-        #[primary_span]
-        span: Span,
-        var: String,
-    },
-    #[suggestion(
-        hir_analysis_suggestion_mut,
-        style = "verbose",
-        code = "addr_of_mut!({var})",
-        applicability = "maybe-incorrect"
-    )]
-    Mut {
-        #[primary_span]
-        span: Span,
-        var: String,
-    },
 }
 
 #[derive(Diagnostic)]
@@ -1597,10 +1571,27 @@ pub(crate) struct UnusedGenericParameter {
     pub span: Span,
     pub param_name: Ident,
     pub param_def_kind: &'static str,
+    #[label(hir_analysis_usage_spans)]
+    pub usage_spans: Vec<Span>,
     #[subdiagnostic]
     pub help: UnusedGenericParameterHelp,
     #[help(hir_analysis_const_param_help)]
     pub const_param_help: Option<()>,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_recursive_generic_parameter)]
+pub(crate) struct RecursiveGenericParameter {
+    #[primary_span]
+    pub spans: Vec<Span>,
+    #[label]
+    pub param_span: Span,
+    pub param_name: Ident,
+    pub param_def_kind: &'static str,
+    #[subdiagnostic]
+    pub help: UnusedGenericParameterHelp,
+    #[note]
+    pub note: (),
 }
 
 #[derive(Subdiagnostic)]
@@ -1611,6 +1602,20 @@ pub(crate) enum UnusedGenericParameterHelp {
     AdtNoPhantomData { param_name: Ident },
     #[help(hir_analysis_unused_generic_parameter_ty_alias_help)]
     TyAlias { param_name: Ident },
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_unconstrained_generic_parameter)]
+pub(crate) struct UnconstrainedGenericParameter {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+    pub param_name: Symbol,
+    pub param_def_kind: &'static str,
+    #[note(hir_analysis_const_param_note)]
+    pub const_param_note: Option<()>,
+    #[note(hir_analysis_const_param_note2)]
+    pub const_param_note2: Option<()>,
 }
 
 #[derive(Diagnostic)]
@@ -1675,4 +1680,37 @@ pub struct InvalidReceiverTy<'tcx> {
     #[primary_span]
     pub span: Span,
     pub receiver_ty: Ty<'tcx>,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_effects_without_next_solver)]
+#[note]
+#[help]
+pub struct EffectsWithoutNextSolver;
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_cmse_call_inputs_stack_spill, code = E0798)]
+#[note]
+pub struct CmseCallInputsStackSpill {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+    pub plural: bool,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_cmse_call_output_stack_spill, code = E0798)]
+#[note(hir_analysis_note1)]
+#[note(hir_analysis_note2)]
+pub struct CmseCallOutputStackSpill {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_cmse_call_generic, code = E0798)]
+pub struct CmseCallGeneric {
+    #[primary_span]
+    pub span: Span,
 }

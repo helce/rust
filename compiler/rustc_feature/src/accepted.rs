@@ -42,6 +42,10 @@ declare_features! (
     // feature-group-start: accepted features
     // -------------------------------------------------------------------------
 
+    // Note that the version indicates when it got *stabilized*.
+    // When moving an unstable feature here, set the version number to
+    // `CURRENT RUSTC VERSION` with ` ` replaced by `_`.
+
     /// Allows `#[target_feature(...)]` on aarch64 platforms
     (accepted, aarch64_target_feature, "1.61.0", Some(44839)),
     /// Allows using the `efiapi` ABI.
@@ -80,6 +84,8 @@ declare_features! (
     (accepted, braced_empty_structs, "1.8.0", Some(29720)),
     /// Allows `c"foo"` literals.
     (accepted, c_str_literals, "1.77.0", Some(105723)),
+    /// Allows `extern "C-unwind" fn` to enable unwinding across ABI boundaries and treat `extern "C" fn` as nounwind.
+    (accepted, c_unwind, "1.81.0", Some(74990)),
     /// Allows `#[cfg_attr(predicate, multiple, attributes, here)]`.
     (accepted, cfg_attr_multi, "1.33.0", Some(54881)),
     /// Allows the use of `#[cfg(doctest)]`, set when rustdoc is collecting doctests.
@@ -230,6 +236,8 @@ declare_features! (
     (accepted, label_break_value, "1.65.0", Some(48594)),
     /// Allows `let...else` statements.
     (accepted, let_else, "1.65.0", Some(87335)),
+    /// Allows using `reason` in lint attributes and the `#[expect(lint)]` lint check.
+    (accepted, lint_reasons, "1.81.0", Some(54503)),
     /// Allows `break {expr}` with a value inside `loop`s.
     (accepted, loop_break_value, "1.19.0", Some(37339)),
     /// Allows use of `?` as the Kleene "at most one" operator in macros.

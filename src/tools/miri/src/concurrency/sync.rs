@@ -1,5 +1,6 @@
 use std::collections::{hash_map::Entry, VecDeque};
 use std::ops::Not;
+use std::time::Duration;
 
 use rustc_data_structures::fx::FxHashMap;
 use rustc_index::{Idx, IndexVec};
@@ -44,7 +45,7 @@ macro_rules! declare_id {
                 // We use 0 as a sentinel value (see the comment above) and,
                 // therefore, need to shift by one when converting from an index
                 // into a vector.
-                let shifted_idx = u32::try_from(idx).unwrap().checked_add(1).unwrap();
+                let shifted_idx = u32::try_from(idx).unwrap().strict_add(1);
                 $name(std::num::NonZero::new(shifted_idx).unwrap())
             }
             fn index(self) -> usize {
@@ -55,12 +56,13 @@ macro_rules! declare_id {
         }
 
         impl $name {
-            pub fn to_u32_scalar(&self) -> Scalar<Provenance> {
+            pub fn to_u32_scalar(&self) -> Scalar {
                 Scalar::from_u32(self.0.get())
             }
         }
     };
 }
+pub(super) use declare_id;
 
 declare_id!(MutexId);
 
@@ -160,16 +162,14 @@ pub struct SynchronizationObjects {
 
 // Private extension trait for local helper methods
 impl<'tcx> EvalContextExtPriv<'tcx> for crate::MiriInterpCx<'tcx> {}
-pub(super) trait EvalContextExtPriv<'tcx>:
-    crate::MiriInterpCxExt<'tcx>
-{
+pub(super) trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
     /// Lazily initialize the ID of this Miri sync structure.
     /// ('0' indicates uninit.)
     #[inline]
     fn get_or_create_id<Id: SyncId>(
         &mut self,
         next_id: Id,
-        lock_op: &OpTy<'tcx, Provenance>,
+        lock_op: &OpTy<'tcx>,
         lock_layout: TyAndLayout<'tcx>,
         offset: u64,
     ) -> InterpResult<'tcx, Option<Id>> {
@@ -244,10 +244,7 @@ pub(super) trait EvalContextExtPriv<'tcx>:
     #[inline]
     fn condvar_get_or_create<F>(&mut self, existing: F) -> InterpResult<'tcx, CondvarId>
     where
-        F: FnOnce(
-            &mut MiriInterpCx<'tcx>,
-            CondvarId,
-        ) -> InterpResult<'tcx, Option<CondvarId>>,
+        F: FnOnce(&mut MiriInterpCx<'tcx>, CondvarId) -> InterpResult<'tcx, Option<CondvarId>>,
     {
         let this = self.eval_context_mut();
         let next_index = this.machine.sync.condvars.next_index();
@@ -266,13 +263,13 @@ pub(super) trait EvalContextExtPriv<'tcx>:
     fn condvar_reacquire_mutex(
         &mut self,
         mutex: MutexId,
-        retval: Scalar<Provenance>,
-        dest: MPlaceTy<'tcx, Provenance>,
+        retval: Scalar,
+        dest: MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
         if this.mutex_is_locked(mutex) {
             assert_ne!(this.mutex_get_owner(mutex), this.active_thread());
-            this.mutex_enqueue_and_block(mutex, retval, dest);
+            this.mutex_enqueue_and_block(mutex, Some((retval, dest)));
         } else {
             // We can have it right now!
             this.mutex_lock(mutex);
@@ -291,7 +288,7 @@ impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
 pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn mutex_get_or_create_id(
         &mut self,
-        lock_op: &OpTy<'tcx, Provenance>,
+        lock_op: &OpTy<'tcx>,
         lock_layout: TyAndLayout<'tcx>,
         offset: u64,
     ) -> InterpResult<'tcx, MutexId> {
@@ -303,7 +300,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
 
     fn rwlock_get_or_create_id(
         &mut self,
-        lock_op: &OpTy<'tcx, Provenance>,
+        lock_op: &OpTy<'tcx>,
         lock_layout: TyAndLayout<'tcx>,
         offset: u64,
     ) -> InterpResult<'tcx, RwLockId> {
@@ -315,7 +312,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
 
     fn condvar_get_or_create_id(
         &mut self,
-        lock_op: &OpTy<'tcx, Provenance>,
+        lock_op: &OpTy<'tcx>,
         lock_layout: TyAndLayout<'tcx>,
         offset: u64,
     ) -> InterpResult<'tcx, CondvarId> {
@@ -353,7 +350,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         } else {
             mutex.owner = Some(thread);
         }
-        mutex.lock_count = mutex.lock_count.checked_add(1).unwrap();
+        mutex.lock_count = mutex.lock_count.strict_add(1);
         if let Some(data_race) = &this.machine.data_race {
             data_race.acquire_clock(&mutex.clock, &this.machine.threads);
         }
@@ -373,9 +370,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 return Ok(None);
             }
             let old_lock_count = mutex.lock_count;
-            mutex.lock_count = old_lock_count
-                .checked_sub(1)
-                .expect("invariant violation: lock_count == 0 iff the thread is unlocked");
+            mutex.lock_count = old_lock_count.strict_sub(1);
             if mutex.lock_count == 0 {
                 mutex.owner = None;
                 // The mutex is completely unlocked. Try transferring ownership
@@ -395,13 +390,14 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     }
 
     /// Put the thread into the queue waiting for the mutex.
-    /// Once the Mutex becomes available, `retval` will be written to `dest`.
+    ///
+    /// Once the Mutex becomes available and if it exists, `retval_dest.0` will
+    /// be written to `retval_dest.1`.
     #[inline]
     fn mutex_enqueue_and_block(
         &mut self,
         id: MutexId,
-        retval: Scalar<Provenance>,
-        dest: MPlaceTy<'tcx, Provenance>,
+        retval_dest: Option<(Scalar, MPlaceTy<'tcx>)>,
     ) {
         let this = self.eval_context_mut();
         assert!(this.mutex_is_locked(id), "queing on unlocked mutex");
@@ -413,13 +409,16 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             callback!(
                 @capture<'tcx> {
                     id: MutexId,
-                    retval: Scalar<Provenance>,
-                    dest: MPlaceTy<'tcx, Provenance>,
+                    retval_dest: Option<(Scalar, MPlaceTy<'tcx>)>,
                 }
                 @unblock = |this| {
                     assert!(!this.mutex_is_locked(id));
                     this.mutex_lock(id);
-                    this.write_scalar(retval, &dest)?;
+
+                    if let Some((retval, dest)) = retval_dest {
+                        this.write_scalar(retval, &dest)?;
+                    }
+
                     Ok(())
                 }
             ),
@@ -458,7 +457,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         trace!("rwlock_reader_lock: {:?} now also held (one more time) by {:?}", id, thread);
         let rwlock = &mut this.machine.sync.rwlocks[id];
         let count = rwlock.readers.entry(thread).or_insert(0);
-        *count = count.checked_add(1).expect("the reader counter overflowed");
+        *count = count.strict_add(1);
         if let Some(data_race) = &this.machine.data_race {
             data_race.acquire_clock(&rwlock.clock_unlocked, &this.machine.threads);
         }
@@ -510,8 +509,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn rwlock_enqueue_and_block_reader(
         &mut self,
         id: RwLockId,
-        retval: Scalar<Provenance>,
-        dest: MPlaceTy<'tcx, Provenance>,
+        retval: Scalar,
+        dest: MPlaceTy<'tcx>,
     ) {
         let this = self.eval_context_mut();
         let thread = this.active_thread();
@@ -523,8 +522,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             callback!(
                 @capture<'tcx> {
                     id: RwLockId,
-                    retval: Scalar<Provenance>,
-                    dest: MPlaceTy<'tcx, Provenance>,
+                    retval: Scalar,
+                    dest: MPlaceTy<'tcx>,
                 }
                 @unblock = |this| {
                     this.rwlock_reader_lock(id);
@@ -593,8 +592,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn rwlock_enqueue_and_block_writer(
         &mut self,
         id: RwLockId,
-        retval: Scalar<Provenance>,
-        dest: MPlaceTy<'tcx, Provenance>,
+        retval: Scalar,
+        dest: MPlaceTy<'tcx>,
     ) {
         let this = self.eval_context_mut();
         assert!(this.rwlock_is_locked(id), "write-queueing on unlocked rwlock");
@@ -606,8 +605,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             callback!(
                 @capture<'tcx> {
                     id: RwLockId,
-                    retval: Scalar<Provenance>,
-                    dest: MPlaceTy<'tcx, Provenance>,
+                    retval: Scalar,
+                    dest: MPlaceTy<'tcx>,
                 }
                 @unblock = |this| {
                     this.rwlock_writer_lock(id);
@@ -632,10 +631,10 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         &mut self,
         condvar: CondvarId,
         mutex: MutexId,
-        timeout: Option<Timeout>,
-        retval_succ: Scalar<Provenance>,
-        retval_timeout: Scalar<Provenance>,
-        dest: MPlaceTy<'tcx, Provenance>,
+        timeout: Option<(TimeoutClock, TimeoutAnchor, Duration)>,
+        retval_succ: Scalar,
+        retval_timeout: Scalar,
+        dest: MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
         if let Some(old_locked_count) = this.mutex_unlock(mutex)? {
@@ -659,9 +658,9 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 @capture<'tcx> {
                     condvar: CondvarId,
                     mutex: MutexId,
-                    retval_succ: Scalar<Provenance>,
-                    retval_timeout: Scalar<Provenance>,
-                    dest: MPlaceTy<'tcx, Provenance>,
+                    retval_succ: Scalar,
+                    retval_timeout: Scalar,
+                    dest: MPlaceTy<'tcx>,
                 }
                 @unblock = |this| {
                     // The condvar was signaled. Make sure we get the clock for that.
@@ -713,11 +712,11 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         &mut self,
         addr: u64,
         bitset: u32,
-        timeout: Option<Timeout>,
-        retval_succ: Scalar<Provenance>,
-        retval_timeout: Scalar<Provenance>,
-        dest: MPlaceTy<'tcx, Provenance>,
-        errno_timeout: Scalar<Provenance>,
+        timeout: Option<(TimeoutClock, TimeoutAnchor, Duration)>,
+        retval_succ: Scalar,
+        retval_timeout: Scalar,
+        dest: MPlaceTy<'tcx>,
+        errno_timeout: Scalar,
     ) {
         let this = self.eval_context_mut();
         let thread = this.active_thread();
@@ -731,10 +730,10 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             callback!(
                 @capture<'tcx> {
                     addr: u64,
-                    retval_succ: Scalar<Provenance>,
-                    retval_timeout: Scalar<Provenance>,
-                    dest: MPlaceTy<'tcx, Provenance>,
-                    errno_timeout: Scalar<Provenance>,
+                    retval_succ: Scalar,
+                    retval_timeout: Scalar,
+                    dest: MPlaceTy<'tcx>,
+                    errno_timeout: Scalar,
                 }
                 @unblock = |this| {
                     let futex = this.machine.sync.futexes.get(&addr).unwrap();

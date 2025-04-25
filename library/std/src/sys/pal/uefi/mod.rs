@@ -11,6 +11,7 @@
 //!
 //! [`OsStr`]: crate::ffi::OsStr
 //! [`OsString`]: crate::ffi::OsString
+#![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod alloc;
 pub mod args;
@@ -24,12 +25,9 @@ pub mod net;
 pub mod os;
 #[path = "../unsupported/pipe.rs"]
 pub mod pipe;
-#[path = "../unsupported/process.rs"]
 pub mod process;
 pub mod stdio;
 pub mod thread;
-#[path = "../unsupported/thread_local_key.rs"]
-pub mod thread_local_key;
 pub mod time;
 
 mod helpers;

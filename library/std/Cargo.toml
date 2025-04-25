@@ -50,13 +50,13 @@ dlmalloc = { version = "0.2.4", features = ['rustc-dep-of-std'] }
 fortanix-sgx-abi = { version = "0.5.0", features = ['rustc-dep-of-std'], public = true }
 
 [target.'cfg(target_os = "hermit")'.dependencies]
-hermit-abi = { version = "0.3.9", features = ['rustc-dep-of-std'], public = true }
+hermit-abi = { version = "0.4.0", features = ['rustc-dep-of-std'], public = true }
 
 [target.'cfg(target_os = "wasi")'.dependencies]
 wasi = { version = "0.11.0", features = ['rustc-dep-of-std'], default-features = false }
 
 [target.'cfg(target_os = "uefi")'.dependencies]
-r-efi = { version = "4.2.0", features = ['rustc-dep-of-std'] }
+r-efi = { version = "4.5.0", features = ['rustc-dep-of-std'] }
 r-efi-alloc = { version = "1.0.0", features = ['rustc-dep-of-std'] }
 
 [features]
@@ -87,6 +87,10 @@ std_detect_file_io = ["std_detect/std_detect_file_io"]
 std_detect_dlsym_getauxval = ["std_detect/std_detect_dlsym_getauxval"]
 std_detect_env_override = ["std_detect/std_detect_env_override"]
 
+# Enable using raw-dylib for Windows imports.
+# This will eventually be the default.
+windows_raw_dylib = []
+
 [package.metadata.fortanix-sgx]
 # Maximum possible number of threads when testing
 threads = 125
@@ -100,8 +104,6 @@ test = true
 
 [lints.rust.unexpected_cfgs]
 level = "warn"
-# x.py uses beta cargo, so `check-cfg` entries do not yet take effect
-# for rust-lang/rust. But for users of `-Zbuild-std` it does.
 check-cfg = [
     'cfg(bootstrap)',
     'cfg(target_arch, values("xtensa"))',

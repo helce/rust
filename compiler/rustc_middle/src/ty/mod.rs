@@ -16,7 +16,6 @@ pub use self::visit::{TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeV
 pub use self::AssocItemContainer::*;
 pub use self::BorrowKind::*;
 pub use self::IntVarValue::*;
-pub use self::Variance::*;
 use crate::error::{OpaqueHiddenTypeMismatch, TypeMismatchReason};
 use crate::metadata::ModChild;
 use crate::middle::privacy::EffectiveVisibilities;
@@ -61,7 +60,6 @@ use rustc_span::{ExpnId, ExpnKind, Span};
 use rustc_target::abi::{Align, FieldIdx, Integer, IntegerType, VariantIdx};
 pub use rustc_target::abi::{ReprFlags, ReprOptions};
 pub use rustc_type_ir::relate::VarianceDiagInfo;
-pub use rustc_type_ir::{DebugWithInfcx, InferCtxtLike, WithInfcx};
 use tracing::{debug, instrument};
 pub use vtable::*;
 
@@ -94,8 +92,9 @@ pub use self::context::{
     tls, CtxtInterners, CurrentGcx, DeducedParamAttrs, Feed, FreeRegionInfo, GlobalCtxt, Lift,
     TyCtxt, TyCtxtFeed,
 };
-pub use self::instance::{Instance, InstanceDef, ReifyReason, ShortInstance, UnusedGenericParams};
+pub use self::instance::{Instance, InstanceKind, ReifyReason, ShortInstance, UnusedGenericParams};
 pub use self::list::{List, ListWithCachedTypeInfo};
+pub use self::opaque_types::OpaqueTypeKey;
 pub use self::parameterized::ParameterizedOverTcx;
 pub use self::pattern::{Pattern, PatternKind};
 pub use self::predicate::{
@@ -149,6 +148,7 @@ mod closure;
 mod consts;
 mod context;
 mod diagnostics;
+mod elaborate_impl;
 mod erase_regions;
 mod generic_args;
 mod generics;
@@ -489,6 +489,8 @@ pub struct Term<'tcx> {
     marker: PhantomData<(Ty<'tcx>, Const<'tcx>)>,
 }
 
+impl<'tcx> rustc_type_ir::inherent::Term<TyCtxt<'tcx>> for Term<'tcx> {}
+
 impl<'tcx> rustc_type_ir::inherent::IntoKind for Term<'tcx> {
     type Kind = TermKind<'tcx>;
 
@@ -758,45 +760,6 @@ impl<'a, 'tcx> IntoIterator for &'a InstantiatedPredicates<'tcx> {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, HashStable, TyEncodable, TyDecodable)]
-#[derive(TypeFoldable, TypeVisitable)]
-pub struct OpaqueTypeKey<'tcx> {
-    pub def_id: LocalDefId,
-    pub args: GenericArgsRef<'tcx>,
-}
-
-impl<'tcx> OpaqueTypeKey<'tcx> {
-    pub fn iter_captured_args(
-        self,
-        tcx: TyCtxt<'tcx>,
-    ) -> impl Iterator<Item = (usize, GenericArg<'tcx>)> {
-        std::iter::zip(self.args, tcx.variances_of(self.def_id)).enumerate().filter_map(
-            |(i, (arg, v))| match (arg.unpack(), v) {
-                (_, ty::Invariant) => Some((i, arg)),
-                (ty::GenericArgKind::Lifetime(_), ty::Bivariant) => None,
-                _ => bug!("unexpected opaque type arg variance"),
-            },
-        )
-    }
-
-    pub fn fold_captured_lifetime_args(
-        self,
-        tcx: TyCtxt<'tcx>,
-        mut f: impl FnMut(Region<'tcx>) -> Region<'tcx>,
-    ) -> Self {
-        let Self { def_id, args } = self;
-        let args = std::iter::zip(args, tcx.variances_of(def_id)).map(|(arg, v)| {
-            match (arg.unpack(), v) {
-                (ty::GenericArgKind::Lifetime(_), ty::Bivariant) => arg,
-                (ty::GenericArgKind::Lifetime(lt), _) => f(lt).into(),
-                _ => arg,
-            }
-        });
-        let args = tcx.mk_args_from_iter(args);
-        Self { def_id, args }
-    }
-}
-
 #[derive(Copy, Clone, Debug, TypeFoldable, TypeVisitable, HashStable, TyEncodable, TyDecodable)]
 pub struct OpaqueHiddenType<'tcx> {
     /// The span of this particular definition of the opaque type. So
@@ -1028,6 +991,16 @@ pub struct ParamEnv<'tcx> {
     packed: CopyTaggedPtr<Clauses<'tcx>, ParamTag, true>,
 }
 
+impl<'tcx> rustc_type_ir::inherent::ParamEnv<TyCtxt<'tcx>> for ParamEnv<'tcx> {
+    fn reveal(self) -> Reveal {
+        self.reveal()
+    }
+
+    fn caller_bounds(self) -> impl IntoIterator<Item = ty::Clause<'tcx>> {
+        self.caller_bounds()
+    }
+}
+
 #[derive(Copy, Clone)]
 struct ParamTag {
     reveal: traits::Reveal,
@@ -1186,11 +1159,8 @@ bitflags::bitflags! {
         const NO_VARIANT_FLAGS        = 0;
         /// Indicates whether the field list of this variant is `#[non_exhaustive]`.
         const IS_FIELD_LIST_NON_EXHAUSTIVE = 1 << 0;
-        /// Indicates whether this variant was obtained as part of recovering from
-        /// a syntactic error. May be incomplete or bogus.
-        const IS_RECOVERED = 1 << 1;
         /// Indicates whether this variant has unnamed fields.
-        const HAS_UNNAMED_FIELDS = 1 << 2;
+        const HAS_UNNAMED_FIELDS = 1 << 1;
     }
 }
 rustc_data_structures::external_bitflags_debug! { VariantFlags }
@@ -1210,6 +1180,8 @@ pub struct VariantDef {
     pub discr: VariantDiscr,
     /// Fields of this variant.
     pub fields: IndexVec<FieldIdx, FieldDef>,
+    /// The error guarantees from parser, if any.
+    tainted: Option<ErrorGuaranteed>,
     /// Flags of the variant (e.g. is field list non-exhaustive)?
     flags: VariantFlags,
 }
@@ -1239,7 +1211,7 @@ impl VariantDef {
         fields: IndexVec<FieldIdx, FieldDef>,
         adt_kind: AdtKind,
         parent_did: DefId,
-        recovered: bool,
+        recover_tainted: Option<ErrorGuaranteed>,
         is_field_list_non_exhaustive: bool,
         has_unnamed_fields: bool,
     ) -> Self {
@@ -1254,27 +1226,25 @@ impl VariantDef {
             flags |= VariantFlags::IS_FIELD_LIST_NON_EXHAUSTIVE;
         }
 
-        if recovered {
-            flags |= VariantFlags::IS_RECOVERED;
-        }
-
         if has_unnamed_fields {
             flags |= VariantFlags::HAS_UNNAMED_FIELDS;
         }
 
-        VariantDef { def_id: variant_did.unwrap_or(parent_did), ctor, name, discr, fields, flags }
+        VariantDef {
+            def_id: variant_did.unwrap_or(parent_did),
+            ctor,
+            name,
+            discr,
+            fields,
+            flags,
+            tainted: recover_tainted,
+        }
     }
 
     /// Is this field list non-exhaustive?
     #[inline]
     pub fn is_field_list_non_exhaustive(&self) -> bool {
         self.flags.intersects(VariantFlags::IS_FIELD_LIST_NON_EXHAUSTIVE)
-    }
-
-    /// Was this variant obtained as part of recovering from a syntactic error?
-    #[inline]
-    pub fn is_recovered(&self) -> bool {
-        self.flags.intersects(VariantFlags::IS_RECOVERED)
     }
 
     /// Does this variant contains unnamed fields
@@ -1286,6 +1256,12 @@ impl VariantDef {
     /// Computes the `Ident` of this variant by looking up the `Span`
     pub fn ident(&self, tcx: TyCtxt<'_>) -> Ident {
         Ident::new(self.name, tcx.def_ident_span(self.def_id).unwrap())
+    }
+
+    /// Was this variant obtained as part of recovering from a syntactic error?
+    #[inline]
+    pub fn has_errors(&self) -> Result<(), ErrorGuaranteed> {
+        self.tainted.map_or(Ok(()), Err)
     }
 
     #[inline]
@@ -1335,8 +1311,24 @@ impl PartialEq for VariantDef {
         // definition of `VariantDef` changes, a compile-error will be produced,
         // reminding us to revisit this assumption.
 
-        let Self { def_id: lhs_def_id, ctor: _, name: _, discr: _, fields: _, flags: _ } = &self;
-        let Self { def_id: rhs_def_id, ctor: _, name: _, discr: _, fields: _, flags: _ } = other;
+        let Self {
+            def_id: lhs_def_id,
+            ctor: _,
+            name: _,
+            discr: _,
+            fields: _,
+            flags: _,
+            tainted: _,
+        } = &self;
+        let Self {
+            def_id: rhs_def_id,
+            ctor: _,
+            name: _,
+            discr: _,
+            fields: _,
+            flags: _,
+            tainted: _,
+        } = other;
 
         let res = lhs_def_id == rhs_def_id;
 
@@ -1366,7 +1358,7 @@ impl Hash for VariantDef {
         // of `VariantDef` changes, a compile-error will be produced, reminding
         // us to revisit this assumption.
 
-        let Self { def_id, ctor: _, name: _, discr: _, fields: _, flags: _ } = &self;
+        let Self { def_id, ctor: _, name: _, discr: _, fields: _, flags: _, tainted: _ } = &self;
         def_id.hash(s)
     }
 }
@@ -1636,7 +1628,7 @@ impl<'tcx> TyCtxt<'tcx> {
         }
     }
 
-    /// If the def-id is an associated type that was desugared from a
+    /// If the `def_id` is an associated type that was desugared from a
     /// return-position `impl Trait` from a trait, then provide the source info
     /// about where that RPITIT came from.
     pub fn opt_rpitit_info(self, def_id: DefId) -> Option<ImplTraitInTraitData> {
@@ -1644,6 +1636,16 @@ impl<'tcx> TyCtxt<'tcx> {
             self.associated_item(def_id).opt_rpitit_info
         } else {
             None
+        }
+    }
+
+    /// Whether the `def_id` is an associated type that was desugared from a
+    /// `#[const_trait]` or `impl_const`.
+    pub fn is_effects_desugared_assoc_ty(self, def_id: DefId) -> bool {
+        if let DefKind::AssocTy = self.def_kind(def_id) {
+            self.associated_item(def_id).is_effects_desugaring
+        } else {
+            false
         }
     }
 
@@ -1731,11 +1733,11 @@ impl<'tcx> TyCtxt<'tcx> {
         }
     }
 
-    /// Returns the possibly-auto-generated MIR of a [`ty::InstanceDef`].
+    /// Returns the possibly-auto-generated MIR of a [`ty::InstanceKind`].
     #[instrument(skip(self), level = "debug")]
-    pub fn instance_mir(self, instance: ty::InstanceDef<'tcx>) -> &'tcx Body<'tcx> {
+    pub fn instance_mir(self, instance: ty::InstanceKind<'tcx>) -> &'tcx Body<'tcx> {
         match instance {
-            ty::InstanceDef::Item(def) => {
+            ty::InstanceKind::Item(def) => {
                 debug!("calling def_kind on def: {:?}", def);
                 let def_kind = self.def_kind(def);
                 debug!("returned from def_kind: {:?}", def_kind);
@@ -1751,19 +1753,19 @@ impl<'tcx> TyCtxt<'tcx> {
                     _ => self.optimized_mir(def),
                 }
             }
-            ty::InstanceDef::VTableShim(..)
-            | ty::InstanceDef::ReifyShim(..)
-            | ty::InstanceDef::Intrinsic(..)
-            | ty::InstanceDef::FnPtrShim(..)
-            | ty::InstanceDef::Virtual(..)
-            | ty::InstanceDef::ClosureOnceShim { .. }
-            | ty::InstanceDef::ConstructCoroutineInClosureShim { .. }
-            | ty::InstanceDef::CoroutineKindShim { .. }
-            | ty::InstanceDef::DropGlue(..)
-            | ty::InstanceDef::CloneShim(..)
-            | ty::InstanceDef::ThreadLocalShim(..)
-            | ty::InstanceDef::FnPtrAddrShim(..)
-            | ty::InstanceDef::AsyncDropGlueCtorShim(..) => self.mir_shims(instance),
+            ty::InstanceKind::VTableShim(..)
+            | ty::InstanceKind::ReifyShim(..)
+            | ty::InstanceKind::Intrinsic(..)
+            | ty::InstanceKind::FnPtrShim(..)
+            | ty::InstanceKind::Virtual(..)
+            | ty::InstanceKind::ClosureOnceShim { .. }
+            | ty::InstanceKind::ConstructCoroutineInClosureShim { .. }
+            | ty::InstanceKind::CoroutineKindShim { .. }
+            | ty::InstanceKind::DropGlue(..)
+            | ty::InstanceKind::CloneShim(..)
+            | ty::InstanceKind::ThreadLocalShim(..)
+            | ty::InstanceKind::FnPtrAddrShim(..)
+            | ty::InstanceKind::AsyncDropGlueCtorShim(..) => self.mir_shims(instance),
         }
     }
 
@@ -1985,8 +1987,13 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     #[inline]
+    pub fn is_const_trait(self, def_id: DefId) -> bool {
+        self.trait_def(def_id).constness == hir::Constness::Const
+    }
+
+    #[inline]
     pub fn is_const_default_method(self, def_id: DefId) -> bool {
-        matches!(self.trait_of_item(def_id), Some(trait_id) if self.has_attr(trait_id, sym::const_trait))
+        matches!(self.trait_of_item(def_id), Some(trait_id) if self.is_const_trait(trait_id))
     }
 
     pub fn impl_method_has_trait_impl_trait_tys(self, def_id: DefId) -> bool {

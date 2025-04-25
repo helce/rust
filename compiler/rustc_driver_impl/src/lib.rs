@@ -4,16 +4,18 @@
 //!
 //! This API is completely unstable and subject to change.
 
+// tidy-alphabetical-start
+#![allow(internal_features)]
 #![allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
-#![feature(rustdoc_internals)]
-#![allow(internal_features)]
 #![feature(decl_macro)]
 #![feature(let_chains)]
 #![feature(panic_backtrace_config)]
 #![feature(panic_update_hook)]
 #![feature(result_flattening)]
+#![feature(rustdoc_internals)]
+// tidy-alphabetical-end
 
 use rustc_ast as ast;
 use rustc_codegen_ssa::{traits::CodegenBackend, CodegenErrors, CodegenResults};
@@ -28,7 +30,7 @@ use rustc_errors::{
 };
 use rustc_feature::find_gated_cfg;
 use rustc_interface::util::{self, get_codegen_backend};
-use rustc_interface::{interface, Queries};
+use rustc_interface::{interface, passes, Linker, Queries};
 use rustc_lint::unerased_lint_store;
 use rustc_metadata::creader::MetadataLoader;
 use rustc_metadata::locator;
@@ -39,7 +41,6 @@ use rustc_session::getopts::{self, Matches};
 use rustc_session::lint::{Lint, LintId};
 use rustc_session::output::collect_crate_types;
 use rustc_session::{config, filesearch, EarlyDiagCtxt, Session};
-use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::source_map::FileLoader;
 use rustc_span::symbol::sym;
 use rustc_span::FileName;
@@ -52,7 +53,7 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, Read, Write};
-use std::panic::{self, catch_unwind, PanicInfo};
+use std::panic::{self, catch_unwind, PanicHookInfo};
 use std::path::PathBuf;
 use std::process::{self, Command, Stdio};
 use std::str;
@@ -365,18 +366,17 @@ fn run_compiler(
             return early_exit();
         }
 
-        let early_dcx = EarlyDiagCtxt::new(sess.opts.error_format);
-
-        if print_crate_info(&early_dcx, codegen_backend, sess, has_input) == Compilation::Stop {
+        if print_crate_info(codegen_backend, sess, has_input) == Compilation::Stop {
             return early_exit();
         }
 
         if !has_input {
-            early_dcx.early_fatal("no input filename given"); // this is fatal
+            #[allow(rustc::diagnostic_outside_of_impl)]
+            sess.dcx().fatal("no input filename given"); // this is fatal
         }
 
         if !sess.opts.unstable_opts.ls.is_empty() {
-            list_metadata(&early_dcx, sess, &*codegen_backend.metadata_loader());
+            list_metadata(sess, &*codegen_backend.metadata_loader());
             return early_exit();
         }
 
@@ -397,7 +397,9 @@ fn run_compiler(
                         Ok(())
                     })?;
 
-                    queries.write_dep_info()?;
+                    queries.global_ctxt()?.enter(|tcx| {
+                        passes::write_dep_info(tcx);
+                    });
                 } else {
                     let krate = queries.parse()?;
                     pretty::print(
@@ -425,7 +427,9 @@ fn run_compiler(
                 return early_exit();
             }
 
-            queries.write_dep_info()?;
+            queries.global_ctxt()?.enter(|tcx| {
+                passes::write_dep_info(tcx);
+            });
 
             if sess.opts.output_types.contains_key(&OutputType::DepInfo)
                 && sess.opts.output_types.len() == 1
@@ -443,21 +447,9 @@ fn run_compiler(
                 return early_exit();
             }
 
-            let linker = queries.codegen_and_build_linker()?;
-
-            // This must run after monomorphization so that all generic types
-            // have been instantiated.
-            if sess.opts.unstable_opts.print_type_sizes {
-                sess.code_stats.print_type_sizes();
-            }
-
-            if sess.opts.unstable_opts.print_vtable_sizes {
-                let crate_name = queries.global_ctxt()?.enter(|tcx| tcx.crate_name(LOCAL_CRATE));
-
-                sess.code_stats.print_vtable_sizes(crate_name);
-            }
-
-            Ok(Some(linker))
+            queries.global_ctxt()?.enter(|tcx| {
+                Ok(Some(Linker::codegen_and_build_linker(tcx, &*compiler.codegen_backend)?))
+            })
         })?;
 
         // Linking is done outside the `compiler.enter()` so that the
@@ -668,7 +660,7 @@ fn process_rlink(sess: &Session, compiler: &interface::Compiler) {
     }
 }
 
-fn list_metadata(early_dcx: &EarlyDiagCtxt, sess: &Session, metadata_loader: &dyn MetadataLoader) {
+fn list_metadata(sess: &Session, metadata_loader: &dyn MetadataLoader) {
     match sess.io.input {
         Input::File(ref ifile) => {
             let path = &(*ifile);
@@ -685,13 +677,13 @@ fn list_metadata(early_dcx: &EarlyDiagCtxt, sess: &Session, metadata_loader: &dy
             safe_println!("{}", String::from_utf8(v).unwrap());
         }
         Input::Str { .. } => {
-            early_dcx.early_fatal("cannot list metadata for stdin");
+            #[allow(rustc::diagnostic_outside_of_impl)]
+            sess.dcx().fatal("cannot list metadata for stdin");
         }
     }
 }
 
 fn print_crate_info(
-    early_dcx: &EarlyDiagCtxt,
     codegen_backend: &dyn CodegenBackend,
     sess: &Session,
     parse_attrs: bool,
@@ -875,8 +867,8 @@ fn print_crate_info(
                         .expect("unknown Apple target OS");
                     println_info!("deployment_target={}", format!("{major}.{minor}"))
                 } else {
-                    early_dcx
-                        .early_fatal("only Apple targets currently support deployment version info")
+                    #[allow(rustc::diagnostic_outside_of_impl)]
+                    sess.dcx().fatal("only Apple targets currently support deployment version info")
                 }
             }
         }
@@ -1131,7 +1123,11 @@ pub fn describe_flag_categories(early_dcx: &EarlyDiagCtxt, matches: &Matches) ->
     }
 
     if cg_flags.iter().any(|x| *x == "no-stack-check") {
-        early_dcx.early_warn("the --no-stack-check flag is deprecated and does nothing");
+        early_dcx.early_warn("the `-Cno-stack-check` flag is deprecated and does nothing");
+    }
+
+    if cg_flags.iter().any(|x| x.starts_with("inline-threshold")) {
+        early_dcx.early_warn("the `-Cinline-threshold` flag is deprecated and does nothing (consider using `-Cllvm-args=--inline-threshold=...`)");
     }
 
     if cg_flags.iter().any(|x| *x == "passes=list") {
@@ -1366,11 +1362,10 @@ pub fn install_ice_hook(
     let using_internal_features = Arc::new(std::sync::atomic::AtomicBool::default());
     let using_internal_features_hook = using_internal_features.clone();
     panic::update_hook(Box::new(
-        move |default_hook: &(dyn Fn(&PanicInfo<'_>) + Send + Sync + 'static),
-              info: &PanicInfo<'_>| {
+        move |default_hook: &(dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static),
+              info: &PanicHookInfo<'_>| {
             // Lock stderr to prevent interleaving of concurrent panics.
             let _guard = io::stderr().lock();
-
             // If the error was caused by a broken pipe then this is not a bug.
             // Write the error and return immediately. See #98700.
             #[cfg(windows)]
@@ -1431,7 +1426,7 @@ pub fn install_ice_hook(
 /// When `install_ice_hook` is called, this function will be called as the panic
 /// hook.
 fn report_ice(
-    info: &panic::PanicInfo<'_>,
+    info: &panic::PanicHookInfo<'_>,
     bug_report_url: &str,
     extra_info: fn(&DiagCtxt),
     using_internal_features: &AtomicBool,
@@ -1443,6 +1438,7 @@ fn report_ice(
         fallback_bundle,
     ));
     let dcx = rustc_errors::DiagCtxt::new(emitter);
+    let dcx = dcx.handle();
 
     // a .span_bug or .bug call has already printed what
     // it wants to print.
@@ -1508,7 +1504,7 @@ fn report_ice(
 
     let num_frames = if backtrace { None } else { Some(2) };
 
-    interface::try_print_query_stack(&dcx, num_frames, file);
+    interface::try_print_query_stack(dcx, num_frames, file);
 
     // We don't trust this callback not to panic itself, so run it at the end after we're sure we've
     // printed all the relevant info.

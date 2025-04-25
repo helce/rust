@@ -13,7 +13,7 @@ use hir_def::{
     },
     lang_item::{LangItem, LangItemTarget},
     path::{GenericArgs, Path},
-    BlockId, FieldId, GenericParamId, ItemContainerId, Lookup, TupleFieldId, TupleId,
+    BlockId, FieldId, GenericDefId, GenericParamId, ItemContainerId, Lookup, TupleFieldId, TupleId,
 };
 use hir_expand::name::{name, Name};
 use stdx::always;
@@ -24,6 +24,7 @@ use crate::{
     consteval,
     db::{InternedClosure, InternedCoroutine},
     error_lifetime,
+    generics::{generics, Generics},
     infer::{
         coerce::{CoerceMany, CoercionCause},
         find_continuable,
@@ -39,7 +40,6 @@ use crate::{
     primitive::{self, UintTy},
     static_lifetime, to_chalk_trait_id,
     traits::FnTrait,
-    utils::{generics, Generics},
     Adjust, Adjustment, AdtId, AutoBorrow, Binders, CallableDefId, FnAbi, FnPointer, FnSig,
     FnSubst, Interner, Rawness, Scalar, Substitution, TraitEnvironment, TraitRef, Ty, TyBuilder,
     TyExt, TyKind,
@@ -440,7 +440,8 @@ impl InferenceContext<'_> {
                 let ty = match self.infer_path(p, tgt_expr.into()) {
                     Some(ty) => ty,
                     None => {
-                        if matches!(p, Path::Normal { mod_path, .. } if mod_path.is_ident()) {
+                        if matches!(p, Path::Normal { mod_path, .. } if mod_path.is_ident() || mod_path.is_self())
+                        {
                             self.push_diagnostic(InferenceDiagnostic::UnresolvedIdent {
                                 expr: tgt_expr,
                             });
@@ -1830,13 +1831,13 @@ impl InferenceContext<'_> {
     ) -> Substitution {
         let (
             parent_params,
-            self_params,
+            has_self_param,
             type_params,
             const_params,
             impl_trait_params,
             lifetime_params,
         ) = def_generics.provenance_split();
-        assert_eq!(self_params, 0); // method shouldn't have another Self param
+        assert!(!has_self_param); // method shouldn't have another Self param
         let total_len =
             parent_params + type_params + const_params + impl_trait_params + lifetime_params;
         let mut substs = Vec::with_capacity(total_len);
@@ -1844,13 +1845,11 @@ impl InferenceContext<'_> {
         // handle provided arguments
         if let Some(generic_args) = generic_args {
             // if args are provided, it should be all of them, but we can't rely on that
-            for (arg, kind_id) in generic_args
-                .args
-                .iter()
-                .take(type_params + const_params + lifetime_params)
-                .zip(def_generics.iter_id())
+            let self_params = type_params + const_params + lifetime_params;
+            for (arg, kind_id) in
+                generic_args.args.iter().zip(def_generics.iter_self_id()).take(self_params)
             {
-                if let Some(g) = generic_arg_to_chalk(
+                let arg = generic_arg_to_chalk(
                     self.db,
                     kind_id,
                     arg,
@@ -1869,9 +1868,8 @@ impl InferenceContext<'_> {
                         )
                     },
                     |this, lt_ref| this.make_lifetime(lt_ref),
-                ) {
-                    substs.push(g);
-                }
+                );
+                substs.push(arg);
             }
         };
 
@@ -1898,7 +1896,8 @@ impl InferenceContext<'_> {
         let callable_ty = self.resolve_ty_shallow(callable_ty);
         if let TyKind::FnDef(fn_def, parameters) = callable_ty.kind(Interner) {
             let def: CallableDefId = from_chalk(self.db, *fn_def);
-            let generic_predicates = self.db.generic_predicates(def.into());
+            let generic_predicates =
+                self.db.generic_predicates(GenericDefId::from_callable(self.db.upcast(), def));
             for predicate in generic_predicates.iter() {
                 let (predicate, binders) = predicate
                     .clone()

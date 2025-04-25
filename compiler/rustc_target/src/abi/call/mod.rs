@@ -1,6 +1,6 @@
 use crate::abi::{self, Abi, Align, FieldsShape, Size};
 use crate::abi::{HasDataLayout, TyAbiInterface, TyAndLayout};
-use crate::spec::{self, HasTargetSpec, HasWasmCAbiOpt};
+use crate::spec::{self, HasTargetSpec, HasWasmCAbiOpt, WasmCAbi};
 use rustc_macros::HashStable_Generic;
 use rustc_span::Symbol;
 use std::fmt;
@@ -30,6 +30,7 @@ mod wasm;
 mod x86;
 mod x86_64;
 mod x86_win64;
+mod xtensa;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, HashStable_Generic)]
 pub enum PassMode {
@@ -339,7 +340,9 @@ impl CastTarget {
         }
     }
 
-    pub fn size<C: HasDataLayout>(&self, _cx: &C) -> Size {
+    /// When you only access the range containing valid data, you can use this unaligned size;
+    /// otherwise, use the safer `size` method.
+    pub fn unaligned_size<C: HasDataLayout>(&self, _cx: &C) -> Size {
         // Prefix arguments are passed in specific designated registers
         let prefix_size = self
             .prefix
@@ -351,6 +354,10 @@ impl CastTarget {
             self.rest.unit.size * self.rest.total.bytes().div_ceil(self.rest.unit.size.bytes());
 
         prefix_size + rest_size
+    }
+
+    pub fn size<C: HasDataLayout>(&self, cx: &C) -> Size {
+        self.unaligned_size(cx).align_to(self.align(cx))
     }
 
     pub fn align<C: HasDataLayout>(&self, cx: &C) -> Align {
@@ -848,7 +855,8 @@ impl<'a, Ty> FnAbi<'a, Ty> {
             return Ok(());
         }
 
-        match &cx.target_spec().arch[..] {
+        let spec = cx.target_spec();
+        match &spec.arch[..] {
             "x86" => {
                 let flavor = if let spec::abi::Abi::Fastcall { .. }
                 | spec::abi::Abi::Vectorcall { .. } = abi
@@ -895,23 +903,23 @@ impl<'a, Ty> FnAbi<'a, Ty> {
             "sparc" => sparc::compute_abi_info(cx, self),
             "sparc64" => sparc64::compute_abi_info(cx, self),
             "nvptx64" => {
-                if cx.target_spec().adjust_abi(cx, abi, self.c_variadic)
-                    == spec::abi::Abi::PtxKernel
-                {
+                if cx.target_spec().adjust_abi(abi, self.c_variadic) == spec::abi::Abi::PtxKernel {
                     nvptx64::compute_ptx_kernel_abi_info(cx, self)
                 } else {
                     nvptx64::compute_abi_info(self)
                 }
             }
             "hexagon" => hexagon::compute_abi_info(self),
+            "xtensa" => xtensa::compute_abi_info(cx, self),
             "riscv32" | "riscv64" => riscv::compute_abi_info(cx, self),
-            "wasm32" | "wasm64" => {
-                if cx.target_spec().adjust_abi(cx, abi, self.c_variadic) == spec::abi::Abi::Wasm {
+            "wasm32" => {
+                if spec.os == "unknown" && cx.wasm_c_abi_opt() == WasmCAbi::Legacy {
                     wasm::compute_wasm_abi_info(self)
                 } else {
                     wasm::compute_c_abi_info(cx, self)
                 }
             }
+            "wasm64" => wasm::compute_c_abi_info(cx, self),
             "bpf" => bpf::compute_abi_info(self),
             "e2k" => e2k::compute_abi_info(cx, self),
             arch => {

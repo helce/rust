@@ -11,9 +11,12 @@ use syntax::{
     SyntaxKind::*,
     SyntaxNode, SyntaxToken, SyntaxTreeBuilder, TextRange, TextSize, WalkEvent, T,
 };
-use tt::buffer::{Cursor, TokenBuffer};
+use tt::{
+    buffer::{Cursor, TokenBuffer},
+    iter::TtIter,
+};
 
-use crate::{to_parser_input::to_parser_input, tt_iter::TtIter};
+use crate::to_parser_input::to_parser_input;
 
 #[cfg(test)]
 mod tests;
@@ -47,7 +50,7 @@ pub(crate) mod dummy_test_span_utils {
     pub const DUMMY: Span = Span {
         range: TextRange::empty(TextSize::new(0)),
         anchor: span::SpanAnchor {
-            file_id: span::FileId::BOGUS,
+            file_id: span::FileId::from_raw(0xe4e4e),
             ast_id: span::ROOT_ERASED_FILE_AST_ID,
         },
         ctx: SyntaxContextId::ROOT,
@@ -60,7 +63,7 @@ pub(crate) mod dummy_test_span_utils {
             Span {
                 range,
                 anchor: span::SpanAnchor {
-                    file_id: span::FileId::BOGUS,
+                    file_id: span::FileId::from_raw(0xe4e4e),
                     ast_id: span::ROOT_ERASED_FILE_AST_ID,
                 },
                 ctx: SyntaxContextId::ROOT,
@@ -213,7 +216,7 @@ where
     let mut res = Vec::new();
 
     while iter.peek_n(0).is_some() {
-        let expanded = iter.expect_fragment(parser::PrefixEntryPoint::Expr, edition);
+        let expanded = crate::expect_fragment(&mut iter, parser::PrefixEntryPoint::Expr, edition);
 
         res.push(match expanded.value {
             None => break,

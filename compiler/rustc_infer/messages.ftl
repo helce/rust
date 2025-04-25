@@ -221,6 +221,12 @@ infer_opaque_hidden_type =
 
 infer_outlives_bound = lifetime of the source pointer does not outlive lifetime bound of the object type
 infer_outlives_content = lifetime of reference outlives lifetime of borrowed content...
+
+infer_precise_capturing_existing = add `{$new_lifetime}` to the `use<...>` bound to explicitly capture it
+infer_precise_capturing_new = add a `use<...>` bound to explicitly capture `{$new_lifetime}`
+
+infer_precise_capturing_new_but_apit = add a `use<...>` bound to explicitly capture `{$new_lifetime}` after turning all argument-position `impl Trait` into type parameters, noting that this possibly affects the API of this crate
+
 infer_prlf_defined_with_sub = the lifetime `{$sub_symbol}` defined here...
 infer_prlf_defined_without_sub = the lifetime defined here...
 infer_prlf_known_limitation = this is a known limitation that will be removed in the future (see issue #100013 <https://github.com/rust-lang/rust/issues/100013> for more information)
@@ -382,7 +388,12 @@ infer_type_annotations_needed = {$source_kind ->
 }
     .label = type must be known at this point
 
+infer_type_annotations_needed_error_time = this is an inference error on crate `time` caused by an API change in Rust 1.80.0; update `time` to version `>=0.3.35` by calling `cargo update`
+
 infer_types_declared_different = these two types are declared with different lifetimes...
+
+infer_warn_removing_apit_params = you could use a `use<...>` bound to explicitly capture `{$new_lifetime}`, but argument-position `impl Trait`s are not nameable
+
 infer_where_copy_predicates = copy the `where` clause predicates from the trait
 
 infer_where_remove = remove the `where` clause

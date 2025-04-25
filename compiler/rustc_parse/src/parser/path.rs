@@ -258,6 +258,7 @@ impl<'a> Parser<'a> {
                         self.bump(); // bump past the colon
                         self.dcx().emit_err(PathSingleColon {
                             span: self.prev_token.span,
+                            suggestion: self.prev_token.span.shrink_to_hi(),
                             type_ascription: self
                                 .psess
                                 .unstable_features
@@ -329,6 +330,7 @@ impl<'a> Parser<'a> {
                             err.cancel();
                             err = self.dcx().create_err(PathSingleColon {
                                 span: self.token.span,
+                                suggestion: self.prev_token.span.shrink_to_hi(),
                                 type_ascription: self
                                     .psess
                                     .unstable_features
@@ -353,17 +355,16 @@ impl<'a> Parser<'a> {
                     })?;
                     let span = lo.to(self.prev_token.span);
                     AngleBracketedArgs { args, span }.into()
-                } else if self.may_recover()
-                    && self.token.kind == token::OpenDelim(Delimiter::Parenthesis)
+                } else if self.token.kind == token::OpenDelim(Delimiter::Parenthesis)
                     // FIXME(return_type_notation): Could also recover `...` here.
                     && self.look_ahead(1, |tok| tok.kind == token::DotDot)
                 {
-                    self.bump();
-                    self.dcx()
-                        .emit_err(errors::BadReturnTypeNotationDotDot { span: self.token.span });
-                    self.bump();
+                    self.bump(); // (
+                    self.bump(); // ..
                     self.expect(&token::CloseDelim(Delimiter::Parenthesis))?;
                     let span = lo.to(self.prev_token.span);
+
+                    self.psess.gated_spans.gate(sym::return_type_notation, span);
 
                     if self.eat_noexpect(&token::RArrow) {
                         let lo = self.prev_token.span;
@@ -372,13 +373,7 @@ impl<'a> Parser<'a> {
                             .emit_err(errors::BadReturnTypeNotationOutput { span: lo.to(ty.span) });
                     }
 
-                    ParenthesizedArgs {
-                        span,
-                        inputs: ThinVec::new(),
-                        inputs_span: span,
-                        output: ast::FnRetTy::Default(self.prev_token.span.shrink_to_hi()),
-                    }
-                    .into()
+                    P(ast::GenericArgs::ParenthesizedElided(span))
                 } else {
                     // `(T, U) -> R`
 
@@ -733,14 +728,6 @@ impl<'a> Parser<'a> {
 
                     let span = lo.to(self.prev_token.span);
 
-                    if let AssocItemConstraintKind::Bound { .. } = kind
-                        && let Some(ast::GenericArgs::Parenthesized(args)) = &gen_args
-                        && args.inputs.is_empty()
-                        && let ast::FnRetTy::Default(..) = args.output
-                    {
-                        self.psess.gated_spans.gate(sym::return_type_notation, span);
-                    }
-
                     let constraint =
                         AssocItemConstraint { id: ast::DUMMY_NODE_ID, ident, gen_args, kind, span };
                     Ok(Some(AngleBracketedArg::Constraint(constraint)))
@@ -920,7 +907,8 @@ impl<'a> Parser<'a> {
             // Fall back by trying to parse a const-expr expression. If we successfully do so,
             // then we should report an error that it needs to be wrapped in braces.
             let snapshot = self.create_snapshot_for_diagnostic();
-            match self.parse_expr_res(Restrictions::CONST_EXPR, None) {
+            let attrs = self.parse_outer_attributes()?;
+            match self.parse_expr_res(Restrictions::CONST_EXPR, attrs) {
                 Ok(expr) => {
                     return Ok(Some(self.dummy_const_arg_needs_braces(
                         self.dcx().struct_span_err(expr.span, "invalid const generic expression"),

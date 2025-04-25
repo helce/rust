@@ -2302,7 +2302,7 @@ pub fn read_link<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 ///
 /// This function currently corresponds to the `realpath` function on Unix
 /// and the `CreateFile` and `GetFinalPathNameByHandle` functions on Windows.
-/// Note that, this [may change in the future][changes].
+/// Note that this [may change in the future][changes].
 ///
 /// On Windows, this converts the path to use [extended length path][path]
 /// syntax, which allows your program to use longer path names, but means you
@@ -2385,6 +2385,9 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 ///
 /// If this function returns an error, some of the parent components might have
 /// been created already.
+///
+/// If the empty path is passed to this function, it always succeeds without
+/// creating any directories.
 ///
 /// # Platform-specific behavior
 ///
@@ -2739,18 +2742,15 @@ impl AsInnerMut<fs_imp::DirBuilder> for DirBuilder {
 /// # Examples
 ///
 /// ```no_run
-/// #![feature(fs_try_exists)]
 /// use std::fs;
 ///
-/// assert!(!fs::try_exists("does_not_exist.txt").expect("Can't check existence of file does_not_exist.txt"));
-/// assert!(fs::try_exists("/root/secret_file.txt").is_err());
+/// assert!(!fs::exists("does_not_exist.txt").expect("Can't check existence of file does_not_exist.txt"));
+/// assert!(fs::exists("/root/secret_file.txt").is_err());
 /// ```
 ///
 /// [`Path::exists`]: crate::path::Path::exists
-// FIXME: stabilization should modify documentation of `exists()` to recommend this method
-// instead.
-#[unstable(feature = "fs_try_exists", issue = "83186")]
+#[stable(feature = "fs_try_exists", since = "1.81.0")]
 #[inline]
-pub fn try_exists<P: AsRef<Path>>(path: P) -> io::Result<bool> {
-    fs_imp::try_exists(path.as_ref())
+pub fn exists<P: AsRef<Path>>(path: P) -> io::Result<bool> {
+    fs_imp::exists(path.as_ref())
 }

@@ -1,4 +1,4 @@
-//! Sanity checking performed by rustbuild before actually executing anything.
+//! Sanity checking performed by bootstrap before actually executing anything.
 //!
 //! This module contains the implementation of ensuring that the build
 //! environment looks reasonable before progressing. This will verify that
@@ -13,7 +13,6 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 #[cfg(not(feature = "bootstrap-self-test"))]
 use crate::builder::Builder;
@@ -24,7 +23,7 @@ use std::collections::HashSet;
 
 use crate::builder::Kind;
 use crate::core::config::Target;
-use crate::utils::helpers::output;
+use crate::utils::exec::command;
 use crate::Build;
 
 pub struct Finder {
@@ -128,7 +127,9 @@ pub fn check(build: &mut Build) {
                     eprintln!(
                         "Consider upgrading libstdc++ or disabling the `llvm.download-ci-llvm` option."
                     );
-                    crate::exit!(1);
+                    eprintln!(
+                        "If you choose to upgrade libstdc++, run `x clean` or delete `build/host/libcxx-version` manually after the upgrade."
+                    );
                 }
             }
             tool::LibcxxVersion::Llvm(_) => {
@@ -138,19 +139,20 @@ pub fn check(build: &mut Build) {
     }
 
     // We need cmake, but only if we're actually building LLVM or sanitizers.
-    let building_llvm = build
-        .hosts
-        .iter()
-        .map(|host| {
-            build.config.llvm_enabled(*host)
-                && build
-                    .config
-                    .target_config
-                    .get(host)
-                    .map(|config| config.llvm_config.is_none())
-                    .unwrap_or(true)
-        })
-        .any(|build_llvm_ourselves| build_llvm_ourselves);
+    let building_llvm = !build.config.llvm_from_ci
+        && build
+            .hosts
+            .iter()
+            .map(|host| {
+                build.config.llvm_enabled(*host)
+                    && build
+                        .config
+                        .target_config
+                        .get(host)
+                        .map(|config| config.llvm_config.is_none())
+                        .unwrap_or(true)
+            })
+            .any(|build_llvm_ourselves| build_llvm_ourselves);
 
     let need_cmake = building_llvm || build.config.any_sanitizers_to_build();
     if need_cmake && cmd_finder.maybe_have("cmake").is_none() {
@@ -206,11 +208,12 @@ than building it.
         .or_else(|| cmd_finder.maybe_have("reuse"));
 
     #[cfg(not(feature = "bootstrap-self-test"))]
-    let stage0_supported_target_list: HashSet<String> =
-        output(Command::new(&build.config.initial_rustc).args(["--print", "target-list"]))
-            .lines()
-            .map(|s| s.to_string())
-            .collect();
+    let stage0_supported_target_list: HashSet<String> = crate::utils::helpers::output(
+        command(&build.config.initial_rustc).args(["--print", "target-list"]).as_command_mut(),
+    )
+    .lines()
+    .map(|s| s.to_string())
+    .collect();
 
     // We're gonna build some custom C code here and there, host triples
     // also build some C++ shims for LLVM so we need a C++ compiler.
@@ -349,7 +352,7 @@ than building it.
             // There are three builds of cmake on windows: MSVC, MinGW, and
             // Cygwin. The Cygwin build does not have generators for Visual
             // Studio, so detect that here and error.
-            let out = output(Command::new("cmake").arg("--help"));
+            let out = command("cmake").capture_stdout().arg("--help").run(build).stdout();
             if !out.contains("Visual Studio") {
                 panic!(
                     "

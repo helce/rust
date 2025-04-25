@@ -8,7 +8,6 @@
 )]
 
 // Some "regular" crates we want to share with rustc
-#[macro_use]
 extern crate tracing;
 
 // The rustc crates we need
@@ -25,6 +24,8 @@ use std::env::{self, VarError};
 use std::num::NonZero;
 use std::path::PathBuf;
 use std::str::FromStr;
+
+use tracing::debug;
 
 use rustc_data_structures::sync::Lrc;
 use rustc_driver::Compilation;
@@ -97,10 +98,9 @@ impl rustc_driver::Callbacks for MiriCompilerCalls {
             }
 
             if tcx.sess.opts.optimize != OptLevel::No {
-                tcx.dcx().warn("Miri does not support optimizations. If you have enabled optimizations \
-                    by selecting a Cargo profile (such as --release) which changes other profile settings \
-                    such as whether debug assertions and overflow checks are enabled, those settings are \
-                    still applied.");
+                tcx.dcx().warn("Miri does not support optimizations: the opt-level is ignored. The only effect \
+                    of selecting a Cargo profile that enables optimizations (such as --release) is to apply \
+                    its remaining settings, such as whether debug assertions and overflow checks are enabled.");
             }
             if tcx.sess.mir_opt_level() > 0 {
                 tcx.dcx().warn("You have explicitly enabled MIR optimizations, overriding Miri's default \
@@ -592,6 +592,9 @@ fn main() {
             let num_cpus = param
                 .parse::<u32>()
                 .unwrap_or_else(|err| show_error!("-Zmiri-num-cpus requires a `u32`: {}", err));
+            if !(1..=miri::MAX_CPUS).contains(&usize::try_from(num_cpus).unwrap()) {
+                show_error!("-Zmiri-num-cpus must be in the range 1..={}", miri::MAX_CPUS);
+            }
             miri_config.num_cpus = num_cpus;
         } else if let Some(param) = arg.strip_prefix("-Zmiri-force-page-size=") {
             let page_size = param.parse::<u64>().unwrap_or_else(|err| {

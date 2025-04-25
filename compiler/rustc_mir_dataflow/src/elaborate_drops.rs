@@ -454,8 +454,7 @@ where
             });
         }
 
-        let skip_contents =
-            adt.is_union() || Some(adt.did()) == self.tcx().lang_items().manually_drop();
+        let skip_contents = adt.is_union() || adt.is_manually_drop();
         let contents_drop = if skip_contents {
             (self.succ, self.unwind)
         } else {
@@ -651,10 +650,8 @@ where
                         [ty.into()],
                         self.source_info.span,
                     ),
-                    args: vec![Spanned {
-                        node: Operand::Move(Place::from(ref_place)),
-                        span: DUMMY_SP,
-                    }],
+                    args: [Spanned { node: Operand::Move(Place::from(ref_place)), span: DUMMY_SP }]
+                        .into(),
                     destination: unit_temp,
                     target: Some(succ),
                     unwind: unwind.into_action(),

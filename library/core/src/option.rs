@@ -654,6 +654,32 @@ impl<T> Option<T> {
         !self.is_some()
     }
 
+    /// Returns `true` if the option is a [`None`] or the value inside of it matches a predicate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(is_none_or)]
+    ///
+    /// let x: Option<u32> = Some(2);
+    /// assert_eq!(x.is_none_or(|x| x > 1), true);
+    ///
+    /// let x: Option<u32> = Some(0);
+    /// assert_eq!(x.is_none_or(|x| x > 1), false);
+    ///
+    /// let x: Option<u32> = None;
+    /// assert_eq!(x.is_none_or(|x| x > 1), true);
+    /// ```
+    #[must_use]
+    #[inline]
+    #[unstable(feature = "is_none_or", issue = "126383")]
+    pub fn is_none_or(self, f: impl FnOnce(T) -> bool) -> bool {
+        match self {
+            None => true,
+            Some(x) => f(x),
+        }
+    }
+
     /////////////////////////////////////////////////////////////////////////
     // Adapter for working with references
     /////////////////////////////////////////////////////////////////////////
@@ -744,6 +770,13 @@ impl<T> Option<T> {
         }
     }
 
+    #[inline]
+    const fn len(&self) -> usize {
+        // Using the intrinsic avoids emitting a branch to get the 0 or 1.
+        let discriminant: isize = crate::intrinsics::discriminant_value(self);
+        discriminant as usize
+    }
+
     /// Returns a slice of the contained value, if any. If this is `None`, an
     /// empty slice is returned. This can be useful to have a single type of
     /// iterator over an `Option` or slice.
@@ -771,7 +804,8 @@ impl<T> Option<T> {
     #[inline]
     #[must_use]
     #[stable(feature = "option_as_slice", since = "1.75.0")]
-    pub fn as_slice(&self) -> &[T] {
+    #[rustc_const_unstable(feature = "const_option_ext", issue = "91930")]
+    pub const fn as_slice(&self) -> &[T] {
         // SAFETY: When the `Option` is `Some`, we're using the actual pointer
         // to the payload, with a length of 1, so this is equivalent to
         // `slice::from_ref`, and thus is safe.
@@ -785,7 +819,7 @@ impl<T> Option<T> {
         unsafe {
             slice::from_raw_parts(
                 (self as *const Self).byte_add(core::mem::offset_of!(Self, Some.0)).cast(),
-                usize::from(self.is_some()),
+                self.len(),
             )
         }
     }
@@ -825,7 +859,8 @@ impl<T> Option<T> {
     #[inline]
     #[must_use]
     #[stable(feature = "option_as_slice", since = "1.75.0")]
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
+    #[rustc_const_unstable(feature = "const_option_ext", issue = "91930")]
+    pub const fn as_mut_slice(&mut self) -> &mut [T] {
         // SAFETY: When the `Option` is `Some`, we're using the actual pointer
         // to the payload, with a length of 1, so this is equivalent to
         // `slice::from_mut`, and thus is safe.
@@ -841,7 +876,7 @@ impl<T> Option<T> {
         unsafe {
             slice::from_raw_parts_mut(
                 (self as *mut Self).byte_add(core::mem::offset_of!(Self, Some.0)).cast(),
-                usize::from(self.is_some()),
+                self.len(),
             )
         }
     }
@@ -2214,10 +2249,8 @@ impl<A> Iterator for Item<A> {
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        match self.opt {
-            Some(_) => (1, Some(1)),
-            None => (0, Some(0)),
-        }
+        let len = self.len();
+        (len, Some(len))
     }
 }
 
@@ -2228,7 +2261,12 @@ impl<A> DoubleEndedIterator for Item<A> {
     }
 }
 
-impl<A> ExactSizeIterator for Item<A> {}
+impl<A> ExactSizeIterator for Item<A> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.opt.len()
+    }
+}
 impl<A> FusedIterator for Item<A> {}
 unsafe impl<A> TrustedLen for Item<A> {}
 

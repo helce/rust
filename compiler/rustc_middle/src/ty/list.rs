@@ -1,5 +1,5 @@
 use super::flags::FlagComputation;
-use super::{DebruijnIndex, DebugWithInfcx, InferCtxtLike, TyCtxt, TypeFlags, WithInfcx};
+use super::{DebruijnIndex, TypeFlags};
 use crate::arena::Arena;
 use rustc_data_structures::aligned::{align_of, Aligned};
 use rustc_serialize::{Encodable, Encoder};
@@ -133,6 +133,20 @@ impl<H, T> RawList<H, T> {
     }
 }
 
+impl<'a, H, T: Copy> rustc_type_ir::inherent::SliceLike for &'a RawList<H, T> {
+    type Item = T;
+
+    type IntoIter = iter::Copied<<&'a [T] as IntoIterator>::IntoIter>;
+
+    fn iter(self) -> Self::IntoIter {
+        (*self).iter()
+    }
+
+    fn as_slice(&self) -> &[Self::Item] {
+        (*self).as_slice()
+    }
+}
+
 macro_rules! impl_list_empty {
     ($header_ty:ty, $header_init:expr) => {
         impl<T> RawList<$header_ty, T> {
@@ -160,14 +174,6 @@ impl_list_empty!((), ());
 impl<H, T: fmt::Debug> fmt::Debug for RawList<H, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         (**self).fmt(f)
-    }
-}
-impl<'tcx, H, T: DebugWithInfcx<TyCtxt<'tcx>>> DebugWithInfcx<TyCtxt<'tcx>> for RawList<H, T> {
-    fn fmt<Infcx: InferCtxtLike<Interner = TyCtxt<'tcx>>>(
-        this: WithInfcx<'_, Infcx, &Self>,
-        f: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
-        fmt::Debug::fmt(&this.map(|this| this.as_slice()), f)
     }
 }
 

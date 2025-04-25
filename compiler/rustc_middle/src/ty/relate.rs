@@ -10,18 +10,6 @@ use crate::ty::{self as ty, Ty, TyCtxt};
 
 pub type RelateResult<'tcx, T> = rustc_type_ir::relate::RelateResult<TyCtxt<'tcx>, T>;
 
-/// Whether aliases should be related structurally or not. Used
-/// to adjust the behavior of generalization and combine.
-///
-/// This should always be `No` unless in a few special-cases when
-/// instantiating canonical responses and in the new solver. Each
-/// such case should have a comment explaining why it is used.
-#[derive(Debug, Copy, Clone)]
-pub enum StructurallyRelateAliases {
-    Yes,
-    No,
-}
-
 impl<'tcx> Relate<TyCtxt<'tcx>> for ty::ImplSubject<'tcx> {
     #[inline]
     fn relate<R: TypeRelation<TyCtxt<'tcx>>>(
@@ -81,7 +69,7 @@ impl<'tcx> Relate<TyCtxt<'tcx>> for ty::Pattern<'tcx> {
                 if inc_a != inc_b {
                     todo!()
                 }
-                Ok(relation.tcx().mk_pat(ty::PatternKind::Range { start, end, include_end: inc_a }))
+                Ok(relation.cx().mk_pat(ty::PatternKind::Range { start, end, include_end: inc_a }))
             }
         }
     }
@@ -93,7 +81,7 @@ impl<'tcx> Relate<TyCtxt<'tcx>> for &'tcx ty::List<ty::PolyExistentialPredicate<
         a: Self,
         b: Self,
     ) -> RelateResult<'tcx, Self> {
-        let tcx = relation.tcx();
+        let tcx = relation.cx();
 
         // FIXME: this is wasteful, but want to do a perf run to see how slow it is.
         // We need to perform this deduplication as we sometimes generate duplicate projections

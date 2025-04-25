@@ -412,6 +412,20 @@ impl clean::GenericBound {
                 })?;
                 ty.print(cx).fmt(f)
             }
+            clean::GenericBound::Use(args) => {
+                if f.alternate() {
+                    f.write_str("use<")?;
+                } else {
+                    f.write_str("use&lt;")?;
+                }
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    arg.fmt(f)?;
+                }
+                if f.alternate() { f.write_str(">") } else { f.write_str("&gt;") }
+            }
         })
     }
 }
@@ -836,7 +850,7 @@ fn resolved_path<'cx>(
         }
     }
     if w.alternate() {
-        write!(w, "{}{:#}", &last.name, last.args.print(cx))?;
+        write!(w, "{}{:#}", last.name, last.args.print(cx))?;
     } else {
         let path = if use_absolute {
             if let Ok((_, _, fqp)) = href(did, cx) {

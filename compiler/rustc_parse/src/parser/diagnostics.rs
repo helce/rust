@@ -1,11 +1,10 @@
 use super::pat::Expected;
 use super::{
-    BlockMode, CommaRecoveryMode, Parser, PathStyle, Restrictions, SemiColonMode, SeqSep,
-    TokenExpectType, TokenType,
+    BlockMode, CommaRecoveryMode, Parser, PathStyle, Restrictions, SemiColonMode, SeqSep, TokenType,
 };
 use crate::errors::{
-    AmbiguousPlus, AsyncMoveBlockIn2015, AttributeOnParamType, BadQPathStage2, BadTypePlus,
-    BadTypePlusSub, ColonAsSemi, ComparisonOperatorsCannotBeChained,
+    AddParen, AmbiguousPlus, AsyncMoveBlockIn2015, AttributeOnParamType, AwaitSuggestion,
+    BadQPathStage2, BadTypePlus, BadTypePlusSub, ColonAsSemi, ComparisonOperatorsCannotBeChained,
     ComparisonOperatorsCannotBeChainedSugg, ConstGenericWithoutBraces,
     ConstGenericWithoutBracesSugg, DocCommentDoesNotDocumentAnything, DocCommentOnParamType,
     DoubleColonInBound, ExpectedIdentifier, ExpectedSemi, ExpectedSemiSugg,
@@ -35,7 +34,7 @@ use rustc_ast::{
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::{
-    pluralize, Applicability, Diag, DiagCtxt, ErrorGuaranteed, FatalError, PErr, PResult,
+    pluralize, Applicability, Diag, DiagCtxtHandle, ErrorGuaranteed, FatalError, PErr, PResult,
     Subdiagnostic,
 };
 use rustc_session::errors::ExprParenthesesNeeded;
@@ -241,8 +240,8 @@ impl<'a> DerefMut for SnapshotParser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn dcx(&self) -> &'a DiagCtxt {
-        &self.psess.dcx
+    pub fn dcx(&self) -> DiagCtxtHandle<'a> {
+        self.psess.dcx()
     }
 
     /// Replace `self` with `snapshot.parser`.
@@ -431,7 +430,7 @@ impl<'a> Parser<'a> {
         &mut self,
         edible: &[TokenKind],
         inedible: &[TokenKind],
-    ) -> PResult<'a, Recovered> {
+    ) -> PResult<'a, ErrorGuaranteed> {
         debug!("expected_one_of_not_found(edible: {:?}, inedible: {:?})", edible, inedible);
         fn tokens_to_string(tokens: &[TokenType]) -> String {
             let mut i = tokens.iter();
@@ -534,7 +533,7 @@ impl<'a> Parser<'a> {
                     sugg: ExpectedSemiSugg::ChangeToSemi(self.token.span),
                 });
                 self.bump();
-                return Ok(Recovered::Yes(guar));
+                return Ok(guar);
             } else if self.look_ahead(0, |t| {
                 t == &token::CloseDelim(Delimiter::Brace)
                     || ((t.can_begin_expr() || t.can_begin_item())
@@ -558,7 +557,7 @@ impl<'a> Parser<'a> {
                     unexpected_token_label: Some(self.token.span),
                     sugg: ExpectedSemiSugg::AddSemi(span),
                 });
-                return Ok(Recovered::Yes(guar));
+                return Ok(guar);
             }
         }
 
@@ -667,7 +666,7 @@ impl<'a> Parser<'a> {
         {
             err.note("you may be trying to write a c-string literal");
             err.note("c-string literals require Rust 2021 or later");
-            err.subdiagnostic(self.dcx(), HelpUseLatestEdition::new());
+            err.subdiagnostic(HelpUseLatestEdition::new());
         }
 
         // `pub` may be used for an item or `pub(crate)`
@@ -713,7 +712,7 @@ impl<'a> Parser<'a> {
         if self.check_too_many_raw_str_terminators(&mut err) {
             if expected.contains(&TokenType::Token(token::Semi)) && self.eat(&token::Semi) {
                 let guar = err.emit();
-                return Ok(Recovered::Yes(guar));
+                return Ok(guar);
             } else {
                 return Err(err);
             }
@@ -1045,9 +1044,7 @@ impl<'a> Parser<'a> {
     /// passes through any errors encountered. Used for error recovery.
     pub(super) fn eat_to_tokens(&mut self, kets: &[&TokenKind]) {
         if let Err(err) =
-            self.parse_seq_to_before_tokens(kets, SeqSep::none(), TokenExpectType::Expect, |p| {
-                Ok(p.parse_token_tree())
-            })
+            self.parse_seq_to_before_tokens(kets, &[], SeqSep::none(), |p| Ok(p.parse_token_tree()))
         {
             err.cancel();
         }
@@ -1154,7 +1151,7 @@ impl<'a> Parser<'a> {
             // Eat from where we started until the end token so that parsing can continue
             // as if we didn't have those extra angle brackets.
             self.eat_to_tokens(end);
-            let span = lo.until(self.token.span);
+            let span = lo.to(self.prev_token.span);
 
             let num_extra_brackets = number_of_gt + number_of_shr * 2;
             return Some(self.dcx().emit_err(UnmatchedAngleBrackets { span, num_extra_brackets }));
@@ -1542,7 +1539,10 @@ impl<'a> Parser<'a> {
 
     pub(super) fn maybe_report_ambiguous_plus(&mut self, impl_dyn_multi: bool, ty: &Ty) {
         if impl_dyn_multi {
-            self.dcx().emit_err(AmbiguousPlus { sum_ty: pprust::ty_to_string(ty), span: ty.span });
+            self.dcx().emit_err(AmbiguousPlus {
+                span: ty.span,
+                suggestion: AddParen { lo: ty.span.shrink_to_lo(), hi: ty.span.shrink_to_hi() },
+            });
         }
     }
 
@@ -1607,25 +1607,14 @@ impl<'a> Parser<'a> {
         }
 
         self.bump(); // `+`
-        let bounds = self.parse_generic_bounds()?;
+        let _bounds = self.parse_generic_bounds()?;
         let sum_span = ty.span.to(self.prev_token.span);
 
         let sub = match &ty.kind {
-            TyKind::Ref(lifetime, mut_ty) => {
-                let sum_with_parens = pprust::to_string(|s| {
-                    s.s.word("&");
-                    s.print_opt_lifetime(lifetime);
-                    s.print_mutability(mut_ty.mutbl, false);
-                    s.popen();
-                    s.print_type(&mut_ty.ty);
-                    if !bounds.is_empty() {
-                        s.word(" + ");
-                        s.print_type_bounds(&bounds);
-                    }
-                    s.pclose()
-                });
-
-                BadTypePlusSub::AddParen { sum_with_parens, span: sum_span }
+            TyKind::Ref(_lifetime, mut_ty) => {
+                let lo = mut_ty.ty.span.shrink_to_lo();
+                let hi = self.prev_token.span.shrink_to_hi();
+                BadTypePlusSub::AddParen { suggestion: AddParen { lo, hi } }
             }
             TyKind::Ptr(..) | TyKind::BareFn(..) => BadTypePlusSub::ForgotParen { span: sum_span },
             _ => BadTypePlusSub::ExpectPath { span: sum_span },
@@ -1967,18 +1956,14 @@ impl<'a> Parser<'a> {
         is_question: bool,
     ) -> (Span, ErrorGuaranteed) {
         let span = lo.to(hi);
-        let applicability = match expr.kind {
-            ExprKind::Try(_) => Applicability::MaybeIncorrect, // `await <expr>?`
-            _ => Applicability::MachineApplicable,
-        };
-
         let guar = self.dcx().emit_err(IncorrectAwait {
             span,
-            sugg_span: (span, applicability),
-            expr: self.span_to_snippet(expr.span).unwrap_or_else(|_| pprust::expr_to_string(expr)),
-            question_mark: if is_question { "?" } else { "" },
+            suggestion: AwaitSuggestion {
+                removal: lo.until(expr.span),
+                dot_await: expr.span.shrink_to_hi(),
+                question_mark: if is_question { "?" } else { "" },
+            },
         });
-
         (span, guar)
     }
 
@@ -2252,11 +2237,11 @@ impl<'a> Parser<'a> {
                     }
                     _ => {
                         // Otherwise, try to get a type and emit a suggestion.
-                        if let Some(ty) = pat.to_ty() {
+                        if let Some(_) = pat.to_ty() {
                             err.span_suggestion_verbose(
-                                pat.span,
+                                pat.span.shrink_to_lo(),
                                 "explicitly ignore the parameter name",
-                                format!("_: {}", pprust::ty_to_string(&ty)),
+                                "_: ".to_string(),
                                 Applicability::MachineApplicable,
                             );
                             err.note(rfc_note);
@@ -2268,7 +2253,7 @@ impl<'a> Parser<'a> {
 
             // `fn foo(a, b) {}`, `fn foo(a<x>, b<y>) {}` or `fn foo(usize, usize) {}`
             if first_param {
-                err.span_suggestion(
+                err.span_suggestion_verbose(
                     self_span,
                     "if this is a `self` type, give it a parameter name",
                     self_sugg,
@@ -2278,14 +2263,14 @@ impl<'a> Parser<'a> {
             // Avoid suggesting that `fn foo(HashMap<u32>)` is fixed with a change to
             // `fn foo(HashMap: TypeName<u32>)`.
             if self.token != token::Lt {
-                err.span_suggestion(
+                err.span_suggestion_verbose(
                     param_span,
                     "if this is a parameter name, give it a type",
                     param_sugg,
                     Applicability::HasPlaceholders,
                 );
             }
-            err.span_suggestion(
+            err.span_suggestion_verbose(
                 type_span,
                 "if this is a type, explicitly ignore the parameter name",
                 type_sugg,
@@ -2360,7 +2345,7 @@ impl<'a> Parser<'a> {
         let mut err = self.dcx().struct_span_err(span, msg);
         let sp = self.psess.source_map().start_point(self.token.span);
         if let Some(sp) = self.psess.ambiguous_block_expr_parse.borrow().get(&sp) {
-            err.subdiagnostic(self.dcx(), ExprParenthesesNeeded::surrounding(*sp));
+            err.subdiagnostic(ExprParenthesesNeeded::surrounding(*sp));
         }
         err.span_label(span, "expected expression");
 
@@ -2502,7 +2487,8 @@ impl<'a> Parser<'a> {
     /// wrapped in braces.
     pub(super) fn handle_unambiguous_unbraced_const_arg(&mut self) -> PResult<'a, P<Expr>> {
         let start = self.token.span;
-        let expr = self.parse_expr_res(Restrictions::CONST_EXPR, None).map_err(|mut err| {
+        let attrs = self.parse_outer_attributes()?;
+        let expr = self.parse_expr_res(Restrictions::CONST_EXPR, attrs).map_err(|mut err| {
             err.span_label(
                 start.shrink_to_lo(),
                 "while parsing a const generic argument starting here",
@@ -2624,7 +2610,10 @@ impl<'a> Parser<'a> {
         if is_op_or_dot {
             self.bump();
         }
-        match self.parse_expr_res(Restrictions::CONST_EXPR, None) {
+        match (|| {
+            let attrs = self.parse_outer_attributes()?;
+            self.parse_expr_res(Restrictions::CONST_EXPR, attrs)
+        })() {
             Ok(expr) => {
                 // Find a mistake like `MyTrait<Assoc == S::Assoc>`.
                 if token::EqEq == snapshot.token.kind {
@@ -2678,7 +2667,10 @@ impl<'a> Parser<'a> {
         &mut self,
         mut snapshot: SnapshotParser<'a>,
     ) -> Option<P<ast::Expr>> {
-        match snapshot.parse_expr_res(Restrictions::CONST_EXPR, None) {
+        match (|| {
+            let attrs = self.parse_outer_attributes()?;
+            snapshot.parse_expr_res(Restrictions::CONST_EXPR, attrs)
+        })() {
             // Since we don't know the exact reason why we failed to parse the type or the
             // expression, employ a simple heuristic to weed out some pathological cases.
             Ok(expr) if let token::Comma | token::Gt = snapshot.token.kind => {
@@ -2961,9 +2953,10 @@ impl<'a> Parser<'a> {
 
     /// This checks if this is a conflict marker, depending of the parameter passed.
     ///
-    /// * `>>>>>`
-    /// * `=====`
-    /// * `<<<<<`
+    /// * `<<<<<<<`
+    /// * `|||||||`
+    /// * `=======`
+    /// * `>>>>>>>`
     ///
     pub(super) fn is_vcs_conflict_marker(
         &mut self,
@@ -2993,14 +2986,18 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn err_vcs_conflict_marker(&mut self) -> PResult<'a, ()> {
+        // <<<<<<<
         let Some(start) = self.conflict_marker(&TokenKind::BinOp(token::Shl), &TokenKind::Lt)
         else {
             return Ok(());
         };
         let mut spans = Vec::with_capacity(3);
         spans.push(start);
+        // |||||||
         let mut middlediff3 = None;
+        // =======
         let mut middle = None;
+        // >>>>>>>
         let mut end = None;
         loop {
             if self.token.kind == TokenKind::Eof {
@@ -3021,29 +3018,50 @@ impl<'a> Parser<'a> {
             }
             self.bump();
         }
+
         let mut err = self.dcx().struct_span_err(spans, "encountered diff marker");
-        err.span_label(start, "after this is the code before the merge");
-        if let Some(middle) = middlediff3 {
-            err.span_label(middle, "");
-        }
+        match middlediff3 {
+            // We're using diff3
+            Some(middlediff3) => {
+                err.span_label(
+                    start,
+                    "between this marker and `|||||||` is the code that we're merging into",
+                );
+                err.span_label(middlediff3, "between this marker and `=======` is the base code (what the two refs diverged from)");
+            }
+            None => {
+                err.span_label(
+                    start,
+                    "between this marker and `=======` is the code that we're merging into",
+                );
+            }
+        };
+
         if let Some(middle) = middle {
-            err.span_label(middle, "");
+            err.span_label(middle, "between this marker and `>>>>>>>` is the incoming code");
         }
         if let Some(end) = end {
-            err.span_label(end, "above this are the incoming code changes");
+            err.span_label(end, "this marker concludes the conflict region");
         }
-        err.help(
-            "if you're having merge conflicts after pulling new code, the top section is the code \
-             you already had and the bottom section is the remote code",
-        );
-        err.help(
-            "if you're in the middle of a rebase, the top section is the code being rebased onto \
-             and the bottom section is the code coming from the current commit being rebased",
-        );
         err.note(
-            "for an explanation on these markers from the `git` documentation, visit \
-             <https://git-scm.com/book/en/v2/Git-Tools-Advanced-Merging#_checking_out_conflicts>",
+            "conflict markers indicate that a merge was started but could not be completed due \
+             to merge conflicts\n\
+             to resolve a conflict, keep only the code you want and then delete the lines \
+             containing conflict markers",
         );
+        err.help(
+            "if you're having merge conflicts after pulling new code:\n\
+             the top section is the code you already had and the bottom section is the remote code\n\
+             if you're in the middle of a rebase:\n\
+             the top section is the code being rebased onto and the bottom section is the code \
+             coming from the current commit being rebased",
+        );
+
+        err.note(
+            "for an explanation on these markers from the `git` documentation:\n\
+             visit <https://git-scm.com/book/en/v2/Git-Tools-Advanced-Merging#_checking_out_conflicts>",
+        );
+
         Err(err)
     }
 

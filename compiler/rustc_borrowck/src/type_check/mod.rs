@@ -38,6 +38,7 @@ use rustc_span::def_id::CRATE_DEF_ID;
 use rustc_span::source_map::Spanned;
 use rustc_span::symbol::sym;
 use rustc_span::Span;
+use rustc_span::DUMMY_SP;
 use rustc_target::abi::{FieldIdx, FIRST_VARIANT};
 use rustc_trait_selection::traits::query::type_op::custom::scrape_region_constraints;
 use rustc_trait_selection::traits::query::type_op::custom::CustomTypeOp;
@@ -49,6 +50,7 @@ use rustc_mir_dataflow::impls::MaybeInitializedPlaces;
 use rustc_mir_dataflow::move_paths::MoveData;
 use rustc_mir_dataflow::ResultsCursor;
 
+use crate::renumber::RegionCtxt;
 use crate::session_diagnostics::{MoveUnsized, SimdIntrinsicArgConst};
 use crate::{
     borrow_set::BorrowSet,
@@ -129,11 +131,10 @@ pub(crate) fn type_check<'mir, 'tcx>(
     location_table: &LocationTable,
     borrow_set: &BorrowSet<'tcx>,
     all_facts: &mut Option<AllFacts>,
-    flow_inits: &mut ResultsCursor<'mir, 'tcx, MaybeInitializedPlaces<'mir, 'tcx>>,
+    flow_inits: &mut ResultsCursor<'mir, 'tcx, MaybeInitializedPlaces<'_, 'mir, 'tcx>>,
     move_data: &MoveData<'tcx>,
     elements: &Rc<DenseLocationMap>,
     upvars: &[&ty::CapturedPlace<'tcx>],
-    use_polonius: bool,
 ) -> MirTypeckResults<'tcx> {
     let implicit_region_bound = ty::Region::new_var(infcx.tcx, universal_regions.fr_fn_body);
     let mut constraints = MirTypeckRegionConstraints {
@@ -189,7 +190,7 @@ pub(crate) fn type_check<'mir, 'tcx>(
     checker.equate_inputs_and_outputs(body, universal_regions, &normalized_inputs_and_output);
     checker.check_signature_annotation(body);
 
-    liveness::generate(&mut checker, body, elements, flow_inits, move_data, use_polonius);
+    liveness::generate(&mut checker, body, elements, flow_inits, move_data);
 
     translate_outlives_facts(&mut checker);
     let opaque_type_values = infcx.take_opaque_types();
@@ -301,10 +302,10 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'tcx> {
         self.sanitize_place(place, location, context);
     }
 
-    fn visit_constant(&mut self, constant: &ConstOperand<'tcx>, location: Location) {
-        debug!(?constant, ?location, "visit_constant");
+    fn visit_const_operand(&mut self, constant: &ConstOperand<'tcx>, location: Location) {
+        debug!(?constant, ?location, "visit_const_operand");
 
-        self.super_constant(constant, location);
+        self.super_const_operand(constant, location);
         let ty = self.sanitize_type(constant, constant.const_.ty());
 
         self.cx.infcx.tcx.for_each_free_region(&ty, |live_region| {
@@ -328,7 +329,7 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'tcx> {
         if let Some(annotation_index) = constant.user_ty {
             if let Err(terr) = self.cx.relate_type_and_user_type(
                 constant.const_.ty(),
-                ty::Variance::Invariant,
+                ty::Invariant,
                 &UserTypeProjection { base: annotation_index, projs: vec![] },
                 locations,
                 ConstraintCategory::Boring,
@@ -451,7 +452,7 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'tcx> {
 
                 if let Err(terr) = self.cx.relate_type_and_user_type(
                     ty,
-                    ty::Variance::Invariant,
+                    ty::Invariant,
                     user_ty,
                     Locations::All(*span),
                     ConstraintCategory::TypeAnnotation,
@@ -1095,7 +1096,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
     ) -> Result<(), NoSolution> {
         // Use this order of parameters because the sup type is usually the
         // "expected" type in diagnostics.
-        self.relate_types(sup, ty::Variance::Contravariant, sub, locations, category)
+        self.relate_types(sup, ty::Contravariant, sub, locations, category)
     }
 
     #[instrument(skip(self, category), level = "debug")]
@@ -1106,7 +1107,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         locations: Locations,
         category: ConstraintCategory<'tcx>,
     ) -> Result<(), NoSolution> {
-        self.relate_types(expected, ty::Variance::Invariant, found, locations, category)
+        self.relate_types(expected, ty::Invariant, found, locations, category)
     }
 
     #[instrument(skip(self), level = "debug")]
@@ -1146,7 +1147,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         trace!(?curr_projected_ty);
 
         let ty = curr_projected_ty.ty;
-        self.relate_types(ty, v.xform(ty::Variance::Contravariant), a, locations, category)?;
+        self.relate_types(ty, v.xform(ty::Contravariant), a, locations, category)?;
 
         Ok(())
     }
@@ -1248,7 +1249,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 if let Some(annotation_index) = self.rvalue_user_ty(rv) {
                     if let Err(terr) = self.relate_type_and_user_type(
                         rv_ty,
-                        ty::Variance::Invariant,
+                        ty::Invariant,
                         &UserTypeProjection { base: annotation_index, projs: vec![] },
                         location.to_locations(),
                         ConstraintCategory::Boring,
@@ -1353,7 +1354,14 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 }
                 // FIXME: check the values
             }
-            TerminatorKind::Call { func, args, destination, call_source, target, .. } => {
+            TerminatorKind::Call { func, args, .. }
+            | TerminatorKind::TailCall { func, args, .. } => {
+                let call_source = match term.kind {
+                    TerminatorKind::Call { call_source, .. } => call_source,
+                    TerminatorKind::TailCall { .. } => CallSource::Normal,
+                    _ => unreachable!(),
+                };
+
                 self.check_operand(func, term_location);
                 for arg in args {
                     self.check_operand(&arg.node, term_location);
@@ -1426,7 +1434,9 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     );
                 }
 
-                self.check_call_dest(body, term, &sig, *destination, *target, term_location);
+                if let TerminatorKind::Call { destination, target, .. } = term.kind {
+                    self.check_call_dest(body, term, &sig, destination, target, term_location);
+                }
 
                 // The ordinary liveness rules will ensure that all
                 // regions in the type of the callee are live here. We
@@ -1444,7 +1454,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         .add_location(region_vid, term_location);
                 }
 
-                self.check_call_inputs(body, term, func, &sig, args, term_location, *call_source);
+                self.check_call_inputs(body, term, func, &sig, args, term_location, call_source);
             }
             TerminatorKind::Assert { cond, msg, .. } => {
                 self.check_operand(cond, term_location);
@@ -1674,6 +1684,11 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             TerminatorKind::Return => {
                 if is_cleanup {
                     span_mirbug!(self, block_data, "return on cleanup block")
+                }
+            }
+            TerminatorKind::TailCall { .. } => {
+                if is_cleanup {
+                    span_mirbug!(self, block_data, "tailcall on cleanup block")
                 }
             }
             TerminatorKind::CoroutineDrop { .. } => {
@@ -2320,7 +2335,63 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         let cast_ty_from = CastTy::from_ty(ty_from);
                         let cast_ty_to = CastTy::from_ty(*ty);
                         match (cast_ty_from, cast_ty_to) {
-                            (Some(CastTy::Ptr(_)), Some(CastTy::Ptr(_))) => (),
+                            (Some(CastTy::Ptr(src)), Some(CastTy::Ptr(dst))) => {
+                                let mut normalize = |t| self.normalize(t, location);
+
+                                // N.B. `struct_tail_with_normalize` only "structurally resolves"
+                                // the type. It is not fully normalized, so we have to normalize it
+                                // afterwards.
+                                let src_tail =
+                                    tcx.struct_tail_with_normalize(src.ty, &mut normalize, || ());
+                                let src_tail = normalize(src_tail);
+                                let dst_tail =
+                                    tcx.struct_tail_with_normalize(dst.ty, &mut normalize, || ());
+                                let dst_tail = normalize(dst_tail);
+
+                                // This checks (lifetime part of) vtable validity for pointer casts,
+                                // which is irrelevant when there are aren't principal traits on both sides (aka only auto traits).
+                                //
+                                // Note that other checks (such as denying `dyn Send` -> `dyn Debug`) are in `rustc_hir_typeck`.
+                                if let ty::Dynamic(src_tty, ..) = src_tail.kind()
+                                    && let ty::Dynamic(dst_tty, ..) = dst_tail.kind()
+                                    && src_tty.principal().is_some()
+                                    && dst_tty.principal().is_some()
+                                {
+                                    // Remove auto traits.
+                                    // Auto trait checks are handled in `rustc_hir_typeck` as FCW.
+                                    let src_obj = tcx.mk_ty_from_kind(ty::Dynamic(
+                                        tcx.mk_poly_existential_predicates(
+                                            &src_tty.without_auto_traits().collect::<Vec<_>>(),
+                                        ),
+                                        tcx.lifetimes.re_static,
+                                        ty::Dyn,
+                                    ));
+                                    let dst_obj = tcx.mk_ty_from_kind(ty::Dynamic(
+                                        tcx.mk_poly_existential_predicates(
+                                            &dst_tty.without_auto_traits().collect::<Vec<_>>(),
+                                        ),
+                                        tcx.lifetimes.re_static,
+                                        ty::Dyn,
+                                    ));
+
+                                    // Replace trait object lifetimes with fresh vars, to allow casts like
+                                    // `*mut dyn FnOnce() + 'a` -> `*mut dyn FnOnce() + 'static`,
+                                    let src_obj =
+                                        freshen_single_trait_object_lifetime(self.infcx, src_obj);
+                                    let dst_obj =
+                                        freshen_single_trait_object_lifetime(self.infcx, dst_obj);
+
+                                    debug!(?src_tty, ?dst_tty, ?src_obj, ?dst_obj);
+
+                                    self.eq_types(
+                                        src_obj,
+                                        dst_obj,
+                                        location.to_locations(),
+                                        ConstraintCategory::Cast { unsize_to: None },
+                                    )
+                                    .unwrap();
+                                }
+                            }
                             _ => {
                                 span_mirbug!(
                                     self,
@@ -2842,4 +2913,17 @@ impl<'tcx> TypeOp<'tcx> for InstantiateOpaqueType<'tcx> {
         output.error_info = Some(self);
         Ok(output)
     }
+}
+
+fn freshen_single_trait_object_lifetime<'tcx>(
+    infcx: &BorrowckInferCtxt<'tcx>,
+    ty: Ty<'tcx>,
+) -> Ty<'tcx> {
+    let &ty::Dynamic(tty, _, dyn_kind @ ty::Dyn) = ty.kind() else { bug!("expected trait object") };
+
+    let fresh = infcx
+        .next_region_var(rustc_infer::infer::RegionVariableOrigin::MiscVariable(DUMMY_SP), || {
+            RegionCtxt::Unknown
+        });
+    infcx.tcx.mk_ty_from_kind(ty::Dynamic(tty, fresh, dyn_kind))
 }

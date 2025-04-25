@@ -248,6 +248,8 @@ declare_features! (
     (unstable, auto_traits, "1.50.0", Some(13231)),
     /// Allows using `box` in patterns (RFC 469).
     (unstable, box_patterns, "1.0.0", Some(29641)),
+    /// Allows builtin # foo() syntax
+    (internal, builtin_syntax, "1.71.0", Some(110680)),
     /// Allows `#[doc(notable_trait)]`.
     /// Renamed from `doc_spotlight`.
     (unstable, doc_notable_trait, "1.52.0", Some(45040)),
@@ -361,10 +363,6 @@ declare_features! (
     (unstable, async_fn_track_caller, "1.73.0", Some(110011)),
     /// Allows `for await` loops.
     (unstable, async_for_loop, "1.77.0", Some(118898)),
-    /// Allows builtin # foo() syntax
-    (unstable, builtin_syntax, "1.71.0", Some(110680)),
-    /// Treat `extern "C"` function as nounwind.
-    (unstable, c_unwind, "1.52.0", Some(74990)),
     /// Allows using C-variadics.
     (unstable, c_variadic, "1.34.0", Some(44930)),
     /// Allows the use of `#[cfg(overflow_checks)` to check if integer overflow behaviour.
@@ -438,6 +436,8 @@ declare_features! (
     (unstable, deprecated_suggestion, "1.61.0", Some(94785)),
     /// Allows deref patterns.
     (incomplete, deref_patterns, "1.79.0", Some(87121)),
+    /// Allows deriving `SmartPointer` traits
+    (unstable, derive_smart_pointer, "1.79.0", Some(123430)),
     /// Controls errors in trait implementations.
     (unstable, do_not_recommend, "1.67.0", Some(51992)),
     /// Tells rustdoc to automatically generate `#[doc(cfg(...))]`.
@@ -451,7 +451,7 @@ declare_features! (
     /// Allows `dyn* Trait` objects.
     (incomplete, dyn_star, "1.65.0", Some(102425)),
     /// Uses generic effect parameters for ~const bounds
-    (unstable, effects, "1.72.0", Some(102090)),
+    (incomplete, effects, "1.72.0", Some(102090)),
     /// Allows exhaustive pattern matching on types that contain uninhabited types.
     (unstable, exhaustive_patterns, "1.13.0", Some(51085)),
     /// Allows explicit tail calls via `become` expression.
@@ -512,10 +512,10 @@ declare_features! (
     /// Allows using `#[link(kind = "link-arg", name = "...")]`
     /// to pass custom arguments to the linker.
     (unstable, link_arg_attribute, "1.76.0", Some(99427)),
-    /// Allows using `reason` in lint attributes and the `#[expect(lint)]` lint check.
-    (unstable, lint_reasons, "1.31.0", Some(54503)),
     /// Give access to additional metadata about declarative macro meta-variables.
     (unstable, macro_metavar_expr, "1.61.0", Some(83527)),
+    /// Provides a way to concatenate identifiers using metavariable expressions.
+    (unstable, macro_metavar_expr_concat, "1.81.0", Some(124225)),
     /// Allows `#[marker]` on certain traits allowing overlapping implementations.
     (unstable, marker_trait_attr, "1.30.0", Some(29864)),
     /// Allows exhaustive pattern matching on types that contain uninhabited types in cases that are
@@ -559,18 +559,24 @@ declare_features! (
     (unstable, offset_of_enum, "1.75.0", Some(120141)),
     /// Allows using multiple nested field accesses in offset_of!
     (unstable, offset_of_nested, "1.77.0", Some(120140)),
+    /// Allows using fields with slice type in offset_of!
+    (unstable, offset_of_slice, "1.81.0", Some(126151)),
     /// Allows using `#[optimize(X)]`.
     (unstable, optimize_attribute, "1.34.0", Some(54882)),
+    /// Allows specifying nop padding on functions for dynamic patching.
+    (unstable, patchable_function_entry, "1.81.0", Some(123115)),
     /// Allows postfix match `expr.match { ... }`
     (unstable, postfix_match, "1.79.0", Some(121618)),
-    /// Allows `use<'a, 'b, A, B>` in `impl use<...> Trait` for precise capture of generic args.
-    (incomplete, precise_capturing, "1.79.0", Some(123432)),
+    /// Allows `use<'a, 'b, A, B>` in `impl Trait + use<...>` for precise capture of generic args.
+    (unstable, precise_capturing, "1.79.0", Some(123432)),
     /// Allows macro attributes on expressions, statements and non-inline modules.
     (unstable, proc_macro_hygiene, "1.30.0", Some(54727)),
     /// Allows `&raw const $place_expr` and `&raw mut $place_expr` expressions.
     (unstable, raw_ref_op, "1.41.0", Some(64490)),
     /// Makes `&` and `&mut` patterns eat only one layer of references in Rust 2024.
     (incomplete, ref_pat_eat_one_layer_2024, "1.79.0", Some(123076)),
+    /// Makes `&` and `&mut` patterns eat only one layer of references in Rust 2024—structural variant
+    (incomplete, ref_pat_eat_one_layer_2024_structural, "1.81.0", Some(123076)),
     /// Allows using the `#[register_tool]` attribute.
     (unstable, register_tool, "1.41.0", Some(66079)),
     /// Allows the `#[repr(i128)]` attribute for enums.
@@ -584,6 +590,8 @@ declare_features! (
     (incomplete, return_type_notation, "1.70.0", Some(109417)),
     /// Allows `extern "rust-cold"`.
     (unstable, rust_cold_cc, "1.63.0", Some(97544)),
+    /// Shortern the tail expression lifetime
+    (unstable, shorter_tail_lifetimes, "1.79.0", Some(123739)),
     /// Allows the use of SIMD types in functions declared in `extern` blocks.
     (unstable, simd_ffi, "1.0.0", Some(27731)),
     /// Allows specialization of implementations (RFC 1210).
@@ -613,8 +621,6 @@ declare_features! (
     (unstable, try_blocks, "1.29.0", Some(31436)),
     /// Allows `impl Trait` to be used inside type aliases (RFC 2515).
     (unstable, type_alias_impl_trait, "1.38.0", Some(63063)),
-    /// Allows the use of type ascription in expressions.
-    (unstable, type_ascription, "1.6.0", Some(23416)),
     /// Allows creation of instances of a struct by moving fields that have
     /// not changed from prior instances of the same struct (RFC #2528)
     (unstable, type_changing_struct_update, "1.58.0", Some(86555)),
@@ -625,15 +631,17 @@ declare_features! (
     /// Allows unsafe on extern declarations and safety qualifiers over internal items.
     (unstable, unsafe_extern_blocks, "1.80.0", Some(123743)),
     /// Allows unsized fn parameters.
-    (unstable, unsized_fn_params, "1.49.0", Some(48055)),
+    (internal, unsized_fn_params, "1.49.0", Some(48055)),
     /// Allows unsized rvalues at arguments and parameters.
     (incomplete, unsized_locals, "1.30.0", Some(48055)),
     /// Allows unsized tuple coercion.
     (unstable, unsized_tuple_coercion, "1.20.0", Some(42877)),
     /// Allows using the `#[used(linker)]` (or `#[used(compiler)]`) attribute.
     (unstable, used_with_arg, "1.60.0", Some(93798)),
-    /// Allows `extern "wasm" fn`
-    (unstable, wasm_abi, "1.53.0", Some(83788)),
+    /// Allows use of x86 `AMX` target-feature attributes and intrinsics
+    (unstable, x86_amx_intrinsics, "1.81.0", Some(126622)),
+    /// Allows use of the `xop` target-feature
+    (unstable, xop_target_feature, "1.81.0", Some(127208)),
     /// Allows `do yeet` expressions
     (unstable, yeet_expr, "1.62.0", Some(96373)),
     // !!!!    !!!!    !!!!    !!!!   !!!!    !!!!    !!!!    !!!!    !!!!    !!!!    !!!!

@@ -31,6 +31,8 @@ use crate::infer::relate::{Relate, StructurallyRelateAliases, TypeRelation};
 use rustc_middle::bug;
 use rustc_middle::ty::{Const, ImplSubject};
 
+use crate::traits::Obligation;
+
 /// Whether we should define opaque types or just treat them opaquely.
 ///
 /// Currently only used to prevent predicate matching from matching anything
@@ -119,10 +121,8 @@ impl<'a, 'tcx> At<'a, 'tcx> {
             self.param_env,
             define_opaque_types,
         );
-        fields
-            .sup()
-            .relate(expected, actual)
-            .map(|_| InferOk { value: (), obligations: fields.obligations })
+        fields.sup().relate(expected, actual)?;
+        Ok(InferOk { value: (), obligations: fields.into_obligations() })
     }
 
     /// Makes `expected <: actual`.
@@ -141,10 +141,8 @@ impl<'a, 'tcx> At<'a, 'tcx> {
             self.param_env,
             define_opaque_types,
         );
-        fields
-            .sub()
-            .relate(expected, actual)
-            .map(|_| InferOk { value: (), obligations: fields.obligations })
+        fields.sub().relate(expected, actual)?;
+        Ok(InferOk { value: (), obligations: fields.into_obligations() })
     }
 
     /// Makes `expected == actual`.
@@ -163,10 +161,22 @@ impl<'a, 'tcx> At<'a, 'tcx> {
             self.param_env,
             define_opaque_types,
         );
-        fields
-            .equate(StructurallyRelateAliases::No)
-            .relate(expected, actual)
-            .map(|_| InferOk { value: (), obligations: fields.obligations })
+        fields.equate(StructurallyRelateAliases::No).relate(expected, actual)?;
+        Ok(InferOk {
+            value: (),
+            obligations: fields
+                .goals
+                .into_iter()
+                .map(|goal| {
+                    Obligation::new(
+                        self.infcx.tcx,
+                        fields.trace.cause.clone(),
+                        goal.param_env,
+                        goal.predicate,
+                    )
+                })
+                .collect(),
+        })
     }
 
     /// Equates `expected` and `found` while structurally relating aliases.
@@ -187,10 +197,8 @@ impl<'a, 'tcx> At<'a, 'tcx> {
             self.param_env,
             DefineOpaqueTypes::Yes,
         );
-        fields
-            .equate(StructurallyRelateAliases::Yes)
-            .relate(expected, actual)
-            .map(|_| InferOk { value: (), obligations: fields.obligations })
+        fields.equate(StructurallyRelateAliases::Yes).relate(expected, actual)?;
+        Ok(InferOk { value: (), obligations: fields.into_obligations() })
     }
 
     pub fn relate<T>(
@@ -204,17 +212,61 @@ impl<'a, 'tcx> At<'a, 'tcx> {
         T: ToTrace<'tcx>,
     {
         match variance {
-            ty::Variance::Covariant => self.sub(define_opaque_types, expected, actual),
-            ty::Variance::Invariant => self.eq(define_opaque_types, expected, actual),
-            ty::Variance::Contravariant => self.sup(define_opaque_types, expected, actual),
+            ty::Covariant => self.sub(define_opaque_types, expected, actual),
+            ty::Invariant => self.eq(define_opaque_types, expected, actual),
+            ty::Contravariant => self.sup(define_opaque_types, expected, actual),
 
             // We could make this make sense but it's not readily
             // exposed and I don't feel like dealing with it. Note
             // that bivariance in general does a bit more than just
             // *nothing*, it checks that the types are the same
             // "modulo variance" basically.
-            ty::Variance::Bivariant => panic!("Bivariant given to `relate()`"),
+            ty::Bivariant => panic!("Bivariant given to `relate()`"),
         }
+    }
+
+    /// Used in the new solver since we don't care about tracking an `ObligationCause`.
+    pub fn relate_no_trace<T>(
+        self,
+        expected: T,
+        variance: ty::Variance,
+        actual: T,
+    ) -> Result<Vec<Goal<'tcx, ty::Predicate<'tcx>>>, NoSolution>
+    where
+        T: Relate<TyCtxt<'tcx>>,
+    {
+        let mut fields = CombineFields::new(
+            self.infcx,
+            TypeTrace::dummy(self.cause),
+            self.param_env,
+            DefineOpaqueTypes::Yes,
+        );
+        fields.sub().relate_with_variance(
+            variance,
+            ty::VarianceDiagInfo::default(),
+            expected,
+            actual,
+        )?;
+        Ok(fields.goals)
+    }
+
+    /// Used in the new solver since we don't care about tracking an `ObligationCause`.
+    pub fn eq_structurally_relating_aliases_no_trace<T>(
+        self,
+        expected: T,
+        actual: T,
+    ) -> Result<Vec<Goal<'tcx, ty::Predicate<'tcx>>>, NoSolution>
+    where
+        T: Relate<TyCtxt<'tcx>>,
+    {
+        let mut fields = CombineFields::new(
+            self.infcx,
+            TypeTrace::dummy(self.cause),
+            self.param_env,
+            DefineOpaqueTypes::Yes,
+        );
+        fields.equate(StructurallyRelateAliases::Yes).relate(expected, actual)?;
+        Ok(fields.goals)
     }
 
     /// Computes the least-upper-bound, or mutual supertype, of two
@@ -237,10 +289,8 @@ impl<'a, 'tcx> At<'a, 'tcx> {
             self.param_env,
             define_opaque_types,
         );
-        fields
-            .lub()
-            .relate(expected, actual)
-            .map(|value| InferOk { value, obligations: fields.obligations })
+        let value = fields.lub().relate(expected, actual)?;
+        Ok(InferOk { value, obligations: fields.into_obligations() })
     }
 
     /// Computes the greatest-lower-bound, or mutual subtype, of two
@@ -261,10 +311,8 @@ impl<'a, 'tcx> At<'a, 'tcx> {
             self.param_env,
             define_opaque_types,
         );
-        fields
-            .glb()
-            .relate(expected, actual)
-            .map(|value| InferOk { value, obligations: fields.obligations })
+        let value = fields.glb().relate(expected, actual)?;
+        Ok(InferOk { value, obligations: fields.into_obligations() })
     }
 }
 
@@ -299,7 +347,7 @@ impl<'tcx> ToTrace<'tcx> for Ty<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: Terms(ExpectedFound::new(a_is_expected, a.into(), b.into())),
+            values: ValuePairs::Terms(ExpectedFound::new(a_is_expected, a.into(), b.into())),
         }
     }
 }
@@ -311,7 +359,10 @@ impl<'tcx> ToTrace<'tcx> for ty::Region<'tcx> {
         a: Self,
         b: Self,
     ) -> TypeTrace<'tcx> {
-        TypeTrace { cause: cause.clone(), values: Regions(ExpectedFound::new(a_is_expected, a, b)) }
+        TypeTrace {
+            cause: cause.clone(),
+            values: ValuePairs::Regions(ExpectedFound::new(a_is_expected, a, b)),
+        }
     }
 }
 
@@ -324,7 +375,7 @@ impl<'tcx> ToTrace<'tcx> for Const<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: Terms(ExpectedFound::new(a_is_expected, a.into(), b.into())),
+            values: ValuePairs::Terms(ExpectedFound::new(a_is_expected, a.into(), b.into())),
         }
     }
 }
@@ -340,13 +391,13 @@ impl<'tcx> ToTrace<'tcx> for ty::GenericArg<'tcx> {
             cause: cause.clone(),
             values: match (a.unpack(), b.unpack()) {
                 (GenericArgKind::Lifetime(a), GenericArgKind::Lifetime(b)) => {
-                    Regions(ExpectedFound::new(a_is_expected, a, b))
+                    ValuePairs::Regions(ExpectedFound::new(a_is_expected, a, b))
                 }
                 (GenericArgKind::Type(a), GenericArgKind::Type(b)) => {
-                    Terms(ExpectedFound::new(a_is_expected, a.into(), b.into()))
+                    ValuePairs::Terms(ExpectedFound::new(a_is_expected, a.into(), b.into()))
                 }
                 (GenericArgKind::Const(a), GenericArgKind::Const(b)) => {
-                    Terms(ExpectedFound::new(a_is_expected, a.into(), b.into()))
+                    ValuePairs::Terms(ExpectedFound::new(a_is_expected, a.into(), b.into()))
                 }
 
                 (
@@ -375,7 +426,10 @@ impl<'tcx> ToTrace<'tcx> for ty::Term<'tcx> {
         a: Self,
         b: Self,
     ) -> TypeTrace<'tcx> {
-        TypeTrace { cause: cause.clone(), values: Terms(ExpectedFound::new(a_is_expected, a, b)) }
+        TypeTrace {
+            cause: cause.clone(),
+            values: ValuePairs::Terms(ExpectedFound::new(a_is_expected, a, b)),
+        }
     }
 }
 
@@ -388,7 +442,7 @@ impl<'tcx> ToTrace<'tcx> for ty::TraitRef<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: TraitRefs(ExpectedFound::new(a_is_expected, a, b)),
+            values: ValuePairs::TraitRefs(ExpectedFound::new(a_is_expected, a, b)),
         }
     }
 }
@@ -402,7 +456,7 @@ impl<'tcx> ToTrace<'tcx> for ty::AliasTy<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: Aliases(ExpectedFound::new(a_is_expected, a.into(), b.into())),
+            values: ValuePairs::Aliases(ExpectedFound::new(a_is_expected, a.into(), b.into())),
         }
     }
 }
@@ -414,7 +468,10 @@ impl<'tcx> ToTrace<'tcx> for ty::AliasTerm<'tcx> {
         a: Self,
         b: Self,
     ) -> TypeTrace<'tcx> {
-        TypeTrace { cause: cause.clone(), values: Aliases(ExpectedFound::new(a_is_expected, a, b)) }
+        TypeTrace {
+            cause: cause.clone(),
+            values: ValuePairs::Aliases(ExpectedFound::new(a_is_expected, a, b)),
+        }
     }
 }
 
@@ -427,7 +484,7 @@ impl<'tcx> ToTrace<'tcx> for ty::FnSig<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: PolySigs(ExpectedFound::new(
+            values: ValuePairs::PolySigs(ExpectedFound::new(
                 a_is_expected,
                 ty::Binder::dummy(a),
                 ty::Binder::dummy(b),
@@ -445,7 +502,7 @@ impl<'tcx> ToTrace<'tcx> for ty::PolyFnSig<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: PolySigs(ExpectedFound::new(a_is_expected, a, b)),
+            values: ValuePairs::PolySigs(ExpectedFound::new(a_is_expected, a, b)),
         }
     }
 }
@@ -459,7 +516,7 @@ impl<'tcx> ToTrace<'tcx> for ty::PolyExistentialTraitRef<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: ExistentialTraitRef(ExpectedFound::new(a_is_expected, a, b)),
+            values: ValuePairs::ExistentialTraitRef(ExpectedFound::new(a_is_expected, a, b)),
         }
     }
 }
@@ -473,7 +530,7 @@ impl<'tcx> ToTrace<'tcx> for ty::PolyExistentialProjection<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: ExistentialProjection(ExpectedFound::new(a_is_expected, a, b)),
+            values: ValuePairs::ExistentialProjection(ExpectedFound::new(a_is_expected, a, b)),
         }
     }
 }

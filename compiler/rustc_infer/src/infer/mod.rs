@@ -1,18 +1,19 @@
 pub use at::DefineOpaqueTypes;
 pub use freshen::TypeFreshener;
 pub use lexical_region_resolve::RegionResolutionError;
+pub use relate::combine::CombineFields;
+pub use relate::combine::PredicateEmittingRelation;
+pub use relate::StructurallyRelateAliases;
+use rustc_errors::DiagCtxtHandle;
 pub use rustc_macros::{TypeFoldable, TypeVisitable};
 pub use rustc_middle::ty::IntVarValue;
 pub use BoundRegionConversionTime::*;
 pub use RegionVariableOrigin::*;
 pub use SubregionOrigin::*;
-pub use ValuePairs::*;
 
-use crate::infer::relate::{CombineFields, RelateResult};
-use crate::traits::{
-    self, ObligationCause, ObligationInspector, PredicateObligations, TraitEngine,
-};
-use error_reporting::TypeErrCtxt;
+use crate::error_reporting::infer::TypeErrCtxt;
+use crate::infer::relate::RelateResult;
+use crate::traits::{self, ObligationCause, ObligationInspector, PredicateObligation, TraitEngine};
 use free_regions::RegionRelations;
 use lexical_region_resolve::LexicalRegionResolutions;
 use opaque_types::OpaqueTypeStorage;
@@ -23,7 +24,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
 use rustc_data_structures::sync::Lrc;
 use rustc_data_structures::undo_log::Rollback;
 use rustc_data_structures::unify as ut;
-use rustc_errors::{Diag, DiagCtxt, ErrorGuaranteed};
+use rustc_errors::{Diag, ErrorGuaranteed};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_macros::extension;
 use rustc_middle::infer::canonical::{Canonical, CanonicalVarValues};
@@ -34,6 +35,7 @@ use rustc_middle::infer::unify_key::{ConstVidKey, EffectVidKey};
 use rustc_middle::mir::interpret::{ErrorHandled, EvalToValTreeResult};
 use rustc_middle::mir::ConstraintCategory;
 use rustc_middle::traits::select;
+use rustc_middle::traits::solve::{Goal, NoSolution};
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
 use rustc_middle::ty::fold::BoundVarReplacerDelegate;
 use rustc_middle::ty::fold::{TypeFoldable, TypeFolder, TypeSuperFoldable};
@@ -51,7 +53,7 @@ use type_variable::TypeVariableOrigin;
 
 pub mod at;
 pub mod canonical;
-pub mod error_reporting;
+mod context;
 pub mod free_regions;
 mod freshen;
 mod lexical_region_resolve;
@@ -63,12 +65,14 @@ pub mod relate;
 pub mod resolve;
 pub(crate) mod snapshot;
 pub mod type_variable;
+// FIXME(error_reporting): Where should we put this?
+pub mod need_type_info;
 
 #[must_use]
 #[derive(Debug)]
 pub struct InferOk<'tcx, T> {
     pub value: T,
-    pub obligations: PredicateObligations<'tcx>,
+    pub obligations: Vec<PredicateObligation<'tcx>>,
 }
 pub type InferResult<'tcx, T> = Result<InferOk<'tcx, T>, TypeError<'tcx>>;
 
@@ -333,79 +337,6 @@ pub struct InferCtxt<'tcx> {
     pub obligation_inspector: Cell<Option<ObligationInspector<'tcx>>>,
 }
 
-impl<'tcx> ty::InferCtxtLike for InferCtxt<'tcx> {
-    type Interner = TyCtxt<'tcx>;
-
-    fn interner(&self) -> TyCtxt<'tcx> {
-        self.tcx
-    }
-
-    fn universe_of_ty(&self, vid: TyVid) -> Option<ty::UniverseIndex> {
-        // FIXME(BoxyUwU): this is kind of jank and means that printing unresolved
-        // ty infers will give you the universe of the var it resolved to not the universe
-        // it actually had. It also means that if you have a `?0.1` and infer it to `u8` then
-        // try to print out `?0.1` it will just print `?0`.
-        match self.probe_ty_var(vid) {
-            Err(universe) => Some(universe),
-            Ok(_) => None,
-        }
-    }
-
-    fn universe_of_ct(&self, ct: ConstVid) -> Option<ty::UniverseIndex> {
-        // Same issue as with `universe_of_ty`
-        match self.probe_const_var(ct) {
-            Err(universe) => Some(universe),
-            Ok(_) => None,
-        }
-    }
-
-    fn universe_of_lt(&self, lt: ty::RegionVid) -> Option<ty::UniverseIndex> {
-        match self.inner.borrow_mut().unwrap_region_constraints().probe_value(lt) {
-            Err(universe) => Some(universe),
-            Ok(_) => None,
-        }
-    }
-
-    fn opportunistic_resolve_lt_var(&self, vid: ty::RegionVid) -> ty::Region<'tcx> {
-        self.inner.borrow_mut().unwrap_region_constraints().opportunistic_resolve_var(self.tcx, vid)
-    }
-
-    fn defining_opaque_types(&self) -> &'tcx ty::List<LocalDefId> {
-        self.defining_opaque_types
-    }
-
-    fn opportunistic_resolve_ty_var(&self, vid: TyVid) -> Ty<'tcx> {
-        match self.probe_ty_var(vid) {
-            Ok(ty) => ty,
-            Err(_) => Ty::new_var(self.tcx, self.root_var(vid)),
-        }
-    }
-
-    fn opportunistic_resolve_int_var(&self, vid: IntVid) -> Ty<'tcx> {
-        self.opportunistic_resolve_int_var(vid)
-    }
-
-    fn opportunistic_resolve_float_var(&self, vid: FloatVid) -> Ty<'tcx> {
-        self.opportunistic_resolve_float_var(vid)
-    }
-
-    fn opportunistic_resolve_ct_var(&self, vid: ConstVid) -> ty::Const<'tcx> {
-        match self.probe_const_var(vid) {
-            Ok(ct) => ct,
-            Err(_) => ty::Const::new_var(self.tcx, self.root_const_var(vid)),
-        }
-    }
-
-    fn opportunistic_resolve_effect_var(&self, vid: EffectVid) -> ty::Const<'tcx> {
-        match self.probe_effect_var(vid) {
-            Some(ct) => ct,
-            None => {
-                ty::Const::new_infer(self.tcx, InferConst::EffectVar(self.root_effect_var(vid)))
-            }
-        }
-    }
-}
-
 /// See the `error_reporting` module for more details.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, TypeFoldable, TypeVisitable)]
 pub enum ValuePairs<'tcx> {
@@ -416,6 +347,7 @@ pub enum ValuePairs<'tcx> {
     PolySigs(ExpectedFound<ty::PolyFnSig<'tcx>>),
     ExistentialTraitRef(ExpectedFound<ty::PolyExistentialTraitRef<'tcx>>),
     ExistentialProjection(ExpectedFound<ty::PolyExistentialProjection<'tcx>>),
+    Dummy,
 }
 
 impl<'tcx> ValuePairs<'tcx> {
@@ -748,14 +680,18 @@ impl<'tcx, T> InferOk<'tcx, T> {
 }
 
 impl<'tcx> InferOk<'tcx, ()> {
-    pub fn into_obligations(self) -> PredicateObligations<'tcx> {
+    pub fn into_obligations(self) -> Vec<PredicateObligation<'tcx>> {
         self.obligations
     }
 }
 
 impl<'tcx> InferCtxt<'tcx> {
-    pub fn dcx(&self) -> &'tcx DiagCtxt {
-        self.tcx.dcx()
+    pub fn dcx(&self) -> DiagCtxtHandle<'_> {
+        self.tcx.dcx().taintable_handle(&self.tainted_by_errors)
+    }
+
+    pub fn defining_opaque_types(&self) -> &'tcx ty::List<LocalDefId> {
+        self.defining_opaque_types
     }
 
     pub fn next_trait_solver(&self) -> bool {
@@ -809,13 +745,13 @@ impl<'tcx> InferCtxt<'tcx> {
             .collect();
         vars.extend(
             (0..inner.int_unification_table().len())
-                .map(|i| ty::IntVid::from_u32(i as u32))
+                .map(|i| ty::IntVid::from_usize(i))
                 .filter(|&vid| inner.int_unification_table().probe_value(vid).is_unknown())
                 .map(|v| Ty::new_int_var(self.tcx, v)),
         );
         vars.extend(
             (0..inner.float_unification_table().len())
-                .map(|i| ty::FloatVid::from_u32(i as u32))
+                .map(|i| ty::FloatVid::from_usize(i))
                 .filter(|&vid| inner.float_unification_table().probe_value(vid).is_unknown())
                 .map(|v| Ty::new_float_var(self.tcx, v)),
         );
@@ -833,19 +769,9 @@ impl<'tcx> InferCtxt<'tcx> {
             .collect()
     }
 
-    pub fn can_sub<T>(&self, param_env: ty::ParamEnv<'tcx>, expected: T, actual: T) -> bool
-    where
-        T: at::ToTrace<'tcx>,
-    {
-        let origin = &ObligationCause::dummy();
-        self.probe(|_| {
-            // We're only answering whether there could be a subtyping relation, and with
-            // opaque types, "there could be one", via registering a hidden type.
-            self.at(origin, param_env).sub(DefineOpaqueTypes::Yes, expected, actual).is_ok()
-        })
-    }
-
-    pub fn can_eq<T>(&self, param_env: ty::ParamEnv<'tcx>, a: T, b: T) -> bool
+    // FIXME(-Znext-solver): Get rid of this method, it's never correct. Either that,
+    // or we need to process the obligations.
+    pub fn can_eq_shallow<T>(&self, param_env: ty::ParamEnv<'tcx>, a: T, b: T) -> bool
     where
         T: at::ToTrace<'tcx>,
     {
@@ -944,9 +870,9 @@ impl<'tcx> InferCtxt<'tcx> {
 
         self.enter_forall(predicate, |ty::SubtypePredicate { a_is_expected, a, b }| {
             if a_is_expected {
-                Ok(self.at(cause, param_env).sub(DefineOpaqueTypes::No, a, b))
+                Ok(self.at(cause, param_env).sub(DefineOpaqueTypes::Yes, a, b))
             } else {
-                Ok(self.at(cause, param_env).sup(DefineOpaqueTypes::No, b, a))
+                Ok(self.at(cause, param_env).sup(DefineOpaqueTypes::Yes, b, a))
             }
         })
     }
@@ -1155,19 +1081,7 @@ impl<'tcx> InferCtxt<'tcx> {
     /// inference variables, regionck errors).
     #[must_use = "this method does not have any side effects"]
     pub fn tainted_by_errors(&self) -> Option<ErrorGuaranteed> {
-        if let Some(guar) = self.tainted_by_errors.get() {
-            Some(guar)
-        } else if self.dcx().err_count_excluding_lint_errs() > self.err_count_on_creation {
-            // Errors reported since this infcx was made. Lint errors are
-            // excluded to avoid some being swallowed in the presence of
-            // non-lint errors. (It's arguable whether or not this exclusion is
-            // important.)
-            let guar = self.dcx().has_errors().unwrap();
-            self.set_tainted_by_errors(guar);
-            Some(guar)
-        } else {
-            None
-        }
+        self.tainted_by_errors.get()
     }
 
     /// Set the "tainted by errors" flag to true. We call this when we
@@ -1351,6 +1265,9 @@ impl<'tcx> InferCtxt<'tcx> {
     where
         T: TypeFoldable<TyCtxt<'tcx>>,
     {
+        if let Err(guar) = value.error_reported() {
+            self.set_tainted_by_errors(guar);
+        }
         if !value.has_non_region_infer() {
             return value;
         }
@@ -1394,8 +1311,7 @@ impl<'tcx> InferCtxt<'tcx> {
                     bug!("`{value:?}` is not fully resolved");
                 }
                 if value.has_infer_regions() {
-                    let guar =
-                        self.tcx.dcx().delayed_bug(format!("`{value:?}` is not fully resolved"));
+                    let guar = self.dcx().delayed_bug(format!("`{value:?}` is not fully resolved"));
                     Ok(self.tcx.fold_regions(value, |re, _| {
                         if re.is_var() { ty::Region::new_error(self.tcx, guar) } else { re }
                     }))
@@ -1511,17 +1427,17 @@ impl<'tcx> InferCtxt<'tcx> {
         span: Span,
     ) -> Result<ty::Const<'tcx>, ErrorHandled> {
         match self.const_eval_resolve(param_env, unevaluated, span) {
-            Ok(Some(val)) => Ok(ty::Const::new_value(
+            Ok(Ok(val)) => Ok(ty::Const::new_value(
                 self.tcx,
                 val,
                 self.tcx.type_of(unevaluated.def).instantiate(self.tcx, unevaluated.args),
             )),
-            Ok(None) => {
+            Ok(Err(bad_ty)) => {
                 let tcx = self.tcx;
                 let def_id = unevaluated.def;
                 span_bug!(
                     tcx.def_span(def_id),
-                    "unable to construct a constant value for the unevaluated constant {:?}",
+                    "unable to construct a valtree for the unevaluated constant {:?}: type {bad_ty} is not valtree-compatible",
                     unevaluated
                 );
             }
@@ -1673,7 +1589,7 @@ impl<'tcx> InferCtxt<'tcx> {
     }
 }
 
-impl<'tcx> TypeErrCtxt<'_, 'tcx> {
+impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
     // [Note-Type-error-reporting]
     // An invariant is that anytime the expected or actual type is Error (the special
     // error type, meaning that an error occurred when typechecking this expression),
@@ -1689,9 +1605,9 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         sp: Span,
         mk_diag: M,
         actual_ty: Ty<'tcx>,
-    ) -> Diag<'tcx>
+    ) -> Diag<'a>
     where
-        M: FnOnce(String) -> Diag<'tcx>,
+        M: FnOnce(String) -> Diag<'a>,
     {
         let actual_ty = self.resolve_vars_if_possible(actual_ty);
         debug!("type_error_struct_with_diag({:?}, {:?})", sp, actual_ty);
@@ -1712,7 +1628,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         expected: Ty<'tcx>,
         actual: Ty<'tcx>,
         err: TypeError<'tcx>,
-    ) -> Diag<'tcx> {
+    ) -> Diag<'a> {
         self.report_and_explain_type_error(TypeTrace::types(cause, true, expected, actual), err)
     }
 
@@ -1722,7 +1638,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         expected: ty::Const<'tcx>,
         actual: ty::Const<'tcx>,
         err: TypeError<'tcx>,
-    ) -> Diag<'tcx> {
+    ) -> Diag<'a> {
         self.report_and_explain_type_error(TypeTrace::consts(cause, true, expected, actual), err)
     }
 }
@@ -1785,7 +1701,7 @@ struct InferenceLiteralEraser<'tcx> {
 }
 
 impl<'tcx> TypeFolder<TyCtxt<'tcx>> for InferenceLiteralEraser<'tcx> {
-    fn interner(&self) -> TyCtxt<'tcx> {
+    fn cx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
 
@@ -1811,7 +1727,7 @@ impl<'tcx> TypeTrace<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: Terms(ExpectedFound::new(a_is_expected, a.into(), b.into())),
+            values: ValuePairs::Terms(ExpectedFound::new(a_is_expected, a.into(), b.into())),
         }
     }
 
@@ -1823,7 +1739,7 @@ impl<'tcx> TypeTrace<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: TraitRefs(ExpectedFound::new(a_is_expected, a, b)),
+            values: ValuePairs::TraitRefs(ExpectedFound::new(a_is_expected, a, b)),
         }
     }
 
@@ -1835,8 +1751,12 @@ impl<'tcx> TypeTrace<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: Terms(ExpectedFound::new(a_is_expected, a.into(), b.into())),
+            values: ValuePairs::Terms(ExpectedFound::new(a_is_expected, a.into(), b.into())),
         }
+    }
+
+    fn dummy(cause: &ObligationCause<'tcx>) -> TypeTrace<'tcx> {
+        TypeTrace { cause: cause.clone(), values: ValuePairs::Dummy }
     }
 }
 
@@ -1921,7 +1841,7 @@ fn replace_param_and_infer_args_with_placeholder<'tcx>(
     }
 
     impl<'tcx> TypeFolder<TyCtxt<'tcx>> for ReplaceParamAndInferWithPlaceholder<'tcx> {
-        fn interner(&self) -> TyCtxt<'tcx> {
+        fn cx(&self) -> TyCtxt<'tcx> {
             self.tcx
         }
 

@@ -1,15 +1,15 @@
 use crate::consts::constant_simple;
 use crate::macros::macro_backtrace;
-use crate::source::{get_source_text, snippet_opt, walk_span_to_context, SpanRange};
+use crate::source::{snippet_opt, walk_span_to_context, SpanRange, SpanRangeExt};
 use crate::tokenize_with_text;
 use rustc_ast::ast::InlineAsmTemplatePiece;
 use rustc_data_structures::fx::FxHasher;
 use rustc_hir::def::Res;
 use rustc_hir::MatchSource::TryDesugar;
 use rustc_hir::{
-    ArrayLen, BinOpKind, BindingMode, Block, BodyId, Closure, Expr, ExprField, ExprKind, FnRetTy, GenericArg,
-    GenericArgs, HirId, HirIdMap, InlineAsmOperand, LetExpr, Lifetime, LifetimeName, Pat, PatField, PatKind, Path,
-    PathSegment, PrimTy, QPath, Stmt, StmtKind, Ty, TyKind, AssocItemConstraint,
+    ArrayLen, AssocItemConstraint, BinOpKind, BindingMode, Block, BodyId, Closure, Expr, ExprField, ExprKind, FnRetTy,
+    GenericArg, GenericArgs, HirId, HirIdMap, InlineAsmOperand, LetExpr, Lifetime, LifetimeName, Pat, PatField,
+    PatKind, Path, PathSegment, PrimTy, QPath, Stmt, StmtKind, Ty, TyKind,
 };
 use rustc_lexer::{tokenize, TokenKind};
 use rustc_lint::LateContext;
@@ -519,7 +519,11 @@ impl HirEqInterExpr<'_, '_, '_> {
     }
 
     fn eq_assoc_type_binding(&mut self, left: &AssocItemConstraint<'_>, right: &AssocItemConstraint<'_>) -> bool {
-        left.ident.name == right.ident.name && self.eq_ty(left.ty().expect("expected assoc type binding"), right.ty().expect("expected assoc type binding"))
+        left.ident.name == right.ident.name
+            && self.eq_ty(
+                left.ty().expect("expected assoc type binding"),
+                right.ty().expect("expected assoc type binding"),
+            )
     }
 
     fn check_ctxt(&mut self, left: SyntaxContext, right: SyntaxContext) -> bool {
@@ -1169,9 +1173,9 @@ fn eq_span_tokens(
     pred: impl Fn(TokenKind) -> bool,
 ) -> bool {
     fn f(cx: &LateContext<'_>, left: Range<BytePos>, right: Range<BytePos>, pred: impl Fn(TokenKind) -> bool) -> bool {
-        if let Some(lsrc) = get_source_text(cx, left)
+        if let Some(lsrc) = left.get_source_text(cx)
             && let Some(lsrc) = lsrc.as_str()
-            && let Some(rsrc) = get_source_text(cx, right)
+            && let Some(rsrc) = right.get_source_text(cx)
             && let Some(rsrc) = rsrc.as_str()
         {
             let pred = |t: &(_, _)| pred(t.0);

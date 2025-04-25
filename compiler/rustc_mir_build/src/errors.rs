@@ -1,9 +1,9 @@
 use crate::fluent_generated as fluent;
-use rustc_errors::DiagArgValue;
 use rustc_errors::{
-    codes::*, Applicability, Diag, DiagCtxt, Diagnostic, EmissionGuarantee, Level, MultiSpan,
+    codes::*, Applicability, Diag, Diagnostic, EmissionGuarantee, Level, MultiSpan,
     SubdiagMessageOp, Subdiagnostic,
 };
+use rustc_errors::{DiagArgValue, DiagCtxtHandle};
 use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::ty::{self, Ty};
 use rustc_pattern_analysis::{errors::Uncovered, rustc::RustcPatCtxt};
@@ -33,6 +33,11 @@ pub(crate) struct CallToDeprecatedSafeFnRequiresUnsafe {
 #[derive(Subdiagnostic)]
 #[multipart_suggestion(mir_build_suggestion, applicability = "machine-applicable")]
 pub(crate) struct CallToDeprecatedSafeFnRequiresUnsafeSub {
+    pub(crate) indent: String,
+    #[suggestion_part(
+        code = "{indent}// TODO: Audit that the environment access only happens in single-threaded code.\n" // ignore-tidy-todo
+    )]
+    pub(crate) start_of_line: Span,
     #[suggestion_part(code = "unsafe {{ ")]
     pub(crate) left: Span,
     #[suggestion_part(code = " }}")]
@@ -487,7 +492,7 @@ pub(crate) struct NonExhaustivePatternsTypeNotEmpty<'p, 'tcx, 'm> {
 }
 
 impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for NonExhaustivePatternsTypeNotEmpty<'_, '_, '_> {
-    fn into_diag(self, dcx: &'a DiagCtxt, level: Level) -> Diag<'_, G> {
+    fn into_diag(self, dcx: DiagCtxtHandle<'a>, level: Level) -> Diag<'_, G> {
         let mut diag =
             Diag::new(dcx, level, fluent::mir_build_non_exhaustive_patterns_type_not_empty);
         diag.span(self.scrut_span);
@@ -562,13 +567,6 @@ pub(crate) struct StaticInPattern {
 }
 
 #[derive(Diagnostic)]
-#[diag(mir_build_assoc_const_in_pattern, code = E0158)]
-pub(crate) struct AssocConstInPattern {
-    #[primary_span]
-    pub(crate) span: Span,
-}
-
-#[derive(Diagnostic)]
 #[diag(mir_build_const_param_in_pattern, code = E0158)]
 pub(crate) struct ConstParamInPattern {
     #[primary_span]
@@ -592,7 +590,7 @@ pub(crate) struct UnreachablePattern {
 }
 
 #[derive(Diagnostic)]
-#[diag(mir_build_const_pattern_depends_on_generic_parameter)]
+#[diag(mir_build_const_pattern_depends_on_generic_parameter, code = E0158)]
 pub(crate) struct ConstPatternDependsOnGenericParameter {
     #[primary_span]
     pub(crate) span: Span,

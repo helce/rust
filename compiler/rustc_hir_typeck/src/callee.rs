@@ -3,11 +3,11 @@ use super::method::MethodCallee;
 use super::{Expectation, FnCtxt, TupleArgumentsFlag};
 
 use crate::errors;
-use rustc_ast::util::parser::PREC_POSTFIX;
+use rustc_ast::util::parser::PREC_UNAMBIGUOUS;
 use rustc_errors::{Applicability, Diag, ErrorGuaranteed, StashKey};
-use rustc_hir as hir;
 use rustc_hir::def::{self, CtorKind, Namespace, Res};
 use rustc_hir::def_id::DefId;
+use rustc_hir::{self as hir, LangItem};
 use rustc_hir_analysis::autoderef::Autoderef;
 use rustc_infer::traits::ObligationCauseCode;
 use rustc_infer::{
@@ -24,8 +24,8 @@ use rustc_span::def_id::LocalDefId;
 use rustc_span::symbol::{sym, Ident};
 use rustc_span::Span;
 use rustc_target::spec::abi;
+use rustc_trait_selection::error_reporting::traits::DefIdOrName;
 use rustc_trait_selection::infer::InferCtxtExt as _;
-use rustc_trait_selection::traits::error_reporting::DefIdOrName;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt as _;
 
 use std::{iter, slice};
@@ -41,7 +41,7 @@ pub fn check_legal_trait_for_method_call(
     trait_id: DefId,
     body_id: DefId,
 ) -> Result<(), ErrorGuaranteed> {
-    if tcx.lang_items().drop_trait() == Some(trait_id)
+    if tcx.is_lang_item(trait_id, LangItem::Drop)
         && tcx.lang_items().fallback_surface_drop_fn() != Some(body_id)
     {
         let sugg = if let Some(receiver) = receiver.filter(|s| !s.is_empty()) {
@@ -628,7 +628,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 return;
             };
 
-            let pick = self.confirm_method(
+            let pick = self.confirm_method_for_diagnostic(
                 call_expr.span,
                 callee_expr,
                 call_expr,
@@ -656,7 +656,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             };
 
             if let Ok(rest_snippet) = rest_snippet {
-                let sugg = if callee_expr.precedence().order() >= PREC_POSTFIX {
+                let sugg = if callee_expr.precedence().order() >= PREC_UNAMBIGUOUS {
                     vec![
                         (up_to_rcvr_span, "".to_string()),
                         (rest_span, format!(".{}({rest_snippet}", segment.ident)),

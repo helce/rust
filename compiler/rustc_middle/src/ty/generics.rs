@@ -14,7 +14,7 @@ use super::{Clause, InstantiatedPredicates, ParamConst, ParamTy, Ty, TyCtxt};
 pub enum GenericParamDefKind {
     Lifetime,
     Type { has_default: bool, synthetic: bool },
-    Const { has_default: bool, is_host_effect: bool },
+    Const { has_default: bool, is_host_effect: bool, synthetic: bool },
 }
 
 impl GenericParamDefKind {
@@ -371,6 +371,7 @@ impl<'tcx> Generics {
 pub struct GenericPredicates<'tcx> {
     pub parent: Option<DefId>,
     pub predicates: &'tcx [(Clause<'tcx>, Span)],
+    pub effects_min_tys: &'tcx ty::List<Ty<'tcx>>,
 }
 
 impl<'tcx> GenericPredicates<'tcx> {
@@ -390,6 +391,10 @@ impl<'tcx> GenericPredicates<'tcx> {
         args: GenericArgsRef<'tcx>,
     ) -> impl Iterator<Item = (Clause<'tcx>, Span)> + DoubleEndedIterator + ExactSizeIterator {
         EarlyBinder::bind(self.predicates).iter_instantiated_copied(tcx, args)
+    }
+
+    pub fn instantiate_own_identity(&self) -> impl Iterator<Item = (Clause<'tcx>, Span)> {
+        EarlyBinder::bind(self.predicates).iter_identity_copied()
     }
 
     #[instrument(level = "debug", skip(self, tcx))]

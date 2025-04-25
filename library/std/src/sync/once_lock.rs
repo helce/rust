@@ -80,14 +80,21 @@ use crate::sync::Once;
 /// static LIST: OnceList<u32> = OnceList::new();
 /// static COUNTER: AtomicU32 = AtomicU32::new(0);
 ///
-/// let vec = (0..thread::available_parallelism().unwrap().get()).map(|_| thread::spawn(|| {
-///     while let i @ 0..=1000 = COUNTER.fetch_add(1, Ordering::Relaxed) {
-///         LIST.push(i);
+/// # const LEN: u32 = if cfg!(miri) { 50 } else { 1000 };
+/// # /*
+/// const LEN: u32 = 1000;
+/// # */
+/// thread::scope(|s| {
+///     for _ in 0..thread::available_parallelism().unwrap().get() {
+///         s.spawn(|| {
+///             while let i @ 0..LEN = COUNTER.fetch_add(1, Ordering::Relaxed) {
+///                 LIST.push(i);
+///             }
+///         });
 ///     }
-/// })).collect::<Vec<thread::JoinHandle<_>>>();
-/// vec.into_iter().for_each(|handle| handle.join().unwrap());
+/// });
 ///
-/// for i in 0..=1000 {
+/// for i in 0..LEN {
 ///     assert!(LIST.contains(&i));
 /// }
 ///
@@ -495,7 +502,7 @@ impl<T> OnceLock<T> {
     #[inline]
     unsafe fn get_unchecked(&self) -> &T {
         debug_assert!(self.is_initialized());
-        (&*self.value.get()).assume_init_ref()
+        unsafe { (&*self.value.get()).assume_init_ref() }
     }
 
     /// # Safety
@@ -504,7 +511,7 @@ impl<T> OnceLock<T> {
     #[inline]
     unsafe fn get_unchecked_mut(&mut self) -> &mut T {
         debug_assert!(self.is_initialized());
-        (&mut *self.value.get()).assume_init_mut()
+        unsafe { (&mut *self.value.get()).assume_init_mut() }
     }
 }
 

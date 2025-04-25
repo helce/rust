@@ -2,11 +2,10 @@
 
 use rustc_codegen_ssa::traits::*;
 use rustc_hir::def_id::DefId;
-use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
+use rustc_middle::middle::codegen_fn_attrs::{CodegenFnAttrFlags, PatchableFunctionEntry};
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_session::config::{FunctionReturn, OptLevel};
 use rustc_span::symbol::sym;
-use rustc_target::spec::abi::Abi;
 use rustc_target::spec::{FramePointer, SanitizerSet, StackProbeType, StackProtector};
 use smallvec::SmallVec;
 
@@ -51,6 +50,34 @@ fn inline_attr<'ll>(cx: &CodegenCx<'ll, '_>, inline: InlineAttr) -> Option<&'ll 
         }
         InlineAttr::None => None,
     }
+}
+
+#[inline]
+fn patchable_function_entry_attrs<'ll>(
+    cx: &CodegenCx<'ll, '_>,
+    attr: Option<PatchableFunctionEntry>,
+) -> SmallVec<[&'ll Attribute; 2]> {
+    let mut attrs = SmallVec::new();
+    let patchable_spec = attr.unwrap_or_else(|| {
+        PatchableFunctionEntry::from_config(cx.tcx.sess.opts.unstable_opts.patchable_function_entry)
+    });
+    let entry = patchable_spec.entry();
+    let prefix = patchable_spec.prefix();
+    if entry > 0 {
+        attrs.push(llvm::CreateAttrStringValue(
+            cx.llcx,
+            "patchable-function-entry",
+            &format!("{}", entry),
+        ));
+    }
+    if prefix > 0 {
+        attrs.push(llvm::CreateAttrStringValue(
+            cx.llcx,
+            "patchable-function-prefix",
+            &format!("{}", prefix),
+        ));
+    }
+    attrs
 }
 
 /// Get LLVM sanitize attributes.
@@ -108,9 +135,10 @@ pub fn frame_pointer_type_attr<'ll>(cx: &CodegenCx<'ll, '_>) -> Option<&'ll Attr
     let opts = &cx.sess().opts;
     // "mcount" function relies on stack pointer.
     // See <https://sourceware.org/binutils/docs/gprof/Implementation.html>.
-    if opts.unstable_opts.instrument_mcount || matches!(opts.cg.force_frame_pointers, Some(true)) {
-        fp = FramePointer::Always;
+    if opts.unstable_opts.instrument_mcount {
+        fp.ratchet(FramePointer::Always);
     }
+    fp.ratchet(opts.cg.force_frame_pointers);
     let attr_value = match fp {
         FramePointer::Always => "all",
         FramePointer::NonLeaf => "non-leaf",
@@ -420,6 +448,7 @@ pub fn from_fn_attrs<'ll, 'tcx>(
         llvm::set_alignment(llfn, align);
     }
     to_add.extend(sanitize_attrs(cx, codegen_fn_attrs.no_sanitize));
+    to_add.extend(patchable_function_entry_attrs(cx, codegen_fn_attrs.patchable_function_entry));
 
     // Always annotate functions with the target-cpu they are compiled for.
     // Without this, ThinLTO won't inline Rust functions into Clang generated
@@ -452,7 +481,7 @@ pub fn from_fn_attrs<'ll, 'tcx>(
         return;
     }
 
-    let mut function_features = function_features
+    let function_features = function_features
         .iter()
         .flat_map(|feat| {
             llvm_util::to_llvm_features(cx.tcx.sess, feat).into_iter().map(|f| format!("+{f}"))
@@ -473,17 +502,6 @@ pub fn from_fn_attrs<'ll, 'tcx>(
                 codegen_fn_attrs.link_name.unwrap_or_else(|| cx.tcx.item_name(instance.def_id()));
             let name = name.as_str();
             to_add.push(llvm::CreateAttrStringValue(cx.llcx, "wasm-import-name", name));
-        }
-
-        // The `"wasm"` abi on wasm targets automatically enables the
-        // `+multivalue` feature because the purpose of the wasm abi is to match
-        // the WebAssembly specification, which has this feature. This won't be
-        // needed when LLVM enables this `multivalue` feature by default.
-        if !cx.tcx.is_closure_like(instance.def_id()) {
-            let abi = cx.tcx.fn_sig(instance.def_id()).skip_binder().abi();
-            if abi == Abi::Wasm {
-                function_features.push("+multivalue".to_string());
-            }
         }
     }
 

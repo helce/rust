@@ -2057,7 +2057,7 @@ extern "C" {
         AddrOpsCount: c_uint,
         DL: &'a DILocation,
         InsertAtEnd: &'a BasicBlock,
-    ) -> &'a Value;
+    );
 
     pub fn LLVMRustDIBuilderCreateEnumerator<'a>(
         Builder: &DIBuilder<'a>,
@@ -2185,7 +2185,7 @@ extern "C" {
         UniqueSectionNames: bool,
         TrapUnreachable: bool,
         Singlethread: bool,
-        AsmComments: bool,
+        VerboseAsm: bool,
         EmitStackSizeSection: bool,
         RelaxELFRelocations: bool,
         UseInitArray: bool,
@@ -2440,4 +2440,8 @@ extern "C" {
         callback: GetSymbolsCallback,
         error_callback: GetSymbolsErrorCallback,
     ) -> *mut c_void;
+
+    pub fn LLVMRustIs64BitSymbolicFile(buf_ptr: *const u8, buf_len: usize) -> bool;
+
+    pub fn LLVMRustIsECObject(buf_ptr: *const u8, buf_len: usize) -> bool;
 }

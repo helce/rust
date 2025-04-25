@@ -463,6 +463,7 @@ pub enum TraitBoundModifier {
 pub enum GenericBound<'hir> {
     Trait(PolyTraitRef<'hir>, TraitBoundModifier),
     Outlives(&'hir Lifetime),
+    Use(&'hir [PreciseCapturingArg<'hir>], Span),
 }
 
 impl GenericBound<'_> {
@@ -477,6 +478,7 @@ impl GenericBound<'_> {
         match self {
             GenericBound::Trait(t, ..) => t.span,
             GenericBound::Outlives(l) => l.ident.span,
+            GenericBound::Use(_, span) => *span,
         }
     }
 }
@@ -524,6 +526,7 @@ pub enum GenericParamKind<'hir> {
         /// Optional default value for the const generic param
         default: Option<&'hir AnonConst>,
         is_host_effect: bool,
+        synthetic: bool,
     },
 }
 
@@ -1038,6 +1041,7 @@ pub struct Block<'hir> {
     pub hir_id: HirId,
     /// Distinguishes between `unsafe { ... }` and `{ ... }`.
     pub rules: BlockCheckMode,
+    /// The span includes the curly braces `{` and `}` around the block.
     pub span: Span,
     /// If true, then there may exist `break 'a` values that aim to
     /// break out of this block early.
@@ -1632,6 +1636,13 @@ pub struct ConstBlock {
 }
 
 /// An expression.
+///
+/// For more details, see the [rust lang reference].
+/// Note that the reference does not document nightly-only features.
+/// There may be also slight differences in the names and representation of AST nodes between
+/// the compiler and the reference.
+///
+/// [rust lang reference]: https://doc.rust-lang.org/reference/expressions.html
 #[derive(Debug, Clone, Copy, HashStable_Generic)]
 pub struct Expr<'hir> {
     pub hir_id: HirId,
@@ -2403,7 +2414,7 @@ pub enum ImplItemKind<'hir> {
 /// * the `A: Bound` in `Trait<A: Bound>`
 /// * the `RetTy` in `Trait(ArgTy, ArgTy) -> RetTy`
 /// * the `C = { Ct }` in `Trait<C = { Ct }>` (feature `associated_const_equality`)
-/// * the `f(): Bound` in `Trait<f(): Bound>` (feature `return_type_notation`)
+/// * the `f(..): Bound` in `Trait<f(..): Bound>` (feature `return_type_notation`)
 #[derive(Debug, Clone, Copy, HashStable_Generic)]
 pub struct AssocItemConstraint<'hir> {
     pub hir_id: HirId,
@@ -2461,6 +2472,15 @@ pub enum AssocItemConstraintKind<'hir> {
     Equality { term: Term<'hir> },
     /// A bound on an associated type (e.g., `AssocTy: Bound` in `Trait<AssocTy: Bound>`).
     Bound { bounds: &'hir [GenericBound<'hir>] },
+}
+
+impl<'hir> AssocItemConstraintKind<'hir> {
+    pub fn descr(&self) -> &'static str {
+        match self {
+            AssocItemConstraintKind::Equality { .. } => "binding",
+            AssocItemConstraintKind::Bound { .. } => "constraint",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, HashStable_Generic)]
@@ -2672,8 +2692,6 @@ pub struct OpaqueTy<'hir> {
     /// originating from a trait method. This makes it so that the opaque is
     /// lowered as an associated type.
     pub in_trait: bool,
-    /// List of arguments captured via `impl use<'a, P, ...> Trait` syntax.
-    pub precise_capturing_args: Option<(&'hir [PreciseCapturingArg<'hir>], Span)>,
 }
 
 #[derive(Debug, Clone, Copy, HashStable_Generic)]
@@ -2688,6 +2706,13 @@ impl PreciseCapturingArg<'_> {
         match self {
             PreciseCapturingArg::Lifetime(lt) => lt.hir_id,
             PreciseCapturingArg::Param(param) => param.hir_id,
+        }
+    }
+
+    pub fn name(self) -> Symbol {
+        match self {
+            PreciseCapturingArg::Lifetime(lt) => lt.ident.name,
+            PreciseCapturingArg::Param(param) => param.ident.name,
         }
     }
 }
@@ -3146,6 +3171,13 @@ impl ItemId {
 /// An item
 ///
 /// The name might be a dummy name in case of anonymous items
+///
+/// For more details, see the [rust lang reference].
+/// Note that the reference does not document nightly-only features.
+/// There may be also slight differences in the names and representation of AST nodes between
+/// the compiler and the reference.
+///
+/// [rust lang reference]: https://doc.rust-lang.org/reference/items.html
 #[derive(Debug, Clone, Copy, HashStable_Generic)]
 pub struct Item<'hir> {
     pub ident: Ident,
@@ -3186,10 +3218,10 @@ impl<'hir> Item<'hir> {
             ItemKind::Static(ty, mutbl, body), (ty, *mutbl, *body);
 
         expect_const, (&'hir Ty<'hir>, &'hir Generics<'hir>, BodyId),
-            ItemKind::Const(ty, gen, body), (ty, gen, *body);
+            ItemKind::Const(ty, generics, body), (ty, generics, *body);
 
         expect_fn, (&FnSig<'hir>, &'hir Generics<'hir>, BodyId),
-            ItemKind::Fn(sig, gen, body), (sig, gen, *body);
+            ItemKind::Fn(sig, generics, body), (sig, generics, *body);
 
         expect_macro, (&ast::MacroDef, MacroKind), ItemKind::Macro(def, mk), (def, *mk);
 
@@ -3201,25 +3233,25 @@ impl<'hir> Item<'hir> {
         expect_global_asm, &'hir InlineAsm<'hir>, ItemKind::GlobalAsm(asm), asm;
 
         expect_ty_alias, (&'hir Ty<'hir>, &'hir Generics<'hir>),
-            ItemKind::TyAlias(ty, gen), (ty, gen);
+            ItemKind::TyAlias(ty, generics), (ty, generics);
 
         expect_opaque_ty, &OpaqueTy<'hir>, ItemKind::OpaqueTy(ty), ty;
 
-        expect_enum, (&EnumDef<'hir>, &'hir Generics<'hir>), ItemKind::Enum(def, gen), (def, gen);
+        expect_enum, (&EnumDef<'hir>, &'hir Generics<'hir>), ItemKind::Enum(def, generics), (def, generics);
 
         expect_struct, (&VariantData<'hir>, &'hir Generics<'hir>),
-            ItemKind::Struct(data, gen), (data, gen);
+            ItemKind::Struct(data, generics), (data, generics);
 
         expect_union, (&VariantData<'hir>, &'hir Generics<'hir>),
-            ItemKind::Union(data, gen), (data, gen);
+            ItemKind::Union(data, generics), (data, generics);
 
         expect_trait,
             (IsAuto, Safety, &'hir Generics<'hir>, GenericBounds<'hir>, &'hir [TraitItemRef]),
-            ItemKind::Trait(is_auto, safety, gen, bounds, items),
-            (*is_auto, *safety, gen, bounds, items);
+            ItemKind::Trait(is_auto, safety, generics, bounds, items),
+            (*is_auto, *safety, generics, bounds, items);
 
         expect_trait_alias, (&'hir Generics<'hir>, GenericBounds<'hir>),
-            ItemKind::TraitAlias(gen, bounds), (gen, bounds);
+            ItemKind::TraitAlias(generics, bounds), (generics, bounds);
 
         expect_impl, &'hir Impl<'hir>, ItemKind::Impl(imp), imp;
     }
@@ -3340,6 +3372,7 @@ pub enum ItemKind<'hir> {
 /// Refer to [`ImplItem`] for an associated item within an impl block.
 #[derive(Debug, Clone, Copy, HashStable_Generic)]
 pub struct Impl<'hir> {
+    pub constness: Constness,
     pub safety: Safety,
     pub polarity: ImplPolarity,
     pub defaultness: Defaultness,
@@ -3744,6 +3777,21 @@ impl<'hir> Node<'hir> {
             | Node::ForeignItem(ForeignItem {
                 kind: ForeignItemKind::Fn(fn_decl, _, _, _), ..
             }) => Some(fn_decl),
+            _ => None,
+        }
+    }
+
+    /// Get a `hir::Impl` if the node is an impl block for the given `trait_def_id`.
+    pub fn impl_block_of_trait(self, trait_def_id: DefId) -> Option<&'hir Impl<'hir>> {
+        match self {
+            Node::Item(Item { kind: ItemKind::Impl(impl_block), .. })
+                if impl_block
+                    .of_trait
+                    .and_then(|trait_ref| trait_ref.trait_def_id())
+                    .is_some_and(|trait_id| trait_id == trait_def_id) =>
+            {
+                Some(impl_block)
+            }
             _ => None,
         }
     }

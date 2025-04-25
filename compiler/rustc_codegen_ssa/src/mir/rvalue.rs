@@ -456,8 +456,12 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                             base::unsize_ptr(bx, lldata, operand.layout.ty, cast.ty, llextra);
                         OperandValue::Pair(lldata, llextra)
                     }
-                    mir::CastKind::PointerCoercion(PointerCoercion::MutToConstPointer)
-                    | mir::CastKind::PtrToPtr
+                    mir::CastKind::PointerCoercion(
+                        PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer,
+                    ) => {
+                        bug!("{kind:?} is for borrowck, and should never appear in codegen");
+                    }
+                    mir::CastKind::PtrToPtr
                         if bx.cx().is_backend_scalar_pair(operand.layout) =>
                     {
                         if let OperandValue::Pair(data_ptr, meta) = operand.val {
@@ -477,9 +481,6 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                             base::cast_to_dyn_star(bx, lldata, operand.layout, cast.ty, llextra);
                         OperandValue::Pair(lldata, llextra)
                     }
-                    mir::CastKind::PointerCoercion(
-                        PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer,
-                    )
                     | mir::CastKind::IntToInt
                     | mir::CastKind::FloatToInt
                     | mir::CastKind::FloatToFloat
@@ -638,7 +639,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         (OperandValue::Immediate(llval), operand.layout)
                     }
                     mir::UnOp::PtrMetadata => {
-                        debug_assert!(operand.layout.ty.is_unsafe_ptr());
+                        debug_assert!(
+                            operand.layout.ty.is_unsafe_ptr() || operand.layout.ty.is_ref(),
+                        );
                         let (_, meta) = operand.val.pointer_parts();
                         assert_eq!(operand.layout.fields.count() > 1, meta.is_some());
                         if let Some(meta) = meta {
@@ -680,7 +683,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         bx.cx().const_usize(val)
                     }
                     mir::NullOp::OffsetOf(fields) => {
-                        let val = layout.offset_of_subfield(bx.cx(), fields.iter()).bytes();
+                        let val = bx
+                            .tcx()
+                            .offset_of_subfield(bx.param_env(), layout, fields.iter())
+                            .bytes();
                         bx.cx().const_usize(val)
                     }
                     mir::NullOp::UbChecks => {
@@ -701,7 +707,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 let static_ = if !def_id.is_local() && bx.cx().tcx().needs_thread_local_shim(def_id)
                 {
                     let instance = ty::Instance {
-                        def: ty::InstanceDef::ThreadLocalShim(def_id),
+                        def: ty::InstanceKind::ThreadLocalShim(def_id),
                         args: ty::GenericArgs::empty(),
                     };
                     let fn_ptr = bx.get_fn_addr(instance);

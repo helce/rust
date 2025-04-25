@@ -4,12 +4,12 @@ use crate::constrained_generic_params::{identify_constrained_generic_params, Par
 use crate::errors;
 use crate::fluent_generated as fluent;
 
-use hir::intravisit::Visitor;
+use hir::intravisit::{self, Visitor};
 use rustc_ast as ast;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
 use rustc_errors::{codes::*, pluralize, struct_span_code_err, Applicability, ErrorGuaranteed};
 use rustc_hir as hir;
-use rustc_hir::def::DefKind;
+use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId, LocalModDefId};
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::ItemKind;
@@ -29,8 +29,8 @@ use rustc_session::parse::feature_err;
 use rustc_span::symbol::{sym, Ident};
 use rustc_span::{Span, DUMMY_SP};
 use rustc_target::spec::abi::Abi;
+use rustc_trait_selection::error_reporting::traits::TypeErrCtxtExt;
 use rustc_trait_selection::regions::InferCtxtRegionExt;
-use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt;
 use rustc_trait_selection::traits::misc::{
     type_allowed_to_implement_const_param_ty, ConstParamTyImplementationError,
 };
@@ -39,6 +39,7 @@ use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt as _
 use rustc_trait_selection::traits::{
     self, FulfillmentError, ObligationCause, ObligationCauseCode, ObligationCtxt, WellFormedLoc,
 };
+use rustc_type_ir::solve::NoSolution;
 use rustc_type_ir::TypeFlags;
 
 use std::cell::LazyCell;
@@ -119,16 +120,7 @@ where
 
     let errors = wfcx.select_all_or_error();
     if !errors.is_empty() {
-        let err = infcx.err_ctxt().report_fulfillment_errors(errors);
-        if tcx.dcx().has_errors().is_some() {
-            return Err(err);
-        } else {
-            // HACK(oli-obk): tests/ui/specialization/min_specialization/specialize_on_type_error.rs
-            // causes an delayed bug during normalization, without reporting an error, so we need
-            // to act as if no error happened, in order to let our callers continue and report an
-            // error later in check_impl_items_against_trait.
-            return Ok(());
-        }
+        return Err(infcx.err_ctxt().report_fulfillment_errors(errors));
     }
 
     debug!(?assumed_wf_types);
@@ -486,7 +478,7 @@ fn check_gat_where_clauses(tcx: TyCtxt<'_>, trait_def_id: LocalDefId) {
                             param_env,
                             item_def_id,
                             tcx.explicit_item_bounds(item_def_id)
-                                .instantiate_identity_iter_copied()
+                                .iter_identity_copied()
                                 .collect::<Vec<_>>(),
                             &FxIndexSet::default(),
                             gat_def_id,
@@ -922,7 +914,12 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) -> Result<(), 
         hir::GenericParamKind::Lifetime { .. } | hir::GenericParamKind::Type { .. } => Ok(()),
 
         // Const parameters are well formed if their type is structural match.
-        hir::GenericParamKind::Const { ty: hir_ty, default: _, is_host_effect: _ } => {
+        hir::GenericParamKind::Const {
+            ty: hir_ty,
+            default: _,
+            is_host_effect: _,
+            synthetic: _,
+        } => {
             let ty = tcx.type_of(param.def_id).instantiate_identity();
 
             if tcx.features().adt_const_params {
@@ -1208,17 +1205,16 @@ fn check_associated_type_bounds(wfcx: &WfCheckingCtxt<'_, '_>, item: ty::AssocIt
     let bounds = wfcx.tcx().explicit_item_bounds(item.def_id);
 
     debug!("check_associated_type_bounds: bounds={:?}", bounds);
-    let wf_obligations =
-        bounds.instantiate_identity_iter_copied().flat_map(|(bound, bound_span)| {
-            let normalized_bound = wfcx.normalize(span, None, bound);
-            traits::wf::clause_obligations(
-                wfcx.infcx,
-                wfcx.param_env,
-                wfcx.body_def_id,
-                normalized_bound,
-                bound_span,
-            )
-        });
+    let wf_obligations = bounds.iter_identity_copied().flat_map(|(bound, bound_span)| {
+        let normalized_bound = wfcx.normalize(span, None, bound);
+        traits::wf::clause_obligations(
+            wfcx.infcx,
+            wfcx.param_env,
+            wfcx.body_def_id,
+            normalized_bound,
+            bound_span,
+        )
+    });
 
     wfcx.register_obligations(wf_obligations);
 }
@@ -1716,13 +1712,12 @@ fn receiver_is_valid<'tcx>(
     let cause =
         ObligationCause::new(span, wfcx.body_def_id, traits::ObligationCauseCode::MethodReceiver);
 
-    let can_eq_self = |ty| infcx.can_eq(wfcx.param_env, self_ty, ty);
-
-    // `self: Self` is always valid.
-    if can_eq_self(receiver_ty) {
-        if let Err(err) = wfcx.eq(&cause, wfcx.param_env, self_ty, receiver_ty) {
-            infcx.err_ctxt().report_mismatched_types(&cause, self_ty, receiver_ty, err).emit();
-        }
+    // Special case `receiver == self_ty`, which doesn't necessarily require the `Receiver` lang item.
+    if let Ok(()) = wfcx.infcx.commit_if_ok(|_| {
+        let ocx = ObligationCtxt::new(wfcx.infcx);
+        ocx.eq(&cause, wfcx.param_env, self_ty, receiver_ty)?;
+        if ocx.select_all_or_error().is_empty() { Ok(()) } else { Err(NoSolution) }
+    }) {
         return true;
     }
 
@@ -1733,58 +1728,51 @@ fn receiver_is_valid<'tcx>(
         autoderef = autoderef.include_raw_pointers();
     }
 
-    // The first type is `receiver_ty`, which we know its not equal to `self_ty`; skip it.
-    autoderef.next();
-
     let receiver_trait_def_id = tcx.require_lang_item(LangItem::Receiver, Some(span));
 
     // Keep dereferencing `receiver_ty` until we get to `self_ty`.
-    loop {
-        if let Some((potential_self_ty, _)) = autoderef.next() {
-            debug!(
-                "receiver_is_valid: potential self type `{:?}` to match `{:?}`",
-                potential_self_ty, self_ty
-            );
+    while let Some((potential_self_ty, _)) = autoderef.next() {
+        debug!(
+            "receiver_is_valid: potential self type `{:?}` to match `{:?}`",
+            potential_self_ty, self_ty
+        );
 
-            if can_eq_self(potential_self_ty) {
-                wfcx.register_obligations(autoderef.into_obligations());
+        // Check if the self type unifies. If it does, then commit the result
+        // since it may have region side-effects.
+        if let Ok(()) = wfcx.infcx.commit_if_ok(|_| {
+            let ocx = ObligationCtxt::new(wfcx.infcx);
+            ocx.eq(&cause, wfcx.param_env, self_ty, potential_self_ty)?;
+            if ocx.select_all_or_error().is_empty() { Ok(()) } else { Err(NoSolution) }
+        }) {
+            wfcx.register_obligations(autoderef.into_obligations());
+            return true;
+        }
 
-                if let Err(err) = wfcx.eq(&cause, wfcx.param_env, self_ty, potential_self_ty) {
-                    infcx
-                        .err_ctxt()
-                        .report_mismatched_types(&cause, self_ty, potential_self_ty, err)
-                        .emit();
-                }
-
+        // Without `feature(arbitrary_self_types)`, we require that each step in the
+        // deref chain implement `receiver`.
+        if !arbitrary_self_types_enabled {
+            if !receiver_is_implemented(
+                wfcx,
+                receiver_trait_def_id,
+                cause.clone(),
+                potential_self_ty,
+            ) {
+                // We cannot proceed.
                 break;
-            } else {
-                // Without `feature(arbitrary_self_types)`, we require that each step in the
-                // deref chain implement `receiver`
-                if !arbitrary_self_types_enabled
-                    && !receiver_is_implemented(
-                        wfcx,
-                        receiver_trait_def_id,
-                        cause.clone(),
-                        potential_self_ty,
-                    )
-                {
-                    return false;
-                }
             }
-        } else {
-            debug!("receiver_is_valid: type `{:?}` does not deref to `{:?}`", receiver_ty, self_ty);
-            return false;
+
+            // Register the bound, in case it has any region side-effects.
+            wfcx.register_bound(
+                cause.clone(),
+                wfcx.param_env,
+                potential_self_ty,
+                receiver_trait_def_id,
+            );
         }
     }
 
-    // Without `feature(arbitrary_self_types)`, we require that `receiver_ty` implements `Receiver`.
-    if !arbitrary_self_types_enabled
-        && !receiver_is_implemented(wfcx, receiver_trait_def_id, cause.clone(), receiver_ty)
-    {
-        return false;
-    }
-
-    true
+    debug!("receiver_is_valid: type `{:?}` does not deref to `{:?}`", receiver_ty, self_ty);
+    false
 }
 
 fn receiver_is_implemented<'tcx>(
@@ -1811,7 +1799,7 @@ fn receiver_is_implemented<'tcx>(
 
 fn check_variances_for_type_defn<'tcx>(
     tcx: TyCtxt<'tcx>,
-    item: &hir::Item<'tcx>,
+    item: &'tcx hir::Item<'tcx>,
     hir_generics: &hir::Generics<'tcx>,
 ) {
     let identity_args = ty::GenericArgs::identity_for_item(tcx, item.owner_id);
@@ -1898,21 +1886,21 @@ fn check_variances_for_type_defn<'tcx>(
             hir::ParamName::Error => {}
             _ => {
                 let has_explicit_bounds = explicitly_bounded_params.contains(&parameter);
-                report_bivariance(tcx, hir_param, has_explicit_bounds, item.kind);
+                report_bivariance(tcx, hir_param, has_explicit_bounds, item);
             }
         }
     }
 }
 
-fn report_bivariance(
-    tcx: TyCtxt<'_>,
-    param: &rustc_hir::GenericParam<'_>,
+fn report_bivariance<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    param: &'tcx hir::GenericParam<'tcx>,
     has_explicit_bounds: bool,
-    item_kind: ItemKind<'_>,
+    item: &'tcx hir::Item<'tcx>,
 ) -> ErrorGuaranteed {
     let param_name = param.name.ident();
 
-    let help = match item_kind {
+    let help = match item.kind {
         ItemKind::Enum(..) | ItemKind::Struct(..) | ItemKind::Union(..) => {
             if let Some(def_id) = tcx.lang_items().phantom_data() {
                 errors::UnusedGenericParameterHelp::Adt {
@@ -1927,6 +1915,41 @@ fn report_bivariance(
         item_kind => bug!("report_bivariance: unexpected item kind: {item_kind:?}"),
     };
 
+    let mut usage_spans = vec![];
+    intravisit::walk_item(
+        &mut CollectUsageSpans { spans: &mut usage_spans, param_def_id: param.def_id.to_def_id() },
+        item,
+    );
+
+    if !usage_spans.is_empty() {
+        // First, check if the ADT/LTA is (probably) cyclical. We say probably here, since we're
+        // not actually looking into substitutions, just walking through fields / the "RHS".
+        // We don't recurse into the hidden types of opaques or anything else fancy.
+        let item_def_id = item.owner_id.to_def_id();
+        let is_probably_cyclical =
+            IsProbablyCyclical { tcx, item_def_id, seen: Default::default() }
+                .visit_def(item_def_id)
+                .is_break();
+        // If the ADT/LTA is cyclical, then if at least one usage of the type parameter or
+        // the `Self` alias is present in the, then it's probably a cyclical struct/ type
+        // alias, and we should call those parameter usages recursive rather than just saying
+        // they're unused...
+        //
+        // We currently report *all* of the parameter usages, since computing the exact
+        // subset is very involved, and the fact we're mentioning recursion at all is
+        // likely to guide the user in the right direction.
+        if is_probably_cyclical {
+            return tcx.dcx().emit_err(errors::RecursiveGenericParameter {
+                spans: usage_spans,
+                param_span: param.span,
+                param_name,
+                param_def_kind: tcx.def_descr(param.def_id.to_def_id()),
+                help,
+                note: (),
+            });
+        }
+    }
+
     let const_param_help =
         matches!(param.kind, hir::GenericParamKind::Type { .. } if !has_explicit_bounds)
             .then_some(());
@@ -1935,11 +1958,92 @@ fn report_bivariance(
         span: param.span,
         param_name,
         param_def_kind: tcx.def_descr(param.def_id.to_def_id()),
+        usage_spans,
         help,
         const_param_help,
     });
     diag.code(E0392);
     diag.emit()
+}
+
+/// Detects cases where an ADT/LTA is trivially cyclical -- we want to detect this so
+/// we only mention that its parameters are used cyclically if the ADT/LTA is truly
+/// cyclical.
+///
+/// Notably, we don't consider substitutions here, so this may have false positives.
+struct IsProbablyCyclical<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    item_def_id: DefId,
+    seen: FxHashSet<DefId>,
+}
+
+impl<'tcx> IsProbablyCyclical<'tcx> {
+    fn visit_def(&mut self, def_id: DefId) -> ControlFlow<(), ()> {
+        match self.tcx.def_kind(def_id) {
+            DefKind::Struct | DefKind::Enum | DefKind::Union => {
+                self.tcx.adt_def(def_id).all_fields().try_for_each(|field| {
+                    self.tcx.type_of(field.did).instantiate_identity().visit_with(self)
+                })
+            }
+            DefKind::TyAlias if self.tcx.type_alias_is_lazy(def_id) => {
+                self.tcx.type_of(def_id).instantiate_identity().visit_with(self)
+            }
+            _ => ControlFlow::Continue(()),
+        }
+    }
+}
+
+impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for IsProbablyCyclical<'tcx> {
+    type Result = ControlFlow<(), ()>;
+
+    fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<(), ()> {
+        let def_id = match ty.kind() {
+            ty::Adt(adt_def, _) => Some(adt_def.did()),
+            ty::Alias(ty::Weak, alias_ty) => Some(alias_ty.def_id),
+            _ => None,
+        };
+        if let Some(def_id) = def_id {
+            if def_id == self.item_def_id {
+                return ControlFlow::Break(());
+            }
+            if self.seen.insert(def_id) {
+                self.visit_def(def_id)?;
+            }
+        }
+        ty.super_visit_with(self)
+    }
+}
+
+/// Collect usages of the `param_def_id` and `Res::SelfTyAlias` in the HIR.
+///
+/// This is used to report places where the user has used parameters in a
+/// non-variance-constraining way for better bivariance errors.
+struct CollectUsageSpans<'a> {
+    spans: &'a mut Vec<Span>,
+    param_def_id: DefId,
+}
+
+impl<'tcx> Visitor<'tcx> for CollectUsageSpans<'_> {
+    type Result = ();
+
+    fn visit_generics(&mut self, _g: &'tcx rustc_hir::Generics<'tcx>) -> Self::Result {
+        // Skip the generics. We only care about fields, not where clause/param bounds.
+    }
+
+    fn visit_ty(&mut self, t: &'tcx hir::Ty<'tcx>) -> Self::Result {
+        if let hir::TyKind::Path(hir::QPath::Resolved(None, qpath)) = t.kind {
+            if let Res::Def(DefKind::TyParam, def_id) = qpath.res
+                && def_id == self.param_def_id
+            {
+                self.spans.push(t.span);
+                return;
+            } else if let Res::SelfTyAlias { .. } = qpath.res {
+                self.spans.push(t.span);
+                return;
+            }
+        }
+        intravisit::walk_ty(self, t);
+    }
 }
 
 impl<'tcx> WfCheckingCtxt<'_, 'tcx> {

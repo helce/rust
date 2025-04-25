@@ -4,8 +4,6 @@ mir_build_already_borrowed = cannot borrow value as mutable because it is also b
 
 mir_build_already_mut_borrowed = cannot borrow value as immutable because it is also borrowed as mutable
 
-mir_build_assoc_const_in_pattern = associated consts cannot be referenced in patterns
-
 mir_build_bindings_with_variant_name =
     pattern binding `{$name}` is named the same as one of the variants of the type `{$ty_path}`
     .suggestion = to match on the variant, qualify the path
@@ -103,7 +101,7 @@ mir_build_deref_raw_pointer_requires_unsafe_unsafe_op_in_unsafe_fn_allowed =
     .note = raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
     .label = dereference of raw pointer
 
-mir_build_exceeds_mcdc_condition_limit = Number of conditions in decision ({$num_conditions}) exceeds limit ({$max_conditions}). MC/DC analysis will not count this expression.
+mir_build_exceeds_mcdc_condition_limit = number of conditions in decision ({$num_conditions}) exceeds limit ({$max_conditions}), so MC/DC analysis will not count this expression
 
 mir_build_extern_static_requires_unsafe =
     use of extern static is unsafe and requires unsafe block

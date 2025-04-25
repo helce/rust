@@ -20,7 +20,7 @@ use path::PathStyle;
 
 use rustc_ast::ptr::P;
 use rustc_ast::token::{self, Delimiter, IdentIsRaw, Nonterminal, Token, TokenKind};
-use rustc_ast::tokenstream::{AttributesData, DelimSpacing, DelimSpan, Spacing};
+use rustc_ast::tokenstream::{AttrsTarget, DelimSpacing, DelimSpan, Spacing};
 use rustc_ast::tokenstream::{TokenStream, TokenTree, TokenTreeCursor};
 use rustc_ast::util::case::Case;
 use rustc_ast::{
@@ -91,17 +91,6 @@ pub enum ForceCollect {
     No,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum TrailingToken {
-    None,
-    Semi,
-    Gt,
-    /// If the trailing token is a comma, then capture it
-    /// Otherwise, ignore the trailing token
-    MaybeComma,
-}
-
-/// Like `maybe_whole_expr`, but for things other than expressions.
 #[macro_export]
 macro_rules! maybe_whole {
     ($p:expr, $constructor:ident, |$x:ident| $e:expr) => {
@@ -153,7 +142,7 @@ pub struct Parser<'a> {
     expected_tokens: Vec<TokenType>,
     token_cursor: TokenCursor,
     // The number of calls to `bump`, i.e. the position in the token stream.
-    num_bump_calls: usize,
+    num_bump_calls: u32,
     // During parsing we may sometimes need to 'unglue' a glued token into two
     // component tokens (e.g. '>>' into '>' and '>), so the parser can consume
     // them one at a time. This process bypasses the normal capturing mechanism
@@ -192,7 +181,7 @@ pub struct Parser<'a> {
 // This type is used a lot, e.g. it's cloned when matching many declarative macro rules with nonterminals. Make sure
 // it doesn't unintentionally get bigger.
 #[cfg(target_pointer_width = "64")]
-rustc_data_structures::static_assert_size!(Parser<'_>, 264);
+rustc_data_structures::static_assert_size!(Parser<'_>, 256);
 
 /// Stores span information about a closure.
 #[derive(Clone, Debug)]
@@ -203,13 +192,13 @@ struct ClosureSpans {
 }
 
 /// Indicates a range of tokens that should be replaced by
-/// the tokens in the provided vector. This is used in two
+/// the tokens in the provided `AttrsTarget`. This is used in two
 /// places during token collection:
 ///
 /// 1. During the parsing of an AST node that may have a `#[derive]`
 /// attribute, we parse a nested AST node that has `#[cfg]` or `#[cfg_attr]`
 /// In this case, we use a `ReplaceRange` to replace the entire inner AST node
-/// with `FlatToken::AttrTarget`, allowing us to perform eager cfg-expansion
+/// with `FlatToken::AttrsTarget`, allowing us to perform eager cfg-expansion
 /// on an `AttrTokenStream`.
 ///
 /// 2. When we parse an inner attribute while collecting tokens. We
@@ -219,7 +208,7 @@ struct ClosureSpans {
 /// the first macro inner attribute to invoke a proc-macro).
 /// When create a `TokenStream`, the inner attributes get inserted
 /// into the proper place in the token stream.
-type ReplaceRange = (Range<u32>, Vec<(FlatToken, Spacing)>);
+type ReplaceRange = (Range<u32>, Option<AttrsTarget>);
 
 /// Controls how we capture tokens. Capturing can be expensive,
 /// so we try to avoid performing capturing in cases where
@@ -232,11 +221,12 @@ enum Capturing {
     Yes,
 }
 
+// This state is used by `Parser::collect_tokens_trailing_token`.
 #[derive(Clone, Debug)]
 struct CaptureState {
     capturing: Capturing,
     replace_ranges: Vec<ReplaceRange>,
-    inner_attr_ranges: FxHashMap<AttrId, ReplaceRange>,
+    inner_attr_ranges: FxHashMap<AttrId, Range<u32>>,
 }
 
 /// Iterator over a `TokenStream` that produces `Token`s. It's a bit odd that
@@ -333,18 +323,6 @@ impl TokenType {
             TokenType::Const => "a const expression".to_string(),
         }
     }
-}
-
-/// Used by [`Parser::expect_any_with_type`].
-#[derive(Copy, Clone, Debug)]
-enum TokenExpectType {
-    /// Unencountered tokens are inserted into [`Parser::expected_tokens`].
-    /// See [`Parser::check`].
-    Expect,
-
-    /// Unencountered tokens are not inserted into [`Parser::expected_tokens`].
-    /// See [`Parser::check_noexpect`].
-    NoExpect,
 }
 
 /// A sequence separator.
@@ -448,6 +426,11 @@ impl<'a> Parser<'a> {
         // Make parser point to the first token.
         parser.bump();
 
+        // Change this from 1 back to 0 after the bump. This eases debugging of
+        // `Parser::collect_tokens_trailing_token` nicer because it makes the
+        // token positions 0-indexed which is nicer than 1-indexed.
+        parser.num_bump_calls = 0;
+
         parser
     }
 
@@ -518,6 +501,7 @@ impl<'a> Parser<'a> {
             FatalError.raise();
         } else {
             self.expected_one_of_not_found(edible, inedible)
+                .map(|error_guaranteed| Recovered::Yes(error_guaranteed))
         }
     }
 
@@ -807,11 +791,13 @@ impl<'a> Parser<'a> {
     }
 
     /// Checks if the next token is contained within `kets`, and returns `true` if so.
-    fn expect_any_with_type(&mut self, kets: &[&TokenKind], expect: TokenExpectType) -> bool {
-        kets.iter().any(|k| match expect {
-            TokenExpectType::Expect => self.check(k),
-            TokenExpectType::NoExpect => self.check_noexpect(k),
-        })
+    fn expect_any_with_type(
+        &mut self,
+        kets_expected: &[&TokenKind],
+        kets_not_expected: &[&TokenKind],
+    ) -> bool {
+        kets_expected.iter().any(|k| self.check(k))
+            || kets_not_expected.iter().any(|k| self.check_noexpect(k))
     }
 
     /// Parses a sequence until the specified delimiters. The function
@@ -819,9 +805,9 @@ impl<'a> Parser<'a> {
     /// closing bracket.
     fn parse_seq_to_before_tokens<T>(
         &mut self,
-        kets: &[&TokenKind],
+        kets_expected: &[&TokenKind],
+        kets_not_expected: &[&TokenKind],
         sep: SeqSep,
-        expect: TokenExpectType,
         mut f: impl FnMut(&mut Parser<'a>) -> PResult<'a, T>,
     ) -> PResult<'a, (ThinVec<T>, Trailing, Recovered)> {
         let mut first = true;
@@ -829,7 +815,7 @@ impl<'a> Parser<'a> {
         let mut trailing = Trailing::No;
         let mut v = ThinVec::new();
 
-        while !self.expect_any_with_type(kets, expect) {
+        while !self.expect_any_with_type(kets_expected, kets_not_expected) {
             if let token::CloseDelim(..) | token::Eof = self.token.kind {
                 break;
             }
@@ -927,7 +913,8 @@ impl<'a> Parser<'a> {
                                     if self.token == token::Colon {
                                         // we will try to recover in `maybe_recover_struct_lit_bad_delims`
                                         return Err(expect_err);
-                                    } else if let [token::CloseDelim(Delimiter::Parenthesis)] = kets
+                                    } else if let [token::CloseDelim(Delimiter::Parenthesis)] =
+                                        kets_expected
                                     {
                                         return Err(expect_err);
                                     } else {
@@ -940,7 +927,9 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            if sep.trailing_sep_allowed && self.expect_any_with_type(kets, expect) {
+            if sep.trailing_sep_allowed
+                && self.expect_any_with_type(kets_expected, kets_not_expected)
+            {
                 trailing = Trailing::Yes;
                 break;
             }
@@ -960,11 +949,10 @@ impl<'a> Parser<'a> {
         let initial_semicolon = self.token.span;
 
         while self.eat(&TokenKind::Semi) {
-            let _ =
-                self.parse_stmt_without_recovery(false, ForceCollect::Yes).unwrap_or_else(|e| {
-                    e.cancel();
-                    None
-                });
+            let _ = self.parse_stmt_without_recovery(false, ForceCollect::No).unwrap_or_else(|e| {
+                e.cancel();
+                None
+            });
         }
 
         expect_err
@@ -1020,7 +1008,7 @@ impl<'a> Parser<'a> {
         sep: SeqSep,
         f: impl FnMut(&mut Parser<'a>) -> PResult<'a, T>,
     ) -> PResult<'a, (ThinVec<T>, Trailing, Recovered)> {
-        self.parse_seq_to_before_tokens(&[ket], sep, TokenExpectType::Expect, f)
+        self.parse_seq_to_before_tokens(&[ket], &[], sep, f)
     }
 
     /// Parses a sequence, including only the closing delimiter. The function
@@ -1125,41 +1113,39 @@ impl<'a> Parser<'a> {
             return looker(&self.token);
         }
 
-        if let Some(&(_, span, _, delim)) = self.token_cursor.stack.last()
-            && delim != Delimiter::Invisible
-        {
-            // We are not in the outermost token stream, and the token stream
-            // we are in has non-skipped delimiters. Look for skipped
-            // delimiters in the lookahead range.
-            let tree_cursor = &self.token_cursor.tree_cursor;
-            let all_normal = (0..dist).all(|i| {
-                let token = tree_cursor.look_ahead(i);
-                !matches!(token, Some(TokenTree::Delimited(.., Delimiter::Invisible, _)))
-            });
-            if all_normal {
-                // There were no skipped delimiters. Do lookahead by plain indexing.
-                return match tree_cursor.look_ahead(dist - 1) {
-                    Some(tree) => {
-                        // Indexing stayed within the current token stream.
-                        match tree {
-                            TokenTree::Token(token, _) => looker(token),
-                            TokenTree::Delimited(dspan, _, delim, _) => {
-                                looker(&Token::new(token::OpenDelim(*delim), dspan.open))
+        // Typically around 98% of the `dist > 0` cases have `dist == 1`, so we
+        // have a fast special case for that.
+        if dist == 1 {
+            // The index is zero because the tree cursor's index always points
+            // to the next token to be gotten.
+            match self.token_cursor.tree_cursor.look_ahead(0) {
+                Some(tree) => {
+                    // Indexing stayed within the current token tree.
+                    match tree {
+                        TokenTree::Token(token, _) => return looker(token),
+                        &TokenTree::Delimited(dspan, _, delim, _) => {
+                            if delim != Delimiter::Invisible {
+                                return looker(&Token::new(token::OpenDelim(delim), dspan.open));
                             }
                         }
+                    };
+                }
+                None => {
+                    // The tree cursor lookahead went (one) past the end of the
+                    // current token tree. Try to return a close delimiter.
+                    if let Some(&(_, span, _, delim)) = self.token_cursor.stack.last()
+                        && delim != Delimiter::Invisible
+                    {
+                        // We are not in the outermost token stream, so we have
+                        // delimiters. Also, those delimiters are not skipped.
+                        return looker(&Token::new(token::CloseDelim(delim), span.close));
                     }
-                    None => {
-                        // Indexing went past the end of the current token
-                        // stream. Use the close delimiter, no matter how far
-                        // ahead `dist` went.
-                        looker(&Token::new(token::CloseDelim(delim), span.close))
-                    }
-                };
+                }
             }
         }
 
-        // We are in a more complex case. Just clone the token cursor and use
-        // `next`, skipping delimiters as necessary. Slow but simple.
+        // Just clone the token cursor and use `next`, skipping delimiters as
+        // necessary. Slow but simple.
         let mut cursor = self.token_cursor.clone();
         let mut i = 0;
         let mut token = Token::dummy();
@@ -1338,17 +1324,6 @@ impl<'a> Parser<'a> {
             };
             DelimArgs { dspan, delim, tokens }
         })
-    }
-
-    fn parse_or_use_outer_attributes(
-        &mut self,
-        already_parsed_attrs: Option<AttrWrapper>,
-    ) -> PResult<'a, AttrWrapper> {
-        if let Some(attrs) = already_parsed_attrs {
-            Ok(attrs)
-        } else {
-            self.parse_outer_attributes()
-        }
     }
 
     /// Parses a single token tree from the input.
@@ -1531,7 +1506,7 @@ impl<'a> Parser<'a> {
         self.collect_tokens_trailing_token(
             AttrWrapper::empty(),
             ForceCollect::Yes,
-            |this, _attrs| Ok((f(this)?, TrailingToken::None)),
+            |this, _attrs| Ok((f(this)?, false)),
         )
     }
 
@@ -1559,14 +1534,16 @@ impl<'a> Parser<'a> {
 
                 // we don't need N spans, but we want at least one, so print all of prev_token
                 dbg_fmt.field("prev_token", &parser.prev_token);
-                // make it easier to peek farther ahead by taking TokenKinds only until EOF
-                let tokens = (0..*lookahead)
-                    .map(|i| parser.look_ahead(i, |tok| tok.kind.clone()))
-                    .scan(parser.prev_token == TokenKind::Eof, |eof, tok| {
-                        let current = eof.then_some(tok.clone()); // include a trailing EOF token
-                        *eof |= &tok == &TokenKind::Eof;
-                        current
-                    });
+                let mut tokens = vec![];
+                for i in 0..*lookahead {
+                    let tok = parser.look_ahead(i, |tok| tok.kind.clone());
+                    let is_eof = tok == TokenKind::Eof;
+                    tokens.push(tok);
+                    if is_eof {
+                        // Don't look ahead past EOF.
+                        break;
+                    }
+                }
                 dbg_fmt.field_with("tokens", |field| field.debug_list().entries(tokens).finish());
                 dbg_fmt.field("approx_token_stream_pos", &parser.num_bump_calls);
 
@@ -1590,7 +1567,7 @@ impl<'a> Parser<'a> {
         self.expected_tokens.clear();
     }
 
-    pub fn approx_token_stream_pos(&self) -> usize {
+    pub fn approx_token_stream_pos(&self) -> u32 {
         self.num_bump_calls
     }
 }
@@ -1606,7 +1583,7 @@ pub(crate) fn make_unclosed_delims_error(
     if let Some(sp) = unmatched.unclosed_span {
         spans.push(sp);
     };
-    let err = psess.dcx.create_err(MismatchedClosingDelimiter {
+    let err = psess.dcx().create_err(MismatchedClosingDelimiter {
         spans,
         delimiter: pprust::token_kind_to_string(&token::CloseDelim(found_delim)).to_string(),
         unmatched: unmatched.found_span,
@@ -1625,12 +1602,11 @@ pub(crate) fn make_unclosed_delims_error(
 enum FlatToken {
     /// A token - this holds both delimiter (e.g. '{' and '}')
     /// and non-delimiter tokens
-    Token(Token),
-    /// Holds the `AttributesData` for an AST node. The
-    /// `AttributesData` is inserted directly into the
-    /// constructed `AttrTokenStream` as
-    /// an `AttrTokenTree::Attributes`.
-    AttrTarget(AttributesData),
+    Token((Token, Spacing)),
+    /// Holds the `AttrsTarget` for an AST node. The `AttrsTarget` is inserted
+    /// directly into the constructed `AttrTokenStream` as an
+    /// `AttrTokenTree::AttrsTarget`.
+    AttrsTarget(AttrsTarget),
     /// A special 'empty' token that is ignored during the conversion
     /// to an `AttrTokenStream`. This is used to simplify the
     /// handling of replace ranges.

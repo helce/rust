@@ -4,7 +4,7 @@ use crate::errors::{
     WhereClauseBeforeTupleStructBodySugg,
 };
 
-use super::{ForceCollect, Parser, TrailingToken};
+use super::{ForceCollect, Parser};
 
 use ast::token::Delimiter;
 use rustc_ast::token;
@@ -62,7 +62,7 @@ impl<'a> Parser<'a> {
                 let snapshot = self.create_snapshot_for_diagnostic();
                 match self.parse_ty() {
                     Ok(p) => {
-                        if let TyKind::ImplTrait(_, bounds, None) = &p.kind {
+                        if let TyKind::ImplTrait(_, bounds) = &p.kind {
                             let span = impl_span.to(self.token.span.shrink_to_lo());
                             let mut err = self.dcx().struct_span_err(
                                 span,
@@ -229,13 +229,13 @@ impl<'a> Parser<'a> {
                                     span: where_predicate.span(),
                                 });
                                 // FIXME - try to continue parsing other generics?
-                                return Ok((None, TrailingToken::None));
+                                return Ok((None, false));
                             }
                             Err(err) => {
                                 err.cancel();
                                 // FIXME - maybe we should overwrite 'self' outside of `collect_tokens`?
                                 this.restore_snapshot(snapshot);
-                                return Ok((None, TrailingToken::None));
+                                return Ok((None, false));
                             }
                         }
                     } else {
@@ -249,14 +249,14 @@ impl<'a> Parser<'a> {
                                     .emit_err(errors::AttrWithoutGenerics { span: attrs[0].span });
                             }
                         }
-                        return Ok((None, TrailingToken::None));
+                        return Ok((None, false));
                     };
 
                     if !this.eat(&token::Comma) {
                         done = true;
                     }
-                    // We just ate the comma, so no need to use `TrailingToken`
-                    Ok((param, TrailingToken::None))
+                    // We just ate the comma, so no need to capture the trailing token.
+                    Ok((param, false))
                 })?;
 
             if let Some(param) = param {
@@ -457,7 +457,7 @@ impl<'a> Parser<'a> {
         // * `for<'a> Trait1<'a>: Trait2<'a /* ok */>`
         // * `(for<'a> Trait1<'a>): Trait2<'a /* not ok */>`
         // * `for<'a> for<'b> Trait1<'a, 'b>: Trait2<'a /* ok */, 'b /* not ok */>`
-        let lifetime_defs = self.parse_late_bound_lifetime_defs()?;
+        let (lifetime_defs, _) = self.parse_late_bound_lifetime_defs()?;
 
         // Parse type with mandatory colon and (possibly empty) bounds,
         // or with mandatory equality sign and the second type.

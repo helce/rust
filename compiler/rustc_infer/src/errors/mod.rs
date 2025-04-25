@@ -15,11 +15,10 @@ use rustc_span::symbol::kw;
 use rustc_span::Symbol;
 use rustc_span::{symbol::Ident, BytePos, Span};
 
+use crate::error_reporting::infer::nice_region_error::placeholder_error::Highlighted;
+use crate::error_reporting::infer::ObligationCauseAsDiagArg;
 use crate::fluent_generated as fluent;
-use crate::infer::error_reporting::{
-    need_type_info::UnderspecifiedArgKind, nice_region_error::placeholder_error::Highlighted,
-    ObligationCauseAsDiagArg,
-};
+use crate::infer::need_type_info::UnderspecifiedArgKind;
 
 use std::path::PathBuf;
 
@@ -55,6 +54,8 @@ pub struct AnnotationRequired<'a> {
     #[note(infer_full_type_written)]
     pub was_written: Option<()>,
     pub path: PathBuf,
+    #[note(infer_type_annotations_needed_error_time)]
+    pub time_version: bool,
 }
 
 // Copy of `AnnotationRequired` for E0283
@@ -1580,4 +1581,55 @@ pub enum ObligationCauseFailureCode {
         #[subdiagnostic]
         subdiags: Vec<TypeErrorAdditionalDiags>,
     },
+}
+
+#[derive(Subdiagnostic)]
+pub enum AddPreciseCapturing {
+    #[suggestion(
+        infer_precise_capturing_new,
+        style = "verbose",
+        code = " + use<{concatenated_bounds}>",
+        applicability = "machine-applicable"
+    )]
+    New {
+        #[primary_span]
+        span: Span,
+        new_lifetime: Symbol,
+        concatenated_bounds: String,
+    },
+    #[suggestion(
+        infer_precise_capturing_existing,
+        style = "verbose",
+        code = "{pre}{new_lifetime}{post}",
+        applicability = "machine-applicable"
+    )]
+    Existing {
+        #[primary_span]
+        span: Span,
+        new_lifetime: Symbol,
+        pre: &'static str,
+        post: &'static str,
+    },
+}
+
+pub struct AddPreciseCapturingAndParams {
+    pub suggs: Vec<(Span, String)>,
+    pub new_lifetime: Symbol,
+    pub apit_spans: Vec<Span>,
+}
+
+impl Subdiagnostic for AddPreciseCapturingAndParams {
+    fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
+        self,
+        diag: &mut Diag<'_, G>,
+        _f: &F,
+    ) {
+        diag.arg("new_lifetime", self.new_lifetime);
+        diag.multipart_suggestion_verbose(
+            fluent::infer_precise_capturing_new_but_apit,
+            self.suggs,
+            Applicability::MaybeIncorrect,
+        );
+        diag.span_note(self.apit_spans, fluent::infer_warn_removing_apit_params);
+    }
 }

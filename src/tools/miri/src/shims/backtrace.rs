@@ -11,8 +11,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         &mut self,
         abi: Abi,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
         let [flags] = this.check_shim(abi, Abi::Rust, link_name, args)?;
@@ -31,8 +31,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         &mut self,
         abi: Abi,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
         let tcx = this.tcx;
@@ -110,7 +110,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
 
     fn resolve_frame_pointer(
         &mut self,
-        ptr: &OpTy<'tcx, Provenance>,
+        ptr: &OpTy<'tcx>,
     ) -> InterpResult<'tcx, (Instance<'tcx>, Loc, String, String)> {
         let this = self.eval_context_mut();
 
@@ -119,7 +119,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         let (alloc_id, offset, _prov) = this.ptr_get_alloc_id(ptr)?;
 
         // This has to be an actual global fn ptr, not a dlsym function.
-        let fn_instance = if let Some(GlobalAlloc::Function(instance)) =
+        let fn_instance = if let Some(GlobalAlloc::Function { instance, .. }) =
             this.tcx.try_get_global_alloc(alloc_id)
         {
             instance
@@ -140,8 +140,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         &mut self,
         abi: Abi,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
         let [ptr, flags] = this.check_shim(abi, Abi::Rust, link_name, args)?;
@@ -218,7 +218,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         &mut self,
         abi: Abi,
         link_name: Symbol,
-        args: &[OpTy<'tcx, Provenance>],
+        args: &[OpTy<'tcx>],
     ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
 

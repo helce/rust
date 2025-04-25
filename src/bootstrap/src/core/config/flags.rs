@@ -1,4 +1,4 @@
-//! Command-line interface of the rustbuild build system.
+//! Command-line interface of the bootstrap build system.
 //!
 //! This module implements the command-line parsing of the build system which
 //! has various flags to configure how it's run.
@@ -469,6 +469,11 @@ Arguments:
         #[arg(long)]
         versioned_dirs: bool,
     },
+    /// Perform profiling and benchmarking of the compiler using the
+    /// `rustc-perf-wrapper` tool.
+    ///
+    /// You need to pass arguments after `--`, e.g.`x perf -- cachegrind`.
+    Perf {},
 }
 
 impl Subcommand {
@@ -490,6 +495,7 @@ impl Subcommand {
             Subcommand::Setup { .. } => Kind::Setup,
             Subcommand::Suggest { .. } => Kind::Suggest,
             Subcommand::Vendor { .. } => Kind::Vendor,
+            Subcommand::Perf { .. } => Kind::Perf,
         }
     }
 

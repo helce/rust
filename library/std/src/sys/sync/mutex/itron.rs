@@ -1,5 +1,7 @@
 //! Mutex implementation backed by μITRON mutexes. Assumes `acre_mtx` and
 //! `TA_INHERIT` are available.
+#![forbid(unsafe_op_in_unsafe_fn)]
+
 use crate::sys::pal::itron::{
     abi,
     error::{expect_success, expect_success_aborting, fail, ItronError},

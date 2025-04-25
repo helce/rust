@@ -539,7 +539,7 @@ impl<'a, 'tcx> SpanDecoder for DecodeContext<'a, 'tcx> {
         } else {
             SpanData::decode(self)
         };
-        Span::new(data.lo, data.hi, data.ctxt, data.parent)
+        data.span()
     }
 
     fn decode_symbol(&mut self) -> Symbol {
@@ -669,7 +669,7 @@ impl<'a, 'tcx> Decodable<DecodeContext<'a, 'tcx>> for SpanData {
         let lo = lo + source_file.translated_source_file.start_pos;
         let hi = hi + source_file.translated_source_file.start_pos;
 
-        // Do not try to decode parent for foreign spans.
+        // Do not try to decode parent for foreign spans (it wasn't encoded in the first place).
         SpanData { lo, hi, ctxt, parent: None }
     }
 }
@@ -1133,7 +1133,7 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
                     .collect(),
                 adt_kind,
                 parent_did,
-                false,
+                None,
                 data.is_non_exhaustive,
                 // FIXME: unnamed fields in crate metadata is unimplemented yet.
                 false,
@@ -1348,7 +1348,9 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
     }
 
     fn get_associated_item(self, id: DefIndex, sess: &'a Session) -> ty::AssocItem {
-        let name = if self.root.tables.opt_rpitit_info.get(self, id).is_some() {
+        let name = if self.root.tables.opt_rpitit_info.get(self, id).is_some()
+            || self.root.tables.is_effects_desugaring.get(self, id)
+        {
             kw::Empty
         } else {
             self.item_name(id)
@@ -1371,6 +1373,7 @@ impl<'a, 'tcx> CrateMetadataRef<'a> {
             container,
             fn_has_self_parameter: has_self,
             opt_rpitit_info,
+            is_effects_desugaring: self.root.tables.is_effects_desugaring.get(self, id),
         }
     }
 

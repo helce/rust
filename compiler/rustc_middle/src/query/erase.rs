@@ -157,9 +157,10 @@ impl EraseType for Result<mir::ConstValue<'_>, mir::interpret::ErrorHandled> {
     type Result = [u8; size_of::<Result<mir::ConstValue<'static>, mir::interpret::ErrorHandled>>()];
 }
 
-impl EraseType for Result<Option<ty::ValTree<'_>>, mir::interpret::ErrorHandled> {
-    type Result =
-        [u8; size_of::<Result<Option<ty::ValTree<'static>>, mir::interpret::ErrorHandled>>()];
+impl EraseType for Result<Result<ty::ValTree<'_>, Ty<'_>>, mir::interpret::ErrorHandled> {
+    type Result = [u8; size_of::<
+        Result<Result<ty::ValTree<'static>, Ty<'static>>, mir::interpret::ErrorHandled>,
+    >()];
 }
 
 impl EraseType for Result<&'_ ty::List<Ty<'_>>, ty::util::AlwaysRequiresDrop> {
@@ -365,7 +366,7 @@ tcx_lifetime! {
     rustc_middle::ty::GenericPredicates,
     rustc_middle::ty::inhabitedness::InhabitedPredicate,
     rustc_middle::ty::Instance,
-    rustc_middle::ty::InstanceDef,
+    rustc_middle::ty::InstanceKind,
     rustc_middle::ty::layout::FnAbiError,
     rustc_middle::ty::layout::LayoutError,
     rustc_middle::ty::ParamEnv,

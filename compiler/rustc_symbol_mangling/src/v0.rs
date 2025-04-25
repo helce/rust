@@ -43,14 +43,21 @@ pub(super) fn mangle<'tcx>(
 
     // Append `::{shim:...#0}` to shims that can coexist with a non-shim instance.
     let shim_kind = match instance.def {
-        ty::InstanceDef::ThreadLocalShim(_) => Some("tls"),
-        ty::InstanceDef::VTableShim(_) => Some("vtable"),
-        ty::InstanceDef::ReifyShim(_, None) => Some("reify"),
-        ty::InstanceDef::ReifyShim(_, Some(ReifyReason::FnPtr)) => Some("reify_fnptr"),
-        ty::InstanceDef::ReifyShim(_, Some(ReifyReason::Vtable)) => Some("reify_vtable"),
+        ty::InstanceKind::ThreadLocalShim(_) => Some("tls"),
+        ty::InstanceKind::VTableShim(_) => Some("vtable"),
+        ty::InstanceKind::ReifyShim(_, None) => Some("reify"),
+        ty::InstanceKind::ReifyShim(_, Some(ReifyReason::FnPtr)) => Some("reify_fnptr"),
+        ty::InstanceKind::ReifyShim(_, Some(ReifyReason::Vtable)) => Some("reify_vtable"),
 
-        ty::InstanceDef::ConstructCoroutineInClosureShim { .. }
-        | ty::InstanceDef::CoroutineKindShim { .. } => Some("fn_once"),
+        // FIXME(async_closures): This shouldn't be needed when we fix
+        // `Instance::ty`/`Instance::def_id`.
+        ty::InstanceKind::ConstructCoroutineInClosureShim { receiver_by_ref: true, .. } => {
+            Some("by_move")
+        }
+        ty::InstanceKind::ConstructCoroutineInClosureShim { receiver_by_ref: false, .. } => {
+            Some("by_ref")
+        }
+        ty::InstanceKind::CoroutineKindShim { .. } => Some("by_move_body"),
 
         _ => None,
     };

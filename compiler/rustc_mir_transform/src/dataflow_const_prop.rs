@@ -10,7 +10,7 @@ use rustc_middle::bug;
 use rustc_middle::mir::interpret::{InterpResult, Scalar};
 use rustc_middle::mir::visit::{MutVisitor, PlaceContext, Visitor};
 use rustc_middle::mir::*;
-use rustc_middle::ty::layout::LayoutOf;
+use rustc_middle::ty::layout::{HasParamEnv, LayoutOf};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_mir_dataflow::value_analysis::{
     Map, PlaceIndex, State, TrackElem, ValueAnalysis, ValueAnalysisWrapper, ValueOrPlace,
@@ -66,7 +66,7 @@ impl<'tcx> MirPass<'tcx> for DataflowConstProp {
 }
 
 struct ConstAnalysis<'a, 'tcx> {
-    map: Map,
+    map: Map<'tcx>,
     tcx: TyCtxt<'tcx>,
     local_decls: &'a LocalDecls<'tcx>,
     ecx: InterpCx<'tcx, DummyMachine>,
@@ -78,7 +78,7 @@ impl<'tcx> ValueAnalysis<'tcx> for ConstAnalysis<'_, 'tcx> {
 
     const NAME: &'static str = "ConstAnalysis";
 
-    fn map(&self) -> &Map {
+    fn map(&self) -> &Map<'tcx> {
         &self.map
     }
 
@@ -181,11 +181,6 @@ impl<'tcx> ValueAnalysis<'tcx> for ConstAnalysis<'_, 'tcx> {
                         state.insert_value_idx(value_target, val, self.map());
                     }
                     if let Some(overflow_target) = overflow_target {
-                        let overflow = match overflow {
-                            FlatSet::Top => FlatSet::Top,
-                            FlatSet::Elem(overflow) => FlatSet::Elem(overflow),
-                            FlatSet::Bottom => FlatSet::Bottom,
-                        };
                         // We have flooded `target` earlier.
                         state.insert_value_idx(overflow_target, overflow, self.map());
                     }
@@ -285,9 +280,11 @@ impl<'tcx> ValueAnalysis<'tcx> for ConstAnalysis<'_, 'tcx> {
                 let val = match null_op {
                     NullOp::SizeOf if layout.is_sized() => layout.size.bytes(),
                     NullOp::AlignOf if layout.is_sized() => layout.align.abi.bytes(),
-                    NullOp::OffsetOf(fields) => {
-                        layout.offset_of_subfield(&self.ecx, fields.iter()).bytes()
-                    }
+                    NullOp::OffsetOf(fields) => self
+                        .ecx
+                        .tcx
+                        .offset_of_subfield(self.ecx.param_env(), layout, fields.iter())
+                        .bytes(),
                     _ => return ValueOrPlace::Value(FlatSet::Top),
                 };
                 FlatSet::Elem(Scalar::from_target_usize(val, &self.tcx))
@@ -324,7 +321,7 @@ impl<'tcx> ValueAnalysis<'tcx> for ConstAnalysis<'_, 'tcx> {
             // This allows the set of visited edges to grow monotonically with the lattice.
             FlatSet::Bottom => TerminatorEdges::None,
             FlatSet::Elem(scalar) => {
-                let choice = scalar.assert_bits(scalar.size());
+                let choice = scalar.assert_scalar_int().to_bits_unchecked();
                 TerminatorEdges::Single(targets.target_for_value(choice))
             }
             FlatSet::Top => TerminatorEdges::SwitchInt { discr, targets },
@@ -333,7 +330,7 @@ impl<'tcx> ValueAnalysis<'tcx> for ConstAnalysis<'_, 'tcx> {
 }
 
 impl<'a, 'tcx> ConstAnalysis<'a, 'tcx> {
-    pub fn new(tcx: TyCtxt<'tcx>, body: &'a Body<'tcx>, map: Map) -> Self {
+    pub fn new(tcx: TyCtxt<'tcx>, body: &'a Body<'tcx>, map: Map<'tcx>) -> Self {
         let param_env = tcx.param_env_reveal_all_normalized(body.source.def_id());
         Self {
             map,
@@ -563,12 +560,13 @@ impl<'tcx, 'locals> Collector<'tcx, 'locals> {
         Self { patch: Patch::new(tcx), local_decls }
     }
 
+    #[instrument(level = "trace", skip(self, ecx, map), ret)]
     fn try_make_constant(
         &self,
         ecx: &mut InterpCx<'tcx, DummyMachine>,
         place: Place<'tcx>,
         state: &State<FlatSet<Scalar>>,
-        map: &Map,
+        map: &Map<'tcx>,
     ) -> Option<Const<'tcx>> {
         let ty = place.ty(self.local_decls, self.patch.tcx).ty;
         let layout = ecx.layout_of(ty).ok()?;
@@ -601,13 +599,14 @@ impl<'tcx, 'locals> Collector<'tcx, 'locals> {
     }
 }
 
+#[instrument(level = "trace", skip(map), ret)]
 fn propagatable_scalar(
     place: PlaceIndex,
     state: &State<FlatSet<Scalar>>,
-    map: &Map,
+    map: &Map<'_>,
 ) -> Option<Scalar> {
     if let FlatSet::Elem(value) = state.get_idx(place, map)
-        && value.try_to_int().is_ok()
+        && value.try_to_scalar_int().is_ok()
     {
         // Do not attempt to propagate pointers, as we may fail to preserve their identity.
         Some(value)
@@ -616,14 +615,14 @@ fn propagatable_scalar(
     }
 }
 
-#[instrument(level = "trace", skip(ecx, state, map))]
+#[instrument(level = "trace", skip(ecx, state, map), ret)]
 fn try_write_constant<'tcx>(
     ecx: &mut InterpCx<'tcx, DummyMachine>,
     dest: &PlaceTy<'tcx>,
     place: PlaceIndex,
     ty: Ty<'tcx>,
     state: &State<FlatSet<Scalar>>,
-    map: &Map,
+    map: &Map<'tcx>,
 ) -> InterpResult<'tcx> {
     let layout = ecx.layout_of(ty)?;
 
@@ -668,7 +667,7 @@ fn try_write_constant<'tcx>(
                 let FlatSet::Elem(Scalar::Int(discr)) = state.get_idx(discr, map) else {
                     throw_machine_stop_str!("discriminant with provenance")
                 };
-                let discr_bits = discr.assert_bits(discr.size());
+                let discr_bits = discr.to_bits(discr.size());
                 let Some((variant, _)) = def.discriminants(*ecx.tcx).find(|(_, var)| discr_bits == var.val) else {
                     throw_machine_stop_str!("illegal discriminant for enum")
                 };
@@ -722,6 +721,7 @@ impl<'mir, 'tcx>
 {
     type FlowState = State<FlatSet<Scalar>>;
 
+    #[instrument(level = "trace", skip(self, results, statement))]
     fn visit_statement_before_primary_effect(
         &mut self,
         results: &mut Results<'tcx, ValueAnalysisWrapper<ConstAnalysis<'_, 'tcx>>>,
@@ -743,6 +743,7 @@ impl<'mir, 'tcx>
         }
     }
 
+    #[instrument(level = "trace", skip(self, results, statement))]
     fn visit_statement_after_primary_effect(
         &mut self,
         results: &mut Results<'tcx, ValueAnalysisWrapper<ConstAnalysis<'_, 'tcx>>>,
@@ -837,7 +838,7 @@ struct OperandCollector<'tcx, 'map, 'locals, 'a> {
     state: &'a State<FlatSet<Scalar>>,
     visitor: &'a mut Collector<'tcx, 'locals>,
     ecx: &'map mut InterpCx<'tcx, DummyMachine>,
-    map: &'map Map,
+    map: &'map Map<'tcx>,
 }
 
 impl<'tcx> Visitor<'tcx> for OperandCollector<'tcx, '_, '_, '_> {

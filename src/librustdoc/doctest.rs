@@ -7,7 +7,7 @@ pub(crate) use markdown::test as test_markdown;
 
 use rustc_ast as ast;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_errors::{ColorConfig, ErrorGuaranteed, FatalError};
+use rustc_errors::{ColorConfig, DiagCtxtHandle, ErrorGuaranteed, FatalError};
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_hir::CRATE_HIR_ID;
 use rustc_interface::interface;
@@ -90,10 +90,7 @@ fn get_doctest_dir() -> io::Result<TempDir> {
     TempFileBuilder::new().prefix("rustdoctest").tempdir()
 }
 
-pub(crate) fn run(
-    dcx: &rustc_errors::DiagCtxt,
-    options: RustdocOptions,
-) -> Result<(), ErrorGuaranteed> {
+pub(crate) fn run(dcx: DiagCtxtHandle<'_>, options: RustdocOptions) -> Result<(), ErrorGuaranteed> {
     let invalid_codeblock_attributes_name = crate::lint::INVALID_CODEBLOCK_ATTRIBUTES.name;
 
     // See core::create_config for what's going on here.
@@ -129,6 +126,7 @@ pub(crate) fn run(
         edition: options.edition,
         target_triple: options.target.clone(),
         crate_name: options.crate_name.clone(),
+        remap_path_prefix: options.remap_path_prefix.clone(),
         ..config::Options::default()
     };
 
@@ -572,7 +570,6 @@ fn make_maybe_absolute_path(path: PathBuf) -> PathBuf {
         std::env::current_dir().map(|c| c.join(&path)).unwrap_or_else(|_| path)
     }
 }
-
 struct IndividualTestOptions {
     outdir: DirState,
     test_id: String,
@@ -651,7 +648,7 @@ impl CreateRunnableDoctests {
         if !item_path.is_empty() {
             item_path.push(' ');
         }
-        format!("{} - {item_path}(line {line})", filename.prefer_local())
+        format!("{} - {item_path}(line {line})", filename.prefer_remapped_unconditionaly())
     }
 
     fn add_test(&mut self, test: ScrapedDoctest) {

@@ -1431,8 +1431,8 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             }
             if let DefKind::Trait = def_kind {
                 record!(self.tables.trait_def[def_id] <- self.tcx.trait_def(def_id));
-                record!(self.tables.super_predicates_of[def_id] <- self.tcx.super_predicates_of(def_id));
-                record!(self.tables.implied_predicates_of[def_id] <- self.tcx.implied_predicates_of(def_id));
+                record!(self.tables.explicit_super_predicates_of[def_id] <- self.tcx.explicit_super_predicates_of(def_id));
+                record!(self.tables.explicit_implied_predicates_of[def_id] <- self.tcx.explicit_implied_predicates_of(def_id));
 
                 let module_children = self.tcx.module_children_local(local_id);
                 record_array!(self.tables.module_children_non_reexports[def_id] <-
@@ -1440,8 +1440,8 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
             }
             if let DefKind::TraitAlias = def_kind {
                 record!(self.tables.trait_def[def_id] <- self.tcx.trait_def(def_id));
-                record!(self.tables.super_predicates_of[def_id] <- self.tcx.super_predicates_of(def_id));
-                record!(self.tables.implied_predicates_of[def_id] <- self.tcx.implied_predicates_of(def_id));
+                record!(self.tables.explicit_super_predicates_of[def_id] <- self.tcx.explicit_super_predicates_of(def_id));
+                record!(self.tables.explicit_implied_predicates_of[def_id] <- self.tcx.explicit_implied_predicates_of(def_id));
             }
             if let DefKind::Trait | DefKind::Impl { .. } = def_kind {
                 let associated_item_def_ids = self.tcx.associated_item_def_ids(def_id);
@@ -1453,6 +1453,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 );
                 for &def_id in associated_item_def_ids {
                     self.encode_info_for_assoc_item(def_id);
+                }
+                if let Some(assoc_def_id) = self.tcx.associated_type_for_effects(def_id) {
+                    record!(self.tables.associated_type_for_effects[def_id] <- assoc_def_id);
                 }
             }
             if def_kind == DefKind::Closure
@@ -1493,6 +1496,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 self.tables
                     .is_type_alias_impl_trait
                     .set(def_id.index, self.tcx.is_type_alias_impl_trait(def_id));
+                self.encode_precise_capturing_args(def_id);
             }
             if tcx.impl_method_has_trait_impl_trait_tys(def_id)
                 && let Ok(table) = self.tcx.collect_return_position_impl_trait_in_trait_tys(def_id)
@@ -1632,8 +1636,20 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     self.tables.assumed_wf_types_for_rpitit[def_id]
                         <- self.tcx.assumed_wf_types_for_rpitit(def_id)
                 );
+                self.encode_precise_capturing_args(def_id);
             }
         }
+        if item.is_effects_desugaring {
+            self.tables.is_effects_desugaring.set(def_id.index, true);
+        }
+    }
+
+    fn encode_precise_capturing_args(&mut self, def_id: DefId) {
+        let Some(precise_capturing_args) = self.tcx.rendered_precise_capturing_args(def_id) else {
+            return;
+        };
+
+        record_array!(self.tables.rendered_precise_capturing_args[def_id] <- precise_capturing_args);
     }
 
     fn encode_mir(&mut self) {
@@ -1693,7 +1709,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 record!(self.tables.mir_coroutine_witnesses[def_id.to_def_id()] <- witnesses);
             }
 
-            let instance = ty::InstanceDef::Item(def_id.to_def_id());
+            let instance = ty::InstanceKind::Item(def_id.to_def_id());
             let unused = tcx.unused_generic_params(instance);
             self.tables.unused_generic_params.set(def_id.local_def_index, unused);
         }
@@ -2020,7 +2036,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
 
                 // if this is an impl of `CoerceUnsized`, create its
                 // "unsized info", else just store None
-                if Some(trait_ref.def_id) == tcx.lang_items().coerce_unsized_trait() {
+                if tcx.is_lang_item(trait_ref.def_id, LangItem::CoerceUnsized) {
                     let coerce_unsized_info = tcx.coerce_unsized_info(def_id).unwrap();
                     record!(self.tables.coerce_unsized_info[def_id] <- coerce_unsized_info);
                 }

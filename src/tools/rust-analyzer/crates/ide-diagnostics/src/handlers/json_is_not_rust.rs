@@ -37,7 +37,7 @@ impl State {
             self.names.insert(name.clone(), 1);
             1
         };
-        make::name(&format!("{}{}", name, count))
+        make::name(&format!("{name}{count}"))
     }
 
     fn serde_derive(&self) -> String {
@@ -146,6 +146,7 @@ pub(crate) fn json_in_items(
                         let cfg = ImportPathConfig {
                             prefer_no_std: config.prefer_no_std,
                             prefer_prelude: config.prefer_prelude,
+                            prefer_absolute: config.prefer_absolute,
                         };
 
                         if !scope_has("Serialize") {

@@ -112,7 +112,7 @@ pub fn report_unstable(
 ) {
     let msg = match reason {
         Some(r) => format!("use of unstable library feature '{feature}': {r}"),
-        None => format!("use of unstable library feature '{}'", &feature),
+        None => format!("use of unstable library feature '{feature}'"),
     };
 
     if is_soft {
@@ -176,7 +176,7 @@ impl<'a, G: EmissionGuarantee> rustc_errors::LintDiagnostic<'a, G> for Deprecate
             diag.arg("has_note", false);
         }
         if let Some(sub) = self.sub {
-            diag.subdiagnostic(diag.dcx, sub);
+            diag.subdiagnostic(sub);
         }
     }
 }

@@ -13,7 +13,7 @@ use rustc_ast_ir::visit::VisitorResult;
 use rustc_hir::def::Namespace;
 use rustc_span::source_map::Spanned;
 use rustc_target::abi::TyAndLayout;
-use rustc_type_ir::{ConstKind, DebugWithInfcx, InferCtxtLike, WithInfcx};
+use rustc_type_ir::ConstKind;
 
 use std::fmt::{self, Debug};
 
@@ -83,14 +83,6 @@ impl fmt::Debug for ty::LateParamRegion {
     }
 }
 
-impl<'tcx> ty::DebugWithInfcx<TyCtxt<'tcx>> for Ty<'tcx> {
-    fn fmt<Infcx: InferCtxtLike<Interner = TyCtxt<'tcx>>>(
-        this: WithInfcx<'_, Infcx, &Self>,
-        f: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
-        this.data.fmt(f)
-    }
-}
 impl<'tcx> fmt::Debug for Ty<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         with_no_trimmed_paths!(fmt::Debug::fmt(self.kind(), f))
@@ -121,70 +113,33 @@ impl<'tcx> fmt::Debug for ty::Clause<'tcx> {
     }
 }
 
-impl<'tcx> DebugWithInfcx<TyCtxt<'tcx>> for Pattern<'tcx> {
-    fn fmt<Infcx: InferCtxtLike<Interner = TyCtxt<'tcx>>>(
-        this: WithInfcx<'_, Infcx, &Self>,
-        f: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
-        match &**this.data {
-            ty::PatternKind::Range { start, end, include_end } => f
-                .debug_struct("Pattern::Range")
-                .field("start", start)
-                .field("end", end)
-                .field("include_end", include_end)
-                .finish(),
-        }
-    }
-}
-
 impl<'tcx> fmt::Debug for ty::consts::Expr<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        WithInfcx::with_no_infcx(self).fmt(f)
-    }
-}
-impl<'tcx> DebugWithInfcx<TyCtxt<'tcx>> for ty::consts::Expr<'tcx> {
-    fn fmt<Infcx: InferCtxtLike<Interner = TyCtxt<'tcx>>>(
-        this: WithInfcx<'_, Infcx, &Self>,
-        f: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
-        match this.data.kind {
+        match self.kind {
             ty::ExprKind::Binop(op) => {
-                let (lhs_ty, rhs_ty, lhs, rhs) = this.data.binop_args();
-                write!(
-                    f,
-                    "({op:?}: ({:?}: {:?}), ({:?}: {:?}))",
-                    &this.wrap(lhs),
-                    &this.wrap(lhs_ty),
-                    &this.wrap(rhs),
-                    &this.wrap(rhs_ty),
-                )
+                let (lhs_ty, rhs_ty, lhs, rhs) = self.binop_args();
+                write!(f, "({op:?}: ({:?}: {:?}), ({:?}: {:?}))", lhs, lhs_ty, rhs, rhs_ty,)
             }
             ty::ExprKind::UnOp(op) => {
-                let (rhs_ty, rhs) = this.data.unop_args();
-                write!(f, "({op:?}: ({:?}: {:?}))", &this.wrap(rhs), &this.wrap(rhs_ty))
+                let (rhs_ty, rhs) = self.unop_args();
+                write!(f, "({op:?}: ({:?}: {:?}))", rhs, rhs_ty)
             }
             ty::ExprKind::FunctionCall => {
-                let (func_ty, func, args) = this.data.call_args();
+                let (func_ty, func, args) = self.call_args();
                 let args = args.collect::<Vec<_>>();
-                write!(f, "({:?}: {:?})(", &this.wrap(func), &this.wrap(func_ty))?;
+                write!(f, "({:?}: {:?})(", func, func_ty)?;
                 for arg in args.iter().rev().skip(1).rev() {
-                    write!(f, "{:?}, ", &this.wrap(arg))?;
+                    write!(f, "{:?}, ", arg)?;
                 }
                 if let Some(arg) = args.last() {
-                    write!(f, "{:?}", &this.wrap(arg))?;
+                    write!(f, "{:?}", arg)?;
                 }
 
                 write!(f, ")")
             }
             ty::ExprKind::Cast(kind) => {
-                let (value_ty, value, to_ty) = this.data.cast_args();
-                write!(
-                    f,
-                    "({kind:?}: ({:?}: {:?}), {:?})",
-                    &this.wrap(value),
-                    &this.wrap(value_ty),
-                    &this.wrap(to_ty)
-                )
+                let (value_ty, value, to_ty) = self.cast_args();
+                write!(f, "({kind:?}: ({:?}: {:?}), {:?})", value, value_ty, to_ty)
             }
         }
     }
@@ -192,20 +147,12 @@ impl<'tcx> DebugWithInfcx<TyCtxt<'tcx>> for ty::consts::Expr<'tcx> {
 
 impl<'tcx> fmt::Debug for ty::Const<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        WithInfcx::with_no_infcx(self).fmt(f)
-    }
-}
-impl<'tcx> DebugWithInfcx<TyCtxt<'tcx>> for ty::Const<'tcx> {
-    fn fmt<Infcx: InferCtxtLike<Interner = TyCtxt<'tcx>>>(
-        this: WithInfcx<'_, Infcx, &Self>,
-        f: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
         // If this is a value, we spend some effort to make it look nice.
-        if let ConstKind::Value(_, _) = this.data.kind() {
+        if let ConstKind::Value(_, _) = self.kind() {
             return ty::tls::with(move |tcx| {
                 // Somehow trying to lift the valtree results in lifetime errors, so we lift the
                 // entire constant.
-                let lifted = tcx.lift(*this.data).unwrap();
+                let lifted = tcx.lift(*self).unwrap();
                 let ConstKind::Value(ty, valtree) = lifted.kind() else {
                     bug!("we checked that this is a valtree")
                 };
@@ -215,7 +162,7 @@ impl<'tcx> DebugWithInfcx<TyCtxt<'tcx>> for ty::Const<'tcx> {
             });
         }
         // Fall back to something verbose.
-        write!(f, "{kind:?}", kind = &this.map(|data| data.kind()))
+        write!(f, "{:?}", self.kind())
     }
 }
 
@@ -247,30 +194,10 @@ impl<'tcx> fmt::Debug for GenericArg<'tcx> {
         }
     }
 }
-impl<'tcx> DebugWithInfcx<TyCtxt<'tcx>> for GenericArg<'tcx> {
-    fn fmt<Infcx: InferCtxtLike<Interner = TyCtxt<'tcx>>>(
-        this: WithInfcx<'_, Infcx, &Self>,
-        f: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
-        match this.data.unpack() {
-            GenericArgKind::Lifetime(lt) => write!(f, "{:?}", &this.wrap(lt)),
-            GenericArgKind::Const(ct) => write!(f, "{:?}", &this.wrap(ct)),
-            GenericArgKind::Type(ty) => write!(f, "{:?}", &this.wrap(ty)),
-        }
-    }
-}
 
 impl<'tcx> fmt::Debug for Region<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.kind())
-    }
-}
-impl<'tcx> DebugWithInfcx<TyCtxt<'tcx>> for Region<'tcx> {
-    fn fmt<Infcx: InferCtxtLike<Interner = TyCtxt<'tcx>>>(
-        this: WithInfcx<'_, Infcx, &Self>,
-        f: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
-        write!(f, "{:?}", &this.map(|data| data.kind()))
     }
 }
 
@@ -330,7 +257,6 @@ TrivialTypeTraversalImpls! {
     crate::ty::adjustment::PointerCoercion,
     ::rustc_span::Span,
     ::rustc_span::symbol::Ident,
-    ::rustc_errors::ErrorGuaranteed,
     ty::BoundVar,
     ty::ValTree<'tcx>,
 }
@@ -357,7 +283,7 @@ TrivialTypeTraversalAndLiftImpls! {
 
 impl<'tcx, T: Lift<TyCtxt<'tcx>>> Lift<TyCtxt<'tcx>> for Option<T> {
     type Lifted = Option<T::Lifted>;
-    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+    fn lift_to_interner(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
         Some(match self {
             Some(x) => Some(tcx.lift(x)?),
             None => None,
@@ -367,7 +293,7 @@ impl<'tcx, T: Lift<TyCtxt<'tcx>>> Lift<TyCtxt<'tcx>> for Option<T> {
 
 impl<'a, 'tcx> Lift<TyCtxt<'tcx>> for Term<'a> {
     type Lifted = ty::Term<'tcx>;
-    fn lift_to_tcx(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
+    fn lift_to_interner(self, tcx: TyCtxt<'tcx>) -> Option<Self::Lifted> {
         match self.unpack() {
             TermKind::Ty(ty) => tcx.lift(ty).map(Into::into),
             TermKind::Const(c) => tcx.lift(c).map(Into::into),
@@ -408,7 +334,7 @@ impl<'tcx> TypeFoldable<TyCtxt<'tcx>> for Pattern<'tcx> {
         folder: &mut F,
     ) -> Result<Self, F::Error> {
         let pat = (*self).clone().try_fold_with(folder)?;
-        Ok(if pat == *self { self } else { folder.interner().mk_pat(pat) })
+        Ok(if pat == *self { self } else { folder.cx().mk_pat(pat) })
     }
 }
 
@@ -480,7 +406,7 @@ impl<'tcx> TypeSuperFoldable<TyCtxt<'tcx>> for Ty<'tcx> {
             | ty::Foreign(..) => return Ok(self),
         };
 
-        Ok(if *self.kind() == kind { self } else { folder.interner().mk_ty_from_kind(kind) })
+        Ok(if *self.kind() == kind { self } else { folder.cx().mk_ty_from_kind(kind) })
     }
 }
 
@@ -516,13 +442,14 @@ impl<'tcx> TypeSuperVisitable<TyCtxt<'tcx>> for Ty<'tcx> {
                 pat.visit_with(visitor)
             }
 
+            ty::Error(guar) => guar.visit_with(visitor),
+
             ty::Bool
             | ty::Char
             | ty::Str
             | ty::Int(_)
             | ty::Uint(_)
             | ty::Float(_)
-            | ty::Error(_)
             | ty::Infer(_)
             | ty::Bound(..)
             | ty::Placeholder(..)
@@ -585,7 +512,7 @@ impl<'tcx> TypeSuperFoldable<TyCtxt<'tcx>> for ty::Predicate<'tcx> {
         folder: &mut F,
     ) -> Result<Self, F::Error> {
         let new = self.kind().try_fold_with(folder)?;
-        Ok(folder.interner().reuse_or_mk_predicate(self, new))
+        Ok(folder.cx().reuse_or_mk_predicate(self, new))
     }
 }
 
@@ -650,7 +577,7 @@ impl<'tcx> TypeSuperFoldable<TyCtxt<'tcx>> for ty::Const<'tcx> {
             ConstKind::Error(e) => ConstKind::Error(e.try_fold_with(folder)?),
             ConstKind::Expr(e) => ConstKind::Expr(e.try_fold_with(folder)?),
         };
-        if kind != self.kind() { Ok(folder.interner().mk_ct_from_kind(kind)) } else { Ok(self) }
+        if kind != self.kind() { Ok(folder.cx().mk_ct_from_kind(kind)) } else { Ok(self) }
     }
 }
 
@@ -675,6 +602,21 @@ impl<'tcx> TypeSuperVisitable<TyCtxt<'tcx>> for ty::Const<'tcx> {
     }
 }
 
+impl<'tcx> TypeVisitable<TyCtxt<'tcx>> for rustc_span::ErrorGuaranteed {
+    fn visit_with<V: TypeVisitor<TyCtxt<'tcx>>>(&self, visitor: &mut V) -> V::Result {
+        visitor.visit_error(*self)
+    }
+}
+
+impl<'tcx> TypeFoldable<TyCtxt<'tcx>> for rustc_span::ErrorGuaranteed {
+    fn try_fold_with<F: FallibleTypeFolder<TyCtxt<'tcx>>>(
+        self,
+        _folder: &mut F,
+    ) -> Result<Self, F::Error> {
+        Ok(self)
+    }
+}
+
 impl<'tcx> TypeFoldable<TyCtxt<'tcx>> for InferConst {
     fn try_fold_with<F: FallibleTypeFolder<TyCtxt<'tcx>>>(
         self,
@@ -687,12 +629,6 @@ impl<'tcx> TypeFoldable<TyCtxt<'tcx>> for InferConst {
 impl<'tcx> TypeVisitable<TyCtxt<'tcx>> for InferConst {
     fn visit_with<V: TypeVisitor<TyCtxt<'tcx>>>(&self, _visitor: &mut V) -> V::Result {
         V::Result::output()
-    }
-}
-
-impl<'tcx> TypeSuperVisitable<TyCtxt<'tcx>> for ty::UnevaluatedConst<'tcx> {
-    fn super_visit_with<V: TypeVisitor<TyCtxt<'tcx>>>(&self, visitor: &mut V) -> V::Result {
-        self.args.visit_with(visitor)
     }
 }
 

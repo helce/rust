@@ -1,7 +1,9 @@
-#![cfg_attr(feature = "nightly", feature(step_trait))]
+// tidy-alphabetical-start
 #![cfg_attr(feature = "nightly", allow(internal_features))]
 #![cfg_attr(feature = "nightly", doc(rust_logo))]
 #![cfg_attr(feature = "nightly", feature(rustdoc_internals))]
+#![cfg_attr(feature = "nightly", feature(step_trait))]
+// tidy-alphabetical-end
 
 use std::fmt;
 use std::num::{NonZeroUsize, ParseIntError};
@@ -425,11 +427,13 @@ pub struct Size {
     raw: u64,
 }
 
-// Safety: Ord is implement as just comparing numerical values and numerical values
-// are not changed by (de-)serialization.
 #[cfg(feature = "nightly")]
-unsafe impl StableOrd for Size {
+impl StableOrd for Size {
     const CAN_USE_UNSTABLE_SORT: bool = true;
+
+    // `Ord` is implemented as just comparing numerical values and numerical values
+    // are not changed by (de-)serialization.
+    const THIS_IMPLEMENTATION_HAS_BEEN_TRIPLE_CHECKED: () = ();
 }
 
 // This is debug-printed a lot in larger structs, don't waste too much space there
@@ -623,7 +627,7 @@ impl Step for Size {
 
     #[inline]
     unsafe fn forward_unchecked(start: Self, count: usize) -> Self {
-        Self::from_bytes(u64::forward_unchecked(start.bytes(), count))
+        Self::from_bytes(unsafe { u64::forward_unchecked(start.bytes(), count) })
     }
 
     #[inline]
@@ -638,7 +642,7 @@ impl Step for Size {
 
     #[inline]
     unsafe fn backward_unchecked(start: Self, count: usize) -> Self {
-        Self::from_bytes(u64::backward_unchecked(start.bytes(), count))
+        Self::from_bytes(unsafe { u64::backward_unchecked(start.bytes(), count) })
     }
 }
 
@@ -1425,7 +1429,7 @@ pub enum Variants<FieldIdx: Idx, VariantIdx: Idx> {
     /// Single enum variants, structs/tuples, unions, and all non-ADTs.
     Single { index: VariantIdx },
 
-    /// Enum-likes with more than one inhabited variant: each variant comes with
+    /// Enum-likes with more than one variant: each variant comes with
     /// a *discriminant* (usually the same as the variant index but the user can
     /// assign explicit discriminant values). That discriminant is encoded
     /// as a *tag* on the machine. The layout of each variant is

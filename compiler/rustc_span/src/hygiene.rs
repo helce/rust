@@ -43,8 +43,14 @@ use std::hash::Hash;
 use tracing::{debug, trace};
 
 /// A `SyntaxContext` represents a chain of pairs `(ExpnId, Transparency)` named "marks".
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SyntaxContext(u32);
+
+// To ensure correctness of incremental compilation,
+// `SyntaxContext` must not implement `Ord` or `PartialOrd`.
+// See https://github.com/rust-lang/rust/issues/90317.
+impl !Ord for SyntaxContext {}
+impl !PartialOrd for SyntaxContext {}
 
 #[derive(Debug, Encodable, Decodable, Clone)]
 pub struct SyntaxContextData {
@@ -689,6 +695,11 @@ impl SyntaxContext {
     #[inline]
     pub(crate) const fn from_u32(raw: u32) -> SyntaxContext {
         SyntaxContext(raw)
+    }
+
+    #[inline]
+    pub(crate) const fn from_u16(raw: u16) -> SyntaxContext {
+        SyntaxContext(raw as u32)
     }
 
     /// Extend a syntax context with a given expansion and transparency.

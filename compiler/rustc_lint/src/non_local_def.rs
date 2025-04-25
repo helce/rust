@@ -11,10 +11,10 @@ use rustc_session::{declare_lint, impl_lint_pass};
 use rustc_span::def_id::{DefId, LOCAL_CRATE};
 use rustc_span::Span;
 use rustc_span::{sym, symbol::kw, ExpnKind, MacroKind, Symbol};
-use rustc_trait_selection::infer::TyCtxtInferExt;
-use rustc_trait_selection::traits::error_reporting::ambiguity::{
+use rustc_trait_selection::error_reporting::traits::ambiguity::{
     compute_applicable_impls_for_diagnostics, CandidateSource,
 };
+use rustc_trait_selection::infer::TyCtxtInferExt;
 
 use crate::fluent_generated as fluent;
 use crate::lints::{NonLocalDefinitionsCargoUpdateNote, NonLocalDefinitionsDiag};
@@ -111,6 +111,12 @@ impl<'tcx> LateLintPass<'tcx> for NonLocalDefinitions {
             }
         };
 
+        // determining if we are in a doctest context can't currently be determined
+        // by the code itself (there are no specific attributes), but fortunately rustdoc
+        // sets a perma-unstable env var for libtest so we just reuse that for now
+        let is_at_toplevel_doctest =
+            || self.body_depth == 2 && std::env::var("UNSTABLE_RUSTDOC_TEST_PATH").is_ok();
+
         match item.kind {
             ItemKind::Impl(impl_) => {
                 // The RFC states:
@@ -191,29 +197,6 @@ impl<'tcx> LateLintPass<'tcx> for NonLocalDefinitions {
                     None
                 };
 
-                let mut collector = PathCollector { paths: Vec::new() };
-                collector.visit_ty(&impl_.self_ty);
-                if let Some(of_trait) = &impl_.of_trait {
-                    collector.visit_trait_ref(of_trait);
-                }
-                collector.visit_generics(&impl_.generics);
-
-                let mut may_move: Vec<Span> = collector
-                    .paths
-                    .into_iter()
-                    .filter_map(|path| {
-                        if let Some(did) = path.res.opt_def_id()
-                            && did_has_local_parent(did, cx.tcx, parent, parent_parent)
-                        {
-                            Some(cx.tcx.def_span(did))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                may_move.sort();
-                may_move.dedup();
-
                 let const_anon = matches!(parent_def_kind, DefKind::Const | DefKind::Static { .. })
                     .then_some(span_for_const_anon_suggestion);
 
@@ -248,15 +231,52 @@ impl<'tcx> LateLintPass<'tcx> for NonLocalDefinitions {
                 } else {
                     None
                 };
-                let move_to = if may_move.is_empty() {
-                    ms.push_span_label(
-                        cx.tcx.def_span(parent),
-                        fluent::lint_non_local_definitions_impl_move_help,
-                    );
-                    None
+
+                let (doctest, move_to) = if is_at_toplevel_doctest() {
+                    (true, None)
                 } else {
-                    Some((cx.tcx.def_span(parent), may_move))
+                    let mut collector = PathCollector { paths: Vec::new() };
+                    collector.visit_ty(&impl_.self_ty);
+                    if let Some(of_trait) = &impl_.of_trait {
+                        collector.visit_trait_ref(of_trait);
+                    }
+                    collector.visit_generics(&impl_.generics);
+
+                    let mut may_move: Vec<Span> = collector
+                        .paths
+                        .into_iter()
+                        .filter_map(|path| {
+                            if let Some(did) = path.res.opt_def_id()
+                                && did_has_local_parent(did, cx.tcx, parent, parent_parent)
+                            {
+                                Some(cx.tcx.def_span(did))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    may_move.sort();
+                    may_move.dedup();
+
+                    let move_to = if may_move.is_empty() {
+                        ms.push_span_label(
+                            cx.tcx.def_span(parent),
+                            fluent::lint_non_local_definitions_impl_move_help,
+                        );
+                        None
+                    } else {
+                        Some((cx.tcx.def_span(parent), may_move))
+                    };
+
+                    (false, move_to)
                 };
+
+                let macro_to_change =
+                    if let ExpnKind::Macro(kind, name) = item.span.ctxt().outer_expn_data().kind {
+                        Some((name.to_string(), kind.descr()))
+                    } else {
+                        None
+                    };
 
                 cx.emit_span_lint(
                     NON_LOCAL_DEFINITIONS,
@@ -272,20 +292,16 @@ impl<'tcx> LateLintPass<'tcx> for NonLocalDefinitions {
                         self_ty_str,
                         of_trait_str,
                         move_to,
+                        doctest,
                         may_remove,
                         has_trait: impl_.of_trait.is_some(),
+                        macro_to_change,
                     },
                 )
             }
             ItemKind::Macro(_macro, MacroKind::Bang)
                 if cx.tcx.has_attr(item.owner_id.def_id, sym::macro_export) =>
             {
-                // determining we if are in a doctest context can't currently be determined
-                // by the code it-self (no specific attrs), but fortunatly rustdoc sets a
-                // perma-unstable env for libtest so we just re-use that env for now
-                let is_at_toplevel_doctest =
-                    self.body_depth == 2 && std::env::var("UNSTABLE_RUSTDOC_TEST_PATH").is_ok();
-
                 cx.emit_span_lint(
                     NON_LOCAL_DEFINITIONS,
                     item.span,
@@ -296,8 +312,7 @@ impl<'tcx> LateLintPass<'tcx> for NonLocalDefinitions {
                             .map(|s| s.to_ident_string())
                             .unwrap_or_else(|| "<unnameable>".to_string()),
                         cargo_update: cargo_update(),
-                        help: (!is_at_toplevel_doctest).then_some(()),
-                        doctest_help: is_at_toplevel_doctest.then_some(()),
+                        doctest: is_at_toplevel_doctest(),
                     },
                 )
             }
@@ -375,7 +390,7 @@ struct ReplaceLocalTypesWithInfer<'a, 'tcx, F: FnMut(DefId) -> bool> {
 impl<'a, 'tcx, F: FnMut(DefId) -> bool> TypeFolder<TyCtxt<'tcx>>
     for ReplaceLocalTypesWithInfer<'a, 'tcx, F>
 {
-    fn interner(&self) -> TyCtxt<'tcx> {
+    fn cx(&self) -> TyCtxt<'tcx> {
         self.infcx.tcx
     }
 

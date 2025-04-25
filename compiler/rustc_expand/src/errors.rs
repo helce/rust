@@ -435,8 +435,23 @@ pub struct ExpectedParenOrBrace<'a> {
 }
 
 #[derive(Diagnostic)]
-#[diag(expand_empty_delegation_list)]
-pub(crate) struct EmptyDelegationList {
+#[diag(expand_empty_delegation_mac)]
+pub(crate) struct EmptyDelegationMac {
+    #[primary_span]
+    pub span: Span,
+    pub kind: String,
+}
+
+#[derive(Diagnostic)]
+#[diag(expand_glob_delegation_outside_impls)]
+pub(crate) struct GlobDelegationOutsideImpls {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(expand_glob_delegation_traitless_qpath)]
+pub(crate) struct GlobDelegationTraitlessQpath {
     #[primary_span]
     pub span: Span,
 }

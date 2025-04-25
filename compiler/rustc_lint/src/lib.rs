@@ -25,9 +25,10 @@
 //!
 //! This API is completely unstable and subject to change.
 
+// tidy-alphabetical-start
+#![allow(internal_features)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
-#![feature(rustdoc_internals)]
 #![feature(array_windows)]
 #![feature(box_patterns)]
 #![feature(control_flow_enum)]
@@ -35,10 +36,12 @@
 #![feature(if_let_guard)]
 #![feature(iter_order_by)]
 #![feature(let_chains)]
-#![feature(trait_upcasting)]
 #![feature(rustc_attrs)]
-#![allow(internal_features)]
+#![feature(rustdoc_internals)]
+#![feature(trait_upcasting)]
+// tidy-alphabetical-end
 
+mod async_closures;
 mod async_fn_in_trait;
 pub mod builtin;
 mod context;
@@ -58,6 +61,7 @@ mod late;
 mod let_underscore;
 mod levels;
 mod lints;
+mod macro_expr_fragment_specifier_2024_migration;
 mod map_unit_fn;
 mod methods;
 mod multiple_supertrait_upcastable;
@@ -84,6 +88,7 @@ use rustc_hir::def_id::LocalModDefId;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::TyCtxt;
 
+use async_closures::AsyncClosureUsage;
 use async_fn_in_trait::AsyncFnInTrait;
 use builtin::*;
 use deref_into_dyn_supertrait::*;
@@ -95,6 +100,7 @@ use impl_trait_overcaptures::ImplTraitOvercaptures;
 use internal::*;
 use invalid_from_utf8::*;
 use let_underscore::*;
+use macro_expr_fragment_specifier_2024_migration::*;
 use map_unit_fn::*;
 use methods::*;
 use multiple_supertrait_upcastable::*;
@@ -114,7 +120,6 @@ use types::*;
 use unit_bindings::*;
 use unused::*;
 
-/// Useful for other parts of the compiler / Clippy.
 pub use builtin::{MissingDoc, SoftLints};
 pub use context::{CheckLintNameResult, FindLintError, LintStore};
 pub use context::{EarlyContext, LateContext, LintContext};
@@ -168,6 +173,7 @@ early_lint_methods!(
             IncompleteInternalFeatures: IncompleteInternalFeatures,
             RedundantSemicolons: RedundantSemicolons,
             UnusedDocComment: UnusedDocComment,
+            Expr2024: Expr2024,
         ]
     ]
 );
@@ -185,7 +191,6 @@ late_lint_methods!(
             ImproperCTypesDefinitions: ImproperCTypesDefinitions,
             InvalidFromUtf8: InvalidFromUtf8,
             VariantSizeDifferences: VariantSizeDifferences,
-            BoxPointers: BoxPointers,
             PathStatements: PathStatements,
             LetUnderscore: LetUnderscore,
             InvalidReferenceCasting: InvalidReferenceCasting,
@@ -219,12 +224,13 @@ late_lint_methods!(
             NoopMethodCall: NoopMethodCall,
             EnumIntrinsicsNonEnums: EnumIntrinsicsNonEnums,
             InvalidAtomicOrdering: InvalidAtomicOrdering,
-            NamedAsmLabels: NamedAsmLabels,
+            AsmLabels: AsmLabels,
             OpaqueHiddenInferredBound: OpaqueHiddenInferredBound,
             MultipleSupertraitUpcastable: MultipleSupertraitUpcastable,
             MapUnitFn: MapUnitFn,
             MissingDebugImplementations: MissingDebugImplementations,
             MissingDoc: MissingDoc,
+            AsyncClosureUsage: AsyncClosureUsage,
             AsyncFnInTrait: AsyncFnInTrait,
             NonLocalDefinitions: NonLocalDefinitions::default(),
             ImplTraitOvercaptures: ImplTraitOvercaptures,
@@ -549,6 +555,10 @@ fn register_builtins(store: &mut LintStore) {
         "converted into hard error, see RFC #3535 \
          <https://rust-lang.github.io/rfcs/3535-constants-in-patterns.html> for more information",
     );
+    store.register_removed(
+        "box_pointers",
+        "it does not detect other kinds of allocations, and existed only for historical reasons",
+    );
 }
 
 fn register_internals(store: &mut LintStore) {
@@ -562,6 +572,8 @@ fn register_internals(store: &mut LintStore) {
     store.register_late_mod_pass(|_| Box::new(ExistingDocKeyword));
     store.register_lints(&TyTyKind::get_lints());
     store.register_late_mod_pass(|_| Box::new(TyTyKind));
+    store.register_lints(&TypeIr::get_lints());
+    store.register_late_mod_pass(|_| Box::new(TypeIr));
     store.register_lints(&Diagnostics::get_lints());
     store.register_late_mod_pass(|_| Box::new(Diagnostics));
     store.register_lints(&BadOptAccess::get_lints());
@@ -585,6 +597,7 @@ fn register_internals(store: &mut LintStore) {
             LintId::of(PASS_BY_VALUE),
             LintId::of(LINT_PASS_IMPL_WITHOUT_MACRO),
             LintId::of(USAGE_OF_QUALIFIED_TY),
+            LintId::of(NON_GLOB_IMPORT_OF_TYPE_IR_INHERENT),
             LintId::of(EXISTING_DOC_KEYWORD),
             LintId::of(BAD_OPT_ACCESS),
             LintId::of(SPAN_USE_EQ_CTXT),

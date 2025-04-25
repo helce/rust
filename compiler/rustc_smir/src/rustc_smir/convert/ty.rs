@@ -304,10 +304,10 @@ impl<'tcx> Stable<'tcx> for ty::FloatTy {
 
     fn stable(&self, _: &mut Tables<'_>) -> Self::T {
         match self {
-            ty::FloatTy::F16 => unimplemented!("f16_f128"),
+            ty::FloatTy::F16 => FloatTy::F16,
             ty::FloatTy::F32 => FloatTy::F32,
             ty::FloatTy::F64 => FloatTy::F64,
-            ty::FloatTy::F128 => unimplemented!("f16_f128"),
+            ty::FloatTy::F128 => FloatTy::F128,
         }
     }
 }
@@ -600,7 +600,7 @@ impl<'tcx> Stable<'tcx> for rustc_middle::ty::GenericParamDefKind {
             ty::GenericParamDefKind::Type { has_default, synthetic } => {
                 GenericParamDefKind::Type { has_default: *has_default, synthetic: *synthetic }
             }
-            ty::GenericParamDefKind::Const { has_default, is_host_effect: _ } => {
+            ty::GenericParamDefKind::Const { has_default, is_host_effect: _, synthetic: _ } => {
                 GenericParamDefKind::Const { has_default: *has_default }
             }
         }
@@ -839,22 +839,22 @@ impl<'tcx> Stable<'tcx> for ty::Instance<'tcx> {
     fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
         let def = tables.instance_def(tables.tcx.lift(*self).unwrap());
         let kind = match self.def {
-            ty::InstanceDef::Item(..) => stable_mir::mir::mono::InstanceKind::Item,
-            ty::InstanceDef::Intrinsic(..) => stable_mir::mir::mono::InstanceKind::Intrinsic,
-            ty::InstanceDef::Virtual(_def_id, idx) => {
+            ty::InstanceKind::Item(..) => stable_mir::mir::mono::InstanceKind::Item,
+            ty::InstanceKind::Intrinsic(..) => stable_mir::mir::mono::InstanceKind::Intrinsic,
+            ty::InstanceKind::Virtual(_def_id, idx) => {
                 stable_mir::mir::mono::InstanceKind::Virtual { idx }
             }
-            ty::InstanceDef::VTableShim(..)
-            | ty::InstanceDef::ReifyShim(..)
-            | ty::InstanceDef::FnPtrAddrShim(..)
-            | ty::InstanceDef::ClosureOnceShim { .. }
-            | ty::InstanceDef::ConstructCoroutineInClosureShim { .. }
-            | ty::InstanceDef::CoroutineKindShim { .. }
-            | ty::InstanceDef::ThreadLocalShim(..)
-            | ty::InstanceDef::DropGlue(..)
-            | ty::InstanceDef::CloneShim(..)
-            | ty::InstanceDef::FnPtrShim(..)
-            | ty::InstanceDef::AsyncDropGlueCtorShim(..) => {
+            ty::InstanceKind::VTableShim(..)
+            | ty::InstanceKind::ReifyShim(..)
+            | ty::InstanceKind::FnPtrAddrShim(..)
+            | ty::InstanceKind::ClosureOnceShim { .. }
+            | ty::InstanceKind::ConstructCoroutineInClosureShim { .. }
+            | ty::InstanceKind::CoroutineKindShim { .. }
+            | ty::InstanceKind::ThreadLocalShim(..)
+            | ty::InstanceKind::DropGlue(..)
+            | ty::InstanceKind::CloneShim(..)
+            | ty::InstanceKind::FnPtrShim(..)
+            | ty::InstanceKind::AsyncDropGlueCtorShim(..) => {
                 stable_mir::mir::mono::InstanceKind::Shim
             }
         };
@@ -866,10 +866,10 @@ impl<'tcx> Stable<'tcx> for ty::Variance {
     type T = stable_mir::mir::Variance;
     fn stable(&self, _: &mut Tables<'_>) -> Self::T {
         match self {
-            ty::Variance::Bivariant => stable_mir::mir::Variance::Bivariant,
-            ty::Variance::Contravariant => stable_mir::mir::Variance::Contravariant,
-            ty::Variance::Covariant => stable_mir::mir::Variance::Covariant,
-            ty::Variance::Invariant => stable_mir::mir::Variance::Invariant,
+            ty::Bivariant => stable_mir::mir::Variance::Bivariant,
+            ty::Contravariant => stable_mir::mir::Variance::Contravariant,
+            ty::Covariant => stable_mir::mir::Variance::Covariant,
+            ty::Invariant => stable_mir::mir::Variance::Invariant,
         }
     }
 }
@@ -909,7 +909,6 @@ impl<'tcx> Stable<'tcx> for rustc_target::spec::abi::Abi {
             abi::Abi::AvrInterrupt => Abi::AvrInterrupt,
             abi::Abi::AvrNonBlockingInterrupt => Abi::AvrNonBlockingInterrupt,
             abi::Abi::CCmseNonSecureCall => Abi::CCmseNonSecureCall,
-            abi::Abi::Wasm => Abi::Wasm,
             abi::Abi::System { unwind } => Abi::System { unwind },
             abi::Abi::RustIntrinsic => Abi::RustIntrinsic,
             abi::Abi::RustCall => Abi::RustCall,

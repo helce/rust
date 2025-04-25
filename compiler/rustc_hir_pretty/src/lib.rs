@@ -1,7 +1,9 @@
 //! HIR pretty-printing is layered on top of AST pretty-printing. A number of
 //! the definitions in this file have equivalents in `rustc_ast_pretty`.
 
+// tidy-alphabetical-start
 #![recursion_limit = "256"]
+// tidy-alphabetical-end
 
 use rustc_ast as ast;
 use rustc_ast::util::parser::{self, AssocOp, Fixity};
@@ -11,7 +13,7 @@ use rustc_ast_pretty::pprust::{Comments, PrintState};
 use rustc_hir as hir;
 use rustc_hir::{
     BindingMode, ByRef, GenericArg, GenericBound, GenericParam, GenericParamKind, HirId,
-    LifetimeParamKind, Node, PatKind, RangeEnd, Term, TraitBoundModifier,
+    LifetimeParamKind, Node, PatKind, PreciseCapturingArg, RangeEnd, Term, TraitBoundModifier,
 };
 use rustc_span::source_map::SourceMap;
 use rustc_span::symbol::{kw, Ident, Symbol};
@@ -583,6 +585,7 @@ impl<'a> State<'a> {
                 self.print_struct(struct_def, generics, item.ident.name, item.span, true);
             }
             hir::ItemKind::Impl(&hir::Impl {
+                constness,
                 safety,
                 polarity,
                 defaultness,
@@ -596,6 +599,10 @@ impl<'a> State<'a> {
                 self.print_defaultness(defaultness);
                 self.print_safety(safety);
                 self.word_nbsp("impl");
+
+                if let hir::Constness::Const = constness {
+                    self.word_nbsp("const");
+                }
 
                 if !generics.params.is_empty() {
                     self.print_generic_params(generics.params);
@@ -1118,7 +1125,7 @@ impl<'a> State<'a> {
     fn print_expr_call(&mut self, func: &hir::Expr<'_>, args: &[hir::Expr<'_>]) {
         let prec = match func.kind {
             hir::ExprKind::Field(..) => parser::PREC_FORCE_PAREN,
-            _ => parser::PREC_POSTFIX,
+            _ => parser::PREC_UNAMBIGUOUS,
         };
 
         self.print_expr_maybe_paren(func, prec);
@@ -1132,7 +1139,7 @@ impl<'a> State<'a> {
         args: &[hir::Expr<'_>],
     ) {
         let base_args = args;
-        self.print_expr_maybe_paren(receiver, parser::PREC_POSTFIX);
+        self.print_expr_maybe_paren(receiver, parser::PREC_UNAMBIGUOUS);
         self.word(".");
         self.print_ident(segment.ident);
 
@@ -1476,12 +1483,12 @@ impl<'a> State<'a> {
                 self.print_expr_maybe_paren(rhs, prec);
             }
             hir::ExprKind::Field(expr, ident) => {
-                self.print_expr_maybe_paren(expr, parser::PREC_POSTFIX);
+                self.print_expr_maybe_paren(expr, parser::PREC_UNAMBIGUOUS);
                 self.word(".");
                 self.print_ident(ident);
             }
             hir::ExprKind::Index(expr, index, _) => {
-                self.print_expr_maybe_paren(expr, parser::PREC_POSTFIX);
+                self.print_expr_maybe_paren(expr, parser::PREC_UNAMBIGUOUS);
                 self.word("[");
                 self.print_expr(index);
                 self.word("]");
@@ -2098,7 +2105,21 @@ impl<'a> State<'a> {
                 GenericBound::Outlives(lt) => {
                     self.print_lifetime(lt);
                 }
+                GenericBound::Use(args, _) => {
+                    self.word("use <");
+
+                    self.commasep(Inconsistent, args, |s, arg| s.print_precise_capturing_arg(*arg));
+
+                    self.word(">");
+                }
             }
+        }
+    }
+
+    fn print_precise_capturing_arg(&mut self, arg: PreciseCapturingArg<'_>) {
+        match arg {
+            PreciseCapturingArg::Lifetime(lt) => self.print_lifetime(lt),
+            PreciseCapturingArg::Param(arg) => self.print_ident(arg.ident),
         }
     }
 
@@ -2128,7 +2149,7 @@ impl<'a> State<'a> {
                     self.print_type(default);
                 }
             }
-            GenericParamKind::Const { ty, ref default, is_host_effect: _ } => {
+            GenericParamKind::Const { ty, ref default, is_host_effect: _, synthetic: _ } => {
                 self.word_space(":");
                 self.print_type(ty);
                 if let Some(default) = default {

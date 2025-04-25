@@ -10,7 +10,6 @@ use crate::prelude::*;
 pub(crate) fn codegen_x86_llvm_intrinsic_call<'tcx>(
     fx: &mut FunctionCx<'_, '_, 'tcx>,
     intrinsic: &str,
-    _args: GenericArgsRef<'tcx>,
     args: &[Spanned<mir::Operand<'tcx>>],
     ret: CPlace<'tcx>,
     target: Option<BasicBlock>,
@@ -459,11 +458,20 @@ pub(crate) fn codegen_x86_llvm_intrinsic_call<'tcx>(
             intrinsic_args!(fx, args => (a); intrinsic);
             let a = a.load_scalar(fx);
 
+            let value = fx.bcx.ins().x86_cvtt2dq(types::I32X4, a);
+            let cvalue = CValue::by_val(value, ret.layout());
+            ret.write_cvalue(fx, cvalue);
+        }
+        "llvm.x86.sse2.cvtps2dq" => {
+            // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_cvtps_epi32
+            intrinsic_args!(fx, args => (a); intrinsic);
+            let a = a.load_scalar(fx);
+
             // Using inline asm instead of fcvt_to_sint_sat as unrepresentable values are turned
             // into 0x80000000 for which Cranelift doesn't have a native instruction.
             codegen_inline_asm_inner(
                 fx,
-                &[InlineAsmTemplatePiece::String(format!("cvttps2dq xmm0, xmm0"))],
+                &[InlineAsmTemplatePiece::String(format!("cvtps2dq xmm0, xmm0"))],
                 &[CInlineAsmOperand::InOut {
                     reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::xmm0)),
                     _late: true,
@@ -902,7 +910,7 @@ pub(crate) fn codegen_x86_llvm_intrinsic_call<'tcx>(
                         .span_fatal(span, "Index argument for `_mm_cmpestri` is not a constant");
                 };
 
-            let imm8 = imm8.try_to_u8().unwrap_or_else(|_| panic!("kind not scalar: {:?}", imm8));
+            let imm8 = imm8.to_u8();
 
             codegen_inline_asm_inner(
                 fx,
@@ -955,7 +963,7 @@ pub(crate) fn codegen_x86_llvm_intrinsic_call<'tcx>(
                         .span_fatal(span, "Index argument for `_mm_cmpestrm` is not a constant");
                 };
 
-            let imm8 = imm8.try_to_u8().unwrap_or_else(|_| panic!("kind not scalar: {:?}", imm8));
+            let imm8 = imm8.to_u8();
 
             codegen_inline_asm_inner(
                 fx,
@@ -1003,7 +1011,7 @@ pub(crate) fn codegen_x86_llvm_intrinsic_call<'tcx>(
                     );
                 };
 
-            let imm8 = imm8.try_to_u8().unwrap_or_else(|_| panic!("kind not scalar: {:?}", imm8));
+            let imm8 = imm8.to_u8();
 
             codegen_inline_asm_inner(
                 fx,
@@ -1040,7 +1048,7 @@ pub(crate) fn codegen_x86_llvm_intrinsic_call<'tcx>(
                     );
                 };
 
-            let imm8 = imm8.try_to_u8().unwrap_or_else(|_| panic!("kind not scalar: {:?}", imm8));
+            let imm8 = imm8.to_u8();
 
             codegen_inline_asm_inner(
                 fx,
@@ -1195,7 +1203,7 @@ pub(crate) fn codegen_x86_llvm_intrinsic_call<'tcx>(
                     .span_fatal(span, "Func argument for `_mm_sha1rnds4_epu32` is not a constant");
             };
 
-            let func = func.try_to_u8().unwrap_or_else(|_| panic!("kind not scalar: {:?}", func));
+            let func = func.to_u8();
 
             codegen_inline_asm_inner(
                 fx,
@@ -1414,6 +1422,36 @@ pub(crate) fn codegen_x86_llvm_intrinsic_call<'tcx>(
                 fx.layout_of(fx.tcx.types.i32),
             );
             ret.write_cvalue(fx, res);
+        }
+
+        "llvm.x86.rdtsc" => {
+            // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_rdtsc&ig_expand=5273
+
+            let res_place = CPlace::new_stack_slot(
+                fx,
+                fx.layout_of(Ty::new_tup(fx.tcx, &[fx.tcx.types.u32, fx.tcx.types.u32])),
+            );
+            let eax_place = res_place.place_field(fx, FieldIdx::new(0));
+            let edx_place = res_place.place_field(fx, FieldIdx::new(1));
+            codegen_inline_asm_inner(
+                fx,
+                &[InlineAsmTemplatePiece::String("rdtsc".to_string())],
+                &[
+                    CInlineAsmOperand::Out {
+                        reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::ax)),
+                        late: true,
+                        place: Some(eax_place),
+                    },
+                    CInlineAsmOperand::Out {
+                        reg: InlineAsmRegOrRegClass::Reg(InlineAsmReg::X86(X86InlineAsmReg::dx)),
+                        late: true,
+                        place: Some(edx_place),
+                    },
+                ],
+                InlineAsmOptions::NOSTACK | InlineAsmOptions::NOMEM,
+            );
+            let res = res_place.to_cvalue(fx);
+            ret.write_cvalue_transmute(fx, res);
         }
 
         _ => {

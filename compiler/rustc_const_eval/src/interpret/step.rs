@@ -32,7 +32,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             // We are unwinding and this fn has no cleanup code.
             // Just go on unwinding.
             trace!("unwinding: skipping frame");
-            self.pop_stack_frame(/* unwinding */ true)?;
+            self.return_from_current_stack_frame(/* unwinding */ true)?;
             return Ok(true);
         };
         let basic_block = &self.body().basic_blocks[loc.block];
@@ -253,7 +253,10 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                         Scalar::from_target_usize(val, self)
                     }
                     mir::NullOp::OffsetOf(fields) => {
-                        let val = layout.offset_of_subfield(self, fields.iter()).bytes();
+                        let val = self
+                            .tcx
+                            .offset_of_subfield(self.param_env, layout, fields.iter())
+                            .bytes();
                         Scalar::from_target_usize(val, self)
                     }
                     mir::NullOp::UbChecks => Scalar::from_bool(self.tcx.sess.ub_checks()),

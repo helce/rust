@@ -1,6 +1,6 @@
 use std::assert_matches::assert_matches;
 
-use rustc_apfloat::ieee::{Double, Single};
+use rustc_apfloat::ieee::{Double, Half, Quad, Single};
 use rustc_apfloat::{Float, FloatConvert};
 use rustc_middle::mir::interpret::{InterpResult, PointerArithmetic, Scalar};
 use rustc_middle::mir::CastKind;
@@ -70,9 +70,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             CastKind::PointerCoercion(
                 PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer,
             ) => {
-                // These are NOPs, but can be wide pointers.
-                let v = self.read_immediate(src)?;
-                self.write_immediate(*v, dest)?;
+                bug!("{cast_kind:?} casts are for borrowck only, not runtime MIR");
             }
 
             CastKind::PointerCoercion(PointerCoercion::ReifyFnPointer) => {
@@ -189,10 +187,10 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             bug!("FloatToFloat/FloatToInt cast: source type {} is not a float type", src.layout.ty)
         };
         let val = match fty {
-            FloatTy::F16 => unimplemented!("f16_f128"),
+            FloatTy::F16 => self.cast_from_float(src.to_scalar().to_f16()?, cast_to.ty),
             FloatTy::F32 => self.cast_from_float(src.to_scalar().to_f32()?, cast_to.ty),
             FloatTy::F64 => self.cast_from_float(src.to_scalar().to_f64()?, cast_to.ty),
-            FloatTy::F128 => unimplemented!("f16_f128"),
+            FloatTy::F128 => self.cast_from_float(src.to_scalar().to_f128()?, cast_to.ty),
         };
         Ok(ImmTy::from_scalar(val, cast_to))
     }
@@ -274,9 +272,13 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         // Let's make sure v is sign-extended *if* it has a signed type.
         let signed = src_layout.abi.is_signed(); // Also asserts that abi is `Scalar`.
 
-        let v = scalar.to_bits(src_layout.size)?;
-        let v = if signed { self.sign_extend(v, src_layout) } else { v };
-        trace!("cast_from_scalar: {}, {} -> {}", v, src_layout.ty, cast_ty);
+        let v = match src_layout.ty.kind() {
+            Uint(_) | RawPtr(..) | FnPtr(..) => scalar.to_uint(src_layout.size)?,
+            Int(_) => scalar.to_int(src_layout.size)? as u128, // we will cast back to `i128` below if the sign matters
+            Bool => scalar.to_bool()?.into(),
+            Char => scalar.to_char()?.into(),
+            _ => span_bug!(self.cur_span(), "invalid int-like cast from {}", src_layout.ty),
+        };
 
         Ok(match *cast_ty.kind() {
             // int -> int
@@ -294,18 +296,18 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             Float(fty) if signed => {
                 let v = v as i128;
                 match fty {
-                    FloatTy::F16 => unimplemented!("f16_f128"),
+                    FloatTy::F16 => Scalar::from_f16(Half::from_i128(v).value),
                     FloatTy::F32 => Scalar::from_f32(Single::from_i128(v).value),
                     FloatTy::F64 => Scalar::from_f64(Double::from_i128(v).value),
-                    FloatTy::F128 => unimplemented!("f16_f128"),
+                    FloatTy::F128 => Scalar::from_f128(Quad::from_i128(v).value),
                 }
             }
             // unsigned int -> float
             Float(fty) => match fty {
-                FloatTy::F16 => unimplemented!("f16_f128"),
+                FloatTy::F16 => Scalar::from_f16(Half::from_u128(v).value),
                 FloatTy::F32 => Scalar::from_f32(Single::from_u128(v).value),
                 FloatTy::F64 => Scalar::from_f64(Double::from_u128(v).value),
-                FloatTy::F128 => unimplemented!("f16_f128"),
+                FloatTy::F128 => Scalar::from_f128(Quad::from_u128(v).value),
             },
 
             // u8 -> char
@@ -319,7 +321,12 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     /// Low-level cast helper function. Converts an apfloat `f` into int or float types.
     fn cast_from_float<F>(&self, f: F, dest_ty: Ty<'tcx>) -> Scalar<M::Provenance>
     where
-        F: Float + Into<Scalar<M::Provenance>> + FloatConvert<Single> + FloatConvert<Double>,
+        F: Float
+            + Into<Scalar<M::Provenance>>
+            + FloatConvert<Half>
+            + FloatConvert<Single>
+            + FloatConvert<Double>
+            + FloatConvert<Quad>,
     {
         use rustc_type_ir::TyKind::*;
 
@@ -356,10 +363,12 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             }
             // float -> float
             Float(fty) => match fty {
-                FloatTy::F16 => unimplemented!("f16_f128"),
+                FloatTy::F16 => Scalar::from_f16(adjust_nan(self, f, f.convert(&mut false).value)),
                 FloatTy::F32 => Scalar::from_f32(adjust_nan(self, f, f.convert(&mut false).value)),
                 FloatTy::F64 => Scalar::from_f64(adjust_nan(self, f, f.convert(&mut false).value)),
-                FloatTy::F128 => unimplemented!("f16_f128"),
+                FloatTy::F128 => {
+                    Scalar::from_f128(adjust_nan(self, f, f.convert(&mut false).value))
+                }
             },
             // That's it.
             _ => span_bug!(self.cur_span(), "invalid float to {} cast", dest_ty),
@@ -383,7 +392,6 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         match (&src_pointee_ty.kind(), &dest_pointee_ty.kind()) {
             (&ty::Array(_, length), &ty::Slice(_)) => {
                 let ptr = self.read_pointer(src)?;
-                // u64 cast is from usize to u64, which is always good
                 let val = Immediate::new_slice(
                     ptr,
                     length.eval_target_usize(*self.tcx, self.param_env),
@@ -393,21 +401,46 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             }
             (ty::Dynamic(data_a, _, ty::Dyn), ty::Dynamic(data_b, _, ty::Dyn)) => {
                 let val = self.read_immediate(src)?;
-                if data_a.principal() == data_b.principal() {
-                    // A NOP cast that doesn't actually change anything, should be allowed even with mismatching vtables.
-                    // (But currently mismatching vtables violate the validity invariant so UB is triggered anyway.)
-                    return self.write_immediate(*val, dest);
-                }
+                // Take apart the old pointer, and find the dynamic type.
                 let (old_data, old_vptr) = val.to_scalar_pair();
                 let old_data = old_data.to_pointer(self)?;
                 let old_vptr = old_vptr.to_pointer(self)?;
-                let (ty, old_trait) = self.get_ptr_vtable(old_vptr)?;
-                if old_trait != data_a.principal() {
-                    throw_ub!(InvalidVTableTrait {
-                        expected_trait: data_a,
-                        vtable_trait: old_trait,
-                    });
+                let ty = self.get_ptr_vtable_ty(old_vptr, Some(data_a))?;
+
+                // Sanity-check that `supertrait_vtable_slot` in this type's vtable indeed produces
+                // our destination trait.
+                if cfg!(debug_assertions) {
+                    let vptr_entry_idx =
+                        self.tcx.supertrait_vtable_slot((src_pointee_ty, dest_pointee_ty));
+                    let vtable_entries = self.vtable_entries(data_a.principal(), ty);
+                    if let Some(entry_idx) = vptr_entry_idx {
+                        let Some(&ty::VtblEntry::TraitVPtr(upcast_trait_ref)) =
+                            vtable_entries.get(entry_idx)
+                        else {
+                            span_bug!(
+                                self.cur_span(),
+                                "invalid vtable entry index in {} -> {} upcast",
+                                src_pointee_ty,
+                                dest_pointee_ty
+                            );
+                        };
+                        let erased_trait_ref = upcast_trait_ref
+                            .map_bound(|r| ty::ExistentialTraitRef::erase_self_ty(*self.tcx, r));
+                        assert!(
+                            data_b
+                                .principal()
+                                .is_some_and(|b| self.eq_in_param_env(erased_trait_ref, b))
+                        );
+                    } else {
+                        // In this case codegen would keep using the old vtable. We don't want to do
+                        // that as it has the wrong trait. The reason codegen can do this is that
+                        // one vtable is a prefix of the other, so we double-check that.
+                        let vtable_entries_b = self.vtable_entries(data_b.principal(), ty);
+                        assert!(&vtable_entries[..vtable_entries_b.len()] == vtable_entries_b);
+                    };
                 }
+
+                // Get the destination trait vtable and return that.
                 let new_vptr = self.get_vtable_ptr(ty, data_b.principal())?;
                 self.write_immediate(Immediate::new_dyn_trait(old_data, new_vptr, self), dest)
             }

@@ -3,8 +3,10 @@ use std::str;
 
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_span::Symbol;
+use rustc_target::abi::Size;
 use rustc_target::spec::abi::Abi;
 
+use crate::concurrency::cpu_affinity::CpuAffinityMask;
 use crate::shims::alloc::EvalContextExt as _;
 use crate::shims::unix::*;
 use crate::*;
@@ -43,15 +45,15 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         &mut self,
         link_name: Symbol,
         abi: Abi,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
     ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
 
         // See `fn emulate_foreign_item_inner` in `shims/foreign_items.rs` for the general pattern.
         #[rustfmt::skip]
         match link_name.as_str() {
-            // Environment variables
+            // Environment related shims
             "getenv" => {
                 let [name] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 let result = this.getenv(name)?;
@@ -76,6 +78,11 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             "chdir" => {
                 let [path] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 let result = this.chdir(path)?;
+                this.write_scalar(Scalar::from_i32(result), dest)?;
+            }
+            "getpid" => {
+                let [] = this.check_shim(abi, Abi::C { unwind: false}, link_name, args)?;
+                let result = this.getpid()?;
                 this.write_scalar(Scalar::from_i32(result), dest)?;
             }
 
@@ -108,6 +115,19 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 // in `this.fcntl()`, so we do not use `check_shim` here.
                 this.check_abi_and_shim_symbol_clash(abi, Abi::C { unwind: false }, link_name)?;
                 let result = this.fcntl(args)?;
+                this.write_scalar(Scalar::from_i32(result), dest)?;
+            }
+            "dup" => {
+                let [old_fd] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let old_fd = this.read_scalar(old_fd)?.to_i32()?;
+                let new_fd = this.dup(old_fd)?;
+                this.write_scalar(Scalar::from_i32(new_fd), dest)?;
+            }
+            "dup2" => {
+                let [old_fd, new_fd] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let old_fd = this.read_scalar(old_fd)?.to_i32()?;
+                let new_fd = this.read_scalar(new_fd)?.to_i32()?;
+                let result = this.dup2(old_fd, new_fd)?;
                 this.write_scalar(Scalar::from_i32(result), dest)?;
             }
 
@@ -326,7 +346,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let name = this.read_scalar(name)?.to_i32()?;
                 // FIXME: Which of these are POSIX, and which are GNU/Linux?
                 // At least the names seem to all also exist on macOS.
-                let sysconfs: &[(&str, fn(&MiriInterpCx<'_>) -> Scalar<Provenance>)] = &[
+                let sysconfs: &[(&str, fn(&MiriInterpCx<'_>) -> Scalar)] = &[
                     ("_SC_PAGESIZE", |this| Scalar::from_int(this.machine.page_size, this.pointer_size())),
                     ("_SC_NPROCESSORS_CONF", |this| Scalar::from_int(this.machine.num_cpus, this.pointer_size())),
                     ("_SC_NPROCESSORS_ONLN", |this| Scalar::from_int(this.machine.num_cpus, this.pointer_size())),
@@ -553,6 +573,99 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let result = this.nanosleep(req, rem)?;
                 this.write_scalar(Scalar::from_i32(result), dest)?;
             }
+            "sched_getaffinity" => {
+                // Currently this function does not exist on all Unixes, e.g. on macOS.
+                if !matches!(&*this.tcx.sess.target.os, "linux" | "freebsd" | "android") {
+                    throw_unsup_format!(
+                        "`sched_getaffinity` is not supported on {}",
+                        this.tcx.sess.target.os
+                    );
+                }
+
+                let [pid, cpusetsize, mask] =
+                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let pid = this.read_scalar(pid)?.to_u32()?;
+                let cpusetsize = this.read_target_usize(cpusetsize)?;
+                let mask = this.read_pointer(mask)?;
+
+                // TODO: when https://github.com/rust-lang/miri/issues/3730 is fixed this should use its notion of tid/pid
+                let thread_id = match pid {
+                    0 => this.active_thread(),
+                    _ => throw_unsup_format!("`sched_getaffinity` is only supported with a pid of 0 (indicating the current thread)"),
+                };
+
+                // The mask is stored in chunks, and the size must be a whole number of chunks.
+                let chunk_size = CpuAffinityMask::chunk_size(this);
+
+                if this.ptr_is_null(mask)? {
+                    let einval = this.eval_libc("EFAULT");
+                    this.set_last_error(einval)?;
+                    this.write_scalar(Scalar::from_i32(-1), dest)?;
+                } else if cpusetsize == 0 || cpusetsize.checked_rem(chunk_size).unwrap() != 0 {
+                    // we only copy whole chunks of size_of::<c_ulong>()
+                    let einval = this.eval_libc("EINVAL");
+                    this.set_last_error(einval)?;
+                    this.write_scalar(Scalar::from_i32(-1), dest)?;
+                } else if let Some(cpuset) = this.machine.thread_cpu_affinity.get(&thread_id) {
+                    let cpuset = cpuset.clone();
+                    // we only copy whole chunks of size_of::<c_ulong>()
+                    let byte_count = Ord::min(cpuset.as_slice().len(), cpusetsize.try_into().unwrap());
+                    this.write_bytes_ptr(mask, cpuset.as_slice()[..byte_count].iter().copied())?;
+                    this.write_scalar(Scalar::from_i32(0), dest)?;
+                } else {
+                    // The thread whose ID is pid could not be found
+                    let einval = this.eval_libc("ESRCH");
+                    this.set_last_error(einval)?;
+                    this.write_scalar(Scalar::from_i32(-1), dest)?;
+                }
+            }
+            "sched_setaffinity" => {
+                // Currently this function does not exist on all Unixes, e.g. on macOS.
+                if !matches!(&*this.tcx.sess.target.os, "linux" | "freebsd" | "android") {
+                    throw_unsup_format!(
+                        "`sched_setaffinity` is not supported on {}",
+                        this.tcx.sess.target.os
+                    );
+                }
+
+                let [pid, cpusetsize, mask] =
+                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let pid = this.read_scalar(pid)?.to_u32()?;
+                let cpusetsize = this.read_target_usize(cpusetsize)?;
+                let mask = this.read_pointer(mask)?;
+
+                // TODO: when https://github.com/rust-lang/miri/issues/3730 is fixed this should use its notion of tid/pid
+                let thread_id = match pid {
+                    0 => this.active_thread(),
+                    _ => throw_unsup_format!("`sched_setaffinity` is only supported with a pid of 0 (indicating the current thread)"),
+                };
+
+                if this.ptr_is_null(mask)? {
+                    let einval = this.eval_libc("EFAULT");
+                    this.set_last_error(einval)?;
+                    this.write_scalar(Scalar::from_i32(-1), dest)?;
+                } else {
+                    // NOTE: cpusetsize might be smaller than `CpuAffinityMask::CPU_MASK_BYTES`.
+                    // Any unspecified bytes are treated as zero here (none of the CPUs are configured).
+                    // This is not exactly documented, so we assume that this is the behavior in practice.
+                    let bits_slice = this.read_bytes_ptr_strip_provenance(mask, Size::from_bytes(cpusetsize))?;
+                    // This ignores the bytes beyond `CpuAffinityMask::CPU_MASK_BYTES`
+                    let bits_array: [u8; CpuAffinityMask::CPU_MASK_BYTES] =
+                        std::array::from_fn(|i| bits_slice.get(i).copied().unwrap_or(0));
+                    match CpuAffinityMask::from_array(this, this.machine.num_cpus, bits_array) {
+                        Some(cpuset) => {
+                            this.machine.thread_cpu_affinity.insert(thread_id, cpuset);
+                            this.write_scalar(Scalar::from_i32(0), dest)?;
+                        }
+                        None => {
+                            // The intersection between the mask and the available CPUs was empty.
+                            let einval = this.eval_libc("EINVAL");
+                            this.set_last_error(einval)?;
+                            this.write_scalar(Scalar::from_i32(-1), dest)?;
+                        }
+                    }
+                }
+            }
 
             // Miscellaneous
             "isatty" => {
@@ -582,11 +695,6 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 let (complete, _) = this.write_os_str_to_c_str(OsStr::new(&formatted), buf, buflen)?;
                 let ret = if complete { 0 } else { this.eval_libc_i32("ERANGE") };
                 this.write_int(ret, dest)?;
-            }
-            "getpid" => {
-                let [] = this.check_shim(abi, Abi::C { unwind: false}, link_name, args)?;
-                let result = this.getpid()?;
-                this.write_scalar(Scalar::from_i32(result), dest)?;
             }
             "getentropy" => {
                 // This function is non-standard but exists with the same signature and behavior on

@@ -25,9 +25,9 @@ use rustc_middle::ty::{
 };
 use rustc_session::lint::builtin::{UNINHABITED_STATIC, UNSUPPORTED_CALLING_CONVENTIONS};
 use rustc_target::abi::FieldIdx;
+use rustc_trait_selection::error_reporting::traits::on_unimplemented::OnUnimplementedDirective;
+use rustc_trait_selection::error_reporting::traits::TypeErrCtxtExt as _;
 use rustc_trait_selection::traits;
-use rustc_trait_selection::traits::error_reporting::on_unimplemented::OnUnimplementedDirective;
-use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt as _;
 use rustc_trait_selection::traits::outlives_bounds::InferCtxtExt as _;
 use rustc_type_ir::fold::TypeFoldable;
 
@@ -481,9 +481,12 @@ fn sanity_check_found_hidden_type<'tcx>(
 /// 2. Checking that all lifetimes that are implicitly captured are mentioned.
 /// 3. Asserting that all parameters mentioned in the captures list are invariant.
 fn check_opaque_precise_captures<'tcx>(tcx: TyCtxt<'tcx>, opaque_def_id: LocalDefId) {
-    let hir::OpaqueTy { precise_capturing_args, .. } =
+    let hir::OpaqueTy { bounds, .. } =
         *tcx.hir_node_by_def_id(opaque_def_id).expect_item().expect_opaque_ty();
-    let Some((precise_capturing_args, _)) = precise_capturing_args else {
+    let Some(precise_capturing_args) = bounds.iter().find_map(|bound| match *bound {
+        hir::GenericBound::Use(bounds, ..) => Some(bounds),
+        _ => None,
+    }) else {
         // No precise capturing args; nothing to validate
         return;
     };
@@ -716,7 +719,7 @@ pub(crate) fn check_item_type(tcx: TyCtxt<'_>, def_id: LocalDefId) {
                             tcx,
                             assoc_item,
                             assoc_item,
-                            ty::TraitRef::new(tcx, def_id.to_def_id(), trait_args),
+                            ty::TraitRef::new_from_args(tcx, def_id.to_def_id(), trait_args),
                         );
                     }
                     _ => {}
@@ -876,7 +879,8 @@ pub(super) fn check_specialization_validity<'tcx>(
     let result = opt_result.unwrap_or(Ok(()));
 
     if let Err(parent_impl) = result {
-        if !tcx.is_impl_trait_in_trait(impl_item) {
+        // FIXME(effects) the associated type from effects could be specialized
+        if !tcx.is_impl_trait_in_trait(impl_item) && !tcx.is_effects_desugared_assoc_ty(impl_item) {
             report_forbidden_specialization(tcx, impl_item, parent_impl);
         } else {
             tcx.dcx().delayed_bug(format!("parent item: {parent_impl:?} not marked as default"));
@@ -1568,6 +1572,7 @@ fn check_type_alias_type_params_are_used<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalD
                 param_name,
                 param_def_kind: tcx.def_descr(param.def_id),
                 help: errors::UnusedGenericParameterHelp::TyAlias { param_name },
+                usage_spans: vec![],
                 const_param_help,
             });
             diag.code(E0091);

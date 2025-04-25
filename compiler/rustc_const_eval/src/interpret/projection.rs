@@ -21,7 +21,7 @@ use rustc_target::abi::{self, VariantIdx};
 use tracing::{debug, instrument};
 
 use super::{
-    throw_ub, throw_unsup_format, InterpCx, InterpResult, MPlaceTy, Machine, MemPlaceMeta, OpTy,
+    throw_ub, throw_unsup, InterpCx, InterpResult, MPlaceTy, Machine, MemPlaceMeta, OpTy,
     Provenance, Scalar,
 };
 
@@ -81,6 +81,8 @@ pub trait Projectable<'tcx, Prov: Provenance>: Sized + std::fmt::Debug {
         ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, Self> {
         assert!(layout.is_sized());
+        // We sometimes do pointer arithmetic with this function, disregarding the source type.
+        // So we don't check the sizes here.
         self.offset_with_meta(offset, OffsetMode::Inbounds, MemPlaceMeta::None, layout, ecx)
     }
 
@@ -184,8 +186,8 @@ where
                     (base_meta, offset)
                 }
                 None => {
-                    // We don't know the alignment of this field, so we cannot adjust.
-                    throw_unsup_format!("`extern type` does not have a known offset")
+                    // We cannot know the alignment of this field, so we cannot adjust.
+                    throw_unsup!(ExternTypeField)
                 }
             }
         } else {
@@ -298,7 +300,7 @@ where
     ) -> InterpResult<'tcx, P> {
         let len = base.len(self)?; // also asserts that we have a type where this makes sense
         let actual_to = if from_end {
-            if from.checked_add(to).map_or(true, |to| to > len) {
+            if from.checked_add(to).is_none_or(|to| to > len) {
                 // This can only be reached in ConstProp and non-rustc-MIR.
                 throw_ub!(BoundsCheckFailed { len: len, index: from.saturating_add(to) });
             }

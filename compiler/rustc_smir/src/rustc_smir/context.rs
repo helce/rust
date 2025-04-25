@@ -6,6 +6,7 @@
 #![allow(rustc::usage_of_qualified_ty)]
 
 use rustc_abi::HasDataLayout;
+use rustc_hir::LangItem;
 use rustc_middle::ty::layout::{
     FnAbiOf, FnAbiOfHelpers, HasParamEnv, HasTyCtxt, LayoutOf, LayoutOfHelpers,
 };
@@ -59,13 +60,14 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
     fn mir_body(&self, item: stable_mir::DefId) -> stable_mir::mir::Body {
         let mut tables = self.0.borrow_mut();
         let def_id = tables[item];
-        tables.tcx.instance_mir(rustc_middle::ty::InstanceDef::Item(def_id)).stable(&mut tables)
+        tables.tcx.instance_mir(rustc_middle::ty::InstanceKind::Item(def_id)).stable(&mut tables)
     }
 
     fn has_body(&self, def: DefId) -> bool {
-        let tables = self.0.borrow();
-        let def_id = tables[def];
-        tables.tcx.is_mir_available(def_id)
+        let mut tables = self.0.borrow_mut();
+        let tcx = tables.tcx;
+        let def_id = def.internal(&mut *tables, tcx);
+        tables.item_has_body(def_id)
     }
 
     fn foreign_modules(&self, crate_num: CrateNum) -> Vec<stable_mir::ty::ForeignModuleDef> {
@@ -158,7 +160,8 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
     fn predicates_of(&self, def_id: stable_mir::DefId) -> stable_mir::ty::GenericPredicates {
         let mut tables = self.0.borrow_mut();
         let def_id = tables[def_id];
-        let GenericPredicates { parent, predicates } = tables.tcx.predicates_of(def_id);
+        let GenericPredicates { parent, predicates, effects_min_tys: _ } =
+            tables.tcx.predicates_of(def_id);
         stable_mir::ty::GenericPredicates {
             parent: parent.map(|did| tables.trait_def(did)),
             predicates: predicates
@@ -179,7 +182,8 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
     ) -> stable_mir::ty::GenericPredicates {
         let mut tables = self.0.borrow_mut();
         let def_id = tables[def_id];
-        let GenericPredicates { parent, predicates } = tables.tcx.explicit_predicates_of(def_id);
+        let GenericPredicates { parent, predicates, effects_min_tys: _ } =
+            tables.tcx.explicit_predicates_of(def_id);
         stable_mir::ty::GenericPredicates {
             parent: parent.map(|did| tables.trait_def(did)),
             predicates: predicates
@@ -224,6 +228,46 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
         } else {
             with_no_trimmed_paths!(tables.tcx.def_path_str(tables[def_id]))
         }
+    }
+
+    fn get_attrs_by_path(
+        &self,
+        def_id: stable_mir::DefId,
+        attr: &[stable_mir::Symbol],
+    ) -> Vec<stable_mir::crate_def::Attribute> {
+        let mut tables = self.0.borrow_mut();
+        let tcx = tables.tcx;
+        let did = tables[def_id];
+        let attr_name: Vec<_> =
+            attr.iter().map(|seg| rustc_span::symbol::Symbol::intern(&seg)).collect();
+        tcx.get_attrs_by_path(did, &attr_name)
+            .map(|attribute| {
+                let attr_str = rustc_ast_pretty::pprust::attribute_to_string(attribute);
+                let span = attribute.span;
+                stable_mir::crate_def::Attribute::new(attr_str, span.stable(&mut *tables))
+            })
+            .collect()
+    }
+
+    fn get_all_attrs(&self, def_id: stable_mir::DefId) -> Vec<stable_mir::crate_def::Attribute> {
+        let mut tables = self.0.borrow_mut();
+        let tcx = tables.tcx;
+        let did = tables[def_id];
+        let filter_fn = move |a: &&rustc_ast::ast::Attribute| {
+            matches!(a.kind, rustc_ast::ast::AttrKind::Normal(_))
+        };
+        let attrs_iter = if let Some(did) = did.as_local() {
+            tcx.hir().attrs(tcx.local_def_id_to_hir_id(did)).iter().filter(filter_fn)
+        } else {
+            tcx.item_attrs(did).iter().filter(filter_fn)
+        };
+        attrs_iter
+            .map(|attribute| {
+                let attr_str = rustc_ast_pretty::pprust::attribute_to_string(attribute);
+                let span = attribute.span;
+                stable_mir::crate_def::Attribute::new(attr_str, span.stable(&mut *tables))
+            })
+            .collect()
     }
 
     fn span_to_string(&self, span: stable_mir::ty::Span) -> String {
@@ -295,7 +339,7 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
         let mut tables = self.0.borrow_mut();
         let tcx = tables.tcx;
         let def_id = def.0.internal(&mut *tables, tcx);
-        tables.tcx.lang_items().c_str() == Some(def_id)
+        tables.tcx.is_lang_item(def_id, LangItem::CStr)
     }
 
     fn fn_sig(&self, def: FnDef, args: &GenericArgs) -> PolyFnSig {
@@ -320,13 +364,6 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
         let tcx = tables.tcx;
         let def_id = def.0.internal(&mut *tables, tcx);
         tcx.intrinsic(def_id).unwrap().name.to_string()
-    }
-
-    fn intrinsic_must_be_overridden(&self, def: IntrinsicDef) -> bool {
-        let mut tables = self.0.borrow_mut();
-        let tcx = tables.tcx;
-        let def_id = def.0.internal(&mut *tables, tcx);
-        tcx.intrinsic_raw(def_id).unwrap().must_be_overridden
     }
 
     fn closure_sig(&self, args: &GenericArgs) -> PolyFnSig {
@@ -515,7 +552,7 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
         let mut tables = self.0.borrow_mut();
         let instance = tables.instances[def];
         tables
-            .has_body(instance)
+            .instance_has_body(instance)
             .then(|| BodyBuilder::new(tables.tcx, instance).build(&mut *tables))
     }
 
@@ -538,6 +575,13 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
         Ok(tables.fn_abi_of_instance(instance, List::empty())?.stable(&mut *tables))
     }
 
+    fn fn_ptr_abi(&self, fn_ptr: PolyFnSig) -> Result<FnAbi, Error> {
+        let mut tables = self.0.borrow_mut();
+        let tcx = tables.tcx;
+        let sig = fn_ptr.internal(&mut *tables, tcx);
+        Ok(tables.fn_abi_of_fn_ptr(sig, List::empty())?.stable(&mut *tables))
+    }
+
     fn instance_def_id(&self, def: InstanceDef) -> stable_mir::DefId {
         let mut tables = self.0.borrow_mut();
         let def_id = tables.instances[def].def_id();
@@ -553,13 +597,13 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
     fn is_empty_drop_shim(&self, def: InstanceDef) -> bool {
         let tables = self.0.borrow_mut();
         let instance = tables.instances[def];
-        matches!(instance.def, ty::InstanceDef::DropGlue(_, None))
+        matches!(instance.def, ty::InstanceKind::DropGlue(_, None))
     }
 
     fn is_empty_async_drop_ctor_shim(&self, def: InstanceDef) -> bool {
         let tables = self.0.borrow_mut();
         let instance = tables.instances[def];
-        matches!(instance.def, ty::InstanceDef::AsyncDropGlueCtorShim(_, None))
+        matches!(instance.def, ty::InstanceKind::AsyncDropGlueCtorShim(_, None))
     }
 
     fn mono_instance(&self, def_id: stable_mir::DefId) -> stable_mir::mir::mono::Instance {
@@ -585,7 +629,7 @@ impl<'tcx> Context for TablesWrapper<'tcx> {
         let tcx = tables.tcx;
         let def_id = def.0.internal(&mut *tables, tcx);
         let args_ref = args.internal(&mut *tables, tcx);
-        match Instance::resolve(tables.tcx, ParamEnv::reveal_all(), def_id, args_ref) {
+        match Instance::try_resolve(tables.tcx, ParamEnv::reveal_all(), def_id, args_ref) {
             Ok(Some(instance)) => Some(instance.stable(&mut *tables)),
             Ok(None) | Err(_) => None,
         }

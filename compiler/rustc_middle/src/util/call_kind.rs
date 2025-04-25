@@ -98,7 +98,7 @@ pub fn call_kind<'tcx>(
         Some(CallKind::Operator { self_arg, trait_id, self_ty: method_args.type_at(0) })
     } else if is_deref {
         let deref_target = tcx.get_diagnostic_item(sym::deref_target).and_then(|deref_target| {
-            Instance::resolve(tcx, param_env, deref_target, method_args).transpose()
+            Instance::try_resolve(tcx, param_env, deref_target, method_args).transpose()
         });
         if let Some(Ok(instance)) = deref_target {
             let deref_target_ty = instance.ty(tcx, param_env);
@@ -117,19 +117,19 @@ pub fn call_kind<'tcx>(
     kind.unwrap_or_else(|| {
         // This isn't a 'special' use of `self`
         debug!(?method_did, ?fn_call_span);
-        let desugaring = if Some(method_did) == tcx.lang_items().into_iter_fn()
+        let desugaring = if tcx.is_lang_item(method_did, LangItem::IntoIterIntoIter)
             && fn_call_span.desugaring_kind() == Some(DesugaringKind::ForLoop)
         {
             Some((CallDesugaringKind::ForLoopIntoIter, method_args.type_at(0)))
         } else if fn_call_span.desugaring_kind() == Some(DesugaringKind::QuestionMark) {
-            if Some(method_did) == tcx.lang_items().branch_fn() {
+            if tcx.is_lang_item(method_did, LangItem::TryTraitBranch) {
                 Some((CallDesugaringKind::QuestionBranch, method_args.type_at(0)))
-            } else if Some(method_did) == tcx.lang_items().from_residual_fn() {
+            } else if tcx.is_lang_item(method_did, LangItem::TryTraitFromResidual) {
                 Some((CallDesugaringKind::QuestionFromResidual, method_args.type_at(0)))
             } else {
                 None
             }
-        } else if Some(method_did) == tcx.lang_items().from_output_fn()
+        } else if tcx.is_lang_item(method_did, LangItem::TryTraitFromOutput)
             && fn_call_span.desugaring_kind() == Some(DesugaringKind::TryBlock)
         {
             Some((CallDesugaringKind::TryBlockFromOutput, method_args.type_at(0)))

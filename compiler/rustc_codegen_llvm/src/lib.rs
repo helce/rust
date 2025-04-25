@@ -4,16 +4,18 @@
 //!
 //! This API is completely unstable and subject to change.
 
+// tidy-alphabetical-start
 #![allow(internal_features)]
-#![feature(rustdoc_internals)]
-#![doc(rust_logo)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![doc(rust_logo)]
 #![feature(exact_size_is_empty)]
 #![feature(extern_types)]
 #![feature(hash_raw_entry)]
+#![feature(impl_trait_in_assoc_type)]
 #![feature(iter_intersperse)]
 #![feature(let_chains)]
-#![feature(impl_trait_in_assoc_type)]
+#![feature(rustdoc_internals)]
+// tidy-alphabetical-end
 
 use back::owned_target_machine::OwnedTargetMachine;
 use back::write::{create_informational_target_machine, create_target_machine};
@@ -29,7 +31,7 @@ use rustc_codegen_ssa::traits::*;
 use rustc_codegen_ssa::ModuleCodegen;
 use rustc_codegen_ssa::{CodegenResults, CompiledModule};
 use rustc_data_structures::fx::FxIndexMap;
-use rustc_errors::{DiagCtxt, ErrorGuaranteed, FatalError};
+use rustc_errors::{DiagCtxtHandle, ErrorGuaranteed, FatalError};
 use rustc_metadata::EncodedMetadata;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::ty::TyCtxt;
@@ -189,7 +191,7 @@ impl WriteBackendMethods for LlvmCodegenBackend {
     }
     fn run_link(
         cgcx: &CodegenContext<Self>,
-        dcx: &DiagCtxt,
+        dcx: DiagCtxtHandle<'_>,
         modules: Vec<ModuleCodegen<Self::Module>>,
     ) -> Result<ModuleCodegen<Self::Module>, FatalError> {
         back::write::link(cgcx, dcx, modules)
@@ -210,32 +212,33 @@ impl WriteBackendMethods for LlvmCodegenBackend {
     }
     unsafe fn optimize(
         cgcx: &CodegenContext<Self>,
-        dcx: &DiagCtxt,
+        dcx: DiagCtxtHandle<'_>,
         module: &ModuleCodegen<Self::Module>,
         config: &ModuleConfig,
     ) -> Result<(), FatalError> {
-        back::write::optimize(cgcx, dcx, module, config)
+        unsafe { back::write::optimize(cgcx, dcx, module, config) }
     }
     fn optimize_fat(
         cgcx: &CodegenContext<Self>,
         module: &mut ModuleCodegen<Self::Module>,
     ) -> Result<(), FatalError> {
         let dcx = cgcx.create_dcx();
-        back::lto::run_pass_manager(cgcx, &dcx, module, false)
+        let dcx = dcx.handle();
+        back::lto::run_pass_manager(cgcx, dcx, module, false)
     }
     unsafe fn optimize_thin(
         cgcx: &CodegenContext<Self>,
         thin: ThinModule<Self>,
     ) -> Result<ModuleCodegen<Self::Module>, FatalError> {
-        back::lto::optimize_thin_module(thin, cgcx)
+        unsafe { back::lto::optimize_thin_module(thin, cgcx) }
     }
     unsafe fn codegen(
         cgcx: &CodegenContext<Self>,
-        dcx: &DiagCtxt,
+        dcx: DiagCtxtHandle<'_>,
         module: ModuleCodegen<Self::Module>,
         config: &ModuleConfig,
     ) -> Result<CompiledModule, FatalError> {
-        back::write::codegen(cgcx, dcx, module, config)
+        unsafe { back::write::codegen(cgcx, dcx, module, config) }
     }
     fn prepare_thin(
         module: ModuleCodegen<Self::Module>,
@@ -271,10 +274,11 @@ impl CodegenBackend for LlvmCodegenBackend {
             |tcx, ()| llvm_util::global_llvm_features(tcx.sess, true)
     }
 
-    fn print(&self, req: &PrintRequest, out: &mut dyn PrintBackendInfo, sess: &Session) {
+    fn print(&self, req: &PrintRequest, out: &mut String, sess: &Session) {
+        use std::fmt::Write;
         match req.kind {
             PrintKind::RelocationModels => {
-                writeln!(out, "Available relocation models:");
+                writeln!(out, "Available relocation models:").unwrap();
                 for name in &[
                     "static",
                     "pic",
@@ -285,25 +289,25 @@ impl CodegenBackend for LlvmCodegenBackend {
                     "ropi-rwpi",
                     "default",
                 ] {
-                    writeln!(out, "    {name}");
+                    writeln!(out, "    {name}").unwrap();
                 }
-                writeln!(out);
+                writeln!(out).unwrap();
             }
             PrintKind::CodeModels => {
-                writeln!(out, "Available code models:");
+                writeln!(out, "Available code models:").unwrap();
                 for name in &["tiny", "small", "kernel", "medium", "large"] {
-                    writeln!(out, "    {name}");
+                    writeln!(out, "    {name}").unwrap();
                 }
-                writeln!(out);
+                writeln!(out).unwrap();
             }
             PrintKind::TlsModels => {
-                writeln!(out, "Available TLS models:");
+                writeln!(out, "Available TLS models:").unwrap();
                 for name in
                     &["global-dynamic", "local-dynamic", "initial-exec", "local-exec", "emulated"]
                 {
-                    writeln!(out, "    {name}");
+                    writeln!(out, "    {name}").unwrap();
                 }
-                writeln!(out);
+                writeln!(out).unwrap();
             }
             PrintKind::StackProtectorStrategies => {
                 writeln!(
@@ -329,7 +333,8 @@ impl CodegenBackend for LlvmCodegenBackend {
     none
         Do not generate stack canaries.
 "#
-                );
+                )
+                .unwrap();
             }
             _other => llvm_util::print(req, out, sess),
         }
@@ -439,7 +444,7 @@ impl ModuleLlvm {
         cgcx: &CodegenContext<LlvmCodegenBackend>,
         name: &CStr,
         buffer: &[u8],
-        dcx: &DiagCtxt,
+        dcx: DiagCtxtHandle<'_>,
     ) -> Result<Self, FatalError> {
         unsafe {
             let llcx = llvm::LLVMRustContextCreate(cgcx.fewer_names);

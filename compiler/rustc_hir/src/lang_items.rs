@@ -11,6 +11,7 @@ use crate::def_id::DefId;
 use crate::{MethodKind, Target};
 
 use rustc_ast as ast;
+use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 use rustc_span::symbol::{kw, sym, Symbol};
@@ -23,6 +24,7 @@ pub struct LanguageItems {
     /// Mappings from lang items to their possibly found [`DefId`]s.
     /// The index corresponds to the order in [`LangItem`].
     items: [Option<DefId>; std::mem::variant_count::<LangItem>()],
+    reverse_items: FxIndexMap<DefId, LangItem>,
     /// Lang items that were not found during collection.
     pub missing: Vec<LangItem>,
 }
@@ -30,7 +32,11 @@ pub struct LanguageItems {
 impl LanguageItems {
     /// Construct an empty collection of lang items and no missing ones.
     pub fn new() -> Self {
-        Self { items: [None; std::mem::variant_count::<LangItem>()], missing: Vec::new() }
+        Self {
+            items: [None; std::mem::variant_count::<LangItem>()],
+            reverse_items: FxIndexMap::default(),
+            missing: Vec::new(),
+        }
     }
 
     pub fn get(&self, item: LangItem) -> Option<DefId> {
@@ -39,6 +45,11 @@ impl LanguageItems {
 
     pub fn set(&mut self, item: LangItem, def_id: DefId) {
         self.items[item as usize] = Some(def_id);
+        self.reverse_items.insert(def_id, item);
+    }
+
+    pub fn from_def_id(&self, def_id: DefId) -> Option<LangItem> {
+        self.reverse_items.get(&def_id).copied()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (LangItem, DefId)> + '_ {
@@ -244,7 +255,9 @@ language_item_table! {
     AsyncIterator,           sym::async_iterator,      async_iterator_trait,       Target::Trait,          GenericRequirement::Exact(0);
 
     CoroutineState,          sym::coroutine_state,     coroutine_state,            Target::Enum,           GenericRequirement::None;
-    Coroutine,               sym::coroutine,           coroutine_trait,            Target::Trait,          GenericRequirement::Minimum(1);
+    Coroutine,               sym::coroutine,           coroutine_trait,            Target::Trait,          GenericRequirement::Exact(1);
+    CoroutineReturn,         sym::coroutine_return,    coroutine_return,           Target::AssocTy,        GenericRequirement::Exact(1);
+    CoroutineYield,          sym::coroutine_yield,     coroutine_yield,            Target::AssocTy,        GenericRequirement::Exact(1);
     CoroutineResume,         sym::coroutine_resume,    coroutine_resume,           Target::Method(MethodKind::Trait { body: false }), GenericRequirement::None;
 
     Unpin,                   sym::unpin,               unpin_trait,                Target::Trait,          GenericRequirement::None;
@@ -391,6 +404,14 @@ language_item_table! {
 
     String,                  sym::String,              string,                     Target::Struct,         GenericRequirement::None;
     CStr,                    sym::CStr,                c_str,                      Target::Struct,         GenericRequirement::None;
+
+    EffectsRuntime,          sym::EffectsRuntime,      effects_runtime,            Target::Struct,         GenericRequirement::None;
+    EffectsNoRuntime,        sym::EffectsNoRuntime,    effects_no_runtime,         Target::Struct,         GenericRequirement::None;
+    EffectsMaybe,            sym::EffectsMaybe,        effects_maybe,              Target::Struct,         GenericRequirement::None;
+    EffectsIntersection,     sym::EffectsIntersection, effects_intersection,       Target::Trait,          GenericRequirement::None;
+    EffectsIntersectionOutput, sym::EffectsIntersectionOutput, effects_intersection_output, Target::AssocTy, GenericRequirement::None;
+    EffectsCompat,           sym::EffectsCompat,       effects_compat,             Target::Trait,          GenericRequirement::Exact(1);
+    EffectsTyCompat,         sym::EffectsTyCompat,     effects_ty_compat,          Target::Trait,          GenericRequirement::Exact(1);
 }
 
 pub enum GenericRequirement {

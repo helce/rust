@@ -40,9 +40,16 @@ pub trait AllocBytes: Clone + fmt::Debug + Deref<Target = [u8]> + DerefMut<Targe
     /// Gives direct access to the raw underlying storage.
     ///
     /// Crucially this pointer is compatible with:
-    /// - other pointers retunred by this method, and
+    /// - other pointers returned by this method, and
     /// - references returned from `deref()`, as long as there was no write.
     fn as_mut_ptr(&mut self) -> *mut u8;
+
+    /// Gives direct access to the raw underlying storage.
+    ///
+    /// Crucially this pointer is compatible with:
+    /// - other pointers returned by this method, and
+    /// - references returned from `deref()`, as long as there was no write.
+    fn as_ptr(&self) -> *const u8;
 }
 
 /// Default `bytes` for `Allocation` is a `Box<u8>`.
@@ -52,7 +59,7 @@ impl AllocBytes for Box<[u8]> {
     }
 
     fn zeroed(size: Size, _align: Align) -> Option<Self> {
-        let bytes = Box::<[u8]>::try_new_zeroed_slice(size.bytes_usize()).ok()?;
+        let bytes = Box::<[u8]>::try_new_zeroed_slice(size.bytes().try_into().ok()?).ok()?;
         // SAFETY: the box was zero-allocated, which is a valid initial value for Box<[u8]>
         let bytes = unsafe { bytes.assume_init() };
         Some(bytes)
@@ -61,6 +68,11 @@ impl AllocBytes for Box<[u8]> {
     fn as_mut_ptr(&mut self) -> *mut u8 {
         // Carefully avoiding any intermediate references.
         ptr::addr_of_mut!(**self).cast()
+    }
+
+    fn as_ptr(&self) -> *const u8 {
+        // Carefully avoiding any intermediate references.
+        ptr::addr_of!(**self).cast()
     }
 }
 
@@ -323,7 +335,10 @@ impl<Prov: Provenance, Bytes: AllocBytes> Allocation<Prov, (), Bytes> {
     /// first call this function and then call write_scalar to fill in the right data.
     pub fn uninit(size: Size, align: Align) -> Self {
         match Self::uninit_inner(size, align, || {
-            panic!("Allocation::uninit called with panic_on_fail had allocation failure");
+            panic!(
+                "interpreter ran out of memory: cannot create allocation of {} bytes",
+                size.bytes()
+            );
         }) {
             Ok(x) => x,
             Err(x) => x,
@@ -487,18 +502,26 @@ impl<Prov: Provenance, Extra, Bytes: AllocBytes> Allocation<Prov, Extra, Bytes> 
         self.provenance.clear(range, cx)?;
 
         assert!(range.end().bytes_usize() <= self.bytes.len()); // need to do our own bounds-check
-        // Cruciall, we go via `AllocBytes::as_mut_ptr`, not `AllocBytes::deref_mut`.
+        // Crucially, we go via `AllocBytes::as_mut_ptr`, not `AllocBytes::deref_mut`.
         let begin_ptr = self.bytes.as_mut_ptr().wrapping_add(range.start.bytes_usize());
         let len = range.end().bytes_usize() - range.start.bytes_usize();
         Ok(ptr::slice_from_raw_parts_mut(begin_ptr, len))
     }
 
     /// This gives direct mutable access to the entire buffer, just exposing their internal state
-    /// without reseting anything. Directly exposes `AllocBytes::as_mut_ptr`. Only works if
+    /// without resetting anything. Directly exposes `AllocBytes::as_mut_ptr`. Only works if
     /// `OFFSET_IS_ADDR` is true.
     pub fn get_bytes_unchecked_raw_mut(&mut self) -> *mut u8 {
         assert!(Prov::OFFSET_IS_ADDR);
         self.bytes.as_mut_ptr()
+    }
+
+    /// This gives direct immutable access to the entire buffer, just exposing their internal state
+    /// without resetting anything. Directly exposes `AllocBytes::as_ptr`. Only works if
+    /// `OFFSET_IS_ADDR` is true.
+    pub fn get_bytes_unchecked_raw(&self) -> *const u8 {
+        assert!(Prov::OFFSET_IS_ADDR);
+        self.bytes.as_ptr()
     }
 }
 

@@ -283,7 +283,7 @@ pub struct CanonicalVarValues<I: Interner> {
 
 impl<I: Interner> CanonicalVarValues<I> {
     pub fn is_identity(&self) -> bool {
-        self.var_values.into_iter().enumerate().all(|(bv, arg)| match arg.kind() {
+        self.var_values.iter().enumerate().all(|(bv, arg)| match arg.kind() {
             ty::GenericArgKind::Lifetime(r) => {
                 matches!(r.kind(), ty::ReBound(ty::INNERMOST, br) if br.var().as_usize() == bv)
             }
@@ -298,7 +298,7 @@ impl<I: Interner> CanonicalVarValues<I> {
 
     pub fn is_identity_modulo_regions(&self) -> bool {
         let mut var = ty::BoundVar::ZERO;
-        for arg in self.var_values {
+        for arg in self.var_values.iter() {
             match arg.kind() {
                 ty::GenericArgKind::Lifetime(r) => {
                     if matches!(r.kind(), ty::ReBound(ty::INNERMOST, br) if var == br.var()) {
@@ -330,25 +330,25 @@ impl<I: Interner> CanonicalVarValues<I> {
 
     // Given a list of canonical variables, construct a set of values which are
     // the identity response.
-    pub fn make_identity(tcx: I, infos: I::CanonicalVars) -> CanonicalVarValues<I> {
+    pub fn make_identity(cx: I, infos: I::CanonicalVars) -> CanonicalVarValues<I> {
         CanonicalVarValues {
-            var_values: tcx.mk_args_from_iter(infos.into_iter().enumerate().map(
+            var_values: cx.mk_args_from_iter(infos.iter().enumerate().map(
                 |(i, info)| -> I::GenericArg {
                     match info.kind {
                         CanonicalVarKind::Ty(_) | CanonicalVarKind::PlaceholderTy(_) => {
-                            Ty::new_anon_bound(tcx, ty::INNERMOST, ty::BoundVar::from_usize(i))
+                            Ty::new_anon_bound(cx, ty::INNERMOST, ty::BoundVar::from_usize(i))
                                 .into()
                         }
                         CanonicalVarKind::Region(_) | CanonicalVarKind::PlaceholderRegion(_) => {
-                            Region::new_anon_bound(tcx, ty::INNERMOST, ty::BoundVar::from_usize(i))
+                            Region::new_anon_bound(cx, ty::INNERMOST, ty::BoundVar::from_usize(i))
                                 .into()
                         }
                         CanonicalVarKind::Effect => {
-                            Const::new_anon_bound(tcx, ty::INNERMOST, ty::BoundVar::from_usize(i))
+                            Const::new_anon_bound(cx, ty::INNERMOST, ty::BoundVar::from_usize(i))
                                 .into()
                         }
                         CanonicalVarKind::Const(_) | CanonicalVarKind::PlaceholderConst(_) => {
-                            Const::new_anon_bound(tcx, ty::INNERMOST, ty::BoundVar::from_usize(i))
+                            Const::new_anon_bound(cx, ty::INNERMOST, ty::BoundVar::from_usize(i))
                                 .into()
                         }
                     }
@@ -371,10 +371,10 @@ impl<I: Interner> CanonicalVarValues<I> {
 
 impl<'a, I: Interner> IntoIterator for &'a CanonicalVarValues<I> {
     type Item = I::GenericArg;
-    type IntoIter = <I::GenericArgs as IntoIterator>::IntoIter;
+    type IntoIter = <I::GenericArgs as SliceLike>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.var_values.into_iter()
+        self.var_values.iter()
     }
 }
 
@@ -382,6 +382,6 @@ impl<I: Interner> Index<ty::BoundVar> for CanonicalVarValues<I> {
     type Output = I::GenericArg;
 
     fn index(&self, value: ty::BoundVar) -> &I::GenericArg {
-        &self.var_values[value.as_usize()]
+        &self.var_values.as_slice()[value.as_usize()]
     }
 }

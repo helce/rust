@@ -1413,6 +1413,20 @@ pub enum FramePointer {
     MayOmit,
 }
 
+impl FramePointer {
+    /// It is intended that the "force frame pointer" transition is "one way"
+    /// so this convenience assures such if used
+    #[inline]
+    pub fn ratchet(&mut self, rhs: FramePointer) -> FramePointer {
+        *self = match (*self, rhs) {
+            (FramePointer::Always, _) | (_, FramePointer::Always) => FramePointer::Always,
+            (FramePointer::NonLeaf, _) | (_, FramePointer::NonLeaf) => FramePointer::NonLeaf,
+            _ => FramePointer::MayOmit,
+        };
+        *self
+    }
+}
+
 impl FromStr for FramePointer {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, ()> {
@@ -1647,6 +1661,7 @@ supported_targets! {
     ("x86_64-unknown-l4re-uclibc", x86_64_unknown_l4re_uclibc),
 
     ("aarch64-unknown-redox", aarch64_unknown_redox),
+    ("i686-unknown-redox", i686_unknown_redox),
     ("x86_64-unknown-redox", x86_64_unknown_redox),
 
     ("i386-apple-ios", i386_apple_ios),
@@ -1765,6 +1780,13 @@ supported_targets! {
     ("aarch64-unknown-uefi", aarch64_unknown_uefi),
 
     ("nvptx64-nvidia-cuda", nvptx64_nvidia_cuda),
+
+    ("xtensa-esp32-none-elf", xtensa_esp32_none_elf),
+    ("xtensa-esp32-espidf", xtensa_esp32_espidf),
+    ("xtensa-esp32s2-none-elf", xtensa_esp32s2_none_elf),
+    ("xtensa-esp32s2-espidf", xtensa_esp32s2_espidf),
+    ("xtensa-esp32s3-none-elf", xtensa_esp32s3_none_elf),
+    ("xtensa-esp32s3-espidf", xtensa_esp32s3_espidf),
 
     ("i686-wrs-vxworks", i686_wrs_vxworks),
     ("x86_64-wrs-vxworks", x86_64_wrs_vxworks),
@@ -2600,22 +2622,8 @@ impl DerefMut for Target {
 
 impl Target {
     /// Given a function ABI, turn it into the correct ABI for this target.
-    pub fn adjust_abi<C>(&self, cx: &C, abi: Abi, c_variadic: bool) -> Abi
-    where
-        C: HasWasmCAbiOpt,
-    {
+    pub fn adjust_abi(&self, abi: Abi, c_variadic: bool) -> Abi {
         match abi {
-            Abi::C { .. } => {
-                if self.arch == "wasm32"
-                    && self.os == "unknown"
-                    && cx.wasm_c_abi_opt() == WasmCAbi::Legacy
-                {
-                    Abi::Wasm
-                } else {
-                    abi
-                }
-            }
-
             // On Windows, `extern "system"` behaves like msvc's `__stdcall`.
             // `__stdcall` only applies on x86 and on non-variadic functions:
             // https://learn.microsoft.com/en-us/cpp/cpp/stdcall?view=msvc-170
@@ -2668,7 +2676,6 @@ impl Target {
             Msp430Interrupt => self.arch == "msp430",
             RiscvInterruptM | RiscvInterruptS => ["riscv32", "riscv64"].contains(&&self.arch[..]),
             AvrInterrupt | AvrNonBlockingInterrupt => self.arch == "avr",
-            Wasm => ["wasm32", "wasm64"].contains(&&self.arch[..]),
             Thiscall { .. } => self.arch == "x86",
             // On windows these fall-back to platform native calling convention (C) when the
             // architecture is not supported.

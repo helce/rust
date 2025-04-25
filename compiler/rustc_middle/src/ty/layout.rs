@@ -5,10 +5,11 @@ use crate::ty::normalize_erasing_regions::NormalizationError;
 use crate::ty::{self, CoroutineArgsExt, Ty, TyCtxt, TypeVisitableExt};
 use rustc_error_messages::DiagMessage;
 use rustc_errors::{
-    Diag, DiagArgValue, DiagCtxt, Diagnostic, EmissionGuarantee, IntoDiagArg, Level,
+    Diag, DiagArgValue, DiagCtxtHandle, Diagnostic, EmissionGuarantee, IntoDiagArg, Level,
 };
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
+use rustc_hir::LangItem;
 use rustc_index::IndexVec;
 use rustc_macros::{extension, HashStable, TyDecodable, TyEncodable};
 use rustc_session::config::OptLevel;
@@ -308,7 +309,8 @@ impl<'tcx> LayoutCalculator for LayoutCx<'tcx, TyCtxt<'tcx>> {
 #[derive(Copy, Clone, Debug)]
 pub enum SizeSkeleton<'tcx> {
     /// Any statically computable Layout.
-    Known(Size),
+    /// Alignment can be `None` if unknown.
+    Known(Size, Option<Align>),
 
     /// This is a generic const expression (i.e. N * 2), which may contain some parameters.
     /// It must be of type usize, and represents the size of a type in bytes.
@@ -338,7 +340,12 @@ impl<'tcx> SizeSkeleton<'tcx> {
         // First try computing a static layout.
         let err = match tcx.layout_of(param_env.and(ty)) {
             Ok(layout) => {
-                return Ok(SizeSkeleton::Known(layout.size));
+                if layout.abi.is_sized() {
+                    return Ok(SizeSkeleton::Known(layout.size, Some(layout.align.abi)));
+                } else {
+                    // Just to be safe, don't claim a known layout for unsized types.
+                    return Err(tcx.arena.alloc(LayoutError::Unknown(ty)));
+                }
             }
             Err(err @ LayoutError::Unknown(_)) => err,
             // We can't extract SizeSkeleton info from other layout errors
@@ -388,19 +395,20 @@ impl<'tcx> SizeSkeleton<'tcx> {
             ty::Array(inner, len) if tcx.features().transmute_generic_consts => {
                 let len_eval = len.try_eval_target_usize(tcx, param_env);
                 if len_eval == Some(0) {
-                    return Ok(SizeSkeleton::Known(Size::from_bytes(0)));
+                    return Ok(SizeSkeleton::Known(Size::from_bytes(0), None));
                 }
 
                 match SizeSkeleton::compute(inner, tcx, param_env)? {
                     // This may succeed because the multiplication of two types may overflow
                     // but a single size of a nested array will not.
-                    SizeSkeleton::Known(s) => {
+                    SizeSkeleton::Known(s, a) => {
                         if let Some(c) = len_eval {
                             let size = s
                                 .bytes()
                                 .checked_mul(c)
                                 .ok_or_else(|| &*tcx.arena.alloc(LayoutError::SizeOverflow(ty)))?;
-                            return Ok(SizeSkeleton::Known(Size::from_bytes(size)));
+                            // Alignment is unchanged by arrays.
+                            return Ok(SizeSkeleton::Known(Size::from_bytes(size), a));
                         }
                         Err(tcx.arena.alloc(LayoutError::Unknown(ty)))
                     }
@@ -426,8 +434,10 @@ impl<'tcx> SizeSkeleton<'tcx> {
                     for field in fields {
                         let field = field?;
                         match field {
-                            SizeSkeleton::Known(size) => {
-                                if size.bytes() > 0 {
+                            SizeSkeleton::Known(size, align) => {
+                                let is_1zst = size.bytes() == 0
+                                    && align.is_some_and(|align| align.bytes() == 1);
+                                if !is_1zst {
                                     return Err(err);
                                 }
                             }
@@ -491,7 +501,7 @@ impl<'tcx> SizeSkeleton<'tcx> {
 
     pub fn same_size(self, other: SizeSkeleton<'tcx>) -> bool {
         match (self, other) {
-            (SizeSkeleton::Known(a), SizeSkeleton::Known(b)) => a == b,
+            (SizeSkeleton::Known(a, _), SizeSkeleton::Known(b, _)) => a == b,
             (SizeSkeleton::Pointer { tail: a, .. }, SizeSkeleton::Pointer { tail: b, .. }) => {
                 a == b
             }
@@ -850,7 +860,7 @@ where
                         // and we rely on this layout information to trigger a panic in
                         // `std::mem::uninitialized::<&dyn Trait>()`, for example.
                         if let ty::Adt(def, args) = metadata.kind()
-                            && Some(def.did()) == tcx.lang_items().dyn_metadata()
+                            && tcx.is_lang_item(def.did(), LangItem::DynMetadata)
                             && let ty::Dynamic(data, _, ty::Dyn) = args.type_at(0).kind()
                         {
                             mk_dyn_vtable(data.principal())
@@ -1169,7 +1179,7 @@ pub fn fn_can_unwind(tcx: TyCtxt<'_>, fn_def_id: Option<DefId>, abi: SpecAbi) ->
         // This is not part of `codegen_fn_attrs` as it can differ between crates
         // and therefore cannot be computed in core.
         if tcx.sess.opts.unstable_opts.panic_in_drop == PanicStrategy::Abort {
-            if Some(did) == tcx.lang_items().drop_in_place_fn() {
+            if tcx.is_lang_item(did, LangItem::DropInPlace) {
                 return false;
             }
         }
@@ -1181,37 +1191,6 @@ pub fn fn_can_unwind(tcx: TyCtxt<'_>, fn_def_id: Option<DefId>, abi: SpecAbi) ->
     // ABIs have such an option. Otherwise the only other thing here is Rust
     // itself, and those ABIs are determined by the panic strategy configured
     // for this compilation.
-    //
-    // Unfortunately at this time there's also another caveat. Rust [RFC
-    // 2945][rfc] has been accepted and is in the process of being implemented
-    // and stabilized. In this interim state we need to deal with historical
-    // rustc behavior as well as plan for future rustc behavior.
-    //
-    // Historically functions declared with `extern "C"` were marked at the
-    // codegen layer as `nounwind`. This happened regardless of `panic=unwind`
-    // or not. This is UB for functions in `panic=unwind` mode that then
-    // actually panic and unwind. Note that this behavior is true for both
-    // externally declared functions as well as Rust-defined function.
-    //
-    // To fix this UB rustc would like to change in the future to catch unwinds
-    // from function calls that may unwind within a Rust-defined `extern "C"`
-    // function and forcibly abort the process, thereby respecting the
-    // `nounwind` attribute emitted for `extern "C"`. This behavior change isn't
-    // ready to roll out, so determining whether or not the `C` family of ABIs
-    // unwinds is conditional not only on their definition but also whether the
-    // `#![feature(c_unwind)]` feature gate is active.
-    //
-    // Note that this means that unlike historical compilers rustc now, by
-    // default, unconditionally thinks that the `C` ABI may unwind. This will
-    // prevent some optimization opportunities, however, so we try to scope this
-    // change and only assume that `C` unwinds with `panic=unwind` (as opposed
-    // to `panic=abort`).
-    //
-    // Eventually the check against `c_unwind` here will ideally get removed and
-    // this'll be a little cleaner as it'll be a straightforward check of the
-    // ABI.
-    //
-    // [rfc]: https://github.com/rust-lang/rfcs/blob/master/text/2945-c-unwind-abi.md
     use SpecAbi::*;
     match abi {
         C { unwind }
@@ -1223,10 +1202,7 @@ pub fn fn_can_unwind(tcx: TyCtxt<'_>, fn_def_id: Option<DefId>, abi: SpecAbi) ->
         | Thiscall { unwind }
         | Aapcs { unwind }
         | Win64 { unwind }
-        | SysV64 { unwind } => {
-            unwind
-                || (!tcx.features().c_unwind && tcx.sess.panic_strategy() == PanicStrategy::Unwind)
-        }
+        | SysV64 { unwind } => unwind,
         PtxKernel
         | Msp430Interrupt
         | X86Interrupt
@@ -1236,7 +1212,6 @@ pub fn fn_can_unwind(tcx: TyCtxt<'_>, fn_def_id: Option<DefId>, abi: SpecAbi) ->
         | RiscvInterruptM
         | RiscvInterruptS
         | CCmseNonSecureCall
-        | Wasm
         | Unadjusted => false,
         Rust | RustCall | RustCold | RustIntrinsic => {
             tcx.sess.panic_strategy() == PanicStrategy::Unwind
@@ -1255,7 +1230,7 @@ pub enum FnAbiError<'tcx> {
 }
 
 impl<'a, 'b, G: EmissionGuarantee> Diagnostic<'a, G> for FnAbiError<'b> {
-    fn into_diag(self, dcx: &'a DiagCtxt, level: Level) -> Diag<'a, G> {
+    fn into_diag(self, dcx: DiagCtxtHandle<'a>, level: Level) -> Diag<'a, G> {
         match self {
             Self::Layout(e) => e.into_diagnostic().into_diag(dcx, level),
             Self::AdjustForForeignAbi(call::AdjustForForeignAbiError::Unsupported {
@@ -1301,7 +1276,7 @@ pub trait FnAbiOf<'tcx>: FnAbiOfHelpers<'tcx> {
     /// Compute a `FnAbi` suitable for indirect calls, i.e. to `fn` pointers.
     ///
     /// NB: this doesn't handle virtual calls - those should use `fn_abi_of_instance`
-    /// instead, where the instance is an `InstanceDef::Virtual`.
+    /// instead, where the instance is an `InstanceKind::Virtual`.
     #[inline]
     fn fn_abi_of_fn_ptr(
         &self,
@@ -1321,7 +1296,7 @@ pub trait FnAbiOf<'tcx>: FnAbiOfHelpers<'tcx> {
     /// direct calls to an `fn`.
     ///
     /// NB: that includes virtual calls, which are represented by "direct calls"
-    /// to an `InstanceDef::Virtual` instance (of `<dyn Trait as Trait>::fn`).
+    /// to an `InstanceKind::Virtual` instance (of `<dyn Trait as Trait>::fn`).
     #[inline]
     #[tracing::instrument(level = "debug", skip(self))]
     fn fn_abi_of_instance(
@@ -1351,3 +1326,37 @@ pub trait FnAbiOf<'tcx>: FnAbiOfHelpers<'tcx> {
 }
 
 impl<'tcx, C: FnAbiOfHelpers<'tcx>> FnAbiOf<'tcx> for C {}
+
+impl<'tcx> TyCtxt<'tcx> {
+    pub fn offset_of_subfield<I>(
+        self,
+        param_env: ty::ParamEnv<'tcx>,
+        mut layout: TyAndLayout<'tcx>,
+        indices: I,
+    ) -> Size
+    where
+        I: Iterator<Item = (VariantIdx, FieldIdx)>,
+    {
+        let cx = LayoutCx { tcx: self, param_env };
+        let mut offset = Size::ZERO;
+
+        for (variant, field) in indices {
+            layout = layout.for_variant(&cx, variant);
+            let index = field.index();
+            offset += layout.fields.offset(index);
+            layout = layout.field(&cx, index);
+            if !layout.is_sized() {
+                // If it is not sized, then the tail must still have at least a known static alignment.
+                let tail = self.struct_tail_erasing_lifetimes(layout.ty, param_env);
+                if !matches!(tail.kind(), ty::Slice(..)) {
+                    bug!(
+                        "offset of not-statically-aligned field (type {:?}) cannot be computed statically",
+                        layout.ty
+                    );
+                }
+            }
+        }
+
+        offset
+    }
+}

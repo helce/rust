@@ -236,11 +236,12 @@ enum ResolutionError<'a> {
     /// Error E0434: can't capture dynamic environment in a fn item.
     CannotCaptureDynamicEnvironmentInFnItem,
     /// Error E0435: attempt to use a non-constant value in a constant.
-    AttemptToUseNonConstantValueInConstant(
-        Ident,
-        /* suggestion */ &'static str,
-        /* current */ &'static str,
-    ),
+    AttemptToUseNonConstantValueInConstant {
+        ident: Ident,
+        suggestion: &'static str,
+        current: &'static str,
+        type_span: Option<Span>,
+    },
     /// Error E0530: `X` bindings cannot shadow `Y`s.
     BindingShadowsSomethingUnacceptable {
         shadowing_binding: PatternSource,
@@ -350,6 +351,7 @@ impl<'a> From<&'a ast::PathSegment> for Segment {
                     (args.span, found_lifetimes)
                 }
                 GenericArgs::Parenthesized(args) => (args.span, true),
+                GenericArgs::ParenthesizedElided(span) => (*span, true),
             }
         } else {
             (DUMMY_SP, false)
@@ -694,10 +696,12 @@ impl<'a> fmt::Debug for Module<'a> {
 }
 
 /// Records a possibly-private value, type, or module definition.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct NameBindingData<'a> {
     kind: NameBindingKind<'a>,
     ambiguity: Option<(NameBinding<'a>, AmbiguityKind)>,
+    /// Produce a warning instead of an error when reporting ambiguities inside this binding.
+    /// May apply to indirect ambiguities under imports, so `ambiguity.is_some()` is not required.
     warn_ambiguity: bool,
     expansion: LocalExpnId,
     span: Span,
@@ -718,7 +722,7 @@ impl<'a> ToNameBinding<'a> for NameBinding<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 enum NameBindingKind<'a> {
     Res(Res),
     Module(Module<'a>),
@@ -830,18 +834,18 @@ impl<'a> NameBindingData<'a> {
         }
     }
 
-    fn is_ambiguity(&self) -> bool {
+    fn is_ambiguity_recursive(&self) -> bool {
         self.ambiguity.is_some()
             || match self.kind {
-                NameBindingKind::Import { binding, .. } => binding.is_ambiguity(),
+                NameBindingKind::Import { binding, .. } => binding.is_ambiguity_recursive(),
                 _ => false,
             }
     }
 
-    fn is_warn_ambiguity(&self) -> bool {
+    fn warn_ambiguity_recursive(&self) -> bool {
         self.warn_ambiguity
             || match self.kind {
-                NameBindingKind::Import { binding, .. } => binding.is_warn_ambiguity(),
+                NameBindingKind::Import { binding, .. } => binding.warn_ambiguity_recursive(),
                 _ => false,
             }
     }
@@ -988,7 +992,7 @@ pub struct Resolver<'a, 'tcx> {
     extern_prelude: FxHashMap<Ident, ExternPreludeEntry<'a>>,
 
     /// N.B., this is used only for better diagnostics, not name resolution itself.
-    field_def_ids: LocalDefIdMap<&'tcx [DefId]>,
+    field_names: LocalDefIdMap<Vec<Ident>>,
 
     /// Span of the privacy modifier in fields of an item `DefId` accessible with dot syntax.
     /// Used for hints during error reporting.
@@ -1089,7 +1093,7 @@ pub struct Resolver<'a, 'tcx> {
     single_segment_macro_resolutions:
         Vec<(Ident, MacroKind, ParentScope<'a>, Option<NameBinding<'a>>)>,
     multi_segment_macro_resolutions:
-        Vec<(Vec<Segment>, Span, MacroKind, ParentScope<'a>, Option<Res>)>,
+        Vec<(Vec<Segment>, Span, MacroKind, ParentScope<'a>, Option<Res>, Namespace)>,
     builtin_attrs: Vec<(Ident, ParentScope<'a>)>,
     /// `derive(Copy)` marks items they are applied to so they are treated specially later.
     /// Derive macros cannot modify the item themselves and have to store the markers in the global
@@ -1136,7 +1140,7 @@ pub struct Resolver<'a, 'tcx> {
     /// When collecting definitions from an AST fragment produced by a macro invocation `ExpnId`
     /// we know what parent node that fragment should be attached to thanks to this table,
     /// and how the `impl Trait` fragments were introduced.
-    invocation_parents: FxHashMap<LocalExpnId, (LocalDefId, ImplTraitContext)>,
+    invocation_parents: FxHashMap<LocalExpnId, (LocalDefId, ImplTraitContext, bool /*in_attr*/)>,
 
     /// Some way to know that we are in a *trait* impl in `visit_assoc_item`.
     /// FIXME: Replace with a more general AST map (together with some other fields).
@@ -1163,6 +1167,15 @@ pub struct Resolver<'a, 'tcx> {
     doc_link_resolutions: FxHashMap<LocalDefId, DocLinkResMap>,
     doc_link_traits_in_scope: FxHashMap<LocalDefId, Vec<DefId>>,
     all_macro_rules: FxHashMap<Symbol, Res>,
+
+    /// Invocation ids of all glob delegations.
+    glob_delegation_invoc_ids: FxHashSet<LocalExpnId>,
+    /// Analogue of module `unexpanded_invocations` but in trait impls, excluding glob delegations.
+    /// Needed because glob delegations wait for all other neighboring macros to expand.
+    impl_unexpanded_invocations: FxHashMap<LocalDefId, FxHashSet<LocalExpnId>>,
+    /// Simplified analogue of module `resolutions` but in trait impls, excluding glob delegations.
+    /// Needed because glob delegations exclude explicitly defined names.
+    impl_binding_keys: FxHashMap<LocalDefId, FxHashSet<BindingKey>>,
 }
 
 /// Nothing really interesting here; it just provides memory for the rest of the crate.
@@ -1359,7 +1372,8 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         node_id_to_def_id.insert(CRATE_NODE_ID, crate_feed);
 
         let mut invocation_parents = FxHashMap::default();
-        invocation_parents.insert(LocalExpnId::ROOT, (CRATE_DEF_ID, ImplTraitContext::Existential));
+        invocation_parents
+            .insert(LocalExpnId::ROOT, (CRATE_DEF_ID, ImplTraitContext::Existential, false));
 
         let mut extern_prelude: FxHashMap<Ident, ExternPreludeEntry<'_>> = tcx
             .sess
@@ -1394,7 +1408,7 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             prelude: None,
             extern_prelude,
 
-            field_def_ids: Default::default(),
+            field_names: Default::default(),
             field_visibility_spans: FxHashMap::default(),
 
             determined_imports: Vec::new(),
@@ -1504,6 +1518,9 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
             doc_link_traits_in_scope: Default::default(),
             all_macro_rules: Default::default(),
             delegation_fn_sigs: Default::default(),
+            glob_delegation_invoc_ids: Default::default(),
+            impl_unexpanded_invocations: Default::default(),
+            impl_binding_keys: Default::default(),
         };
 
         let root_parent_scope = ParentScope::module(graph_root, &resolver);
@@ -2112,10 +2129,18 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
         }
     }
 
-    fn field_def_ids(&self, def_id: DefId) -> Option<&'tcx [DefId]> {
+    fn field_idents(&self, def_id: DefId) -> Option<Vec<Ident>> {
         match def_id.as_local() {
-            Some(def_id) => self.field_def_ids.get(&def_id).copied(),
-            None => Some(self.tcx.associated_item_def_ids(def_id)),
+            Some(def_id) => self.field_names.get(&def_id).cloned(),
+            None => Some(
+                self.tcx
+                    .associated_item_def_ids(def_id)
+                    .iter()
+                    .map(|&def_id| {
+                        Ident::new(self.tcx.item_name(def_id), self.tcx.def_span(def_id))
+                    })
+                    .collect(),
+            ),
         }
     }
 

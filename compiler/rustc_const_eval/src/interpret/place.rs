@@ -9,7 +9,6 @@ use tracing::{instrument, trace};
 
 use rustc_ast::Mutability;
 use rustc_middle::mir;
-use rustc_middle::ty;
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::Ty;
 use rustc_middle::{bug, span_bug};
@@ -442,7 +441,7 @@ where
 
     /// Take an operand, representing a pointer, and dereference it to a place.
     /// Corresponds to the `*` operator in Rust.
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     pub fn deref_pointer(
         &self,
         src: &impl Readable<'tcx, M::Provenance>,
@@ -499,13 +498,14 @@ where
         &self,
         mplace: &MPlaceTy<'tcx, M::Provenance>,
     ) -> InterpResult<'tcx, (MPlaceTy<'tcx, M::Provenance>, u64)> {
-        // Basically we just transmute this place into an array following simd_size_and_type.
-        // (Transmuting is okay since this is an in-memory place. We also double-check the size
-        // stays the same.)
+        // Basically we want to transmute this place into an array following simd_size_and_type.
         let (len, e_ty) = mplace.layout.ty.simd_size_and_type(*self.tcx);
-        let array = Ty::new_array(self.tcx.tcx, e_ty, len);
-        let layout = self.layout_of(array)?;
-        let mplace = mplace.transmute(layout, self)?;
+        // Some SIMD types have padding, so `len` many `e_ty` does not cover the entire place.
+        // Therefore we cannot transmute, and instead we project at offset 0, which side-steps
+        // the size check.
+        let array_layout = self.layout_of(Ty::new_array(self.tcx.tcx, e_ty, len))?;
+        assert!(array_layout.size <= mplace.layout.size);
+        let mplace = mplace.offset(Size::ZERO, array_layout, self)?;
         Ok((mplace, len))
     }
 
@@ -533,7 +533,7 @@ where
 
     /// Computes a place. You should only use this if you intend to write into this
     /// place; for reading, a more efficient alternative is `eval_place_to_op`.
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     pub fn eval_place(
         &self,
         mir_place: mir::Place<'tcx>,
@@ -570,7 +570,7 @@ where
 
     /// Write an immediate to a place
     #[inline(always)]
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     pub fn write_immediate(
         &mut self,
         src: Immediate<M::Provenance>,
@@ -808,7 +808,7 @@ where
     /// Copies the data from an operand to a place.
     /// `allow_transmute` indicates whether the layouts may disagree.
     #[inline(always)]
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     fn copy_op_inner(
         &mut self,
         src: &impl Readable<'tcx, M::Provenance>,
@@ -837,7 +837,7 @@ where
     /// `allow_transmute` indicates whether the layouts may disagree.
     /// Also, if you use this you are responsible for validating that things get copied at the
     /// right type.
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     fn copy_op_no_validate(
         &mut self,
         src: &impl Readable<'tcx, M::Provenance>,
@@ -914,7 +914,7 @@ where
     /// If the place currently refers to a local that doesn't yet have a matching allocation,
     /// create such an allocation.
     /// This is essentially `force_to_memplace`.
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     pub fn force_allocation(
         &mut self,
         place: &PlaceTy<'tcx, M::Provenance>,
@@ -995,13 +995,25 @@ where
     }
 
     /// Returns a wide MPlace of type `str` to a new 1-aligned allocation.
+    /// Immutable strings are deduplicated and stored in global memory.
     pub fn allocate_str(
         &mut self,
         str: &str,
         kind: MemoryKind<M::MemoryKind>,
         mutbl: Mutability,
     ) -> InterpResult<'tcx, MPlaceTy<'tcx, M::Provenance>> {
-        let ptr = self.allocate_bytes_ptr(str.as_bytes(), Align::ONE, kind, mutbl)?;
+        let tcx = self.tcx.tcx;
+
+        // Use cache for immutable strings.
+        let ptr = if mutbl.is_not() {
+            // Use dedup'd allocation function.
+            let id = tcx.allocate_bytes_dedup(str.as_bytes());
+
+            // Turn untagged "global" pointers (obtained via `tcx`) into the machine pointer to the allocation.
+            M::adjust_alloc_root_pointer(&self, Pointer::from(id), Some(kind))?
+        } else {
+            self.allocate_bytes_ptr(str.as_bytes(), Align::ONE, kind, mutbl)?
+        };
         let meta = Scalar::from_target_usize(u64::try_from(str.len()).unwrap(), self);
         let layout = self.layout_of(self.tcx.types.str_).unwrap();
         Ok(self.ptr_with_meta_to_mplace(ptr.into(), MemPlaceMeta::Meta(meta), layout))
@@ -1016,54 +1028,6 @@ where
         let ptr = self.global_root_pointer(Pointer::from(raw.alloc_id))?;
         let layout = self.layout_of(raw.ty)?;
         Ok(self.ptr_to_mplace(ptr.into(), layout))
-    }
-
-    /// Turn a place with a `dyn Trait` type into a place with the actual dynamic type.
-    /// Aso returns the vtable.
-    pub(super) fn unpack_dyn_trait(
-        &self,
-        mplace: &MPlaceTy<'tcx, M::Provenance>,
-        expected_trait: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
-    ) -> InterpResult<'tcx, (MPlaceTy<'tcx, M::Provenance>, Pointer<Option<M::Provenance>>)> {
-        assert!(
-            matches!(mplace.layout.ty.kind(), ty::Dynamic(_, _, ty::Dyn)),
-            "`unpack_dyn_trait` only makes sense on `dyn*` types"
-        );
-        let vtable = mplace.meta().unwrap_meta().to_pointer(self)?;
-        let (ty, vtable_trait) = self.get_ptr_vtable(vtable)?;
-        if expected_trait.principal() != vtable_trait {
-            throw_ub!(InvalidVTableTrait { expected_trait, vtable_trait });
-        }
-        // This is a kind of transmute, from a place with unsized type and metadata to
-        // a place with sized type and no metadata.
-        let layout = self.layout_of(ty)?;
-        let mplace =
-            MPlaceTy { mplace: MemPlace { meta: MemPlaceMeta::None, ..mplace.mplace }, layout };
-        Ok((mplace, vtable))
-    }
-
-    /// Turn a `dyn* Trait` type into an value with the actual dynamic type.
-    /// Also returns the vtable.
-    pub(super) fn unpack_dyn_star<P: Projectable<'tcx, M::Provenance>>(
-        &self,
-        val: &P,
-        expected_trait: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
-    ) -> InterpResult<'tcx, (P, Pointer<Option<M::Provenance>>)> {
-        assert!(
-            matches!(val.layout().ty.kind(), ty::Dynamic(_, _, ty::DynStar)),
-            "`unpack_dyn_star` only makes sense on `dyn*` types"
-        );
-        let data = self.project_field(val, 0)?;
-        let vtable = self.project_field(val, 1)?;
-        let vtable = self.read_pointer(&vtable.to_op(self)?)?;
-        let (ty, vtable_trait) = self.get_ptr_vtable(vtable)?;
-        if expected_trait.principal() != vtable_trait {
-            throw_ub!(InvalidVTableTrait { expected_trait, vtable_trait });
-        }
-        // `data` is already the right thing but has the wrong type. So we transmute it.
-        let layout = self.layout_of(ty)?;
-        let data = data.transmute(layout, self)?;
-        Ok((data, vtable))
     }
 }
 

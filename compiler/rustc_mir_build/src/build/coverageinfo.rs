@@ -2,7 +2,7 @@ use std::assert_matches::assert_matches;
 use std::collections::hash_map::Entry;
 
 use rustc_data_structures::fx::FxHashMap;
-use rustc_middle::mir::coverage::{BlockMarkerId, BranchSpan, CoverageKind};
+use rustc_middle::mir::coverage::{BlockMarkerId, BranchSpan, CoverageInfoHi, CoverageKind};
 use rustc_middle::mir::{self, BasicBlock, SourceInfo, UnOp};
 use rustc_middle::thir::{ExprId, ExprKind, Pat, Thir};
 use rustc_middle::ty::TyCtxt;
@@ -13,14 +13,23 @@ use crate::build::{Builder, CFG};
 
 mod mcdc;
 
-pub(crate) struct BranchInfoBuilder {
+/// Collects coverage-related information during MIR building, to eventually be
+/// turned into a function's [`CoverageInfoHi`] when MIR building is complete.
+pub(crate) struct CoverageInfoBuilder {
     /// Maps condition expressions to their enclosing `!`, for better instrumentation.
     nots: FxHashMap<ExprId, NotInfo>,
 
     markers: BlockMarkerGen,
-    branch_spans: Vec<BranchSpan>,
 
+    /// Present if branch coverage is enabled.
+    branch_info: Option<BranchInfo>,
+    /// Present if MC/DC coverage is enabled.
     mcdc_info: Option<MCDCInfoBuilder>,
+}
+
+#[derive(Default)]
+struct BranchInfo {
+    branch_spans: Vec<BranchSpan>,
 }
 
 #[derive(Clone, Copy)]
@@ -62,20 +71,20 @@ impl BlockMarkerGen {
     }
 }
 
-impl BranchInfoBuilder {
-    /// Creates a new branch info builder, but only if branch coverage instrumentation
+impl CoverageInfoBuilder {
+    /// Creates a new coverage info builder, but only if coverage instrumentation
     /// is enabled and `def_id` represents a function that is eligible for coverage.
     pub(crate) fn new_if_enabled(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Self> {
-        if tcx.sess.instrument_coverage_branch() && tcx.is_eligible_for_coverage(def_id) {
-            Some(Self {
-                nots: FxHashMap::default(),
-                markers: BlockMarkerGen::default(),
-                branch_spans: vec![],
-                mcdc_info: tcx.sess.instrument_coverage_mcdc().then(MCDCInfoBuilder::new),
-            })
-        } else {
-            None
+        if !tcx.sess.instrument_coverage() || !tcx.is_eligible_for_coverage(def_id) {
+            return None;
         }
+
+        Some(Self {
+            nots: FxHashMap::default(),
+            markers: BlockMarkerGen::default(),
+            branch_info: tcx.sess.instrument_coverage_branch().then(BranchInfo::default),
+            mcdc_info: tcx.sess.instrument_coverage_mcdc().then(MCDCInfoBuilder::new),
+        })
     }
 
     /// Unary `!` expressions inside an `if` condition are lowered by lowering
@@ -87,6 +96,12 @@ impl BranchInfoBuilder {
     /// synthesize branch instrumentation for the enclosing `!`.
     pub(crate) fn visit_unary_not(&mut self, thir: &Thir<'_>, unary_not: ExprId) {
         assert_matches!(thir[unary_not].kind, ExprKind::Unary { op: UnOp::Not, .. });
+
+        // The information collected by this visitor is only needed when branch
+        // coverage or higher is enabled.
+        if self.branch_info.is_none() {
+            return;
+        }
 
         self.visit_with_not_info(
             thir,
@@ -118,41 +133,59 @@ impl BranchInfoBuilder {
         }
     }
 
-    fn add_two_way_branch<'tcx>(
+    fn register_two_way_branch<'tcx>(
         &mut self,
+        tcx: TyCtxt<'tcx>,
         cfg: &mut CFG<'tcx>,
         source_info: SourceInfo,
         true_block: BasicBlock,
         false_block: BasicBlock,
     ) {
+        // Separate path for handling branches when MC/DC is enabled.
+        if let Some(mcdc_info) = self.mcdc_info.as_mut() {
+            let inject_block_marker =
+                |source_info, block| self.markers.inject_block_marker(cfg, source_info, block);
+            mcdc_info.visit_evaluated_condition(
+                tcx,
+                source_info,
+                true_block,
+                false_block,
+                inject_block_marker,
+            );
+            return;
+        }
+
+        // Bail out if branch coverage is not enabled.
+        let Some(branch_info) = self.branch_info.as_mut() else { return };
+
         let true_marker = self.markers.inject_block_marker(cfg, source_info, true_block);
         let false_marker = self.markers.inject_block_marker(cfg, source_info, false_block);
 
-        self.branch_spans.push(BranchSpan { span: source_info.span, true_marker, false_marker });
+        branch_info.branch_spans.push(BranchSpan {
+            span: source_info.span,
+            true_marker,
+            false_marker,
+        });
     }
 
-    pub(crate) fn into_done(self) -> Option<Box<mir::coverage::BranchInfo>> {
-        let Self {
-            nots: _,
-            markers: BlockMarkerGen { num_block_markers },
-            branch_spans,
-            mcdc_info,
-        } = self;
+    pub(crate) fn into_done(self) -> Box<CoverageInfoHi> {
+        let Self { nots: _, markers: BlockMarkerGen { num_block_markers }, branch_info, mcdc_info } =
+            self;
 
-        if num_block_markers == 0 {
-            assert!(branch_spans.is_empty());
-            return None;
-        }
+        let branch_spans =
+            branch_info.map(|branch_info| branch_info.branch_spans).unwrap_or_default();
 
         let (mcdc_decision_spans, mcdc_branch_spans) =
             mcdc_info.map(MCDCInfoBuilder::into_done).unwrap_or_default();
 
-        Some(Box::new(mir::coverage::BranchInfo {
+        // For simplicity, always return an info struct (without Option), even
+        // if there's nothing interesting in it.
+        Box::new(CoverageInfoHi {
             num_block_markers,
             branch_spans,
             mcdc_branch_spans,
             mcdc_decision_spans,
-        }))
+        })
     }
 }
 
@@ -166,7 +199,7 @@ impl<'tcx> Builder<'_, 'tcx> {
         block: &mut BasicBlock,
     ) {
         // Bail out if condition coverage is not enabled for this function.
-        let Some(branch_info) = self.coverage_branch_info.as_mut() else { return };
+        let Some(coverage_info) = self.coverage_info.as_mut() else { return };
         if !self.tcx.sess.instrument_coverage_condition() {
             return;
         };
@@ -205,7 +238,14 @@ impl<'tcx> Builder<'_, 'tcx> {
             mir::TerminatorKind::if_(mir::Operand::Copy(place), true_block, false_block),
         );
 
-        branch_info.add_two_way_branch(&mut self.cfg, source_info, true_block, false_block);
+        // Separate path for handling branches when MC/DC is enabled.
+        coverage_info.register_two_way_branch(
+            self.tcx,
+            &mut self.cfg,
+            source_info,
+            true_block,
+            false_block,
+        );
 
         let join_block = self.cfg.start_new_block();
         self.cfg.goto(true_block, source_info, join_block);
@@ -222,12 +262,12 @@ impl<'tcx> Builder<'_, 'tcx> {
         mut then_block: BasicBlock,
         mut else_block: BasicBlock,
     ) {
-        // Bail out if branch coverage is not enabled for this function.
-        let Some(branch_info) = self.coverage_branch_info.as_mut() else { return };
+        // Bail out if coverage is not enabled for this function.
+        let Some(coverage_info) = self.coverage_info.as_mut() else { return };
 
         // If this condition expression is nested within one or more `!` expressions,
         // replace it with the enclosing `!` collected by `visit_unary_not`.
-        if let Some(&NotInfo { enclosing_not, is_flipped }) = branch_info.nots.get(&expr_id) {
+        if let Some(&NotInfo { enclosing_not, is_flipped }) = coverage_info.nots.get(&expr_id) {
             expr_id = enclosing_not;
             if is_flipped {
                 std::mem::swap(&mut then_block, &mut else_block);
@@ -236,22 +276,13 @@ impl<'tcx> Builder<'_, 'tcx> {
 
         let source_info = SourceInfo { span: self.thir[expr_id].span, scope: self.source_scope };
 
-        // Separate path for handling branches when MC/DC is enabled.
-        if let Some(mcdc_info) = branch_info.mcdc_info.as_mut() {
-            let inject_block_marker = |source_info, block| {
-                branch_info.markers.inject_block_marker(&mut self.cfg, source_info, block)
-            };
-            mcdc_info.visit_evaluated_condition(
-                self.tcx,
-                source_info,
-                then_block,
-                else_block,
-                inject_block_marker,
-            );
-            return;
-        }
-
-        branch_info.add_two_way_branch(&mut self.cfg, source_info, then_block, else_block);
+        coverage_info.register_two_way_branch(
+            self.tcx,
+            &mut self.cfg,
+            source_info,
+            then_block,
+            else_block,
+        );
     }
 
     /// If branch coverage is enabled, inject marker statements into `true_block`
@@ -264,12 +295,16 @@ impl<'tcx> Builder<'_, 'tcx> {
         true_block: BasicBlock,
         false_block: BasicBlock,
     ) {
-        // Bail out if branch coverage is not enabled for this function.
-        let Some(branch_info) = self.coverage_branch_info.as_mut() else { return };
-
-        // FIXME(#124144) This may need special handling when MC/DC is enabled.
+        // Bail out if coverage is not enabled for this function.
+        let Some(coverage_info) = self.coverage_info.as_mut() else { return };
 
         let source_info = SourceInfo { span: pattern.span, scope: self.source_scope };
-        branch_info.add_two_way_branch(&mut self.cfg, source_info, true_block, false_block);
+        coverage_info.register_two_way_branch(
+            self.tcx,
+            &mut self.cfg,
+            source_info,
+            true_block,
+            false_block,
+        );
     }
 }

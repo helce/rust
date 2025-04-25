@@ -98,7 +98,7 @@ fn or_fun_call() {
 
     let opt = Some(1);
     let hello = "Hello";
-    let _ = opt.ok_or(format!("{} world.", hello));
+    let _ = opt.ok_or_else(|| format!("{} world.", hello));
 
     // index
     let map = HashMap::<u64, u64>::new();
@@ -309,6 +309,13 @@ mod lazy {
         let without_default = Some(Foo);
         without_default.unwrap_or_else(Foo::new);
     }
+}
+
+fn host_effect() {
+    // #12877 - make sure we don't ICE in type_certainty
+    use std::ops::Add;
+
+    Add::<i32>::add(1, 1).add(i32::MIN);
 }
 
 fn main() {}

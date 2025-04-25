@@ -110,6 +110,7 @@ const ROOT_PROBLEMATIC_CONSTS: &[u32] = &[
     173390526, 721077,
 ];
 
+// Returns all permutations of problematic consts, over 2000 elements.
 fn generate_problematic_strings(
     consts: &[u32],
     letter_digit: &FxHashMap<char, char>,
@@ -186,6 +187,11 @@ fn should_ignore(line: &str) -> bool {
     // - `//@[rev] normalize-stderr-test`
         || static_regex!("\\s*//@(\\[.*\\]) (compile-flags|normalize-stderr-test|error-pattern).*")
             .is_match(line)
+        // Matching for rustdoc tests commands.
+        // It allows to prevent them emitting warnings like `line longer than 100 chars`.
+        || static_regex!(
+            "\\s*//@ \\!?(count|files|has|has-dir|hasraw|matches|matchesraw|snapshot)\\s.*"
+        ).is_match(line)
 }
 
 /// Returns `true` if `line` is allowed to be longer than the normal limit.
@@ -314,6 +320,8 @@ pub fn check(path: &Path, bad: &mut bool) {
         ROOT_PROBLEMATIC_CONSTS,
         &[('A', '4'), ('B', '8'), ('E', '3')].iter().cloned().collect(),
     );
+    // This creates a RegexSet as regex contains performance optimizations to be able to deal with these over
+    // 2000 needles efficiently. This runs over the entire source code, so performance matters.
     let problematic_regex = RegexSet::new(problematic_consts_strings.as_slice()).unwrap();
 
     walk(path, skip, &mut |entry, contents| {
@@ -444,7 +452,9 @@ pub fn check(path: &Path, bad: &mut bool) {
                 suppressible_tidy_err!(err, skip_cr, "CR character");
             }
             if filename != "style.rs" {
-                if trimmed.contains("TODO") {
+                // Allow using TODO in diagnostic suggestions by marking the
+                // relevant line with `// ignore-tidy-todo`.
+                if trimmed.contains("TODO") && !trimmed.contains("ignore-tidy-todo") {
                     err(
                         "TODO is used for tasks that should be done before merging a PR; If you want to leave a message in the codebase use FIXME",
                     )
@@ -461,10 +471,13 @@ pub fn check(path: &Path, bad: &mut bool) {
                 }
             }
             // for now we just check libcore
-            if trimmed.contains("unsafe {") && !trimmed.starts_with("//") && !last_safety_comment {
-                if file.components().any(|c| c.as_os_str() == "core") && !is_test {
-                    suppressible_tidy_err!(err, skip_undocumented_unsafe, "undocumented unsafe");
-                }
+            if trimmed.contains("unsafe {")
+                && !trimmed.starts_with("//")
+                && !last_safety_comment
+                && file.components().any(|c| c.as_os_str() == "core")
+                && !is_test
+            {
+                suppressible_tidy_err!(err, skip_undocumented_unsafe, "undocumented unsafe");
             }
             if trimmed.contains("// SAFETY:") {
                 last_safety_comment = true;
@@ -485,10 +498,10 @@ pub fn check(path: &Path, bad: &mut bool) {
                     "copyright notices attributed to the Rust Project Developers are deprecated"
                 );
             }
-            if !file.components().any(|c| c.as_os_str() == "rustc_baked_icu_data") {
-                if is_unexplained_ignore(&extension, line) {
-                    err(UNEXPLAINED_IGNORE_DOCTEST_INFO);
-                }
+            if !file.components().any(|c| c.as_os_str() == "rustc_baked_icu_data")
+                && is_unexplained_ignore(&extension, line)
+            {
+                err(UNEXPLAINED_IGNORE_DOCTEST_INFO);
             }
 
             if filename.ends_with(".cpp") && line.contains("llvm_unreachable") {
@@ -523,26 +536,24 @@ pub fn check(path: &Path, bad: &mut bool) {
                         backtick_count += comment_text.chars().filter(|ch| *ch == '`').count();
                     }
                     comment_block = Some((start_line, backtick_count));
-                } else {
-                    if let Some((start_line, backtick_count)) = comment_block.take() {
-                        if backtick_count % 2 == 1 {
-                            let mut err = |msg: &str| {
-                                tidy_error!(bad, "{}:{start_line}: {msg}", file.display());
-                            };
-                            let block_len = (i + 1) - start_line;
-                            if block_len == 1 {
-                                suppressible_tidy_err!(
-                                    err,
-                                    skip_odd_backticks,
-                                    "comment with odd number of backticks"
-                                );
-                            } else {
-                                suppressible_tidy_err!(
-                                    err,
-                                    skip_odd_backticks,
-                                    "{block_len}-line comment block with odd number of backticks"
-                                );
-                            }
+                } else if let Some((start_line, backtick_count)) = comment_block.take() {
+                    if backtick_count % 2 == 1 {
+                        let mut err = |msg: &str| {
+                            tidy_error!(bad, "{}:{start_line}: {msg}", file.display());
+                        };
+                        let block_len = (i + 1) - start_line;
+                        if block_len == 1 {
+                            suppressible_tidy_err!(
+                                err,
+                                skip_odd_backticks,
+                                "comment with odd number of backticks"
+                            );
+                        } else {
+                            suppressible_tidy_err!(
+                                err,
+                                skip_odd_backticks,
+                                "{block_len}-line comment block with odd number of backticks"
+                            );
                         }
                     }
                 }

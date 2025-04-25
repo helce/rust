@@ -877,18 +877,11 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
     }
 
     fn nonterminal_to_string(&self, nt: &Nonterminal) -> String {
-        match nt {
-            token::NtExpr(e) => self.expr_to_string(e),
-            token::NtMeta(e) => self.attr_item_to_string(e),
-            token::NtTy(e) => self.ty_to_string(e),
-            token::NtPath(e) => self.path_to_string(e),
-            token::NtItem(e) => self.item_to_string(e),
-            token::NtBlock(e) => self.block_to_string(e),
-            token::NtStmt(e) => self.stmt_to_string(e),
-            token::NtPat(e) => self.pat_to_string(e),
-            token::NtLiteral(e) => self.expr_to_string(e),
-            token::NtVis(e) => self.vis_to_string(e),
-        }
+        // We extract the token stream from the AST fragment and pretty print
+        // it, rather than using AST pretty printing, because `Nonterminal` is
+        // slated for removal in #124141. (This method will also then be
+        // removed.)
+        self.tts_to_string(&TokenStream::from_nonterminal_ast(nt))
     }
 
     /// Print the token kind precisely, without converting `$crate` into its respective crate name.
@@ -1022,6 +1015,10 @@ pub trait PrintState<'a>: std::ops::Deref<Target = pp::Printer> + std::ops::Dere
         Self::to_string(|s| s.print_attr_item(ai, ai.path.span))
     }
 
+    fn tts_to_string(&self, tokens: &TokenStream) -> String {
+        Self::to_string(|s| s.print_tts(tokens, false))
+    }
+
     fn to_string(f: impl FnOnce(&mut State<'_>)) -> String {
         let mut printer = State::new();
         f(&mut printer);
@@ -1062,6 +1059,11 @@ impl<'a> PrintState<'a> for State<'a> {
                 self.commasep(Inconsistent, &data.inputs, |s, ty| s.print_type(ty));
                 self.word(")");
                 self.print_fn_ret_ty(&data.output);
+            }
+            ast::GenericArgs::ParenthesizedElided(_) => {
+                self.word("(");
+                self.word("..");
+                self.word(")");
             }
         }
     }
@@ -1190,17 +1192,8 @@ impl<'a> State<'a> {
                 }
                 self.print_type_bounds(bounds);
             }
-            ast::TyKind::ImplTrait(_, bounds, precise_capturing_args) => {
+            ast::TyKind::ImplTrait(_, bounds) => {
                 self.word_nbsp("impl");
-                if let Some((precise_capturing_args, ..)) = precise_capturing_args.as_deref() {
-                    self.word("use");
-                    self.word("<");
-                    self.commasep(Inconsistent, precise_capturing_args, |s, arg| match arg {
-                        ast::PreciseCapturingArg::Arg(p, _) => s.print_path(p, false, 0),
-                        ast::PreciseCapturingArg::Lifetime(lt) => s.print_lifetime(*lt),
-                    });
-                    self.word(">")
-                }
                 self.print_type_bounds(bounds);
             }
             ast::TyKind::Array(ty, length) => {
@@ -1803,6 +1796,15 @@ impl<'a> State<'a> {
                     self.print_poly_trait_ref(tref);
                 }
                 GenericBound::Outlives(lt) => self.print_lifetime(*lt),
+                GenericBound::Use(args, _) => {
+                    self.word("use");
+                    self.word("<");
+                    self.commasep(Inconsistent, args, |s, arg| match arg {
+                        ast::PreciseCapturingArg::Arg(p, _) => s.print_path(p, false, 0),
+                        ast::PreciseCapturingArg::Lifetime(lt) => s.print_lifetime(*lt),
+                    });
+                    self.word(">")
+                }
             }
         }
     }
@@ -2066,10 +2068,6 @@ impl<'a> State<'a> {
         Self::to_string(|s| {
             s.print_tt(tt, false);
         })
-    }
-
-    pub(crate) fn tts_to_string(&self, tokens: &TokenStream) -> String {
-        Self::to_string(|s| s.print_tts(tokens, false))
     }
 
     pub(crate) fn path_segment_to_string(&self, p: &ast::PathSegment) -> String {

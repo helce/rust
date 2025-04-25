@@ -328,13 +328,13 @@ impl<'tcx> Stable<'tcx> for mir::Operand<'tcx> {
 }
 
 impl<'tcx> Stable<'tcx> for mir::ConstOperand<'tcx> {
-    type T = stable_mir::mir::Constant;
+    type T = stable_mir::mir::ConstOperand;
 
     fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
-        stable_mir::mir::Constant {
+        stable_mir::mir::ConstOperand {
             span: self.span.stable(tables),
             user_ty: self.user_ty.map(|u| u.as_usize()).or(None),
-            literal: self.const_.stable(tables),
+            const_: self.const_.stable(tables),
         }
     }
 }
@@ -644,6 +644,7 @@ impl<'tcx> Stable<'tcx> for mir::TerminatorKind<'tcx> {
                 target: target.map(|t| t.as_usize()),
                 unwind: unwind.stable(tables),
             },
+            mir::TerminatorKind::TailCall { func: _, args: _, fn_span: _ } => todo!(),
             mir::TerminatorKind::Assert { cond, expected, msg, target, unwind } => {
                 TerminatorKind::Assert {
                     cond: cond.stable(tables),
@@ -709,7 +710,7 @@ impl<'tcx> Stable<'tcx> for mir::interpret::GlobalAlloc<'tcx> {
 
     fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
         match self {
-            mir::interpret::GlobalAlloc::Function(instance) => {
+            mir::interpret::GlobalAlloc::Function { instance, .. } => {
                 GlobalAlloc::Function(instance.stable(tables))
             }
             mir::interpret::GlobalAlloc::VTable(ty, trait_ref) => {

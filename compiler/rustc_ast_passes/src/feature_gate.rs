@@ -1,6 +1,6 @@
 use rustc_ast as ast;
 use rustc_ast::visit::{self, AssocCtxt, FnCtxt, FnKind, Visitor};
-use rustc_ast::{attr, AssocItemConstraint, AssocItemConstraintKind, NodeId};
+use rustc_ast::{attr, NodeId};
 use rustc_ast::{token, PatKind};
 use rustc_feature::{AttributeGate, BuiltinAttribute, Features, GateIssue, BUILTIN_ATTRIBUTE_MAP};
 use rustc_session::parse::{feature_err, feature_err_issue, feature_warn};
@@ -445,23 +445,6 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
         visit::walk_fn(self, fn_kind)
     }
 
-    fn visit_assoc_item_constraint(&mut self, constraint: &'a AssocItemConstraint) {
-        if let AssocItemConstraintKind::Bound { .. } = constraint.kind
-            && let Some(ast::GenericArgs::Parenthesized(args)) = constraint.gen_args.as_ref()
-            && args.inputs.is_empty()
-            && let ast::FnRetTy::Default(..) = args.output
-        {
-            gate!(
-                &self,
-                return_type_notation,
-                constraint.span,
-                "return type notation is experimental"
-            );
-        }
-
-        visit::walk_assoc_item_constraint(self, constraint)
-    }
-
     fn visit_assoc_item(&mut self, i: &'a ast::AssocItem, ctxt: AssocCtxt) {
         let is_fn = match &i.kind {
             ast::AssocItemKind::Fn(_) => true,
@@ -566,6 +549,7 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
         unsafe_extern_blocks,
         "`unsafe extern {}` blocks and `safe` keyword are experimental"
     );
+    gate_all!(return_type_notation, "return type notation is experimental");
 
     if !visitor.features.never_patterns {
         if let Some(spans) = spans.get(&sym::never_patterns) {
@@ -611,10 +595,6 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
 
     gate_all_legacy_dont_use!(box_patterns, "box pattern syntax is experimental");
     gate_all_legacy_dont_use!(trait_alias, "trait aliases are experimental");
-    // Despite being a new feature, `where T: Trait<Assoc(): Sized>`, which is RTN syntax now,
-    // used to be gated under associated_type_bounds, which are right above, so RTN needs to
-    // be too.
-    gate_all_legacy_dont_use!(return_type_notation, "return type notation is experimental");
     gate_all_legacy_dont_use!(decl_macro, "`macro` is experimental");
     gate_all_legacy_dont_use!(try_blocks, "`try` blocks are unstable");
     gate_all_legacy_dont_use!(auto_traits, "`auto` traits are unstable");
@@ -627,8 +607,7 @@ fn maybe_stage_features(sess: &Session, features: &Features, krate: &ast::Crate)
     // does not check the same for lib features unless there's at least one
     // declared lang feature
     if !sess.opts.unstable_features.is_nightly_build() {
-        let lang_features = &features.declared_lang_features;
-        if lang_features.len() == 0 {
+        if features.declared_features.is_empty() {
             return;
         }
         for attr in krate.attrs.iter().filter(|attr| attr.has_name(sym::feature)) {
@@ -644,7 +623,8 @@ fn maybe_stage_features(sess: &Session, features: &Features, krate: &ast::Crate)
                 attr.meta_item_list().into_iter().flatten().flat_map(|nested| nested.ident())
             {
                 let name = ident.name;
-                let stable_since = lang_features
+                let stable_since = features
+                    .declared_lang_features
                     .iter()
                     .flat_map(|&(feature, _, since)| if feature == name { since } else { None })
                     .next();

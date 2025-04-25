@@ -9,7 +9,6 @@
 
 use crate::{declare_lint, declare_lint_pass, FutureIncompatibilityReason};
 use rustc_span::edition::Edition;
-use rustc_span::symbol::sym;
 
 declare_lint_pass! {
     /// Does nothing as a lint pass, but registers some `Lint`s
@@ -34,6 +33,7 @@ declare_lint_pass! {
         CONST_EVALUATABLE_UNCHECKED,
         CONST_ITEM_MUTATION,
         DEAD_CODE,
+        DEPENDENCY_ON_UNIT_NEVER_TYPE_FALLBACK,
         DEPRECATED,
         DEPRECATED_CFG_ATTR_CRATE_TYPE_NAME,
         DEPRECATED_IN_FUTURE,
@@ -73,11 +73,13 @@ declare_lint_pass! {
         NON_CONTIGUOUS_RANGE_ENDPOINTS,
         NON_EXHAUSTIVE_OMITTED_PATTERNS,
         ORDER_DEPENDENT_TRAIT_OBJECTS,
+        OUT_OF_SCOPE_MACRO_CALLS,
         OVERLAPPING_RANGE_ENDPOINTS,
         PATTERNS_IN_FNS_WITHOUT_BODY,
         PRIVATE_BOUNDS,
         PRIVATE_INTERFACES,
         PROC_MACRO_DERIVE_RESOLUTION_FALLBACK,
+        PTR_CAST_ADD_AUTO_TO_OBJECT,
         PUB_USE_OF_PRIVATE_EXTERN_CRATE,
         REDUNDANT_LIFETIMES,
         REFINING_IMPL_TRAIT_INTERNAL,
@@ -114,6 +116,7 @@ declare_lint_pass! {
         UNNAMEABLE_TYPES,
         UNREACHABLE_CODE,
         UNREACHABLE_PATTERNS,
+        UNSAFE_ATTR_OUTSIDE_UNSAFE,
         UNSAFE_OP_IN_UNSAFE_FN,
         UNSTABLE_NAME_COLLISIONS,
         UNSTABLE_SYNTAX_PRE_EXPANSION,
@@ -459,7 +462,7 @@ declare_lint! {
     pub MUST_NOT_SUSPEND,
     Allow,
     "use of a `#[must_not_suspend]` value across a yield point",
-    @feature_gate = rustc_span::symbol::sym::must_not_suspend;
+    @feature_gate = must_not_suspend;
 }
 
 declare_lint! {
@@ -511,8 +514,9 @@ declare_lint! {
     /// This will produce:
     ///
     /// ```text
-    /// error: external crate `regex` unused in `lint_example`: remove the dependency or add `use regex as _;`
+    /// error: extern crate `regex` is unused in crate `lint_example`
     ///   |
+    ///   = help: remove the dependency or add `use regex as _;` to the crate root
     /// note: the lint level is defined here
     ///  --> src/lib.rs:1:9
     ///   |
@@ -605,13 +609,13 @@ declare_lint! {
 }
 
 declare_lint! {
-    /// The `unfulfilled_lint_expectations` lint detects lint trigger expectations
-    /// that have not been fulfilled.
+    /// The `unfulfilled_lint_expectations` lint detects when a lint expectation is
+    /// unfulfilled.
     ///
     /// ### Example
     ///
     /// ```rust
-    /// #![feature(lint_reasons)]
+    /// #![cfg_attr(bootstrap, feature(lint_reasons))]
     ///
     /// #[expect(unused_variables)]
     /// let x = 10;
@@ -622,24 +626,14 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// It was expected that the marked code would emit a lint. This expectation
-    /// has not been fulfilled.
+    /// The `#[expect]` attribute can be used to create a lint expectation. The
+    /// expectation is fulfilled, if a `#[warn]` attribute at the same location
+    /// would result in a lint emission. If the expectation is unfulfilled,
+    /// because no lint was emitted, this lint will be emitted on the attribute.
     ///
-    /// The `expect` attribute can be removed if this is intended behavior otherwise
-    /// it should be investigated why the expected lint is no longer issued.
-    ///
-    /// In rare cases, the expectation might be emitted at a different location than
-    /// shown in the shown code snippet. In most cases, the `#[expect]` attribute
-    /// works when added to the outer scope. A few lints can only be expected
-    /// on a crate level.
-    ///
-    /// Part of RFC 2383. The progress is being tracked in [#54503]
-    ///
-    /// [#54503]: https://github.com/rust-lang/rust/issues/54503
     pub UNFULFILLED_LINT_EXPECTATIONS,
     Warn,
-    "unfulfilled lint expectation",
-    @feature_gate = rustc_span::sym::lint_reasons;
+    "unfulfilled lint expectation"
 }
 
 declare_lint! {
@@ -1209,16 +1203,16 @@ declare_lint! {
     /// This was historically allowed, but is not the intended behavior
     /// according to the visibility rules. This is a [future-incompatible]
     /// lint to transition this to a hard error in the future. See [issue
-    /// #34537] for more details.
+    /// #127909] for more details.
     ///
-    /// [issue #34537]: https://github.com/rust-lang/rust/issues/34537
+    /// [issue #127909]: https://github.com/rust-lang/rust/issues/127909
     /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub PUB_USE_OF_PRIVATE_EXTERN_CRATE,
     Deny,
     "detect public re-exports of private extern crates",
     @future_incompatible = FutureIncompatibleInfo {
-        reason: FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps,
-        reference: "issue #34537 <https://github.com/rust-lang/rust/issues/34537>",
+        reason: FutureIncompatibilityReason::FutureReleaseErrorReportInDeps,
+        reference: "issue #127909 <https://github.com/rust-lang/rust/issues/127909>",
     };
 }
 
@@ -1652,7 +1646,7 @@ declare_lint! {
     pub RUST_2024_INCOMPATIBLE_PAT,
     Allow,
     "detects patterns whose meaning will change in Rust 2024",
-    @feature_gate = sym::ref_pat_eat_one_layer_2024;
+    @feature_gate = ref_pat_eat_one_layer_2024;
     // FIXME uncomment below upon stabilization
     /*@future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionSemanticsChange(Edition::Edition2024),
@@ -2160,8 +2154,7 @@ declare_lint! {
 }
 
 declare_lint! {
-    /// The `macro_use_extern_crate` lint detects the use of the
-    /// [`macro_use` attribute].
+    /// The `macro_use_extern_crate` lint detects the use of the [`macro_use` attribute].
     ///
     /// ### Example
     ///
@@ -2179,12 +2172,13 @@ declare_lint! {
     /// This will produce:
     ///
     /// ```text
-    /// error: deprecated `#[macro_use]` attribute used to import macros should be replaced at use sites with a `use` item to import the macro instead
+    /// error: applying the `#[macro_use]` attribute to an `extern crate` item is deprecated
     ///  --> src/main.rs:3:1
     ///   |
     /// 3 | #[macro_use]
     ///   | ^^^^^^^^^^^^
     ///   |
+    ///   = help: remove it and import macros at use sites with a `use` item instead
     /// note: the lint level is defined here
     ///  --> src/main.rs:1:9
     ///   |
@@ -2700,7 +2694,7 @@ declare_lint! {
     pub FUZZY_PROVENANCE_CASTS,
     Allow,
     "a fuzzy integer to pointer cast is used",
-    @feature_gate = sym::strict_provenance;
+    @feature_gate = strict_provenance;
 }
 
 declare_lint! {
@@ -2746,7 +2740,7 @@ declare_lint! {
     pub LOSSY_PROVENANCE_CASTS,
     Allow,
     "a lossy pointer to integer cast is used",
-    @feature_gate = sym::strict_provenance;
+    @feature_gate = strict_provenance;
 }
 
 declare_lint! {
@@ -3256,7 +3250,11 @@ declare_lint! {
     /// See the [Checking Conditional Configurations][check-cfg] section for more
     /// details.
     ///
+    /// See the [Cargo Specifics][unexpected_cfgs_lint_config] section for configuring this lint in
+    /// `Cargo.toml`.
+    ///
     /// [check-cfg]: https://doc.rust-lang.org/nightly/rustc/check-cfg.html
+    /// [unexpected_cfgs_lint_config]: https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html#check-cfg-in-lintsrust-table
     pub UNEXPECTED_CFGS,
     Warn,
     "detects unexpected names and values in `#[cfg]` conditions",
@@ -3926,7 +3924,7 @@ declare_lint! {
     pub NON_EXHAUSTIVE_OMITTED_PATTERNS,
     Allow,
     "detect when patterns of types marked `non_exhaustive` are missed",
-    @feature_gate = sym::non_exhaustive_omitted_patterns_lint;
+    @feature_gate = non_exhaustive_omitted_patterns_lint;
 }
 
 declare_lint! {
@@ -4046,7 +4044,7 @@ declare_lint! {
     pub TEST_UNSTABLE_LINT,
     Deny,
     "this unstable lint is only for testing",
-    @feature_gate = sym::test_unstable_lint;
+    @feature_gate = test_unstable_lint;
 }
 
 declare_lint! {
@@ -4189,6 +4187,60 @@ declare_lint! {
     "never type fallback affecting unsafe function calls",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseSemanticsChange,
+        reference: "issue #123748 <https://github.com/rust-lang/rust/issues/123748>",
+    };
+    @edition Edition2024 => Deny;
+    report_in_external_macro
+}
+
+declare_lint! {
+    /// The `dependency_on_unit_never_type_fallback` lint detects cases where code compiles with
+    /// [never type fallback] being [`()`], but will stop compiling with fallback being [`!`].
+    ///
+    /// [never type fallback]: https://doc.rust-lang.org/nightly/core/primitive.never.html#never-type-fallback
+    /// [`!`]: https://doc.rust-lang.org/core/primitive.never.html
+    /// [`()`]: https://doc.rust-lang.org/core/primitive.unit.html
+    ///
+    /// ### Example
+    ///
+    /// ```rust,compile_fail
+    /// #![deny(dependency_on_unit_never_type_fallback)]
+    /// fn main() {
+    ///     if true {
+    ///         // return has type `!` which, is some cases, causes never type fallback
+    ///         return
+    ///     } else {
+    ///         // the type produced by this call is not specified explicitly,
+    ///         // so it will be inferred from the previous branch
+    ///         Default::default()
+    ///     };
+    ///     // depending on the fallback, this may compile (because `()` implements `Default`),
+    ///     // or it may not (because `!` does not implement `Default`)
+    /// }
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Due to historic reasons never type fallback was `()`, meaning that `!` got spontaneously
+    /// coerced to `()`. There are plans to change that, but they may make the code such as above
+    /// not compile. Instead of depending on the fallback, you should specify the type explicitly:
+    /// ```
+    /// if true {
+    ///     return
+    /// } else {
+    ///     // type is explicitly specified, fallback can't hurt us no more
+    ///     <() as Default>::default()
+    /// };
+    /// ```
+    ///
+    /// See [Tracking Issue for making `!` fall back to `!`](https://github.com/rust-lang/rust/issues/123748).
+    pub DEPENDENCY_ON_UNIT_NEVER_TYPE_FALLBACK,
+    Warn,
+    "never type fallback affecting unsafe function calls",
+    @future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps,
         reference: "issue #123748 <https://github.com/rust-lang/rust/issues/123748>",
     };
     report_in_external_macro
@@ -4534,16 +4586,18 @@ declare_lint! {
 
 declare_lint! {
     /// The `elided_lifetimes_in_associated_constant` lint detects elided lifetimes
-    /// that were erroneously allowed in associated constants.
+    /// in associated constants when there are other lifetimes in scope. This was
+    /// accidentally supported, and this lint was later relaxed to allow eliding
+    /// lifetimes to `'static` when there are no lifetimes in scope.
     ///
     /// ### Example
     ///
     /// ```rust,compile_fail
     /// #![deny(elided_lifetimes_in_associated_constant)]
     ///
-    /// struct Foo;
+    /// struct Foo<'a>(&'a ());
     ///
-    /// impl Foo {
+    /// impl<'a> Foo<'a> {
     ///     const STR: &str = "hello, world";
     /// }
     /// ```
@@ -4565,7 +4619,7 @@ declare_lint! {
     /// [against]: https://github.com/rust-lang/rust/issues/38831
     /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub ELIDED_LIFETIMES_IN_ASSOCIATED_CONSTANT,
-    Warn,
+    Deny,
     "elided lifetimes cannot be used in associated constants in impls",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps,
@@ -4839,5 +4893,138 @@ declare_lint! {
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
         reference: "issue #123743 <https://github.com/rust-lang/rust/issues/123743>",
+    };
+}
+
+declare_lint! {
+    /// The `unsafe_attr_outside_unsafe` lint detects a missing unsafe keyword
+    /// on attributes considered unsafe.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #![feature(unsafe_attributes)]
+    /// #![warn(unsafe_attr_outside_unsafe)]
+    ///
+    /// #[no_mangle]
+    /// extern "C" fn foo() {}
+    ///
+    /// fn main() {}
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Some attributes (e.g. `no_mangle`, `export_name`, `link_section` -- see
+    /// [issue #82499] for a more complete list) are considered "unsafe" attributes.
+    /// An unsafe attribute must only be used inside unsafe(...).
+    ///
+    /// This lint can automatically wrap the attributes in `unsafe(...)` , but this
+    /// obviously cannot verify that the preconditions of the `unsafe`
+    /// attributes are fulfilled, so that is still up to the user.
+    ///
+    /// The lint is currently "allow" by default, but that might change in the
+    /// future.
+    ///
+    /// [editions]: https://doc.rust-lang.org/edition-guide/
+    /// [issue #82499]: https://github.com/rust-lang/rust/issues/82499
+    pub UNSAFE_ATTR_OUTSIDE_UNSAFE,
+    Allow,
+    "detects unsafe attributes outside of unsafe",
+    @future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
+        reference: "issue #123757 <https://github.com/rust-lang/rust/issues/123757>",
+    };
+}
+
+declare_lint! {
+    /// The `ptr_cast_add_auto_to_object` lint detects casts of raw pointers to trait
+    /// objects, which add auto traits.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,edition2021,compile_fail
+    /// let ptr: *const dyn core::any::Any = &();
+    /// _ = ptr as *const dyn core::any::Any + Send;
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Adding an auto trait can make the vtable invalid, potentially causing
+    /// UB in safe code afterwards. For example:
+    ///
+    /// ```ignore (causes a warning)
+    /// #![feature(arbitrary_self_types)]
+    ///
+    /// trait Trait {
+    ///     fn f(self: *const Self)
+    ///     where
+    ///         Self: Send;
+    /// }
+    ///
+    /// impl Trait for *const () {
+    ///     fn f(self: *const Self) {
+    ///         unreachable!()
+    ///     }
+    /// }
+    ///
+    /// fn main() {
+    ///     let unsend: *const () = &();
+    ///     let unsend: *const dyn Trait = &unsend;
+    ///     let send_bad: *const (dyn Trait + Send) = unsend as _;
+    ///     send_bad.f(); // this crashes, since vtable for `*const ()` does not have an entry for `f`
+    /// }
+    /// ```
+    ///
+    /// Generally you must ensure that vtable is right for the pointer's type,
+    /// before passing the pointer to safe code.
+    pub PTR_CAST_ADD_AUTO_TO_OBJECT,
+    Warn,
+    "detects `as` casts from pointers to `dyn Trait` to pointers to `dyn Trait + Auto`",
+    @future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::FutureReleaseErrorReportInDeps,
+        reference: "issue #127323 <https://github.com/rust-lang/rust/issues/127323>",
+    };
+}
+
+declare_lint! {
+    /// The `out_of_scope_macro_calls` lint detects `macro_rules` called when they are not in scope,
+    /// above their definition, which may happen in key-value attributes.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #![doc = in_root!()]
+    ///
+    /// macro_rules! in_root { () => { "" } }
+    ///
+    /// fn main() {}
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// The scope in which a `macro_rules` item is visible starts at that item and continues
+    /// below it. This is more similar to `let` than to other items, which are in scope both above
+    /// and below their definition.
+    /// Due to a bug `macro_rules` were accidentally in scope inside some key-value attributes
+    /// above their definition. The lint catches such cases.
+    /// To address the issue turn the `macro_rules` into a regularly scoped item by importing it
+    /// with `use`.
+    ///
+    /// This is a [future-incompatible] lint to transition this to a
+    /// hard error in the future.
+    ///
+    /// [future-incompatible]: ../index.md#future-incompatible-lints
+    pub OUT_OF_SCOPE_MACRO_CALLS,
+    Warn,
+    "detects out of scope calls to `macro_rules` in key-value attributes",
+    @future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::FutureReleaseErrorDontReportInDeps,
+        reference: "issue #124535 <https://github.com/rust-lang/rust/issues/124535>",
     };
 }

@@ -35,8 +35,8 @@ expand_duplicate_matcher_binding = duplicate matcher binding
     .label = duplicate binding
     .label2 = previous binding
 
-expand_empty_delegation_list =
-    empty list delegation is not supported
+expand_empty_delegation_mac =
+    empty {$kind} delegation is not supported
 
 expand_expected_paren_or_brace =
     expected `(` or `{"{"}`, found `{$token}`
@@ -57,6 +57,12 @@ expand_feature_removed =
     feature has been removed
     .label = feature has been removed
     .reason = {$reason}
+
+expand_glob_delegation_outside_impls =
+    glob delegation is only supported in impls
+
+expand_glob_delegation_traitless_qpath =
+    qualified path without a trait in glob delegation
 
 expand_helper_attribute_name_invalid =
     `{$name}` cannot be a name of derive helper attribute
@@ -157,7 +163,7 @@ expand_unsupported_key_value =
     key-value macro attributes are not supported
 
 expand_var_still_repeating =
-    variable '{$ident}' is still repeating at this depth
+    variable `{$ident}` is still repeating at this depth
 
 expand_wrong_fragment_kind =
     non-{$kind} macro in {$kind} position: {$name}

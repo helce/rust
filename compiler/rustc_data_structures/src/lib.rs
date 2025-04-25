@@ -10,6 +10,7 @@
 #![allow(internal_features)]
 #![allow(rustc::default_hash_types)]
 #![allow(rustc::potential_query_instability)]
+#![cfg_attr(bootstrap, feature(lint_reasons))]
 #![cfg_attr(not(parallel_compiler), feature(cell_leak))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
@@ -23,11 +24,8 @@
 #![feature(core_intrinsics)]
 #![feature(extend_one)]
 #![feature(hash_raw_entry)]
-#![feature(hasher_prefixfree_extras)]
-#![feature(lint_reasons)]
 #![feature(macro_metavar_expr)]
 #![feature(map_try_insert)]
-#![feature(maybe_uninit_uninit_array)]
 #![feature(min_specialization)]
 #![feature(negative_impls)]
 #![feature(never_type)]
@@ -68,7 +66,6 @@ pub mod owned_slice;
 pub mod packed;
 pub mod profiling;
 pub mod sharded;
-pub mod sip128;
 pub mod small_c_str;
 pub mod snapshot_map;
 pub mod sorted_map;

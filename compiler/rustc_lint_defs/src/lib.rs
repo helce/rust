@@ -691,9 +691,14 @@ pub enum BuiltinLintDiag {
         /// The span of the unnecessarily-qualified path to remove.
         removal_span: Span,
     },
+    UnsafeAttrOutsideUnsafe {
+        attribute_name_span: Span,
+        sugg_spans: (Span, Span),
+    },
     AssociatedConstElidedLifetime {
         elided: bool,
         span: Span,
+        lifetimes_in_scope: MultiSpan,
     },
     RedundantImportVisibility {
         span: Span,
@@ -706,7 +711,10 @@ pub enum BuiltinLintDiag {
     },
     MacroUseDeprecated,
     UnusedMacroUse,
-    PrivateExternCrateReexport(Ident),
+    PrivateExternCrateReexport {
+        source: Ident,
+        extern_crate_span: Span,
+    },
     UnusedLabel,
     MacroIsPrivate(Ident),
     UnusedMacroDefinition(Symbol),
@@ -735,6 +743,9 @@ pub enum BuiltinLintDiag {
     },
     InnerAttributeUnstable {
         is_macro: bool,
+    },
+    OutOfScopeMacroCalls {
+        path: String,
     },
 }
 
@@ -854,7 +865,7 @@ macro_rules! declare_lint {
         );
     );
     ($(#[$attr:meta])* $vis: vis $NAME: ident, $Level: ident, $desc: expr,
-     $(@feature_gate = $gate:expr;)?
+     $(@feature_gate = $gate:ident;)?
      $(@future_incompatible = FutureIncompatibleInfo {
         reason: $reason:expr,
         $($field:ident : $val:expr),* $(,)*
@@ -868,7 +879,7 @@ macro_rules! declare_lint {
             desc: $desc,
             is_externally_loaded: false,
             $($v: true,)*
-            $(feature_gate: Some($gate),)?
+            $(feature_gate: Some(rustc_span::symbol::sym::$gate),)?
             $(future_incompatible: Some($crate::FutureIncompatibleInfo {
                 reason: $reason,
                 $($field: $val,)*
@@ -884,21 +895,21 @@ macro_rules! declare_lint {
 macro_rules! declare_tool_lint {
     (
         $(#[$attr:meta])* $vis:vis $tool:ident ::$NAME:ident, $Level: ident, $desc: expr
-        $(, @feature_gate = $gate:expr;)?
+        $(, @feature_gate = $gate:ident;)?
     ) => (
         $crate::declare_tool_lint!{$(#[$attr])* $vis $tool::$NAME, $Level, $desc, false $(, @feature_gate = $gate;)?}
     );
     (
         $(#[$attr:meta])* $vis:vis $tool:ident ::$NAME:ident, $Level:ident, $desc:expr,
         report_in_external_macro: $rep:expr
-        $(, @feature_gate = $gate:expr;)?
+        $(, @feature_gate = $gate:ident;)?
     ) => (
          $crate::declare_tool_lint!{$(#[$attr])* $vis $tool::$NAME, $Level, $desc, $rep $(, @feature_gate = $gate;)?}
     );
     (
         $(#[$attr:meta])* $vis:vis $tool:ident ::$NAME:ident, $Level:ident, $desc:expr,
         $external:expr
-        $(, @feature_gate = $gate:expr;)?
+        $(, @feature_gate = $gate:ident;)?
     ) => (
         $(#[$attr])*
         $vis static $NAME: &$crate::Lint = &$crate::Lint {
@@ -909,7 +920,7 @@ macro_rules! declare_tool_lint {
             report_in_external_macro: $external,
             future_incompatible: None,
             is_externally_loaded: true,
-            $(feature_gate: Some($gate),)?
+            $(feature_gate: Some(rustc_span::symbol::sym::$gate),)?
             crate_level_only: false,
             ..$crate::Lint::default_fields_for_macro()
         };

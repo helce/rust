@@ -4,22 +4,76 @@ use crate::{errors, parse_in};
 
 use rustc_ast::token::Delimiter;
 use rustc_ast::tokenstream::DelimSpan;
-use rustc_ast::MetaItemKind;
-use rustc_ast::{self as ast, AttrArgs, AttrArgsEq, Attribute, DelimArgs, MetaItem};
+use rustc_ast::{
+    self as ast, AttrArgs, AttrArgsEq, Attribute, DelimArgs, MetaItem, MetaItemKind,
+    NestedMetaItem, Safety,
+};
 use rustc_errors::{Applicability, FatalError, PResult};
-use rustc_feature::{AttributeTemplate, BuiltinAttribute, BUILTIN_ATTRIBUTE_MAP};
+use rustc_feature::{
+    AttributeSafety, AttributeTemplate, BuiltinAttribute, Features, BUILTIN_ATTRIBUTE_MAP,
+};
 use rustc_session::errors::report_lit_error;
-use rustc_session::lint::builtin::ILL_FORMED_ATTRIBUTE_INPUT;
+use rustc_session::lint::builtin::{ILL_FORMED_ATTRIBUTE_INPUT, UNSAFE_ATTR_OUTSIDE_UNSAFE};
 use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::parse::ParseSess;
-use rustc_span::{sym, Span, Symbol};
+use rustc_span::{sym, BytePos, Span, Symbol};
 
-pub fn check_attr(psess: &ParseSess, attr: &Attribute) {
+pub fn check_attr(features: &Features, psess: &ParseSess, attr: &Attribute) {
     if attr.is_doc_comment() {
         return;
     }
 
     let attr_info = attr.ident().and_then(|ident| BUILTIN_ATTRIBUTE_MAP.get(&ident.name));
+    let attr_item = attr.get_normal_item();
+
+    let is_unsafe_attr = attr_info.is_some_and(|attr| attr.safety == AttributeSafety::Unsafe);
+
+    if features.unsafe_attributes {
+        if is_unsafe_attr {
+            if let ast::Safety::Default = attr_item.unsafety {
+                let path_span = attr_item.path.span;
+
+                // If the `attr_item`'s span is not from a macro, then just suggest
+                // wrapping it in `unsafe(...)`. Otherwise, we suggest putting the
+                // `unsafe(`, `)` right after and right before the opening and closing
+                // square bracket respectively.
+                let diag_span = if attr_item.span().can_be_used_for_suggestions() {
+                    attr_item.span()
+                } else {
+                    attr.span
+                        .with_lo(attr.span.lo() + BytePos(2))
+                        .with_hi(attr.span.hi() - BytePos(1))
+                };
+
+                if attr.span.at_least_rust_2024() {
+                    psess.dcx().emit_err(errors::UnsafeAttrOutsideUnsafe {
+                        span: path_span,
+                        suggestion: errors::UnsafeAttrOutsideUnsafeSuggestion {
+                            left: diag_span.shrink_to_lo(),
+                            right: diag_span.shrink_to_hi(),
+                        },
+                    });
+                } else {
+                    psess.buffer_lint(
+                        UNSAFE_ATTR_OUTSIDE_UNSAFE,
+                        path_span,
+                        ast::CRATE_NODE_ID,
+                        BuiltinLintDiag::UnsafeAttrOutsideUnsafe {
+                            attribute_name_span: path_span,
+                            sugg_spans: (diag_span.shrink_to_lo(), diag_span.shrink_to_hi()),
+                        },
+                    );
+                }
+            }
+        } else {
+            if let Safety::Unsafe(unsafe_span) = attr_item.unsafety {
+                psess.dcx().emit_err(errors::InvalidAttrUnsafe {
+                    span: unsafe_span,
+                    name: attr_item.path.clone(),
+                });
+            }
+        }
+    }
 
     // Check input tokens for built-in and key-value attributes.
     match attr_info {
@@ -32,7 +86,7 @@ pub fn check_attr(psess: &ParseSess, attr: &Attribute) {
                 }
             }
         }
-        _ if let AttrArgs::Eq(..) = attr.get_normal_item().args => {
+        _ if let AttrArgs::Eq(..) = attr_item.args => {
             // All key-value attributes are restricted to meta-item syntax.
             match parse_meta(psess, attr) {
                 Ok(_) => {}
@@ -65,7 +119,7 @@ pub fn parse_meta<'a>(psess: &'a ParseSess, attr: &Attribute) -> PResult<'a, Met
                     let res = match res {
                         Ok(lit) => {
                             if token_lit.suffix.is_some() {
-                                let mut err = psess.dcx.struct_span_err(
+                                let mut err = psess.dcx().struct_span_err(
                                     expr.span,
                                     "suffixed literals are not allowed in attributes",
                                 );
@@ -98,7 +152,7 @@ pub fn parse_meta<'a>(psess: &'a ParseSess, attr: &Attribute) -> PResult<'a, Met
                     //   the error because an earlier error will have already
                     //   been reported.
                     let msg = "attribute value must be a literal";
-                    let mut err = psess.dcx.struct_span_err(expr.span, msg);
+                    let mut err = psess.dcx().struct_span_err(expr.span, msg);
                     if let ast::ExprKind::Err(_) = expr.kind {
                         err.downgrade_to_delayed_bug();
                     }
@@ -114,7 +168,7 @@ fn check_meta_bad_delim(psess: &ParseSess, span: DelimSpan, delim: Delimiter) {
     if let Delimiter::Parenthesis = delim {
         return;
     }
-    psess.dcx.emit_err(errors::MetaBadDelim {
+    psess.dcx().emit_err(errors::MetaBadDelim {
         span: span.entire(),
         sugg: errors::MetaBadDelimSugg { open: span.open, close: span.close },
     });
@@ -124,7 +178,7 @@ pub(super) fn check_cfg_attr_bad_delim(psess: &ParseSess, span: DelimSpan, delim
     if let Delimiter::Parenthesis = delim {
         return;
     }
-    psess.dcx.emit_err(errors::CfgAttrBadDelim {
+    psess.dcx().emit_err(errors::CfgAttrBadDelim {
         span: span.entire(),
         sugg: errors::MetaBadDelimSugg { open: span.open, close: span.close },
     });
@@ -132,9 +186,13 @@ pub(super) fn check_cfg_attr_bad_delim(psess: &ParseSess, span: DelimSpan, delim
 
 /// Checks that the given meta-item is compatible with this `AttributeTemplate`.
 fn is_attr_template_compatible(template: &AttributeTemplate, meta: &ast::MetaItemKind) -> bool {
+    let is_one_allowed_subword = |items: &[NestedMetaItem]| match items {
+        [item] => item.is_word() && template.one_of.iter().any(|&word| item.has_name(word)),
+        _ => false,
+    };
     match meta {
         MetaItemKind::Word => template.word,
-        MetaItemKind::List(..) => template.list.is_some(),
+        MetaItemKind::List(items) => template.list.is_some() || is_one_allowed_subword(items),
         MetaItemKind::NameValue(lit) if lit.kind.is_str() => template.name_value_str.is_some(),
         MetaItemKind::NameValue(..) => false,
     }
@@ -178,6 +236,7 @@ fn emit_malformed_attribute(
     if let Some(descr) = template.list {
         suggestions.push(format!("#{inner}[{name}({descr})]"));
     }
+    suggestions.extend(template.one_of.iter().map(|&word| format!("#{inner}[{name}({word})]")));
     if let Some(descr) = template.name_value_str {
         suggestions.push(format!("#{inner}[{name} = \"{descr}\"]"));
     }
@@ -191,7 +250,7 @@ fn emit_malformed_attribute(
     } else {
         suggestions.sort();
         psess
-            .dcx
+            .dcx()
             .struct_span_err(span, error_msg)
             .with_span_suggestions(
                 span,

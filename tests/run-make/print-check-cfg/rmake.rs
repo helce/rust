@@ -86,14 +86,10 @@ fn main() {
 }
 
 fn check(CheckCfg { args, contains }: CheckCfg) {
-    let output = rustc()
-        .input("lib.rs")
-        .arg("-Zunstable-options")
-        .arg("--print=check-cfg")
-        .args(&*args)
-        .run();
+    let output =
+        rustc().input("lib.rs").arg("-Zunstable-options").arg("--print=check-cfg").args(args).run();
 
-    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = output.stdout_utf8();
 
     let mut found = HashSet::<String>::new();
 

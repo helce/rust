@@ -71,7 +71,7 @@ fn spawn_emulator(target: &str, server: &Path, tmpdir: &Path, rootfs: Option<Pat
 
     // Wait for the emulator to come online
     loop {
-        let dur = Duration::from_millis(100);
+        let dur = Duration::from_millis(2000);
         if let Ok(mut client) = TcpStream::connect(&device_address) {
             t!(client.set_read_timeout(Some(dur)));
             t!(client.set_write_timeout(Some(dur)));
@@ -317,13 +317,11 @@ fn run(support_lib_count: usize, exe: String, all_args: Vec<String>) {
                 t!(io::copy(&mut (&mut client).take(amt), &mut stdout));
                 t!(stdout.flush());
             }
+        } else if amt == 0 {
+            stderr_done = true;
         } else {
-            if amt == 0 {
-                stderr_done = true;
-            } else {
-                t!(io::copy(&mut (&mut client).take(amt), &mut stderr));
-                t!(stderr.flush());
-            }
+            t!(io::copy(&mut (&mut client).take(amt), &mut stderr));
+            t!(stderr.flush());
         }
     }
 

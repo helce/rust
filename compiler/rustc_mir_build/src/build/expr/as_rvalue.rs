@@ -152,10 +152,11 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     source_info,
                     TerminatorKind::Call {
                         func: exchange_malloc,
-                        args: vec![
+                        args: [
                             Spanned { node: Operand::Move(size), span: DUMMY_SP },
                             Spanned { node: Operand::Move(align), span: DUMMY_SP },
-                        ],
+                        ]
+                        .into(),
                         destination: storage,
                         target: Some(success),
                         unwind: UnwindAction::Continue,
@@ -184,13 +185,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 this.cfg.push_assign(block, source_info, Place::from(result), box_);
 
                 // initialize the box contents:
-                unpack!(
-                    block = this.expr_into_dest(
-                        this.tcx.mk_place_deref(Place::from(result)),
-                        block,
-                        value,
-                    )
-                );
+                block = this
+                    .expr_into_dest(this.tcx.mk_place_deref(Place::from(result)), block, value)
+                    .into_block();
                 block.and(Rvalue::Use(Operand::Move(Place::from(result))))
             }
             ExprKind::Cast { source } => {
@@ -485,7 +482,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 block.and(Rvalue::Aggregate(result, operands))
             }
             ExprKind::Assign { .. } | ExprKind::AssignOp { .. } => {
-                block = unpack!(this.stmt_expr(block, expr_id, None));
+                block = this.stmt_expr(block, expr_id, None).into_block();
                 block.and(Rvalue::Use(Operand::Constant(Box::new(ConstOperand {
                     span: expr_span,
                     user_ty: None,

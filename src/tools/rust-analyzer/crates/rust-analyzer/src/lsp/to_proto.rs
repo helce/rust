@@ -21,16 +21,17 @@ use serde_json::to_value;
 use vfs::AbsPath;
 
 use crate::{
-    cargo_target_spec::CargoTargetSpec,
     config::{CallInfoConfig, Config},
     global_state::GlobalStateSnapshot,
     line_index::{LineEndings, LineIndex, PositionEncoding},
     lsp::{
+        ext::ShellRunnableArgs,
         semantic_tokens::{self, standard_fallback_type},
         utils::invalid_params_error,
         LspError,
     },
     lsp_ext::{self, SnippetTextEdit},
+    target_spec::{CargoTargetSpec, TargetSpec},
 };
 
 pub(crate) fn position(line_index: &LineIndex, offset: TextSize) -> lsp_types::Position {
@@ -500,7 +501,9 @@ pub(crate) fn inlay_hint(
         padding_left: Some(inlay_hint.pad_left),
         padding_right: Some(inlay_hint.pad_right),
         kind: match inlay_hint.kind {
-            InlayKind::Parameter => Some(lsp_types::InlayHintKind::PARAMETER),
+            InlayKind::Parameter | InlayKind::GenericParameter => {
+                Some(lsp_types::InlayHintKind::PARAMETER)
+            }
             InlayKind::Type | InlayKind::Chaining => Some(lsp_types::InlayHintKind::TYPE),
             _ => None,
         },
@@ -1356,34 +1359,92 @@ pub(crate) fn code_action(
 pub(crate) fn runnable(
     snap: &GlobalStateSnapshot,
     runnable: Runnable,
-) -> Cancellable<lsp_ext::Runnable> {
+) -> Cancellable<Option<lsp_ext::Runnable>> {
     let config = snap.config.runnables();
-    let spec = CargoTargetSpec::for_file(snap, runnable.nav.file_id)?;
-    let workspace_root = spec.as_ref().map(|it| it.workspace_root.clone());
-    let cwd = match runnable.kind {
-        ide::RunnableKind::Bin { .. } => workspace_root.clone().map(|it| it.into()),
-        _ => spec.as_ref().map(|it| it.cargo_toml.parent().into()),
-    };
-    let target = spec.as_ref().map(|s| s.target.as_str());
-    let label = runnable.label(target);
-    let (cargo_args, executable_args) =
-        CargoTargetSpec::runnable_args(snap, spec, &runnable.kind, &runnable.cfg);
-    let location = location_link(snap, None, runnable.nav)?;
+    let target_spec = TargetSpec::for_file(snap, runnable.nav.file_id)?;
 
-    Ok(lsp_ext::Runnable {
-        label,
-        location: Some(location),
-        kind: lsp_ext::RunnableKind::Cargo,
-        args: lsp_ext::CargoRunnable {
-            workspace_root: workspace_root.map(|it| it.into()),
-            cwd,
-            override_cargo: config.override_cargo,
-            cargo_args,
-            cargo_extra_args: config.cargo_extra_args,
-            executable_args,
-            expect_test: None,
-        },
-    })
+    match target_spec {
+        Some(TargetSpec::Cargo(spec)) => {
+            let workspace_root = spec.workspace_root.clone();
+
+            let target = spec.target.clone();
+
+            let (cargo_args, executable_args) = CargoTargetSpec::runnable_args(
+                snap,
+                Some(spec.clone()),
+                &runnable.kind,
+                &runnable.cfg,
+            );
+
+            let cwd = match runnable.kind {
+                ide::RunnableKind::Bin { .. } => workspace_root.clone(),
+                _ => spec.cargo_toml.parent().to_owned(),
+            };
+
+            let label = runnable.label(Some(&target));
+            let location = location_link(snap, None, runnable.nav)?;
+
+            Ok(Some(lsp_ext::Runnable {
+                label,
+                location: Some(location),
+                kind: lsp_ext::RunnableKind::Cargo,
+                args: lsp_ext::RunnableArgs::Cargo(lsp_ext::CargoRunnableArgs {
+                    workspace_root: Some(workspace_root.into()),
+                    override_cargo: config.override_cargo,
+                    cargo_args,
+                    cwd: cwd.into(),
+                    executable_args,
+                    environment: Default::default(),
+                }),
+            }))
+        }
+        Some(TargetSpec::ProjectJson(spec)) => {
+            let label = runnable.label(Some(&spec.label));
+            let location = location_link(snap, None, runnable.nav)?;
+
+            match spec.runnable_args(&runnable.kind) {
+                Some(json_shell_runnable_args) => {
+                    let runnable_args = ShellRunnableArgs {
+                        program: json_shell_runnable_args.program,
+                        args: json_shell_runnable_args.args,
+                        cwd: json_shell_runnable_args.cwd,
+                        environment: Default::default(),
+                    };
+                    Ok(Some(lsp_ext::Runnable {
+                        label,
+                        location: Some(location),
+                        kind: lsp_ext::RunnableKind::Shell,
+                        args: lsp_ext::RunnableArgs::Shell(runnable_args),
+                    }))
+                }
+                None => Ok(None),
+            }
+        }
+        None => {
+            let Some(path) = snap.file_id_to_file_path(runnable.nav.file_id).parent() else {
+                return Ok(None);
+            };
+            let (cargo_args, executable_args) =
+                CargoTargetSpec::runnable_args(snap, None, &runnable.kind, &runnable.cfg);
+
+            let label = runnable.label(None);
+            let location = location_link(snap, None, runnable.nav)?;
+
+            Ok(Some(lsp_ext::Runnable {
+                label,
+                location: Some(location),
+                kind: lsp_ext::RunnableKind::Cargo,
+                args: lsp_ext::RunnableArgs::Cargo(lsp_ext::CargoRunnableArgs {
+                    workspace_root: None,
+                    override_cargo: config.override_cargo,
+                    cargo_args,
+                    cwd: path.as_path().unwrap().to_path_buf().into(),
+                    executable_args,
+                    environment: Default::default(),
+                }),
+            }))
+        }
+    }
 }
 
 pub(crate) fn code_lens(
@@ -1407,33 +1468,37 @@ pub(crate) fn code_lens(
             };
             let r = runnable(snap, run)?;
 
-            let lens_config = snap.config.lens();
-            if lens_config.run
-                && client_commands_config.run_single
-                && r.args.workspace_root.is_some()
-            {
-                let command = command::run_single(&r, &title);
-                acc.push(lsp_types::CodeLens {
-                    range: annotation_range,
-                    command: Some(command),
-                    data: None,
-                })
-            }
-            if lens_config.debug && can_debug && client_commands_config.debug_single {
-                let command = command::debug_single(&r);
-                acc.push(lsp_types::CodeLens {
-                    range: annotation_range,
-                    command: Some(command),
-                    data: None,
-                })
-            }
-            if lens_config.interpret {
-                let command = command::interpret_single(&r);
-                acc.push(lsp_types::CodeLens {
-                    range: annotation_range,
-                    command: Some(command),
-                    data: None,
-                })
+            if let Some(r) = r {
+                let has_root = match &r.args {
+                    lsp_ext::RunnableArgs::Cargo(c) => c.workspace_root.is_some(),
+                    lsp_ext::RunnableArgs::Shell(_) => true,
+                };
+
+                let lens_config = snap.config.lens();
+                if lens_config.run && client_commands_config.run_single && has_root {
+                    let command = command::run_single(&r, &title);
+                    acc.push(lsp_types::CodeLens {
+                        range: annotation_range,
+                        command: Some(command),
+                        data: None,
+                    })
+                }
+                if lens_config.debug && can_debug && client_commands_config.debug_single {
+                    let command = command::debug_single(&r);
+                    acc.push(lsp_types::CodeLens {
+                        range: annotation_range,
+                        command: Some(command),
+                        data: None,
+                    })
+                }
+                if lens_config.interpret {
+                    let command = command::interpret_single(&r);
+                    acc.push(lsp_types::CodeLens {
+                        range: annotation_range,
+                        command: Some(command),
+                        data: None,
+                    })
+                }
             }
         }
         AnnotationKind::HasImpls { pos, data } => {
@@ -1538,12 +1603,8 @@ pub(crate) fn test_item(
         id: test_item.id,
         label: test_item.label,
         kind: match test_item.kind {
-            ide::TestItemKind::Crate(id) => 'b: {
-                let Some((cargo_ws, target)) = snap.cargo_target_for_crate_root(id) else {
-                    break 'b lsp_ext::TestItemKind::Package;
-                };
-                let target = &cargo_ws[target];
-                match target.kind {
+            ide::TestItemKind::Crate(id) => match snap.target_spec_for_crate(id) {
+                Some(target_spec) => match target_spec.target_kind() {
                     project_model::TargetKind::Bin
                     | project_model::TargetKind::Lib { .. }
                     | project_model::TargetKind::Example
@@ -1552,8 +1613,9 @@ pub(crate) fn test_item(
                     project_model::TargetKind::Test => lsp_ext::TestItemKind::Test,
                     // benches are not tests needed to be shown in the test explorer
                     project_model::TargetKind::Bench => return None,
-                }
-            }
+                },
+                None => lsp_ext::TestItemKind::Package,
+            },
             ide::TestItemKind::Module => lsp_ext::TestItemKind::Module,
             ide::TestItemKind::Function => lsp_ext::TestItemKind::Test,
         },
@@ -1566,7 +1628,7 @@ pub(crate) fn test_item(
             .file
             .map(|f| lsp_types::TextDocumentIdentifier { uri: url(snap, f) }),
         range: line_index.and_then(|l| Some(range(l, test_item.text_range?))),
-        runnable: test_item.runnable.and_then(|r| runnable(snap, r).ok()),
+        runnable: test_item.runnable.and_then(|r| runnable(snap, r).ok()).flatten(),
     })
 }
 

@@ -67,12 +67,6 @@ pub struct BuiltinWhileTrue {
 }
 
 #[derive(LintDiagnostic)]
-#[diag(lint_builtin_box_pointers)]
-pub struct BuiltinBoxPointers<'a> {
-    pub ty: Ty<'a>,
-}
-
-#[derive(LintDiagnostic)]
 #[diag(lint_builtin_non_shorthand_field_patterns)]
 pub struct BuiltinNonShorthandFieldPatterns {
     pub ident: Ident,
@@ -87,6 +81,8 @@ pub enum BuiltinUnsafe {
     AllowInternalUnsafe,
     #[diag(lint_builtin_unsafe_block)]
     UnsafeBlock,
+    #[diag(lint_builtin_unsafe_extern_block)]
+    UnsafeExternBlock,
     #[diag(lint_builtin_unsafe_trait)]
     UnsafeTrait,
     #[diag(lint_builtin_unsafe_impl)]
@@ -321,6 +317,13 @@ pub struct BuiltinTypeAliasGenericBounds<'a, 'b> {
     pub suggestion: BuiltinTypeAliasGenericBoundsSuggestion,
     #[subdiagnostic]
     pub sub: Option<SuggestChangingAssocTypes<'a, 'b>>,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_macro_expr_fragment_specifier_2024_migration)]
+pub struct MacroExprFragment2024 {
+    #[suggestion(code = "expr_2021", applicability = "machine-applicable")]
+    pub suggestion: Span,
 }
 
 pub struct BuiltinTypeAliasGenericBoundsSuggestion {
@@ -924,6 +927,14 @@ pub struct TyQualified {
 }
 
 #[derive(LintDiagnostic)]
+#[diag(lint_non_glob_import_type_ir_inherent)]
+pub struct NonGlobImportTypeIrInherent {
+    #[suggestion(code = "{snippet}", applicability = "maybe-incorrect")]
+    pub suggestion: Option<Span>,
+    pub snippet: &'static str,
+}
+
+#[derive(LintDiagnostic)]
 #[diag(lint_lintpass_by_hand)]
 #[help]
 pub struct LintPassByHand;
@@ -1358,17 +1369,18 @@ pub enum NonLocalDefinitionsDiag {
         cargo_update: Option<NonLocalDefinitionsCargoUpdateNote>,
         const_anon: Option<Option<Span>>,
         move_to: Option<(Span, Vec<Span>)>,
+        doctest: bool,
         may_remove: Option<(Span, String)>,
         has_trait: bool,
         self_ty_str: String,
         of_trait_str: Option<String>,
+        macro_to_change: Option<(String, &'static str)>,
     },
     MacroRules {
         depth: u32,
         body_kind_descr: &'static str,
         body_name: String,
-        help: Option<()>,
-        doctest_help: Option<()>,
+        doctest: bool,
         cargo_update: Option<NonLocalDefinitionsCargoUpdateNote>,
     },
 }
@@ -1383,10 +1395,12 @@ impl<'a> LintDiagnostic<'a, ()> for NonLocalDefinitionsDiag {
                 cargo_update,
                 const_anon,
                 move_to,
+                doctest,
                 may_remove,
                 has_trait,
                 self_ty_str,
                 of_trait_str,
+                macro_to_change,
             } => {
                 diag.primary_message(fluent::lint_non_local_definitions_impl);
                 diag.arg("depth", depth);
@@ -1395,6 +1409,15 @@ impl<'a> LintDiagnostic<'a, ()> for NonLocalDefinitionsDiag {
                 diag.arg("self_ty_str", self_ty_str);
                 if let Some(of_trait_str) = of_trait_str {
                     diag.arg("of_trait_str", of_trait_str);
+                }
+
+                if let Some((macro_to_change, macro_kind)) = macro_to_change {
+                    diag.arg("macro_to_change", macro_to_change);
+                    diag.arg("macro_kind", macro_kind);
+                    diag.note(fluent::lint_macro_to_change);
+                }
+                if let Some(cargo_update) = cargo_update {
+                    diag.subdiagnostic(cargo_update);
                 }
 
                 if has_trait {
@@ -1411,6 +1434,9 @@ impl<'a> LintDiagnostic<'a, ()> for NonLocalDefinitionsDiag {
                     }
                     diag.span_help(ms, fluent::lint_non_local_definitions_impl_move_help);
                 }
+                if doctest {
+                    diag.help(fluent::lint_doctest);
+                }
 
                 if let Some((span, part)) = may_remove {
                     diag.arg("may_remove_part", part);
@@ -1422,9 +1448,6 @@ impl<'a> LintDiagnostic<'a, ()> for NonLocalDefinitionsDiag {
                     );
                 }
 
-                if let Some(cargo_update) = cargo_update {
-                    diag.subdiagnostic(&diag.dcx, cargo_update);
-                }
                 if let Some(const_anon) = const_anon {
                     diag.note(fluent::lint_exception);
                     if let Some(const_anon) = const_anon {
@@ -1443,8 +1466,7 @@ impl<'a> LintDiagnostic<'a, ()> for NonLocalDefinitionsDiag {
                 depth,
                 body_kind_descr,
                 body_name,
-                help,
-                doctest_help,
+                doctest,
                 cargo_update,
             } => {
                 diag.primary_message(fluent::lint_non_local_definitions_macro_rules);
@@ -1452,18 +1474,17 @@ impl<'a> LintDiagnostic<'a, ()> for NonLocalDefinitionsDiag {
                 diag.arg("body_kind_descr", body_kind_descr);
                 diag.arg("body_name", body_name);
 
-                if let Some(()) = help {
-                    diag.help(fluent::lint_help);
-                }
-                if let Some(()) = doctest_help {
+                if doctest {
                     diag.help(fluent::lint_help_doctest);
+                } else {
+                    diag.help(fluent::lint_help);
                 }
 
                 diag.note(fluent::lint_non_local);
                 diag.note(fluent::lint_non_local_definitions_deprecation);
 
                 if let Some(cargo_update) = cargo_update {
-                    diag.subdiagnostic(&diag.dcx, cargo_update);
+                    diag.subdiagnostic(cargo_update);
                 }
             }
         }
@@ -1949,7 +1970,7 @@ impl<'a> LintDiagnostic<'a, ()> for UnusedDef<'_, '_> {
             diag.note(note.to_string());
         }
         if let Some(sugg) = self.suggestion {
-            diag.subdiagnostic(diag.dcx, sugg);
+            diag.subdiagnostic(sugg);
         }
     }
 }
@@ -2036,10 +2057,34 @@ pub struct UnitBindingsDiag {
 }
 
 #[derive(LintDiagnostic)]
-#[diag(lint_builtin_asm_labels)]
-#[help]
-#[note]
-pub struct BuiltinNamedAsmLabel;
+pub enum InvalidAsmLabel {
+    #[diag(lint_invalid_asm_label_named)]
+    #[help]
+    #[note]
+    Named {
+        #[note(lint_invalid_asm_label_no_span)]
+        missing_precise_span: bool,
+    },
+    #[diag(lint_invalid_asm_label_format_arg)]
+    #[help]
+    #[note(lint_note1)]
+    #[note(lint_note2)]
+    FormatArg {
+        #[note(lint_invalid_asm_label_no_span)]
+        missing_precise_span: bool,
+    },
+    #[diag(lint_invalid_asm_label_binary)]
+    #[help]
+    #[note(lint_note1)]
+    #[note(lint_note2)]
+    Binary {
+        #[note(lint_invalid_asm_label_no_span)]
+        missing_precise_span: bool,
+        // hack to get a label on the whole span, must match the emitted span
+        #[label]
+        span: Span,
+    },
+}
 
 #[derive(Subdiagnostic)]
 pub enum UnexpectedCfgCargoHelp {
@@ -2313,6 +2358,7 @@ pub mod unexpected_cfg_value {
 
 #[derive(LintDiagnostic)]
 #[diag(lint_macro_use_deprecated)]
+#[help]
 pub struct MacroUseDeprecated;
 
 #[derive(LintDiagnostic)]
@@ -2323,6 +2369,8 @@ pub struct UnusedMacroUse;
 #[diag(lint_private_extern_crate_reexport, code = E0365)]
 pub struct PrivateExternCrateReexport {
     pub ident: Ident,
+    #[suggestion(code = "pub ", style = "verbose", applicability = "maybe-incorrect")]
+    pub sugg: Span,
 }
 
 #[derive(LintDiagnostic)]
@@ -2416,6 +2464,7 @@ pub struct UnknownMacroVariable {
 
 #[derive(LintDiagnostic)]
 #[diag(lint_unused_crate_dependency)]
+#[help]
 pub struct UnusedCrateDependency {
     pub extern_crate: Symbol,
     pub local_crate: Symbol,
@@ -2861,6 +2910,8 @@ pub struct AssociatedConstElidedLifetime {
 
     pub code: &'static str,
     pub elided: bool,
+    #[note]
+    pub lifetimes_in_scope: MultiSpan,
 }
 
 #[derive(LintDiagnostic)]
@@ -2873,4 +2924,32 @@ pub struct RedundantImportVisibility {
 
     pub import_vis: String,
     pub max_vis: String,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_unsafe_attr_outside_unsafe)]
+pub struct UnsafeAttrOutsideUnsafe {
+    #[label]
+    pub span: Span,
+    #[subdiagnostic]
+    pub suggestion: UnsafeAttrOutsideUnsafeSuggestion,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(
+    lint_unsafe_attr_outside_unsafe_suggestion,
+    applicability = "machine-applicable"
+)]
+pub struct UnsafeAttrOutsideUnsafeSuggestion {
+    #[suggestion_part(code = "unsafe(")]
+    pub left: Span,
+    #[suggestion_part(code = ")")]
+    pub right: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_out_of_scope_macro_calls)]
+#[help]
+pub struct OutOfScopeMacroCalls {
+    pub path: String,
 }

@@ -7,6 +7,8 @@ use rustc_span::def_id::DefId;
 use rustc_span::Span;
 use tracing::{debug, instrument, trace};
 
+pub type OpaqueTypeKey<'tcx> = rustc_type_ir::OpaqueTypeKey<TyCtxt<'tcx>>;
+
 /// Converts generic params of a TypeFoldable from one
 /// item's generics to another. Usually from a function's generics
 /// list to the opaque type's own generics.
@@ -93,7 +95,7 @@ impl<'tcx> ReverseMapper<'tcx> {
 }
 
 impl<'tcx> TypeFolder<TyCtxt<'tcx>> for ReverseMapper<'tcx> {
-    fn interner(&self) -> TyCtxt<'tcx> {
+    fn cx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
 
@@ -142,7 +144,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for ReverseMapper<'tcx> {
                     )
                     .emit();
 
-                ty::Region::new_error(self.interner(), e)
+                ty::Region::new_error(self.cx(), e)
             }
         }
     }

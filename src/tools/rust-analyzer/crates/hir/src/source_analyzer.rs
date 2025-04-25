@@ -24,11 +24,12 @@ use hir_def::{
     LocalFieldId, Lookup, ModuleDefId, TraitId, VariantId,
 };
 use hir_expand::{
-    builtin_fn_macro::BuiltinFnLikeExpander,
     mod_path::path,
-    name,
-    name::{AsName, Name},
     HirFileId, InFile, InMacroFile, MacroFileId, MacroFileIdExt,
+    {
+        name,
+        name::{AsName, Name},
+    },
 };
 use hir_ty::{
     diagnostics::{
@@ -67,38 +68,44 @@ impl SourceAnalyzer {
     pub(crate) fn new_for_body(
         db: &dyn HirDatabase,
         def: DefWithBodyId,
-        node @ InFile { file_id, .. }: InFile<&SyntaxNode>,
+        node: InFile<&SyntaxNode>,
         offset: Option<TextSize>,
     ) -> SourceAnalyzer {
-        let (body, source_map) = db.body_with_source_map(def);
-        let scopes = db.expr_scopes(def);
-        let scope = match offset {
-            None => scope_for(&scopes, &source_map, node),
-            Some(offset) => scope_for_offset(db, &scopes, &source_map, node.file_id, offset),
-        };
-        let resolver = resolver_for_scope(db.upcast(), def, scope);
-        SourceAnalyzer {
-            resolver,
-            def: Some((def, body, source_map)),
-            infer: Some(db.infer(def)),
-            file_id,
-        }
+        Self::new_for_body_(db, def, node, offset, Some(db.infer(def)))
     }
 
     pub(crate) fn new_for_body_no_infer(
         db: &dyn HirDatabase,
         def: DefWithBodyId,
+        node: InFile<&SyntaxNode>,
+        offset: Option<TextSize>,
+    ) -> SourceAnalyzer {
+        Self::new_for_body_(db, def, node, offset, None)
+    }
+
+    pub(crate) fn new_for_body_(
+        db: &dyn HirDatabase,
+        def: DefWithBodyId,
         node @ InFile { file_id, .. }: InFile<&SyntaxNode>,
         offset: Option<TextSize>,
+        infer: Option<Arc<InferenceResult>>,
     ) -> SourceAnalyzer {
         let (body, source_map) = db.body_with_source_map(def);
         let scopes = db.expr_scopes(def);
         let scope = match offset {
-            None => scope_for(&scopes, &source_map, node),
-            Some(offset) => scope_for_offset(db, &scopes, &source_map, node.file_id, offset),
+            None => scope_for(db, &scopes, &source_map, node),
+            Some(offset) => {
+                debug_assert!(
+                    node.text_range().contains_inclusive(offset),
+                    "{:?} not in {:?}",
+                    offset,
+                    node.text_range()
+                );
+                scope_for_offset(db, &scopes, &source_map, node.file_id, offset)
+            }
         };
         let resolver = resolver_for_scope(db.upcast(), def, scope);
-        SourceAnalyzer { resolver, def: Some((def, body, source_map)), infer: None, file_id }
+        SourceAnalyzer { resolver, def: Some((def, body, source_map)), infer, file_id }
     }
 
     pub(crate) fn new_for_resolver(
@@ -661,7 +668,6 @@ impl SourceAnalyzer {
             return resolved;
         }
 
-        // This must be a normal source file rather than macro file.
         let ctx = LowerCtx::new(db.upcast(), self.file_id);
         let hir_path = Path::from_src(&ctx, path.clone())?;
 
@@ -822,8 +828,10 @@ impl SourceAnalyzer {
         macro_call: InFile<&ast::MacroCall>,
     ) -> Option<MacroFileId> {
         let krate = self.resolver.krate();
+        // FIXME: This causes us to parse, generally this is the wrong approach for resolving a
+        // macro call to a macro call id!
         let macro_call_id = macro_call.as_call_id(db.upcast(), krate, |path| {
-            self.resolver.resolve_path_as_macro_def(db.upcast(), &path, Some(MacroSubNs::Bang))
+            self.resolver.resolve_path_as_macro_def(db.upcast(), path, Some(MacroSubNs::Bang))
         })?;
         // why the 64?
         Some(macro_call_id.as_macro_file()).filter(|it| it.expansion_level(db.upcast()) < 64)
@@ -839,37 +847,13 @@ impl SourceAnalyzer {
         infer.variant_resolution_for_expr(expr_id)
     }
 
-    pub(crate) fn is_unsafe_macro_call(
+    pub(crate) fn is_unsafe_macro_call_expr(
         &self,
         db: &dyn HirDatabase,
-        macro_call: InFile<&ast::MacroCall>,
+        macro_expr: InFile<&ast::MacroExpr>,
     ) -> bool {
-        // check for asm/global_asm
-        if let Some(mac) = self.resolve_macro_call(db, macro_call) {
-            let ex = match mac.id {
-                hir_def::MacroId::Macro2Id(it) => it.lookup(db.upcast()).expander,
-                hir_def::MacroId::MacroRulesId(it) => it.lookup(db.upcast()).expander,
-                _ => hir_def::MacroExpander::Declarative,
-            };
-            match ex {
-                hir_def::MacroExpander::BuiltIn(e)
-                    if e == BuiltinFnLikeExpander::Asm || e == BuiltinFnLikeExpander::GlobalAsm =>
-                {
-                    return true
-                }
-                _ => (),
-            }
-        }
-        let macro_expr = match macro_call
-            .map(|it| it.syntax().parent().and_then(ast::MacroExpr::cast))
-            .transpose()
-        {
-            Some(it) => it,
-            None => return false,
-        };
-
         if let (Some((def, body, sm)), Some(infer)) = (&self.def, &self.infer) {
-            if let Some(expanded_expr) = sm.macro_expansion_expr(macro_expr.as_ref()) {
+            if let Some(expanded_expr) = sm.macro_expansion_expr(macro_expr) {
                 let mut is_unsafe = false;
                 unsafe_expressions(
                     db,
@@ -976,14 +960,15 @@ impl SourceAnalyzer {
 }
 
 fn scope_for(
+    db: &dyn HirDatabase,
     scopes: &ExprScopes,
     source_map: &BodySourceMap,
     node: InFile<&SyntaxNode>,
 ) -> Option<ScopeId> {
-    node.value
-        .ancestors()
-        .filter_map(ast::Expr::cast)
-        .filter_map(|it| source_map.node_expr(InFile::new(node.file_id, &it)))
+    node.ancestors_with_macros(db.upcast())
+        .take_while(|it| !ast::Item::can_cast(it.kind()) || ast::MacroCall::can_cast(it.kind()))
+        .filter_map(|it| it.map(ast::Expr::cast).transpose())
+        .filter_map(|it| source_map.node_expr(it.as_ref()))
         .find_map(|it| scopes.scope_for(it))
 }
 
@@ -1009,8 +994,8 @@ fn scope_for_offset(
                     Some(it.file_id.macro_file()?.call_node(db.upcast()))
                 })
                 .find(|it| it.file_id == from_file)
-                .filter(|it| it.value.kind() == SyntaxKind::MACRO_CALL)?;
-            Some((source.value.text_range(), scope))
+                .filter(|it| it.kind() == SyntaxKind::MACRO_CALL)?;
+            Some((source.text_range(), scope))
         })
         .filter(|(expr_range, _scope)| expr_range.start() <= offset && offset <= expr_range.end())
         // find containing scope

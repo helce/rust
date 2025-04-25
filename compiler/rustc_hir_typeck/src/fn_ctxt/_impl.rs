@@ -19,7 +19,7 @@ use rustc_hir_analysis::hir_ty_lowering::{
     GenericPathSegment, HirTyLowerer, IsMethodCall, RegionInferReason,
 };
 use rustc_infer::infer::canonical::{Canonical, OriginalQueryValues, QueryResponse};
-use rustc_infer::infer::error_reporting::TypeAnnotationNeeded::E0282;
+use rustc_infer::infer::need_type_info::TypeAnnotationNeeded;
 use rustc_infer::infer::{DefineOpaqueTypes, InferResult};
 use rustc_lint::builtin::SELF_CONSTRUCTOR_FROM_OUTER_ITEM;
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow, AutoBorrowMutability};
@@ -37,7 +37,7 @@ use rustc_span::hygiene::DesugaringKind;
 use rustc_span::symbol::{kw, sym};
 use rustc_span::Span;
 use rustc_target::abi::FieldIdx;
-use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt as _;
+use rustc_trait_selection::error_reporting::traits::TypeErrCtxtExt as _;
 use rustc_trait_selection::traits::{
     self, NormalizeExt, ObligationCauseCode, ObligationCtxt, StructurallyNormalizeExt,
 };
@@ -386,6 +386,26 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
     }
 
+    pub fn require_type_has_static_alignment(
+        &self,
+        ty: Ty<'tcx>,
+        span: Span,
+        code: traits::ObligationCauseCode<'tcx>,
+    ) {
+        if !ty.references_error() {
+            let tail =
+                self.tcx.struct_tail_with_normalize(ty, |ty| self.normalize(span, ty), || {});
+            // Sized types have static alignment, and so do slices.
+            if tail.is_trivially_sized(self.tcx) || matches!(tail.kind(), ty::Slice(..)) {
+                // Nothing else is required here.
+            } else {
+                // We can't be sure, let's required full `Sized`.
+                let lang_item = self.tcx.require_lang_item(LangItem::Sized, None);
+                self.require_type_meets(ty, span, code, lang_item);
+            }
+        }
+    }
+
     pub fn register_bound(
         &self,
         ty: Ty<'tcx>,
@@ -640,8 +660,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         })
     }
 
-    pub(crate) fn err_args(&self, len: usize) -> Vec<Ty<'tcx>> {
-        let ty_error = Ty::new_misc_error(self.tcx);
+    pub(crate) fn err_args(&self, len: usize, guar: ErrorGuaranteed) -> Vec<Ty<'tcx>> {
+        let ty_error = Ty::new_error(self.tcx, guar);
         vec![ty_error; len]
     }
 
@@ -730,16 +750,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     /// Resolves an associated value path into a base type and associated constant, or method
     /// resolution. The newly resolved definition is written into `type_dependent_defs`.
+    #[instrument(level = "trace", skip(self), ret)]
     pub fn resolve_ty_and_res_fully_qualified_call(
         &self,
         qpath: &'tcx QPath<'tcx>,
         hir_id: HirId,
         span: Span,
     ) -> (Res, Option<LoweredTy<'tcx>>, &'tcx [hir::PathSegment<'tcx>]) {
-        debug!(
-            "resolve_ty_and_res_fully_qualified_call: qpath={:?} hir_id={:?} span={:?}",
-            qpath, hir_id, span
-        );
         let (ty, qself, item_segment) = match *qpath {
             QPath::Resolved(ref opt_qself, path) => {
                 return (
@@ -826,15 +843,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
 
                 if item_name.name != kw::Empty {
-                    if let Some(e) = self.report_method_error(
+                    self.report_method_error(
                         hir_id,
                         ty.normalized,
                         error,
                         Expectation::NoExpectation,
                         trait_missing_method && span.edition().at_least_rust_2021(), // emits missing method for trait only after edition 2021
-                    ) {
-                        e.emit();
-                    }
+                    );
                 }
 
                 result
@@ -1124,7 +1139,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // parameter's value explicitly, so we have to do some error-
             // checking here.
             let arg_count =
-                check_generic_arg_count_for_call(tcx, def_id, generics, seg, IsMethodCall::No);
+                check_generic_arg_count_for_call(self, def_id, generics, seg, IsMethodCall::No);
 
             if let ExplicitLateBound::Yes = arg_count.explicit_late_bound {
                 explicit_late_bound = ExplicitLateBound::Yes;
@@ -1167,7 +1182,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     name: self.tcx.item_name(def.did()).to_ident_string(),
                 });
                 if ty.raw.has_param() {
-                    let guar = self.tcx.dcx().emit_err(errors::SelfCtorFromOuterItem {
+                    let guar = self.dcx().emit_err(errors::SelfCtorFromOuterItem {
                         span: path_span,
                         impl_span: tcx.def_span(impl_def_id),
                         sugg,
@@ -1192,7 +1207,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     // Check the visibility of the ctor.
                     let vis = tcx.visibility(ctor_def_id);
                     if !vis.is_accessible_from(tcx.parent_module(hir_id).to_def_id(), tcx) {
-                        tcx.dcx()
+                        self.dcx()
                             .emit_err(CtorIsPrivate { span, def: tcx.def_path_str(adt_def.did()) });
                     }
                     let new_res = Res::Def(DefKind::Ctor(CtorOf::Struct, ctor_kind), ctor_def_id);
@@ -1201,7 +1216,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     (new_res, Some(user_args.args))
                 }
                 _ => {
-                    let mut err = tcx.dcx().struct_span_err(
+                    let mut err = self.dcx().struct_span_err(
                         span,
                         "the `Self` constructor can only be used with tuple or unit structs",
                     );
@@ -1289,7 +1304,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         self.fcx.ty_infer(Some(param), inf.span).into()
                     }
                     (
-                        &GenericParamDefKind::Const { has_default, is_host_effect },
+                        &GenericParamDefKind::Const { has_default, is_host_effect, .. },
                         GenericArg::Infer(inf),
                     ) => {
                         if has_default && is_host_effect {
@@ -1331,7 +1346,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             self.fcx.var_for_def(self.span, param)
                         }
                     }
-                    GenericParamDefKind::Const { has_default, is_host_effect } => {
+                    GenericParamDefKind::Const { has_default, is_host_effect, .. } => {
                         if has_default {
                             // N.B. this is a bit of a hack. `infer_args` is passed depending on
                             // whether the user has provided generic args. E.g. for `Vec::new`
@@ -1360,7 +1375,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let args_raw = self_ctor_args.unwrap_or_else(|| {
             lower_generic_args(
-                tcx,
+                self,
                 def_id,
                 &[],
                 has_self,
@@ -1399,10 +1414,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // This also occurs for an enum variant on a type alias.
             let impl_ty = self.normalize(span, tcx.type_of(impl_def_id).instantiate(tcx, args));
             let self_ty = self.normalize(span, self_ty);
-            match self.at(&self.misc(span), self.param_env).eq(
-                DefineOpaqueTypes::No,
-                impl_ty,
+            match self.at(&self.misc(span), self.param_env).sub(
+                DefineOpaqueTypes::Yes,
                 self_ty,
+                impl_ty,
             ) {
                 Ok(ok) => self.register_infer_ok_obligations(ok),
                 Err(_) => {
@@ -1504,7 +1519,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         } else {
             let e = self.tainted_by_errors().unwrap_or_else(|| {
                 self.err_ctxt()
-                    .emit_inference_failure_err(self.body_id, sp, ty.into(), E0282, true)
+                    .emit_inference_failure_err(
+                        self.body_id,
+                        sp,
+                        ty.into(),
+                        TypeAnnotationNeeded::E0282,
+                        true,
+                    )
                     .emit()
             });
             let err = Ty::new_error(self.tcx, e);

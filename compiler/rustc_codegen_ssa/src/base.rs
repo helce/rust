@@ -37,7 +37,7 @@ use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
 use rustc_session::config::{self, CrateType, EntryFnType, OptLevel, OutputType};
 use rustc_session::Session;
 use rustc_span::symbol::sym;
-use rustc_span::Symbol;
+use rustc_span::{Symbol, DUMMY_SP};
 use rustc_target::abi::FIRST_VARIANT;
 
 use std::cmp;
@@ -163,8 +163,7 @@ pub fn unsized_info<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
 
             // trait upcasting coercion
 
-            let vptr_entry_idx =
-                cx.tcx().vtable_trait_upcasting_coercion_new_vptr_slot((source, target));
+            let vptr_entry_idx = cx.tcx().supertrait_vtable_slot((source, target));
 
             if let Some(entry_idx) = vptr_entry_idx {
                 let ptr_size = bx.data_layout().pointer_size;
@@ -468,6 +467,7 @@ pub fn maybe_create_entry_wrapper<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
                 ty::ParamEnv::reveal_all(),
                 start_def_id,
                 cx.tcx().mk_args(&[main_ret_ty.into()]),
+                DUMMY_SP,
             );
             let start_fn = cx.get_fn_addr(start_instance);
 
@@ -804,6 +804,34 @@ pub fn codegen_crate<B: ExtraBackendMethods>(
 
     ongoing_codegen.check_for_errors(tcx.sess);
     ongoing_codegen
+}
+
+/// Returns whether a call from the current crate to the [`Instance`] would produce a call
+/// from `compiler_builtins` to a symbol the linker must resolve.
+///
+/// Such calls from `compiler_bultins` are effectively impossible for the linker to handle. Some
+/// linkers will optimize such that dead calls to unresolved symbols are not an error, but this is
+/// not guaranteed. So we used this function in codegen backends to ensure we do not generate any
+/// unlinkable calls.
+///
+/// Note that calls to LLVM intrinsics are uniquely okay because they won't make it to the linker.
+pub fn is_call_from_compiler_builtins_to_upstream_monomorphization<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    instance: Instance<'tcx>,
+) -> bool {
+    fn is_llvm_intrinsic(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
+        if let Some(name) = tcx.codegen_fn_attrs(def_id).link_name {
+            name.as_str().starts_with("llvm.")
+        } else {
+            false
+        }
+    }
+
+    let def_id = instance.def_id();
+    !def_id.is_local()
+        && tcx.is_compiler_builtins(LOCAL_CRATE)
+        && !is_llvm_intrinsic(tcx, def_id)
+        && !tcx.should_codegen_locally(instance)
 }
 
 impl CrateInfo {

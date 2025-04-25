@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 #![allow(missing_docs, nonstandard_style)]
-#![deny(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod abi;
 
@@ -33,8 +33,6 @@ pub mod pipe;
 pub mod process;
 pub mod stdio;
 pub use self::itron::thread;
-pub mod thread_local_dtor;
-pub mod thread_local_key;
 pub use self::itron::thread_parking;
 pub mod time;
 

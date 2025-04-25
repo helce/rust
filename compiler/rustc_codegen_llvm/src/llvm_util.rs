@@ -6,7 +6,6 @@ use crate::errors::{
 use crate::llvm;
 use libc::c_int;
 use rustc_codegen_ssa::base::wants_wasm_eh;
-use rustc_codegen_ssa::traits::PrintBackendInfo;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::small_c_str::SmallCStr;
 use rustc_fs_util::path_to_c_string;
@@ -18,6 +17,7 @@ use rustc_target::spec::{MergeFunctions, PanicStrategy};
 use rustc_target::target_features::RUSTC_SPECIFIC_FEATURES;
 
 use std::ffi::{c_char, c_void, CStr, CString};
+use std::fmt::Write;
 use std::path::Path;
 use std::ptr;
 use std::slice;
@@ -49,12 +49,16 @@ unsafe fn configure_llvm(sess: &Session) {
     let mut llvm_c_strs = Vec::with_capacity(n_args + 1);
     let mut llvm_args = Vec::with_capacity(n_args + 1);
 
-    llvm::LLVMRustInstallErrorHandlers();
+    unsafe {
+        llvm::LLVMRustInstallErrorHandlers();
+    }
     // On Windows, an LLVM assertion will open an Abort/Retry/Ignore dialog
     // box for the purpose of launching a debugger. However, on CI this will
     // cause it to hang until it times out, which can take several hours.
     if std::env::var_os("CI").is_some() {
-        llvm::LLVMRustDisableSystemDialogsOnCrash();
+        unsafe {
+            llvm::LLVMRustDisableSystemDialogsOnCrash();
+        }
     }
 
     fn llvm_arg_to_arg_name(full_arg: &str) -> &str {
@@ -124,12 +128,12 @@ unsafe fn configure_llvm(sess: &Session) {
     }
 
     if sess.opts.unstable_opts.llvm_time_trace {
-        llvm::LLVMRustTimeTraceProfilerInitialize();
+        unsafe { llvm::LLVMRustTimeTraceProfilerInitialize() };
     }
 
     rustc_llvm::initialize_available_targets();
 
-    llvm::LLVMRustSetLLVMOptions(llvm_args.len() as c_int, llvm_args.as_ptr());
+    unsafe { llvm::LLVMRustSetLLVMOptions(llvm_args.len() as c_int, llvm_args.as_ptr()) };
 }
 
 pub fn time_trace_profiler_finish(file_name: &Path) {
@@ -372,7 +376,7 @@ fn llvm_target_features(tm: &llvm::TargetMachine) -> Vec<(&str, &str)> {
     ret
 }
 
-fn print_target_features(out: &mut dyn PrintBackendInfo, sess: &Session, tm: &llvm::TargetMachine) {
+fn print_target_features(out: &mut String, sess: &Session, tm: &llvm::TargetMachine) {
     let mut llvm_target_features = llvm_target_features(tm);
     let mut known_llvm_target_features = FxHashSet::<&'static str>::default();
     let mut rustc_target_features = sess
@@ -394,10 +398,15 @@ fn print_target_features(out: &mut dyn PrintBackendInfo, sess: &Session, tm: &ll
             (*feature, desc)
         })
         .collect::<Vec<_>>();
+
+    // Since we add this at the end ...
     rustc_target_features.extend_from_slice(&[(
         "crt-static",
         "Enables C Run-time Libraries to be statically linked",
     )]);
+    // ... we need to sort the list again.
+    rustc_target_features.sort();
+
     llvm_target_features.retain(|(f, _d)| !known_llvm_target_features.contains(f));
 
     let max_feature_len = llvm_target_features
@@ -407,24 +416,26 @@ fn print_target_features(out: &mut dyn PrintBackendInfo, sess: &Session, tm: &ll
         .max()
         .unwrap_or(0);
 
-    writeln!(out, "Features supported by rustc for this target:");
+    writeln!(out, "Features supported by rustc for this target:").unwrap();
     for (feature, desc) in &rustc_target_features {
-        writeln!(out, "    {feature:max_feature_len$} - {desc}.");
+        writeln!(out, "    {feature:max_feature_len$} - {desc}.").unwrap();
     }
-    writeln!(out, "\nCode-generation features supported by LLVM for this target:");
+    writeln!(out, "\nCode-generation features supported by LLVM for this target:").unwrap();
     for (feature, desc) in &llvm_target_features {
-        writeln!(out, "    {feature:max_feature_len$} - {desc}.");
+        writeln!(out, "    {feature:max_feature_len$} - {desc}.").unwrap();
     }
     if llvm_target_features.is_empty() {
-        writeln!(out, "    Target features listing is not supported by this LLVM version.");
+        writeln!(out, "    Target features listing is not supported by this LLVM version.")
+            .unwrap();
     }
-    writeln!(out, "\nUse +feature to enable a feature, or -feature to disable it.");
-    writeln!(out, "For example, rustc -C target-cpu=mycpu -C target-feature=+feature1,-feature2\n");
-    writeln!(out, "Code-generation features cannot be used in cfg or #[target_feature],");
-    writeln!(out, "and may be renamed or removed in a future version of LLVM or rustc.\n");
+    writeln!(out, "\nUse +feature to enable a feature, or -feature to disable it.").unwrap();
+    writeln!(out, "For example, rustc -C target-cpu=mycpu -C target-feature=+feature1,-feature2\n")
+        .unwrap();
+    writeln!(out, "Code-generation features cannot be used in cfg or #[target_feature],").unwrap();
+    writeln!(out, "and may be renamed or removed in a future version of LLVM or rustc.\n").unwrap();
 }
 
-pub(crate) fn print(req: &PrintRequest, mut out: &mut dyn PrintBackendInfo, sess: &Session) {
+pub(crate) fn print(req: &PrintRequest, mut out: &mut String, sess: &Session) {
     require_inited();
     let tm = create_informational_target_machine(sess);
     match req.kind {
@@ -435,9 +446,9 @@ pub(crate) fn print(req: &PrintRequest, mut out: &mut dyn PrintBackendInfo, sess
             let cpu_cstring = CString::new(handle_native(sess.target.cpu.as_ref()))
                 .unwrap_or_else(|e| bug!("failed to convert to cstring: {}", e));
             unsafe extern "C" fn callback(out: *mut c_void, string: *const c_char, len: usize) {
-                let out = &mut *(out as *mut &mut dyn PrintBackendInfo);
-                let bytes = slice::from_raw_parts(string as *const u8, len);
-                write!(out, "{}", String::from_utf8_lossy(bytes));
+                let out = unsafe { &mut *(out as *mut &mut String) };
+                let bytes = unsafe { slice::from_raw_parts(string as *const u8, len) };
+                write!(out, "{}", String::from_utf8_lossy(bytes)).unwrap();
             }
             unsafe {
                 llvm::LLVMRustPrintTargetCPUs(

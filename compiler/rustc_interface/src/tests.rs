@@ -2,14 +2,22 @@
 use crate::interface::{initialize_checked_jobserver, parse_cfg};
 use rustc_data_structures::profiling::TimePassesFormat;
 use rustc_errors::{emitter::HumanReadableErrorType, registry, ColorConfig};
+use rustc_session::config::{build_configuration, build_session_options, rustc_optgroups};
 use rustc_session::config::{
-    build_configuration, build_session_options, rustc_optgroups, BranchProtection, CFGuard, Cfg,
-    CollapseMacroDebuginfo, CoverageLevel, CoverageOptions, DebugInfo, DumpMonoStatsFormat,
-    ErrorOutputType, ExternEntry, ExternLocation, Externs, FunctionReturn, InliningThreshold,
-    Input, InstrumentCoverage, InstrumentXRay, LinkSelfContained, LinkerPluginLto, LocationDetail,
-    LtoCli, NextSolverConfig, OomStrategy, Options, OutFileName, OutputType, OutputTypes, PAuthKey,
-    PacRet, Passes, Polonius, ProcMacroExecutionStrategy, Strip, SwitchWithOptPath,
-    SymbolManglingVersion, WasiExecModel,
+    BranchProtection, CFGuard, Cfg, CollapseMacroDebuginfo, CoverageLevel, CoverageOptions,
+    DebugInfo, DumpMonoStatsFormat, ErrorOutputType,
+};
+use rustc_session::config::{
+    ExternEntry, ExternLocation, Externs, FunctionReturn, InliningThreshold, Input,
+    InstrumentCoverage, InstrumentXRay, LinkSelfContained, LinkerPluginLto,
+};
+use rustc_session::config::{
+    LocationDetail, LtoCli, NextSolverConfig, OomStrategy, Options, OutFileName, OutputType,
+    OutputTypes, PAuthKey, PacRet, Passes, PatchableFunctionEntry,
+};
+use rustc_session::config::{
+    Polonius, ProcMacroExecutionStrategy, Strip, SwitchWithOptPath, SymbolManglingVersion,
+    WasiExecModel,
 };
 use rustc_session::lint::Level;
 use rustc_session::search_paths::SearchPath;
@@ -20,9 +28,9 @@ use rustc_span::source_map::{RealFileLoader, SourceMapInputs};
 use rustc_span::symbol::sym;
 use rustc_span::{FileName, SourceFileHashAlgorithm};
 use rustc_target::spec::{
-    CodeModel, LinkerFlavorCli, MergeFunctions, OnBrokenPipe, PanicStrategy, RelocModel, WasmCAbi,
+    CodeModel, FramePointer, LinkerFlavorCli, MergeFunctions, OnBrokenPipe, PanicStrategy,
+    RelocModel, RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, TlsModel, WasmCAbi,
 };
-use rustc_target::spec::{RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, TlsModel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
@@ -70,7 +78,7 @@ where
             Arc::default(),
             Default::default(),
         );
-        let cfg = parse_cfg(&sess.dcx(), matches.opt_strs("cfg"));
+        let cfg = parse_cfg(sess.dcx(), matches.opt_strs("cfg"));
         let cfg = build_configuration(&sess, cfg);
         f(sess, cfg)
     });
@@ -605,7 +613,7 @@ fn test_codegen_options_tracking_hash() {
     tracked!(debug_assertions, Some(true));
     tracked!(debuginfo, DebugInfo::Limited);
     tracked!(embed_bitcode, false);
-    tracked!(force_frame_pointers, Some(false));
+    tracked!(force_frame_pointers, FramePointer::Always);
     tracked!(force_unwind_tables, Some(true));
     tracked!(inline_threshold, Some(0xf007ba11));
     tracked!(instrument_coverage, InstrumentCoverage::Yes);
@@ -683,6 +691,7 @@ fn test_unstable_options_tracking_hash() {
     untracked!(dump_mir, Some(String::from("abc")));
     untracked!(dump_mir_dataflow, true);
     untracked!(dump_mir_dir, String::from("abc"));
+    untracked!(dump_mir_exclude_alloc_bytes, true);
     untracked!(dump_mir_exclude_pass_number, true);
     untracked!(dump_mir_graphviz, true);
     untracked!(dump_mono_stats, SwitchWithOptPath::Enabled(Some("mono-items-dir/".into())));
@@ -749,7 +758,6 @@ fn test_unstable_options_tracking_hash() {
     // tidy-alphabetical-start
     tracked!(allow_features, Some(vec![String::from("lang_items")]));
     tracked!(always_encode_mir, true);
-    tracked!(asm_comments, true);
     tracked!(assume_incomplete_release, true);
     tracked!(binary_dep_depinfo, true);
     tracked!(box_noalias, false);
@@ -761,7 +769,7 @@ fn test_unstable_options_tracking_hash() {
         })
     );
     tracked!(codegen_backend, Some("abc".to_string()));
-    tracked!(coverage_options, CoverageOptions { level: CoverageLevel::Mcdc });
+    tracked!(coverage_options, CoverageOptions { level: CoverageLevel::Mcdc, no_mir_spans: true });
     tracked!(crate_attr, vec!["abc".to_string()]);
     tracked!(cross_crate_inline_threshold, InliningThreshold::Always);
     tracked!(debug_info_for_profiling, true);
@@ -813,6 +821,11 @@ fn test_unstable_options_tracking_hash() {
     tracked!(packed_bundled_libs, true);
     tracked!(panic_abort_tests, true);
     tracked!(panic_in_drop, PanicStrategy::Abort);
+    tracked!(
+        patchable_function_entry,
+        PatchableFunctionEntry::from_total_and_prefix_nops(10, 5)
+            .expect("total must be greater than or equal to prefix")
+    );
     tracked!(plt, Some(true));
     tracked!(polonius, Polonius::Legacy);
     tracked!(precise_enum_drop_elaboration, false);
@@ -849,6 +862,7 @@ fn test_unstable_options_tracking_hash() {
     tracked!(uninit_const_chunk_threshold, 123);
     tracked!(unleash_the_miri_inside_of_you, true);
     tracked!(use_ctors_section, Some(true));
+    tracked!(verbose_asm, true);
     tracked!(verify_llvm_ir, true);
     tracked!(virtual_function_elimination, true);
     tracked!(wasi_exec_model, Some(WasiExecModel::Reactor));

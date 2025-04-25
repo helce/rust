@@ -783,16 +783,13 @@ pub enum PatKind<'tcx> {
     },
 
     /// One of the following:
-    /// * `&str` (represented as a valtree), which will be handled as a string pattern and thus
-    ///   exhaustiveness checking will detect if you use the same string twice in different
-    ///   patterns.
+    /// * `&str`/`&[u8]` (represented as a valtree), which will be handled as a string/slice pattern
+    ///   and thus exhaustiveness checking will detect if you use the same string/slice twice in
+    ///   different patterns.
     /// * integer, bool, char or float (represented as a valtree), which will be handled by
     ///   exhaustiveness to cover exactly its own value, similar to `&str`, but these values are
     ///   much simpler.
-    /// * Opaque constants (represented as `mir::ConstValue`), that must not be matched
-    ///   structurally. So anything that does not derive `PartialEq` and `Eq`.
-    ///
-    /// These are always compared with the matched place using (the semantics of) `PartialEq`.
+    /// * `String`, if `string_deref_patterns` is enabled.
     Constant {
         value: mir::Const<'tcx>,
     },
@@ -1033,8 +1030,8 @@ impl<'tcx> PatRangeBoundary<'tcx> {
                 if let (Some(a), Some(b)) = (a.try_to_scalar_int(), b.try_to_scalar_int()) {
                     let sz = ty.primitive_size(tcx);
                     let cmp = match ty.kind() {
-                        ty::Uint(_) | ty::Char => a.assert_uint(sz).cmp(&b.assert_uint(sz)),
-                        ty::Int(_) => a.assert_int(sz).cmp(&b.assert_int(sz)),
+                        ty::Uint(_) | ty::Char => a.to_uint(sz).cmp(&b.to_uint(sz)),
+                        ty::Int(_) => a.to_int(sz).cmp(&b.to_int(sz)),
                         _ => unreachable!(),
                     };
                     return Some(cmp);
@@ -1047,6 +1044,12 @@ impl<'tcx> PatRangeBoundary<'tcx> {
         let b = other.eval_bits(ty, tcx, param_env);
 
         match ty.kind() {
+            ty::Float(ty::FloatTy::F16) => {
+                use rustc_apfloat::Float;
+                let a = rustc_apfloat::ieee::Half::from_bits(a);
+                let b = rustc_apfloat::ieee::Half::from_bits(b);
+                a.partial_cmp(&b)
+            }
             ty::Float(ty::FloatTy::F32) => {
                 use rustc_apfloat::Float;
                 let a = rustc_apfloat::ieee::Single::from_bits(a);
@@ -1057,6 +1060,12 @@ impl<'tcx> PatRangeBoundary<'tcx> {
                 use rustc_apfloat::Float;
                 let a = rustc_apfloat::ieee::Double::from_bits(a);
                 let b = rustc_apfloat::ieee::Double::from_bits(b);
+                a.partial_cmp(&b)
+            }
+            ty::Float(ty::FloatTy::F128) => {
+                use rustc_apfloat::Float;
+                let a = rustc_apfloat::ieee::Quad::from_bits(a);
+                let b = rustc_apfloat::ieee::Quad::from_bits(b);
                 a.partial_cmp(&b)
             }
             ty::Int(ity) => {

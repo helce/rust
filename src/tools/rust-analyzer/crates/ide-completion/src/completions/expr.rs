@@ -15,7 +15,7 @@ pub(crate) fn complete_expr_path(
     path_ctx @ PathCompletionCtx { qualified, .. }: &PathCompletionCtx,
     expr_ctx: &PathExprCtx,
 ) {
-    let _p = tracing::span!(tracing::Level::INFO, "complete_expr_path").entered();
+    let _p = tracing::info_span!("complete_expr_path").entered();
     if !ctx.qualifier_ctx.none() {
         return;
     }
@@ -177,6 +177,7 @@ pub(crate) fn complete_expr_path(
                                 ImportPathConfig {
                                     prefer_no_std: ctx.config.prefer_no_std,
                                     prefer_prelude: ctx.config.prefer_prelude,
+                                    prefer_absolute: ctx.config.prefer_absolute,
                                 },
                             )
                             .filter(|it| it.len() > 1);
@@ -202,6 +203,7 @@ pub(crate) fn complete_expr_path(
                                 ImportPathConfig {
                                     prefer_no_std: ctx.config.prefer_no_std,
                                     prefer_prelude: ctx.config.prefer_prelude,
+                                    prefer_absolute: ctx.config.prefer_absolute,
                                 },
                             )
                             .filter(|it| it.len() > 1);
@@ -334,7 +336,7 @@ pub(crate) fn complete_expr_path(
 }
 
 pub(crate) fn complete_expr(acc: &mut Completions, ctx: &CompletionContext<'_>) {
-    let _p = tracing::span!(tracing::Level::INFO, "complete_expr").entered();
+    let _p = tracing::info_span!("complete_expr").entered();
 
     if !ctx.config.enable_term_search {
         return;

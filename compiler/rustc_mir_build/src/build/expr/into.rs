@@ -1,6 +1,7 @@
 //! See docs in build/expr/mod.rs
 
 use crate::build::expr::category::{Category, RvalueFunc};
+use crate::build::matches::DeclareLetBindings;
 use crate::build::{BlockAnd, BlockAndExtension, BlockFrame, Builder, NeedsTemporary};
 use rustc_ast::InlineAsmOptions;
 use rustc_data_structures::fx::FxHashMap;
@@ -81,13 +82,15 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         // Lower the condition, and have it branch into `then` and `else` blocks.
                         let (then_block, else_block) =
                             this.in_if_then_scope(condition_scope, then_span, |this| {
-                                let then_blk = unpack!(this.then_else_break(
-                                    block,
-                                    cond,
-                                    Some(condition_scope), // Temp scope
-                                    source_info,
-                                    true, // Declare `let` bindings normally
-                                ));
+                                let then_blk = this
+                                    .then_else_break(
+                                        block,
+                                        cond,
+                                        Some(condition_scope), // Temp scope
+                                        source_info,
+                                        DeclareLetBindings::Yes, // Declare `let` bindings normally
+                                    )
+                                    .into_block();
 
                                 // Lower the `then` arm into its block.
                                 this.expr_into_dest(destination, then_blk, then)
@@ -104,7 +107,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
                 // If there is an `else` arm, lower it into `else_blk`.
                 if let Some(else_expr) = else_opt {
-                    unpack!(else_blk = this.expr_into_dest(destination, else_blk, else_expr));
+                    else_blk = this.expr_into_dest(destination, else_blk, else_expr).into_block();
                 } else {
                     // There is no `else` arm, so we know both arms have type `()`.
                     // Generate the implicit `else {}` by assigning unit.
@@ -150,6 +153,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             ExprKind::LogicalOp { op, lhs, rhs } => {
                 let condition_scope = this.local_scope();
                 let source_info = this.source_info(expr.span);
+
+                this.visit_coverage_branch_operation(op, expr.span);
+
                 // We first evaluate the left-hand side of the predicate ...
                 let (then_block, else_block) =
                     this.in_if_then_scope(condition_scope, expr.span, |this| {
@@ -160,7 +166,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                             source_info,
                             // This flag controls how inner `let` expressions are lowered,
                             // but either way there shouldn't be any of those in here.
-                            true,
+                            DeclareLetBindings::LetNotPermitted,
                         )
                     });
                 let (short_circuit, continuation, constant) = match op {
@@ -183,7 +189,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         const_: Const::from_bool(this.tcx, constant),
                     },
                 );
-                let mut rhs_block = unpack!(this.expr_into_dest(destination, continuation, rhs));
+                let mut rhs_block =
+                    this.expr_into_dest(destination, continuation, rhs).into_block();
                 // Instrument the lowered RHS's value for condition coverage.
                 // (Does nothing if condition coverage is not enabled.)
                 this.visit_coverage_standalone_condition(rhs, destination, &mut rhs_block);
@@ -226,7 +233,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     // introduce a unit temporary as the destination for the loop body.
                     let tmp = this.get_unit_temp();
                     // Execute the body, branching back to the test.
-                    let body_block_end = unpack!(this.expr_into_dest(tmp, body_block, body));
+                    let body_block_end = this.expr_into_dest(tmp, body_block, body).into_block();
                     this.cfg.goto(body_block_end, source_info, loop_block);
 
                     // Loops are only exited by `break` expressions.
@@ -235,7 +242,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
             ExprKind::Call { ty: _, fun, ref args, from_hir_call, fn_span } => {
                 let fun = unpack!(block = this.as_local_operand(block, fun));
-                let args: Vec<_> = args
+                let args: Box<[_]> = args
                     .into_iter()
                     .copied()
                     .map(|arg| Spanned {
@@ -458,7 +465,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                             targets.push(target);
 
                             let tmp = this.get_unit_temp();
-                            let target = unpack!(this.ast_block(tmp, target, block, source_info));
+                            let target =
+                                this.ast_block(tmp, target, block, source_info).into_block();
                             this.cfg.terminate(
                                 target,
                                 source_info,
@@ -482,7 +490,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         operands,
                         options,
                         line_spans,
-                        targets,
+                        targets: targets.into_boxed_slice(),
                         unwind: if options.contains(InlineAsmOptions::MAY_UNWIND) {
                             UnwindAction::Continue
                         } else {
@@ -498,7 +506,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
             // These cases don't actually need a destination
             ExprKind::Assign { .. } | ExprKind::AssignOp { .. } => {
-                unpack!(block = this.stmt_expr(block, expr_id, None));
+                block = this.stmt_expr(block, expr_id, None).into_block();
                 this.cfg.push_assign_unit(block, source_info, destination, this.tcx);
                 block.unit()
             }
@@ -507,7 +515,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | ExprKind::Break { .. }
             | ExprKind::Return { .. }
             | ExprKind::Become { .. } => {
-                unpack!(block = this.stmt_expr(block, expr_id, None));
+                block = this.stmt_expr(block, expr_id, None).into_block();
                 // No assign, as these have type `!`.
                 block.unit()
             }

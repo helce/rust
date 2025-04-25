@@ -1,5 +1,5 @@
 #![warn(clippy::manual_unwrap_or_default)]
-#![allow(clippy::unnecessary_literal_unwrap)]
+#![allow(clippy::unnecessary_literal_unwrap, clippy::manual_unwrap_or)]
 
 fn main() {
     let x: Option<Vec<String>> = None;
@@ -46,6 +46,21 @@ fn main() {
     let x: &[_] = match map.get(&0) {
         Some(x) => x,
         None => &[],
+    };
+
+    let x: Result<String, i64> = Ok(String::new());
+    match x {
+        //~^ ERROR: match can be simplified with `.unwrap_or_default()`
+        Ok(v) => v,
+        Err(_) => String::new(),
+    };
+
+    let x: Result<String, i64> = Ok(String::new());
+    if let Ok(v) = x {
+        //~^ ERROR: if let can be simplified with `.unwrap_or_default()`
+        v
+    } else {
+        String::new()
     };
 }
 

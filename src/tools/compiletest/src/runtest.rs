@@ -15,7 +15,7 @@ use crate::errors::{self, Error, ErrorKind};
 use crate::header::TestProps;
 use crate::json;
 use crate::read2::{read2_abbreviated, Truncated};
-use crate::util::{add_dylib_path, dylib_env_var, logv, PathBufExt};
+use crate::util::{add_dylib_path, copy_dir_all, dylib_env_var, logv, static_regex, PathBufExt};
 use crate::ColorConfig;
 use colored::Colorize;
 use miropt_test_tools::{files_for_miropt_test, MiroptTest, MiroptTestFile};
@@ -47,14 +47,6 @@ use debugger::DebuggerCommands;
 
 #[cfg(test)]
 mod tests;
-
-macro_rules! static_regex {
-    ($re:literal) => {{
-        static RE: ::std::sync::OnceLock<::regex::Regex> = ::std::sync::OnceLock::new();
-        RE.get_or_init(|| ::regex::Regex::new($re).unwrap())
-    }};
-}
-use static_regex;
 
 const FAKE_SRC_BASE: &str = "fake-test-src-base";
 
@@ -102,6 +94,8 @@ fn get_lib_name(lib: &str, aux_type: AuxType) -> Option<String> {
             format!("{}.dll", lib)
         } else if cfg!(target_vendor = "apple") {
             format!("lib{}.dylib", lib)
+        } else if cfg!(target_os = "aix") {
+            format!("lib{}.a", lib)
         } else {
             format!("lib{}.so", lib)
         }),
@@ -383,9 +377,10 @@ impl<'test> TestCx<'test> {
         // if a test does not crash, consider it an error
         if proc_res.status.success() || matches!(proc_res.status.code(), Some(1 | 0)) {
             self.fatal(&format!(
-                "test no longer crashes/triggers ICE! Please give it a mearningful name, \
+                "crashtest no longer crashes/triggers ICE, horray! Please give it a meaningful name, \
             add a doc-comment to the start of the test explaining why it exists and \
-            move it to tests/ui or wherever you see fit."
+            move it to tests/ui or wherever you see fit. Adding 'Fixes #<issueNr>' to your PR description \
+            ensures that the corresponding ticket is auto-closed upon merge."
             ));
         }
     }
@@ -705,10 +700,10 @@ impl<'test> TestCx<'test> {
             // since it is extensively used in the testsuite.
             check_cfg.push_str("cfg(FALSE");
             for revision in &self.props.revisions {
-                check_cfg.push_str(",");
-                check_cfg.push_str(&normalize_revision(&revision));
+                check_cfg.push(',');
+                check_cfg.push_str(&normalize_revision(revision));
             }
-            check_cfg.push_str(")");
+            check_cfg.push(')');
 
             cmd.args(&["--check-cfg", &check_cfg]);
         }
@@ -826,7 +821,7 @@ impl<'test> TestCx<'test> {
         // Append the other `cdb-command:`s
         for line in &dbg_cmds.commands {
             script_str.push_str(line);
-            script_str.push_str("\n");
+            script_str.push('\n');
         }
 
         script_str.push_str("qq\n"); // Quit the debugger (including remote debugger, if any)
@@ -1208,7 +1203,7 @@ impl<'test> TestCx<'test> {
         // Append the other commands
         for line in &dbg_cmds.commands {
             script_str.push_str(line);
-            script_str.push_str("\n");
+            script_str.push('\n');
         }
 
         // Finally, quit the debugger
@@ -1258,7 +1253,7 @@ impl<'test> TestCx<'test> {
         // Remove options that are either unwanted (-O) or may lead to duplicates due to RUSTFLAGS.
         let options_to_remove = ["-O".to_owned(), "-g".to_owned(), "--debuginfo".to_owned()];
 
-        options.iter().filter(|x| !options_to_remove.contains(x)).map(|x| x.clone()).collect()
+        options.iter().filter(|x| !options_to_remove.contains(x)).cloned().collect()
     }
 
     fn maybe_add_external_args(&self, cmd: &mut Command, args: &Vec<String>) {
@@ -1833,6 +1828,16 @@ impl<'test> TestCx<'test> {
                 ));
             }
         }
+
+        // Build any `//@ aux-codegen-backend`, and pass the resulting library
+        // to `-Zcodegen-backend` when compiling the test file.
+        if let Some(aux_file) = &self.props.aux_codegen_backend {
+            let aux_type = self.build_auxiliary(of, aux_file, aux_dir, false);
+            if let Some(lib_name) = get_lib_name(aux_file.trim_end_matches(".rs"), aux_type) {
+                let lib_path = aux_dir.join(&lib_name);
+                rustc.arg(format!("-Zcodegen-backend={}", lib_path.display()));
+            }
+        }
     }
 
     fn compose_and_run_compiler(&self, mut rustc: Command, input: Option<String>) -> ProcRes {
@@ -2254,6 +2259,9 @@ impl<'test> TestCx<'test> {
         }
 
         match output_file {
+            // If the test's compile flags specify an output path with `-o`,
+            // avoid a compiler warning about `--out-dir` being ignored.
+            _ if self.props.compile_flags.iter().any(|flag| flag == "-o") => {}
             TargetLocation::ThisFile(path) => {
                 rustc.arg("-o").arg(path);
             }
@@ -2499,8 +2507,8 @@ impl<'test> TestCx<'test> {
             // This works with both `--emit asm` (as default output name for the assembly)
             // and `ptx-linker` because the latter can write output at requested location.
             let output_path = self.output_base_name().with_extension(extension);
-            let output_file = TargetLocation::ThisFile(output_path.clone());
-            output_file
+
+            TargetLocation::ThisFile(output_path.clone())
         }
     }
 
@@ -2747,7 +2755,7 @@ impl<'test> TestCx<'test> {
             for entry in walkdir::WalkDir::new(dir) {
                 let entry = entry.expect("failed to read file");
                 if entry.file_type().is_file()
-                    && entry.path().extension().and_then(|p| p.to_str()) == Some("html".into())
+                    && entry.path().extension().and_then(|p| p.to_str()) == Some("html")
                 {
                     let status =
                         Command::new("tidy").args(&tidy_args).arg(entry.path()).status().unwrap();
@@ -2778,8 +2786,7 @@ impl<'test> TestCx<'test> {
             &compare_dir,
             self.config.verbose,
             |file_type, extension| {
-                file_type.is_file()
-                    && (extension == Some("html".into()) || extension == Some("js".into()))
+                file_type.is_file() && (extension == Some("html") || extension == Some("js"))
             },
         ) {
             return;
@@ -2825,11 +2832,11 @@ impl<'test> TestCx<'test> {
                 }
                 match String::from_utf8(line.clone()) {
                     Ok(line) => {
-                        if line.starts_with("+") {
+                        if line.starts_with('+') {
                             write!(&mut out, "{}", line.green()).unwrap();
-                        } else if line.starts_with("-") {
+                        } else if line.starts_with('-') {
                             write!(&mut out, "{}", line.red()).unwrap();
-                        } else if line.starts_with("@") {
+                        } else if line.starts_with('@') {
                             write!(&mut out, "{}", line.blue()).unwrap();
                         } else {
                             out.write_all(line.as_bytes()).unwrap();
@@ -2902,7 +2909,7 @@ impl<'test> TestCx<'test> {
                     && line.ends_with(';')
                 {
                     if let Some(ref mut other_files) = other_files {
-                        other_files.push(line.rsplit("mod ").next().unwrap().replace(";", ""));
+                        other_files.push(line.rsplit("mod ").next().unwrap().replace(';', ""));
                     }
                     None
                 } else {
@@ -3134,7 +3141,7 @@ impl<'test> TestCx<'test> {
             let mut string = String::new();
             for cgu in cgus {
                 string.push_str(&cgu[..]);
-                string.push_str(" ");
+                string.push(' ');
             }
 
             string
@@ -3167,10 +3174,7 @@ impl<'test> TestCx<'test> {
         // CGUs joined with "--". This function splits such composite CGU names
         // and handles each component individually.
         fn remove_crate_disambiguators_from_set_of_cgu_names(cgus: &str) -> String {
-            cgus.split("--")
-                .map(|cgu| remove_crate_disambiguator_from_cgu(cgu))
-                .collect::<Vec<_>>()
-                .join("--")
+            cgus.split("--").map(remove_crate_disambiguator_from_cgu).collect::<Vec<_>>().join("--")
         }
     }
 
@@ -3352,7 +3356,7 @@ impl<'test> TestCx<'test> {
             //   endif
         }
 
-        if self.config.target.contains("msvc") && self.config.cc != "" {
+        if self.config.target.contains("msvc") && !self.config.cc.is_empty() {
             // We need to pass a path to `lib.exe`, so assume that `cc` is `cl.exe`
             // and that `lib.exe` lives next to it.
             let lib = Path::new(&self.config.cc).parent().unwrap().join("lib.exe");
@@ -3458,6 +3462,21 @@ impl<'test> TestCx<'test> {
         let rmake_out_dir = base_dir.join("rmake_out");
         create_dir_all(&rmake_out_dir).unwrap();
 
+        // Copy all input files (apart from rmake.rs) to the temporary directory,
+        // so that the input directory structure from `tests/run-make/<test>` is mirrored
+        // to the `rmake_out` directory.
+        for path in walkdir::WalkDir::new(&self.testpaths.file).min_depth(1) {
+            let path = path.unwrap().path().to_path_buf();
+            if path.file_name().is_some_and(|s| s != "rmake.rs") {
+                let target = rmake_out_dir.join(path.strip_prefix(&self.testpaths.file).unwrap());
+                if path.is_dir() {
+                    copy_dir_all(&path, target).unwrap();
+                } else {
+                    fs::copy(&path, target).unwrap();
+                }
+            }
+        }
+
         // HACK: assume stageN-target, we only want stageN.
         let stage = self.config.stage_id.split('-').next().unwrap();
 
@@ -3517,18 +3536,15 @@ impl<'test> TestCx<'test> {
             .env("PYTHON", &self.config.python)
             .env("RUST_BUILD_STAGE", &self.config.stage_id)
             .env("RUSTC", cwd.join(&self.config.rustc_path))
-            .env("TMPDIR", &rmake_out_dir)
             .env("LD_LIB_PATH_ENVVAR", dylib_env_var())
             .env(dylib_env_var(), &host_dylib_env_paths)
             .env("HOST_RPATH_DIR", cwd.join(&self.config.compile_lib_path))
             .env("TARGET_RPATH_DIR", cwd.join(&self.config.run_lib_path))
-            .env("LLVM_COMPONENTS", &self.config.llvm_components)
-            // We for sure don't want these tests to run in parallel, so make
-            // sure they don't have access to these vars if we run via `make`
-            // at the top level
-            .env_remove("MAKEFLAGS")
-            .env_remove("MFLAGS")
-            .env_remove("CARGO_MAKEFLAGS");
+            .env("LLVM_COMPONENTS", &self.config.llvm_components);
+
+        // In test code we want to be very pedantic about values being silently discarded that are
+        // annotated with `#[must_use]`.
+        cmd.arg("-Dunused_must_use");
 
         if std::env::var_os("COMPILETEST_FORCE_STAGE0").is_some() {
             let mut stage0_sysroot = build_root.clone();
@@ -3558,7 +3574,7 @@ impl<'test> TestCx<'test> {
         let target_rpath_env_path = env::join_paths(target_rpath_env_path).unwrap();
 
         let mut cmd = Command::new(&recipe_bin);
-        cmd.current_dir(&self.testpaths.file)
+        cmd.current_dir(&rmake_out_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("LD_LIB_PATH_ENVVAR", dylib_env_var())
@@ -3569,16 +3585,9 @@ impl<'test> TestCx<'test> {
             .env("SOURCE_ROOT", &src_root)
             .env("RUST_BUILD_STAGE", &self.config.stage_id)
             .env("RUSTC", cwd.join(&self.config.rustc_path))
-            .env("TMPDIR", &rmake_out_dir)
             .env("HOST_RPATH_DIR", cwd.join(&self.config.compile_lib_path))
             .env("TARGET_RPATH_DIR", cwd.join(&self.config.run_lib_path))
-            .env("LLVM_COMPONENTS", &self.config.llvm_components)
-            // We for sure don't want these tests to run in parallel, so make
-            // sure they don't have access to these vars if we run via `make`
-            // at the top level
-            .env_remove("MAKEFLAGS")
-            .env_remove("MFLAGS")
-            .env_remove("CARGO_MAKEFLAGS");
+            .env("LLVM_COMPONENTS", &self.config.llvm_components);
 
         if let Some(ref rustdoc) = self.config.rustdoc_path {
             cmd.env("RUSTDOC", cwd.join(rustdoc));
@@ -3629,7 +3638,7 @@ impl<'test> TestCx<'test> {
             //   endif
         }
 
-        if self.config.target.contains("msvc") && self.config.cc != "" {
+        if self.config.target.contains("msvc") && !self.config.cc.is_empty() {
             // We need to pass a path to `lib.exe`, so assume that `cc` is `cl.exe`
             // and that `lib.exe` lives next to it.
             let lib = Path::new(&self.config.cc).parent().unwrap().join("lib.exe");
@@ -3820,7 +3829,7 @@ impl<'test> TestCx<'test> {
             && !self.props.dont_check_compiler_stderr
         {
             self.fatal_proc_rec(
-                &format!("compiler output got truncated, cannot compare with reference file"),
+                "compiler output got truncated, cannot compare with reference file",
                 &proc_res,
             );
         }
@@ -4001,8 +4010,8 @@ impl<'test> TestCx<'test> {
                     crate_name.to_str().expect("crate name implies file name must be valid UTF-8");
                 // replace `a.foo` -> `a__foo` for crate name purposes.
                 // replace `revision-name-with-dashes` -> `revision_name_with_underscore`
-                let crate_name = crate_name.replace(".", "__");
-                let crate_name = crate_name.replace("-", "_");
+                let crate_name = crate_name.replace('.', "__");
+                let crate_name = crate_name.replace('-', "_");
                 rustc.arg("--crate-name");
                 rustc.arg(crate_name);
             }
@@ -4050,7 +4059,7 @@ impl<'test> TestCx<'test> {
     fn check_mir_dump(&self, test_info: MiroptTest) {
         let test_dir = self.testpaths.file.parent().unwrap();
         let test_crate =
-            self.testpaths.file.file_stem().unwrap().to_str().unwrap().replace("-", "_");
+            self.testpaths.file.file_stem().unwrap().to_str().unwrap().replace('-', "_");
 
         let MiroptTest { run_filecheck, suffix, files, passes: _ } = test_info;
 

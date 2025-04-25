@@ -5,13 +5,13 @@ use cranelift_codegen::CodegenError;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::ModuleError;
 use rustc_ast::InlineAsmOptions;
+use rustc_codegen_ssa::base::is_call_from_compiler_builtins_to_upstream_monomorphization;
 use rustc_index::IndexVec;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::layout::FnAbiOf;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::TypeVisitableExt;
-use rustc_monomorphize::is_call_from_compiler_builtins_to_upstream_monomorphization;
 
 use crate::constant::ConstantCx;
 use crate::debuginfo::{FunctionDebugContext, TypeDebugContext};
@@ -249,9 +249,7 @@ pub(crate) fn compile_fn(
     }
 
     // Define debuginfo for function
-    let isa = module.isa();
     let debug_context = &mut cx.debug_context;
-    let unwind_context = &mut cx.unwind_context;
     cx.profiler.generic_activity("generate debug info").run(|| {
         if let Some(debug_context) = debug_context {
             codegened_func.func_debug_cx.unwrap().finalize(
@@ -260,7 +258,6 @@ pub(crate) fn compile_fn(
                 context,
             );
         }
-        unwind_context.add_function(codegened_func.func_id, &context, isa);
     });
 }
 
@@ -494,6 +491,11 @@ fn codegen_fn_body(fx: &mut FunctionCx<'_, '_, '_>, start_block: Block) {
                     )
                 });
             }
+            // FIXME(explicit_tail_calls): add support for tail calls to the cranelift backend, once cranelift supports tail calls
+            TerminatorKind::TailCall { fn_span, .. } => span_bug!(
+                *fn_span,
+                "tail calls are not yet supported in `rustc_codegen_cranelift` backend"
+            ),
             TerminatorKind::InlineAsm {
                 template,
                 operands,
@@ -677,20 +679,21 @@ fn codegen_stmt<'tcx>(
                     CastKind::PointerCoercion(PointerCoercion::UnsafeFnPointer),
                     ref operand,
                     to_ty,
-                )
-                | Rvalue::Cast(
-                    CastKind::PointerCoercion(PointerCoercion::MutToConstPointer),
-                    ref operand,
-                    to_ty,
-                )
-                | Rvalue::Cast(
-                    CastKind::PointerCoercion(PointerCoercion::ArrayToPointer),
-                    ref operand,
-                    to_ty,
                 ) => {
                     let to_layout = fx.layout_of(fx.monomorphize(to_ty));
                     let operand = codegen_operand(fx, operand);
                     lval.write_cvalue(fx, operand.cast_pointer_to(to_layout));
+                }
+                Rvalue::Cast(
+                    CastKind::PointerCoercion(
+                        PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer,
+                    ),
+                    ..,
+                ) => {
+                    bug!(
+                        "{:?} is for borrowck, and should never appear in codegen",
+                        to_place_and_rval.1
+                    );
                 }
                 Rvalue::Cast(
                     CastKind::IntToInt
@@ -832,9 +835,10 @@ fn codegen_stmt<'tcx>(
                     let val = match null_op {
                         NullOp::SizeOf => layout.size.bytes(),
                         NullOp::AlignOf => layout.align.abi.bytes(),
-                        NullOp::OffsetOf(fields) => {
-                            layout.offset_of_subfield(fx, fields.iter()).bytes()
-                        }
+                        NullOp::OffsetOf(fields) => fx
+                            .tcx
+                            .offset_of_subfield(ParamEnv::reveal_all(), layout, fields.iter())
+                            .bytes(),
                         NullOp::UbChecks => {
                             let val = fx.tcx.sess.ub_checks();
                             let val = CValue::by_val(
@@ -907,7 +911,7 @@ fn codegen_stmt<'tcx>(
         | StatementKind::PlaceMention(..)
         | StatementKind::AscribeUserType(..) => {}
 
-        StatementKind::Coverage { .. } => fx.tcx.dcx().fatal("-Zcoverage is unimplemented"),
+        StatementKind::Coverage { .. } => unreachable!(),
         StatementKind::Intrinsic(ref intrinsic) => match &**intrinsic {
             // We ignore `assume` intrinsics, they are only useful for optimizations
             NonDivergingIntrinsic::Assume(_) => {}

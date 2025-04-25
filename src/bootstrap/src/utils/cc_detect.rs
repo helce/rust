@@ -23,11 +23,10 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::{env, iter};
 
 use crate::core::config::TargetSelection;
-use crate::utils::helpers::output;
+use crate::utils::exec::{command, BootstrapCommand};
 use crate::{Build, CLang, GitRepo};
 
 // The `cc` crate doesn't provide a way to obtain a path to the detected archiver,
@@ -143,15 +142,15 @@ pub fn find_target(build: &Build, target: TargetSelection) {
         build.cxx.borrow_mut().insert(target, compiler);
     }
 
-    build.verbose(|| println!("CC_{} = {:?}", &target.triple, build.cc(target)));
-    build.verbose(|| println!("CFLAGS_{} = {:?}", &target.triple, cflags));
+    build.verbose(|| println!("CC_{} = {:?}", target.triple, build.cc(target)));
+    build.verbose(|| println!("CFLAGS_{} = {cflags:?}", target.triple));
     if let Ok(cxx) = build.cxx(target) {
         let cxxflags = build.cflags(target, GitRepo::Rustc, CLang::Cxx);
-        build.verbose(|| println!("CXX_{} = {:?}", &target.triple, cxx));
-        build.verbose(|| println!("CXXFLAGS_{} = {:?}", &target.triple, cxxflags));
+        build.verbose(|| println!("CXX_{} = {cxx:?}", target.triple));
+        build.verbose(|| println!("CXXFLAGS_{} = {cxxflags:?}", target.triple));
     }
     if let Some(ar) = ar {
-        build.verbose(|| println!("AR_{} = {:?}", &target.triple, ar));
+        build.verbose(|| println!("AR_{} = {ar:?}", target.triple));
         build.ar.borrow_mut().insert(target, ar);
     }
 
@@ -183,14 +182,15 @@ fn default_compiler(
                 return None;
             }
 
-            let output = output(c.to_command().arg("--version"));
+            let cmd = BootstrapCommand::from(c.to_command());
+            let output = cmd.capture_stdout().arg("--version").run(build).stdout();
             let i = output.find(" 4.")?;
             match output[i + 3..].chars().next().unwrap() {
                 '0'..='6' => {}
                 _ => return None,
             }
             let alternative = format!("e{gnu_compiler}");
-            if Command::new(&alternative).output().is_ok() {
+            if command(&alternative).capture().run(build).is_success() {
                 Some(PathBuf::from(alternative))
             } else {
                 None

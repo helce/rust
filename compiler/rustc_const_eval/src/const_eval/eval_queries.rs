@@ -17,7 +17,7 @@ use rustc_span::def_id::LocalDefId;
 use rustc_span::{Span, DUMMY_SP};
 use rustc_target::abi::{self, Abi};
 
-use super::{CanAccessMutGlobal, CompileTimeEvalContext, CompileTimeInterpreter};
+use super::{CanAccessMutGlobal, CompileTimeInterpCx, CompileTimeMachine};
 use crate::const_eval::CheckAlignment;
 use crate::errors::ConstEvalError;
 use crate::errors::{self, DanglingPtrInFinal};
@@ -32,7 +32,7 @@ use crate::CTRL_C_RECEIVED;
 // Returns a pointer to where the result lives
 #[instrument(level = "trace", skip(ecx, body))]
 fn eval_body_using_ecx<'tcx, R: InterpretationResult<'tcx>>(
-    ecx: &mut CompileTimeEvalContext<'tcx>,
+    ecx: &mut CompileTimeInterpCx<'tcx>,
     cid: GlobalId<'tcx>,
     body: &'tcx mir::Body<'tcx>,
 ) -> InterpResult<'tcx, R> {
@@ -114,7 +114,7 @@ fn eval_body_using_ecx<'tcx, R: InterpretationResult<'tcx>>(
             let err_diag = errors::MutablePtrInFinal { span: ecx.tcx.span, kind: intern_kind };
             ecx.tcx.emit_node_span_lint(
                 lint::builtin::CONST_EVAL_MUTABLE_PTR_IN_FINAL_VALUE,
-                ecx.best_lint_scope(),
+                ecx.machine.best_lint_scope(*ecx.tcx),
                 err_diag.span,
                 err_diag,
             )
@@ -139,13 +139,13 @@ pub(crate) fn mk_eval_cx_to_read_const_val<'tcx>(
     root_span: Span,
     param_env: ty::ParamEnv<'tcx>,
     can_access_mut_global: CanAccessMutGlobal,
-) -> CompileTimeEvalContext<'tcx> {
+) -> CompileTimeInterpCx<'tcx> {
     debug!("mk_eval_cx: {:?}", param_env);
     InterpCx::new(
         tcx,
         root_span,
         param_env,
-        CompileTimeInterpreter::new(can_access_mut_global, CheckAlignment::No),
+        CompileTimeMachine::new(can_access_mut_global, CheckAlignment::No),
     )
 }
 
@@ -156,7 +156,7 @@ pub fn mk_eval_cx_for_const_val<'tcx>(
     param_env: ty::ParamEnv<'tcx>,
     val: mir::ConstValue<'tcx>,
     ty: Ty<'tcx>,
-) -> Option<(CompileTimeEvalContext<'tcx>, OpTy<'tcx>)> {
+) -> Option<(CompileTimeInterpCx<'tcx>, OpTy<'tcx>)> {
     let ecx = mk_eval_cx_to_read_const_val(tcx.tcx, tcx.span, param_env, CanAccessMutGlobal::No);
     let op = ecx.const_val_to_op(val, ty, None).ok()?;
     Some((ecx, op))
@@ -170,7 +170,7 @@ pub fn mk_eval_cx_for_const_val<'tcx>(
 /// encounter an `Indirect` they cannot handle.
 #[instrument(skip(ecx), level = "debug")]
 pub(super) fn op_to_const<'tcx>(
-    ecx: &CompileTimeEvalContext<'tcx>,
+    ecx: &CompileTimeInterpCx<'tcx>,
     op: &OpTy<'tcx>,
     for_diagnostics: bool,
 ) -> ConstValue<'tcx> {
@@ -289,7 +289,7 @@ pub fn eval_to_const_value_raw_provider<'tcx>(
 
     // We call `const_eval` for zero arg intrinsics, too, in order to cache their value.
     // Catch such calls and evaluate them instead of trying to load a constant's MIR.
-    if let ty::InstanceDef::Intrinsic(def_id) = key.value.instance.def {
+    if let ty::InstanceKind::Intrinsic(def_id) = key.value.instance.def {
         let ty = key.value.instance.ty(tcx, key.param_env);
         let ty::FnDef(_, args) = ty.kind() else {
             bug!("intrinsic with type {:?}", ty);
@@ -328,14 +328,14 @@ pub trait InterpretationResult<'tcx> {
     /// evaluation query.
     fn make_result(
         mplace: MPlaceTy<'tcx>,
-        ecx: &mut InterpCx<'tcx, CompileTimeInterpreter<'tcx>>,
+        ecx: &mut InterpCx<'tcx, CompileTimeMachine<'tcx>>,
     ) -> Self;
 }
 
 impl<'tcx> InterpretationResult<'tcx> for ConstAlloc<'tcx> {
     fn make_result(
         mplace: MPlaceTy<'tcx>,
-        _ecx: &mut InterpCx<'tcx, CompileTimeInterpreter<'tcx>>,
+        _ecx: &mut InterpCx<'tcx, CompileTimeMachine<'tcx>>,
     ) -> Self {
         ConstAlloc { alloc_id: mplace.ptr().provenance.unwrap().alloc_id(), ty: mplace.layout.ty }
     }
@@ -383,41 +383,16 @@ fn eval_in_interpreter<'tcx, R: InterpretationResult<'tcx>>(
         // they do not have to behave "as if" they were evaluated at runtime.
         // For consts however we want to ensure they behave "as if" they were evaluated at runtime,
         // so we have to reject reading mutable global memory.
-        CompileTimeInterpreter::new(CanAccessMutGlobal::from(is_static), CheckAlignment::Error),
+        CompileTimeMachine::new(CanAccessMutGlobal::from(is_static), CheckAlignment::Error),
     );
     let res = ecx.load_mir(cid.instance.def, cid.promoted);
-    res.and_then(|body| eval_body_using_ecx(&mut ecx, cid, body)).map_err(|error| {
-        let (error, backtrace) = error.into_parts();
-        backtrace.print_backtrace();
-
-        let (kind, instance) = if ecx.tcx.is_static(cid.instance.def_id()) {
-            ("static", String::new())
-        } else {
-            // If the current item has generics, we'd like to enrich the message with the
-            // instance and its args: to show the actual compile-time values, in addition to
-            // the expression, leading to the const eval error.
-            let instance = &cid.instance;
-            if !instance.args.is_empty() {
-                let instance = with_no_trimmed_paths!(instance.to_string());
-                ("const_with_path", instance)
-            } else {
-                ("const", String::new())
-            }
-        };
-
-        super::report(
-            *ecx.tcx,
-            error,
-            DUMMY_SP,
-            || super::get_span_and_frames(ecx.tcx, ecx.stack()),
-            |span, frames| ConstEvalError { span, error_kind: kind, instance, frame_notes: frames },
-        )
-    })
+    res.and_then(|body| eval_body_using_ecx(&mut ecx, cid, body))
+        .map_err(|error| report_eval_error(&ecx, cid, error))
 }
 
 #[inline(always)]
 fn const_validate_mplace<'tcx>(
-    ecx: &InterpCx<'tcx, CompileTimeInterpreter<'tcx>>,
+    ecx: &InterpCx<'tcx, CompileTimeMachine<'tcx>>,
     mplace: &MPlaceTy<'tcx>,
     cid: GlobalId<'tcx>,
 ) -> Result<(), ErrorHandled> {
@@ -438,23 +413,60 @@ fn const_validate_mplace<'tcx>(
         ecx.const_validate_operand(&mplace.into(), path, &mut ref_tracking, mode)
             // Instead of just reporting the `InterpError` via the usual machinery, we give a more targeted
             // error about the validation failure.
-            .map_err(|error| report_validation_error(&ecx, error, alloc_id))?;
+            .map_err(|error| report_validation_error(&ecx, cid, error, alloc_id))?;
         inner = true;
     }
 
     Ok(())
 }
 
-#[inline(always)]
-fn report_validation_error<'tcx>(
-    ecx: &InterpCx<'tcx, CompileTimeInterpreter<'tcx>>,
+#[inline(never)]
+fn report_eval_error<'tcx>(
+    ecx: &InterpCx<'tcx, CompileTimeMachine<'tcx>>,
+    cid: GlobalId<'tcx>,
     error: InterpErrorInfo<'tcx>,
-    alloc_id: AllocId,
 ) -> ErrorHandled {
     let (error, backtrace) = error.into_parts();
     backtrace.print_backtrace();
 
-    let ub_note = matches!(error, InterpError::UndefinedBehavior(_)).then(|| {});
+    let (kind, instance) = if ecx.tcx.is_static(cid.instance.def_id()) {
+        ("static", String::new())
+    } else {
+        // If the current item has generics, we'd like to enrich the message with the
+        // instance and its args: to show the actual compile-time values, in addition to
+        // the expression, leading to the const eval error.
+        let instance = &cid.instance;
+        if !instance.args.is_empty() {
+            let instance = with_no_trimmed_paths!(instance.to_string());
+            ("const_with_path", instance)
+        } else {
+            ("const", String::new())
+        }
+    };
+
+    super::report(
+        *ecx.tcx,
+        error,
+        DUMMY_SP,
+        || super::get_span_and_frames(ecx.tcx, ecx.stack()),
+        |span, frames| ConstEvalError { span, error_kind: kind, instance, frame_notes: frames },
+    )
+}
+
+#[inline(never)]
+fn report_validation_error<'tcx>(
+    ecx: &InterpCx<'tcx, CompileTimeMachine<'tcx>>,
+    cid: GlobalId<'tcx>,
+    error: InterpErrorInfo<'tcx>,
+    alloc_id: AllocId,
+) -> ErrorHandled {
+    if !matches!(error.kind(), InterpError::UndefinedBehavior(_)) {
+        // Some other error happened during validation, e.g. an unsupported operation.
+        return report_eval_error(ecx, cid, error);
+    }
+
+    let (error, backtrace) = error.into_parts();
+    backtrace.print_backtrace();
 
     let bytes = ecx.print_alloc_bytes_for_diagnostics(alloc_id);
     let (size, align, _) = ecx.get_alloc_info(alloc_id);
@@ -465,6 +477,6 @@ fn report_validation_error<'tcx>(
         error,
         DUMMY_SP,
         || crate::const_eval::get_span_and_frames(ecx.tcx, ecx.stack()),
-        move |span, frames| errors::ValidationFailure { span, ub_note, frames, raw_bytes },
+        move |span, frames| errors::ValidationFailure { span, ub_note: (), frames, raw_bytes },
     )
 }

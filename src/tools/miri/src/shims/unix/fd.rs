@@ -240,7 +240,7 @@ impl FdTable {
         let new_fd = candidate_new_fd.unwrap_or_else(|| {
             // find_map ran out of BTreeMap entries before finding a free fd, use one plus the
             // maximum fd in the map
-            self.fds.last_key_value().map(|(fd, _)| fd.checked_add(1).unwrap()).unwrap_or(min_fd)
+            self.fds.last_key_value().map(|(fd, _)| fd.strict_add(1)).unwrap_or(min_fd)
         });
 
         self.fds.try_insert(new_fd, file_handle).unwrap();
@@ -273,7 +273,33 @@ impl FdTable {
 
 impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
 pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
-    fn fcntl(&mut self, args: &[OpTy<'tcx, Provenance>]) -> InterpResult<'tcx, i32> {
+    fn dup(&mut self, old_fd: i32) -> InterpResult<'tcx, i32> {
+        let this = self.eval_context_mut();
+
+        let Some(dup_fd) = this.machine.fds.dup(old_fd) else {
+            return this.fd_not_found();
+        };
+        Ok(this.machine.fds.insert_fd_with_min_fd(dup_fd, 0))
+    }
+
+    fn dup2(&mut self, old_fd: i32, new_fd: i32) -> InterpResult<'tcx, i32> {
+        let this = self.eval_context_mut();
+
+        let Some(dup_fd) = this.machine.fds.dup(old_fd) else {
+            return this.fd_not_found();
+        };
+        if new_fd != old_fd {
+            // Close new_fd if it is previously opened.
+            // If old_fd and new_fd point to the same description, then `dup_fd` ensures we keep the underlying file description alive.
+            if let Some(file_descriptor) = this.machine.fds.fds.insert(new_fd, dup_fd) {
+                // Ignore close error (not interpreter's) according to dup2() doc.
+                file_descriptor.close(this.machine.communicate())?.ok();
+            }
+        }
+        Ok(new_fd)
+    }
+
+    fn fcntl(&mut self, args: &[OpTy<'tcx>]) -> InterpResult<'tcx, i32> {
         let this = self.eval_context_mut();
 
         if args.len() < 2 {
@@ -329,19 +355,18 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         }
     }
 
-    fn close(&mut self, fd_op: &OpTy<'tcx, Provenance>) -> InterpResult<'tcx, Scalar<Provenance>> {
+    fn close(&mut self, fd_op: &OpTy<'tcx>) -> InterpResult<'tcx, Scalar> {
         let this = self.eval_context_mut();
 
         let fd = this.read_scalar(fd_op)?.to_i32()?;
 
-        Ok(Scalar::from_i32(if let Some(file_descriptor) = this.machine.fds.remove(fd) {
-            let result = file_descriptor.close(this.machine.communicate())?;
-            // return `0` if close is successful
-            let result = result.map(|()| 0i32);
-            this.try_unwrap_io_result(result)?
-        } else {
-            this.fd_not_found()?
-        }))
+        let Some(file_descriptor) = this.machine.fds.remove(fd) else {
+            return Ok(Scalar::from_i32(this.fd_not_found()?));
+        };
+        let result = file_descriptor.close(this.machine.communicate())?;
+        // return `0` if close is successful
+        let result = result.map(|()| 0i32);
+        Ok(Scalar::from_i32(this.try_unwrap_io_result(result)?))
     }
 
     /// Function used when a file descriptor does not exist. It returns `Ok(-1)`and sets
@@ -355,12 +380,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         Ok((-1).into())
     }
 
-    fn read(
-        &mut self,
-        fd: i32,
-        buf: Pointer<Option<Provenance>>,
-        count: u64,
-    ) -> InterpResult<'tcx, i64> {
+    fn read(&mut self, fd: i32, buf: Pointer, count: u64) -> InterpResult<'tcx, i64> {
         let this = self.eval_context_mut();
 
         // Isolation check is done via `FileDescriptor` trait.
@@ -399,7 +419,12 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         match result {
             Ok(read_bytes) => {
                 // If reading to `bytes` did not fail, we write those bytes to the buffer.
-                this.write_bytes_ptr(buf, bytes)?;
+                // Crucially, if fewer than `bytes.len()` bytes were read, only write
+                // that much into the output buffer!
+                this.write_bytes_ptr(
+                    buf,
+                    bytes[..usize::try_from(read_bytes).unwrap()].iter().copied(),
+                )?;
                 Ok(read_bytes)
             }
             Err(e) => {
@@ -409,12 +434,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         }
     }
 
-    fn write(
-        &mut self,
-        fd: i32,
-        buf: Pointer<Option<Provenance>>,
-        count: u64,
-    ) -> InterpResult<'tcx, i64> {
+    fn write(&mut self, fd: i32, buf: Pointer, count: u64) -> InterpResult<'tcx, i64> {
         let this = self.eval_context_mut();
 
         // Isolation check is done via `FileDescriptor` trait.
