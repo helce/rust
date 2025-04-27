@@ -5,6 +5,7 @@
 // its numerical value.
 
 //@ min-lldb-version: 310
+//@ min-gdb-version 11.2
 
 //@ compile-flags:-g
 
