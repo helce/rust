@@ -175,6 +175,8 @@ target | std | notes
 `e2k12c-unknown-linux-gnu` | ✓ | E2K elbrus-12c Linux (kernel 5.10, glibc 2.35)
 `e2k16c-unknown-linux-gnu` | ✓ | E2K elbrus-16c Linux (kernel 5.10, glibc 2.35)
 `e2k2c3-unknown-linux-gnu` | ✓ | E2K elbrus-2c3 Linux (kernel 5.10, glibc 2.35)
+`e2k48c-unknown-linux-gnu` | ✓ | E2K elbrus-48c Linux (kernel 5.10, glibc 2.35)
+`e2k8v7-unknown-linux-gnu` | ✓ | E2K elbrus-8v7 Linux (kernel 5.10, glibc 2.35)
 `i586-pc-windows-msvc` | * | 32-bit Windows w/o SSE [^x86_32-floats-x87]
 `i586-unknown-linux-gnu` | ✓ | 32-bit Linux w/o SSE (kernel 3.2, glibc 2.17) [^x86_32-floats-x87]
 `i586-unknown-linux-musl` | ✓ | 32-bit Linux w/o SSE, musl 1.2.3 [^x86_32-floats-x87]

@@ -231,6 +231,12 @@
 //@ revisions: e2k2c3_unknown_linux_gnu
 //@ [e2k2c3_unknown_linux_gnu] compile-flags: --target e2k2c3-unknown-linux-gnu
 //@ [e2k2c3_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2k48c_unknown_linux_gnu
+//@ [e2k48c_unknown_linux_gnu] compile-flags: --target e2k48c-unknown-linux-gnu
+//@ [e2k48c_unknown_linux_gnu] needs-llvm-components: elbrus
+//@ revisions: e2k8v7_unknown_linux_gnu
+//@ [e2k8v7_unknown_linux_gnu] compile-flags: --target e2k8v7-unknown-linux-gnu
+//@ [e2k8v7_unknown_linux_gnu] needs-llvm-components: elbrus
 //@ revisions: hexagon_unknown_linux_musl
 //@ [hexagon_unknown_linux_musl] compile-flags: --target hexagon-unknown-linux-musl
 //@ [hexagon_unknown_linux_musl] needs-llvm-components: hexagon
