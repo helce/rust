@@ -7,9 +7,6 @@
 #[macro_use]
 extern crate proc_macro_attr;
 
-#[macro_use]
-extern crate proc_macro_attr;
-
 #[allow(unused)] //~ ERROR: item has both inner and outer attributes
 fn foo1() {
     #![allow(unused)]
