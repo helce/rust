@@ -1,3 +1,7 @@
+use std::io;
+
+use serde::Serialize;
+
 use crate::compiler_interface::with;
 use crate::mir::pretty::function_body;
 use crate::ty::{
@@ -5,10 +9,9 @@ use crate::ty::{
     TyConst, TyKind, VariantIdx,
 };
 use crate::{Error, Opaque, Span, Symbol};
-use std::io;
 
 /// The SMIR representation of a single function.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Body {
     pub blocks: Vec<BasicBlock>,
 
@@ -104,20 +107,20 @@ impl Body {
 
 type LocalDecls = Vec<LocalDecl>;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct LocalDecl {
     pub ty: Ty,
     pub span: Span,
     pub mutability: Mutability,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize)]
 pub struct BasicBlock {
     pub statements: Vec<Statement>,
     pub terminator: Terminator,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Terminator {
     pub kind: TerminatorKind,
     pub span: Span,
@@ -131,7 +134,7 @@ impl Terminator {
 
 pub type Successors = Vec<BasicBlockIdx>;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum TerminatorKind {
     Goto {
         target: BasicBlockIdx,
@@ -221,7 +224,7 @@ impl TerminatorKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct InlineAsmOperand {
     pub in_value: Option<Operand>,
     pub out_place: Option<Place>,
@@ -230,7 +233,7 @@ pub struct InlineAsmOperand {
     pub raw_rpr: String,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum UnwindAction {
     Continue,
     Unreachable,
@@ -238,7 +241,7 @@ pub enum UnwindAction {
     Cleanup(BasicBlockIdx),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum AssertMessage {
     BoundsCheck { len: Operand, index: Operand },
     Overflow(BinOp, Operand, Operand),
@@ -307,7 +310,7 @@ impl AssertMessage {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum BinOp {
     Add,
     AddUnchecked,
@@ -342,7 +345,7 @@ impl BinOp {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum UnOp {
     Not,
     Neg,
@@ -357,20 +360,20 @@ impl UnOp {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum CoroutineKind {
     Desugared(CoroutineDesugaring, CoroutineSource),
     Coroutine(Movability),
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum CoroutineSource {
     Block,
     Closure,
     Fn,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum CoroutineDesugaring {
     Async,
 
@@ -386,7 +389,7 @@ pub(crate) type LocalDefId = Opaque;
 pub(crate) type Coverage = Opaque;
 
 /// The FakeReadCause describes the type of pattern why a FakeRead statement exists.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum FakeReadCause {
     ForMatchGuard,
     ForMatchedPlace(LocalDefId),
@@ -396,7 +399,7 @@ pub enum FakeReadCause {
 }
 
 /// Describes what kind of retag is to be performed
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize)]
 pub enum RetagKind {
     FnEntry,
     TwoPhase,
@@ -404,7 +407,7 @@ pub enum RetagKind {
     Default,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize)]
 pub enum Variance {
     Covariant,
     Invariant,
@@ -412,26 +415,26 @@ pub enum Variance {
     Bivariant,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CopyNonOverlapping {
     pub src: Operand,
     pub dst: Operand,
     pub count: Operand,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum NonDivergingIntrinsic {
     Assume(Operand),
     CopyNonOverlapping(CopyNonOverlapping),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Statement {
     pub kind: StatementKind,
     pub span: Span,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum StatementKind {
     Assign(Place, Rvalue),
     FakeRead(FakeReadCause, Place),
@@ -448,7 +451,7 @@ pub enum StatementKind {
     Nop,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum Rvalue {
     /// Creates a pointer with the indicated mutability to the place.
     ///
@@ -622,7 +625,7 @@ impl Rvalue {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum AggregateKind {
     Array(Ty),
     Tuple,
@@ -633,14 +636,14 @@ pub enum AggregateKind {
     RawPtr(Ty, Mutability),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum Operand {
     Copy(Place),
     Move(Place),
     Constant(ConstOperand),
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Serialize)]
 pub struct Place {
     pub local: Local,
     /// projection out of a place (access a field, deref a pointer, etc)
@@ -653,7 +656,7 @@ impl From<Local> for Place {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ConstOperand {
     pub span: Span,
     pub user_ty: Option<UserTypeAnnotationIndex>,
@@ -661,7 +664,7 @@ pub struct ConstOperand {
 }
 
 /// Debug information pertaining to a user variable.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct VarDebugInfo {
     /// The variable name.
     pub name: Symbol,
@@ -703,19 +706,19 @@ impl VarDebugInfo {
 
 pub type SourceScope = u32;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SourceInfo {
     pub span: Span,
     pub scope: SourceScope,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct VarDebugInfoFragment {
     pub ty: Ty,
     pub projection: Vec<ProjectionElem>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum VarDebugInfoContents {
     Place(Place),
     Const(ConstOperand),
@@ -726,7 +729,7 @@ pub enum VarDebugInfoContents {
 // ProjectionElem<Local, Ty>) and user-provided type annotations (for which the projection elements
 // are of type ProjectionElem<(), ()>). In SMIR we don't need this generality, so we just use
 // ProjectionElem for Places.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum ProjectionElem {
     /// Dereference projections (e.g. `*_1`) project to the address referenced by the base place.
     Deref,
@@ -800,7 +803,7 @@ pub enum ProjectionElem {
     Subtype(Ty),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct UserTypeProjection {
     pub base: UserTypeAnnotationIndex,
 
@@ -830,7 +833,7 @@ pub type FieldIdx = usize;
 type UserTypeAnnotationIndex = usize;
 
 /// The possible branch sites of a [TerminatorKind::SwitchInt].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SwitchTargets {
     /// The conditional branches where the first element represents the value that guards this
     /// branch, and the second element is the branch target.
@@ -867,7 +870,7 @@ impl SwitchTargets {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum BorrowKind {
     /// Data must be immutable and is aliasable.
     Shared,
@@ -894,14 +897,14 @@ impl BorrowKind {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum MutBorrowKind {
     Default,
     TwoPhaseBorrow,
     ClosureCapture,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum FakeBorrowKind {
     /// A shared (deep) borrow. Data must be immutable and is aliasable.
     Deep,
@@ -912,19 +915,19 @@ pub enum FakeBorrowKind {
     Shallow,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum Mutability {
     Not,
     Mut,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum Safety {
     Safe,
     Unsafe,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum PointerCoercion {
     /// Go from a fn-item type to a fn-pointer type.
     ReifyFnPointer,
@@ -951,7 +954,7 @@ pub enum PointerCoercion {
     Unsize,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum CastKind {
     // FIXME(smir-rename): rename this to PointerExposeProvenance
     PointerExposeAddress,
@@ -967,7 +970,7 @@ pub enum CastKind {
     Transmute,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum NullOp {
     /// Returns the size of a value of that type.
     SizeOf,

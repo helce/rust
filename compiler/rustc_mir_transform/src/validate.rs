@@ -17,9 +17,7 @@ use rustc_middle::{bug, span_bug};
 use rustc_target::abi::{Size, FIRST_VARIANT};
 use rustc_target::spec::abi::Abi;
 
-use crate::util::is_within_packed;
-
-use crate::util::relate_types;
+use crate::util::{is_within_packed, relate_types};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum EdgeKind {
@@ -102,25 +100,6 @@ impl<'tcx> MirPass<'tcx> for Validator {
                         format!("Free regions in optimized {} MIR", body.phase.name()),
                     );
                 }
-            }
-        }
-
-        // Enforce that coroutine-closure layouts are identical.
-        if let Some(layout) = body.coroutine_layout_raw()
-            && let Some(by_move_body) = body.coroutine_by_move_body()
-            && let Some(by_move_layout) = by_move_body.coroutine_layout_raw()
-        {
-            // FIXME(async_closures): We could do other validation here?
-            if layout.variant_fields.len() != by_move_layout.variant_fields.len() {
-                cfg_checker.fail(
-                    Location::START,
-                    format!(
-                        "Coroutine layout has different number of variant fields from \
-                        by-move coroutine layout:\n\
-                        layout: {layout:#?}\n\
-                        by_move_layout: {by_move_layout:#?}",
-                    ),
-                );
             }
         }
     }
@@ -900,8 +879,8 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                         self.param_env,
                         adt_def.non_enum_variant().fields[field].ty(self.tcx, args),
                     );
-                    if fields.len() == 1 {
-                        let src_ty = fields.raw[0].ty(self.body, self.tcx);
+                    if let [field] = fields.raw.as_slice() {
+                        let src_ty = field.ty(self.body, self.tcx);
                         if !self.mir_assign_valid_types(src_ty, dest_ty) {
                             self.fail(location, "union field has the wrong type");
                         }
@@ -969,11 +948,9 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                         self.fail(location, "RawPtr should be in runtime MIR only");
                     }
 
-                    if fields.len() != 2 {
-                        self.fail(location, "raw pointer aggregate must have 2 fields");
-                    } else {
-                        let data_ptr_ty = fields.raw[0].ty(self.body, self.tcx);
-                        let metadata_ty = fields.raw[1].ty(self.body, self.tcx);
+                    if let [data_ptr, metadata] = fields.raw.as_slice() {
+                        let data_ptr_ty = data_ptr.ty(self.body, self.tcx);
+                        let metadata_ty = metadata.ty(self.body, self.tcx);
                         if let ty::RawPtr(in_pointee, in_mut) = data_ptr_ty.kind() {
                             if *in_mut != mutability {
                                 self.fail(location, "input and output mutability must match");
@@ -1000,6 +977,8 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                                 self.fail(location, "metadata for pointer-to-thin must be unit");
                             }
                         }
+                    } else {
+                        self.fail(location, "raw pointer aggregate must have 2 fields");
                     }
                 }
             },
@@ -1347,7 +1326,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
             }
             Rvalue::Repeat(_, _)
             | Rvalue::ThreadLocalRef(_)
-            | Rvalue::AddressOf(_, _)
+            | Rvalue::RawPtr(_, _)
             | Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf | NullOp::UbChecks, _)
             | Rvalue::Discriminant(_) => {}
         }

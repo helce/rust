@@ -1,11 +1,8 @@
 //! This module contains a variety of sort implementations that are optimized for small lengths.
 
-use crate::intrinsics;
 use crate::mem::{self, ManuallyDrop, MaybeUninit};
-use crate::ptr;
-use crate::slice;
-
 use crate::slice::sort::shared::FreezeMarker;
+use crate::{intrinsics, ptr, slice};
 
 // It's important to differentiate between SMALL_SORT_THRESHOLD performance for
 // small slices and small-sort performance sorting small sub-slices as part of
@@ -843,7 +840,8 @@ unsafe fn bidirectional_merge<T: FreezeMarker, F: FnMut(&T, &T) -> bool>(
     }
 }
 
-#[inline(never)]
+#[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]
+#[cfg_attr(feature = "panic_immediate_abort", inline)]
 fn panic_on_ord_violation() -> ! {
     // This is indicative of a logic bug in the user-provided comparison function or Ord
     // implementation. They are expected to implement a total order as explained in the Ord

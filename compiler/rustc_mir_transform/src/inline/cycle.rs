@@ -2,10 +2,10 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_middle::mir::TerminatorKind;
-use rustc_middle::ty::TypeVisitableExt;
-use rustc_middle::ty::{self, GenericArgsRef, InstanceKind, TyCtxt};
+use rustc_middle::ty::{self, GenericArgsRef, InstanceKind, TyCtxt, TypeVisitableExt};
 use rustc_session::Limit;
 use rustc_span::sym;
+use tracing::{instrument, trace};
 
 // FIXME: check whether it is cheaper to precompute the entire call graph instead of invoking
 // this query ridiculously often.
@@ -89,7 +89,6 @@ pub(crate) fn mir_callgraph_reachable<'tcx>(
                 | InstanceKind::FnPtrShim(..)
                 | InstanceKind::ClosureOnceShim { .. }
                 | InstanceKind::ConstructCoroutineInClosureShim { .. }
-                | InstanceKind::CoroutineKindShim { .. }
                 | InstanceKind::ThreadLocalShim { .. }
                 | InstanceKind::CloneShim(..) => {}
 

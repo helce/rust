@@ -3,16 +3,11 @@
 use crate::cmp::Ordering;
 use crate::error::Error;
 use crate::ffi::c_char;
-use crate::fmt;
-use crate::intrinsics;
 use crate::iter::FusedIterator;
 use crate::marker::PhantomData;
-use crate::ops;
-use crate::ptr::addr_of;
-use crate::ptr::NonNull;
-use crate::slice;
+use crate::ptr::{addr_of, NonNull};
 use crate::slice::memchr;
-use crate::str;
+use crate::{fmt, intrinsics, ops, slice, str};
 
 // FIXME: because this is doc(inline)d, we *have* to use intra-doc links because the actual link
 //   depends on where the item is being documented. however, since this is libcore, we can't
@@ -94,8 +89,9 @@ use crate::str;
 /// ```
 ///
 /// [str]: prim@str "str"
-#[derive(Hash)]
+#[derive(PartialEq, Eq, Hash)]
 #[stable(feature = "core_c_str", since = "1.64.0")]
+#[rustc_diagnostic_item = "cstr_type"]
 #[rustc_has_incoherent_inherent_impls]
 #[lang = "CStr"]
 // `fn from` in `impl From<&CStr> for Box<CStr>` current implementation relies
@@ -103,8 +99,7 @@ use crate::str;
 // However, `CStr` layout is considered an implementation detail and must not be relied upon. We
 // want `repr(transparent)` but we don't want it to show up in rustdoc, so we hide it under
 // `cfg(doc)`. This is an ad-hoc implementation of attribute privacy.
-#[cfg_attr(not(doc), repr(transparent))]
-#[allow(clippy::derived_hash_with_manual_eq)]
+#[repr(transparent)]
 pub struct CStr {
     // FIXME: this should not be represented with a DST slice but rather with
     //        just a raw `c_char` along with some form of marker to make
@@ -678,15 +673,9 @@ impl CStr {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl PartialEq for CStr {
-    #[inline]
-    fn eq(&self, other: &CStr) -> bool {
-        self.to_bytes().eq(other.to_bytes())
-    }
-}
-#[stable(feature = "rust1", since = "1.0.0")]
-impl Eq for CStr {}
+// `.to_bytes()` representations are compared instead of the inner `[c_char]`s,
+// because `c_char` is `i8` (not `u8`) on some platforms.
+// That is why this is implemented manually and not derived.
 #[stable(feature = "rust1", since = "1.0.0")]
 impl PartialOrd for CStr {
     #[inline]

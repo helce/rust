@@ -2,12 +2,12 @@
 
 pub(super) mod structural_traits;
 
-use rustc_type_ir::elaborate;
+use derive_where::derive_where;
 use rustc_type_ir::fold::TypeFoldable;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
 use rustc_type_ir::visit::TypeVisitableExt as _;
-use rustc_type_ir::{self as ty, Interner, Upcast as _};
+use rustc_type_ir::{self as ty, elaborate, Interner, Upcast as _};
 use tracing::{debug, instrument};
 
 use crate::delegate::SolverDelegate;
@@ -21,8 +21,7 @@ use crate::solve::{
 ///
 /// It consists of both the `source`, which describes how that goal would be proven,
 /// and the `result` when using the given `source`.
-#[derive(derivative::Derivative)]
-#[derivative(Debug(bound = ""), Clone(bound = ""))]
+#[derive_where(Clone, Debug; I: Interner)]
 pub(super) struct Candidate<I: Interner> {
     pub(super) source: CandidateSource<I>,
     pub(super) result: CanonicalResponse<I>,
@@ -534,7 +533,7 @@ where
             | ty::RawPtr(_, _)
             | ty::Ref(_, _, _)
             | ty::FnDef(_, _)
-            | ty::FnPtr(_)
+            | ty::FnPtr(..)
             | ty::Dynamic(..)
             | ty::Closure(..)
             | ty::CoroutineClosure(..)
@@ -621,7 +620,7 @@ where
             | ty::RawPtr(_, _)
             | ty::Ref(_, _, _)
             | ty::FnDef(_, _)
-            | ty::FnPtr(_)
+            | ty::FnPtr(..)
             | ty::Alias(..)
             | ty::Closure(..)
             | ty::CoroutineClosure(..)
@@ -699,6 +698,18 @@ where
                 if ecx.trait_ref_is_knowable(goal.param_env, trait_ref)? {
                     Err(NoSolution)
                 } else {
+                    // While the trait bound itself may be unknowable, we may be able to
+                    // prove that a super trait is not implemented. For this, we recursively
+                    // prove the super trait bounds of the current goal.
+                    //
+                    // We skip the goal itself as that one would cycle.
+                    let predicate: I::Predicate = trait_ref.upcast(cx);
+                    ecx.add_goals(
+                        GoalSource::Misc,
+                        elaborate::elaborate(cx, [predicate])
+                            .skip(1)
+                            .map(|predicate| goal.with(cx, predicate)),
+                    );
                     ecx.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
                 }
             },

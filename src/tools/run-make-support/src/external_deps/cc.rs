@@ -3,9 +3,6 @@ use std::path::Path;
 use crate::command::Command;
 use crate::{env_var, is_msvc, is_windows, uname};
 
-// FIXME(jieyouxu): can we get rid of the `cygpath` external dependency?
-use super::cygpath::get_windows_path;
-
 /// Construct a new platform-specific C compiler invocation.
 ///
 /// WARNING: This means that what flags are accepted by the underlying C compiler is
@@ -13,6 +10,13 @@ use super::cygpath::get_windows_path;
 #[track_caller]
 pub fn cc() -> Cc {
     Cc::new()
+}
+
+/// Construct a new platform-specific CXX compiler invocation.
+/// CXX_DEFAULT_FLAGS is passed from compiletest.
+#[track_caller]
+pub fn cxx() -> Cc {
+    Cc::new_cxx()
 }
 
 /// A platform-specific C compiler invocation builder. The specific C compiler used is
@@ -37,6 +41,22 @@ impl Cc {
         let mut cmd = Command::new(compiler);
 
         let default_cflags = env_var("CC_DEFAULT_FLAGS");
+        for flag in default_cflags.split(char::is_whitespace) {
+            cmd.arg(flag);
+        }
+
+        Self { cmd }
+    }
+
+    /// Construct a new platform-specific CXX compiler invocation.
+    /// CXX_DEFAULT_FLAGS is passed from compiletest.
+    #[track_caller]
+    pub fn new_cxx() -> Self {
+        let compiler = env_var("CXX");
+
+        let mut cmd = Command::new(compiler);
+
+        let default_cflags = env_var("CXX_DEFAULT_FLAGS");
         for flag in default_cflags.split(char::is_whitespace) {
             cmd.arg(flag);
         }
@@ -75,12 +95,12 @@ impl Cc {
 
         if is_msvc() {
             path.set_extension("exe");
-            let fe_path = get_windows_path(&path);
+            let fe_path = path.clone();
             path.set_extension("");
             path.set_extension("obj");
-            let fo_path = get_windows_path(path);
-            self.cmd.arg(format!("-Fe:{fe_path}"));
-            self.cmd.arg(format!("-Fo:{fo_path}"));
+            let fo_path = path;
+            self.cmd.arg(format!("-Fe:{}", fe_path.to_str().unwrap()));
+            self.cmd.arg(format!("-Fo:{}", fo_path.to_str().unwrap()));
         } else {
             self.cmd.arg("-o");
             self.cmd.arg(name);
@@ -93,6 +113,17 @@ impl Cc {
     pub fn output<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
         self.cmd.arg("-o");
         self.cmd.arg(path.as_ref());
+        self
+    }
+
+    /// Optimize the output.
+    /// Equivalent to `-O3` for GNU-compatible linkers or `-O2` for MSVC linkers.
+    pub fn optimize(&mut self) -> &mut Self {
+        if is_msvc() {
+            self.cmd.arg("-O2");
+        } else {
+            self.cmd.arg("-O3");
+        }
         self
     }
 }

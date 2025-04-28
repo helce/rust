@@ -160,24 +160,19 @@ mod tests;
 
 use crate::any::Any;
 use crate::cell::{Cell, OnceCell, UnsafeCell};
-use crate::env;
 use crate::ffi::CStr;
-use crate::fmt;
-use crate::io;
 use crate::marker::PhantomData;
-use crate::mem::{self, forget};
+use crate::mem::{self, forget, ManuallyDrop};
 use crate::num::NonZero;
-use crate::panic;
-use crate::panicking;
 use crate::pin::Pin;
 use crate::ptr::addr_of_mut;
-use crate::str;
 use crate::sync::atomic::{AtomicUsize, Ordering};
 use crate::sync::Arc;
 use crate::sys::sync::Parker;
 use crate::sys::thread as imp;
 use crate::sys_common::{AsInner, IntoInner};
 use crate::time::{Duration, Instant};
+use crate::{env, fmt, io, panic, panicking, str};
 
 #[stable(feature = "scoped_threads", since = "1.63.0")]
 mod scoped;
@@ -192,22 +187,14 @@ pub use scoped::{scope, Scope, ScopedJoinHandle};
 #[macro_use]
 mod local;
 
-cfg_if::cfg_if! {
-    if #[cfg(test)] {
-        // Avoid duplicating the global state associated with thread-locals between this crate and
-        // realstd. Miri relies on this.
-        pub use realstd::thread::{local_impl, AccessError, LocalKey};
-    } else {
-        #[stable(feature = "rust1", since = "1.0.0")]
-        pub use self::local::{AccessError, LocalKey};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use self::local::{AccessError, LocalKey};
 
-        // Implementation details used by the thread_local!{} macro.
-        #[doc(hidden)]
-        #[unstable(feature = "thread_local_internals", issue = "none")]
-        pub mod local_impl {
-            pub use crate::sys::thread_local::*;
-        }
-    }
+// Implementation details used by the thread_local!{} macro.
+#[doc(hidden)]
+#[unstable(feature = "thread_local_internals", issue = "none")]
+pub mod local_impl {
+    pub use crate::sys::thread_local::*;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -425,7 +412,6 @@ impl Builder {
     /// # Examples
     ///
     /// ```
-    /// #![feature(thread_spawn_unchecked)]
     /// use std::thread;
     ///
     /// let builder = thread::Builder::new();
@@ -446,26 +432,25 @@ impl Builder {
     /// ```
     ///
     /// [`io::Result`]: crate::io::Result
-    #[unstable(feature = "thread_spawn_unchecked", issue = "55132")]
-    pub unsafe fn spawn_unchecked<'a, F, T>(self, f: F) -> io::Result<JoinHandle<T>>
+    #[stable(feature = "thread_spawn_unchecked", since = "1.82.0")]
+    pub unsafe fn spawn_unchecked<F, T>(self, f: F) -> io::Result<JoinHandle<T>>
     where
         F: FnOnce() -> T,
-        F: Send + 'a,
-        T: Send + 'a,
+        F: Send,
+        T: Send,
     {
         Ok(JoinHandle(unsafe { self.spawn_unchecked_(f, None) }?))
     }
 
-    unsafe fn spawn_unchecked_<'a, 'scope, F, T>(
+    unsafe fn spawn_unchecked_<'scope, F, T>(
         self,
         f: F,
         scope_data: Option<Arc<scoped::ScopeData>>,
     ) -> io::Result<JoinInner<'scope, T>>
     where
         F: FnOnce() -> T,
-        F: Send + 'a,
-        T: Send + 'a,
-        'scope: 'a,
+        F: Send,
+        T: Send,
     {
         let Builder { name, stack_size } = self;
 
@@ -510,11 +495,10 @@ impl Builder {
                 MaybeDangling(mem::MaybeUninit::new(x))
             }
             fn into_inner(self) -> T {
-                // SAFETY: we are always initialized.
-                let ret = unsafe { self.0.assume_init_read() };
                 // Make sure we don't drop.
-                mem::forget(self);
-                ret
+                let this = ManuallyDrop::new(self);
+                // SAFETY: we are always initialized.
+                unsafe { this.0.assume_init_read() }
             }
         }
         impl<T> Drop for MaybeDangling<T> {
@@ -546,7 +530,7 @@ impl Builder {
             // will call `decrement_num_running_threads` and therefore signal that this thread is
             // done.
             drop(their_packet);
-            // Here, the lifetime `'a` and even `'scope` can end. `main` keeps running for a bit
+            // Here, the lifetime `'scope` can end. `main` keeps running for a bit
             // after that before returning itself.
         };
 
@@ -858,7 +842,7 @@ pub fn panicking() -> bool {
     panicking::panicking()
 }
 
-/// Use [`sleep`].
+/// Uses [`sleep`].
 ///
 /// Puts the current thread to sleep for at least the specified amount of time.
 ///
@@ -1129,7 +1113,7 @@ pub fn park() {
     forget(guard);
 }
 
-/// Use [`park_timeout`].
+/// Uses [`park_timeout`].
 ///
 /// Blocks unless or until the current thread's token is made available or
 /// the specified duration has been reached (may wake spuriously).
@@ -1301,9 +1285,10 @@ enum ThreadName {
 
 // This module ensures private fields are kept private, which is necessary to enforce the safety requirements.
 mod thread_name_string {
+    use core::str;
+
     use super::ThreadName;
     use crate::ffi::{CStr, CString};
-    use core::str;
 
     /// Like a `String` it's guaranteed UTF-8 and like a `CString` it's null terminated.
     pub(crate) struct ThreadNameString {

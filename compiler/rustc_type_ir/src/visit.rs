@@ -41,11 +41,12 @@
 //! - u.visit_with(visitor)
 //! ```
 
+use std::fmt;
+use std::ops::ControlFlow;
+
 use rustc_ast_ir::visit::VisitorResult;
 use rustc_ast_ir::{try_visit, walk_visitable_list};
 use rustc_index::{Idx, IndexVec};
-use std::fmt;
-use std::ops::ControlFlow;
 
 use crate::data_structures::Lrc;
 use crate::inherent::*;
@@ -239,10 +240,6 @@ pub trait TypeVisitableExt<I: Interner>: TypeVisitable<I> {
 
     fn has_aliases(&self) -> bool {
         self.has_type_flags(TypeFlags::HAS_ALIAS)
-    }
-
-    fn has_inherent_projections(&self) -> bool {
-        self.has_type_flags(TypeFlags::HAS_TY_INHERENT)
     }
 
     fn has_opaque_types(&self) -> bool {

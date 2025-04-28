@@ -2,6 +2,9 @@
 //! allows bidirectional lookup; i.e., given a value, one can easily find the
 //! type, and vice versa.
 
+use std::hash::{Hash, Hasher};
+use std::{fmt, str};
+
 use rustc_arena::DroplessArena;
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::stable_hasher::{
@@ -9,10 +12,6 @@ use rustc_data_structures::stable_hasher::{
 };
 use rustc_data_structures::sync::Lock;
 use rustc_macros::{symbols, Decodable, Encodable, HashStable_Generic};
-
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::str;
 
 use crate::{with_session_globals, Edition, Span, DUMMY_SP};
 
@@ -177,6 +176,7 @@ symbols! {
         CoerceUnsized,
         Command,
         ConstParamTy,
+        ConstParamTy_,
         Context,
         Continue,
         Copy,
@@ -276,6 +276,7 @@ symbols! {
         Path,
         PathBuf,
         Pending,
+        PinCoerceUnsized,
         Pointer,
         Poll,
         ProcMacro,
@@ -336,6 +337,7 @@ symbols! {
         TyKind,
         Unknown,
         Unsize,
+        UnsizedConstParamTy,
         Upvars,
         Vec,
         VecDeque,
@@ -354,6 +356,7 @@ symbols! {
         _task_context,
         a32,
         aarch64_target_feature,
+        aarch64_unstable_target_feature,
         aarch64_ver_target_feature,
         abi,
         abi_amdgpu_kernel,
@@ -470,6 +473,7 @@ symbols! {
         attr,
         attr_literals,
         attributes,
+        audit_that,
         augmented_assignments,
         auto_traits,
         automatically_derived,
@@ -532,6 +536,7 @@ symbols! {
         cfg_attr_multi,
         cfg_doctest,
         cfg_eval,
+        cfg_fmt_debug,
         cfg_hide,
         cfg_overflow_checks,
         cfg_panic,
@@ -555,6 +560,7 @@ symbols! {
         clobber_abi,
         clone,
         clone_closures,
+        clone_fn,
         clone_from,
         closure,
         closure_lifetime_binder,
@@ -591,6 +597,7 @@ symbols! {
         conservative_impl_trait,
         console,
         const_allocate,
+        const_arg_path,
         const_async_blocks,
         const_closures,
         const_compare_raw_pointers,
@@ -669,6 +676,7 @@ symbols! {
         crate_visibility_modifier,
         crt_dash_static: "crt-static",
         csky_target_feature,
+        cstr_type,
         cstring_type,
         ctlz,
         ctlz_nonzero,
@@ -888,6 +896,7 @@ symbols! {
         fmaf32,
         fmaf64,
         fmt,
+        fmt_debug,
         fmul_algebraic,
         fmul_fast,
         fn_align,
@@ -931,6 +940,7 @@ symbols! {
         fs_create_dir,
         fsub_algebraic,
         fsub_fast,
+        full,
         fundamental,
         fused_iterator,
         future,
@@ -1214,6 +1224,7 @@ symbols! {
         mir_static_mut,
         mir_storage_dead,
         mir_storage_live,
+        mir_tail_call,
         mir_unreachable,
         mir_unwind_cleanup,
         mir_unwind_continue,
@@ -1227,6 +1238,7 @@ symbols! {
         modifiers,
         module,
         module_path,
+        more_maybe_bounds,
         more_qualified_paths,
         more_struct_aliases,
         movbe_target_feature,
@@ -1272,6 +1284,7 @@ symbols! {
         new_binary,
         new_const,
         new_debug,
+        new_debug_noop,
         new_display,
         new_lower_exp,
         new_lower_hex,
@@ -1614,6 +1627,7 @@ symbols! {
         rustc_dirty,
         rustc_do_not_const_check,
         rustc_doc_primitive,
+        rustc_driver,
         rustc_dummy,
         rustc_dump_def_parents,
         rustc_dump_item_bounds,
@@ -1665,6 +1679,7 @@ symbols! {
         rustc_private,
         rustc_proc_macro_decls,
         rustc_promotable,
+        rustc_pub_transparent,
         rustc_reallocator,
         rustc_regions,
         rustc_reservation_impl,
@@ -1689,6 +1704,7 @@ symbols! {
         rvalue_static_promotion,
         rwpi,
         s,
+        s390x_target_feature,
         safety,
         sanitize,
         sanitizer_cfi_generalize_pointers,
@@ -1697,10 +1713,13 @@ symbols! {
         saturating_add,
         saturating_div,
         saturating_sub,
+        select_unpredictable,
         self_in_typedefs,
         self_struct_ctor,
         semitransparent,
+        sha512_sm_x86,
         shadow_call_stack,
+        shallow,
         shl,
         shl_assign,
         shorter_tail_lifetimes,
@@ -1839,6 +1858,7 @@ symbols! {
         stringify,
         struct_field_attributes,
         struct_inherit,
+        struct_target_features,
         struct_variant,
         structural_match,
         structural_peq,
@@ -2002,6 +2022,8 @@ symbols! {
         unsafe_no_drop_flag,
         unsafe_pin_internals,
         unsize,
+        unsized_const_param_ty,
+        unsized_const_params,
         unsized_fn_params,
         unsized_locals,
         unsized_tuple_coercion,
@@ -2440,13 +2462,11 @@ pub mod kw {
 /// Given that `sym` is imported, use them like `sym::symbol_name`.
 /// For example `sym::rustfmt` or `sym::u8`.
 pub mod sym {
-    use super::Symbol;
-
-    #[doc(inline)]
-    pub use super::sym_generated::*;
-
     // Used from a macro in `librustc_feature/accepted.rs`
     pub use super::kw::MacroRules as macro_rules;
+    #[doc(inline)]
+    pub use super::sym_generated::*;
+    use super::Symbol;
 
     /// Get the symbol for an integer.
     ///

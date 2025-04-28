@@ -2,7 +2,8 @@
 
 use hir::def_id::LocalDefId;
 use hir::{ConstContext, LangItem};
-use rustc_errors::{codes::*, Diag};
+use rustc_errors::codes::*;
+use rustc_errors::Diag;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_infer::infer::TyCtxtInferExt;
@@ -22,7 +23,7 @@ use rustc_trait_selection::traits::SelectionContext;
 use tracing::debug;
 
 use super::ConstCx;
-use crate::errors;
+use crate::{errors, fluent_generated};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -52,28 +53,6 @@ pub trait NonConstOp<'tcx>: std::fmt::Debug {
     }
 
     fn build_error(&self, ccx: &ConstCx<'_, 'tcx>, span: Span) -> Diag<'tcx>;
-}
-
-#[derive(Debug)]
-pub struct FloatingPointOp;
-impl<'tcx> NonConstOp<'tcx> for FloatingPointOp {
-    fn status_in_item(&self, ccx: &ConstCx<'_, 'tcx>) -> Status {
-        if ccx.const_kind() == hir::ConstContext::ConstFn {
-            Status::Unstable(sym::const_fn_floating_point_arithmetic)
-        } else {
-            Status::Allowed
-        }
-    }
-
-    #[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
-    fn build_error(&self, ccx: &ConstCx<'_, 'tcx>, span: Span) -> Diag<'tcx> {
-        feature_err(
-            &ccx.tcx.sess,
-            sym::const_fn_floating_point_arithmetic,
-            span,
-            format!("floating point arithmetic is not allowed in {}s", ccx.const_kind()),
-        )
-    }
 }
 
 /// A function call where the callee is a pointer.
@@ -309,7 +288,7 @@ impl<'tcx> NonConstOp<'tcx> for FnCallNonConst<'tcx> {
         }
 
         if let ConstContext::Static(_) = ccx.const_kind() {
-            err.note("consider wrapping this expression in `std::sync::LazyLock::new(|| ...)`");
+            err.note(fluent_generated::const_eval_lazy_lock);
         }
 
         err
@@ -333,7 +312,7 @@ impl<'tcx> NonConstOp<'tcx> for FnCallUnstable {
         // FIXME: make this translatable
         #[allow(rustc::untranslatable_diagnostic)]
         if ccx.is_const_stable_const_fn() {
-            err.help("const-stable functions can only call other const-stable functions");
+            err.help(fluent_generated::const_eval_const_stable);
         } else if ccx.tcx.sess.is_nightly_build() {
             if let Some(feature) = feature {
                 err.help(format!("add `#![feature({feature})]` to the crate attributes to enable"));
@@ -383,7 +362,7 @@ impl<'tcx> NonConstOp<'tcx> for HeapAllocation {
         ccx.dcx().create_err(errors::UnallowedHeapAllocations {
             span,
             kind: ccx.const_kind(),
-            teach: ccx.tcx.sess.teach(E0010).then_some(()),
+            teach: ccx.tcx.sess.teach(E0010),
         })
     }
 }
@@ -439,22 +418,12 @@ impl<'tcx> NonConstOp<'tcx> for CellBorrow {
         DiagImportance::Secondary
     }
     fn build_error(&self, ccx: &ConstCx<'_, 'tcx>, span: Span) -> Diag<'tcx> {
-        // FIXME: Maybe a more elegant solution to this if else case
-        if let hir::ConstContext::Static(_) = ccx.const_kind() {
-            ccx.dcx().create_err(errors::InteriorMutableDataRefer {
-                span,
-                opt_help: Some(()),
-                kind: ccx.const_kind(),
-                teach: ccx.tcx.sess.teach(E0492).then_some(()),
-            })
-        } else {
-            ccx.dcx().create_err(errors::InteriorMutableDataRefer {
-                span,
-                opt_help: None,
-                kind: ccx.const_kind(),
-                teach: ccx.tcx.sess.teach(E0492).then_some(()),
-            })
-        }
+        ccx.dcx().create_err(errors::InteriorMutableDataRefer {
+            span,
+            opt_help: matches!(ccx.const_kind(), hir::ConstContext::Static(_)),
+            kind: ccx.const_kind(),
+            teach: ccx.tcx.sess.teach(E0492),
+        })
     }
 }
 
@@ -480,12 +449,12 @@ impl<'tcx> NonConstOp<'tcx> for MutBorrow {
             hir::BorrowKind::Raw => ccx.tcx.dcx().create_err(errors::UnallowedMutableRaw {
                 span,
                 kind: ccx.const_kind(),
-                teach: ccx.tcx.sess.teach(E0764).then_some(()),
+                teach: ccx.tcx.sess.teach(E0764),
             }),
             hir::BorrowKind::Ref => ccx.dcx().create_err(errors::UnallowedMutableRefs {
                 span,
                 kind: ccx.const_kind(),
-                teach: ccx.tcx.sess.teach(E0764).then_some(()),
+                teach: ccx.tcx.sess.teach(E0764),
             }),
         }
     }
@@ -604,8 +573,6 @@ impl<'tcx> NonConstOp<'tcx> for StaticAccess {
             span,
             format!("referencing statics in {}s is unstable", ccx.const_kind(),),
         );
-        // FIXME: make this translatable
-        #[allow(rustc::untranslatable_diagnostic)]
         err
             .note("`static` and `const` variables can refer to other `const` variables. A `const` variable, however, cannot refer to a `static` variable.")
             .help("to fix this, the value can be extracted to a `const` and then used.");

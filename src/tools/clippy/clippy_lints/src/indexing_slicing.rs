@@ -1,6 +1,5 @@
-//! lint on indexing and slicing operations
-
-use clippy_utils::consts::{constant, Constant};
+use clippy_config::Conf;
+use clippy_utils::consts::{ConstEvalCtxt, Constant};
 use clippy_utils::diagnostics::{span_lint, span_lint_and_then};
 use clippy_utils::ty::{deref_chain, get_adt_inherent_method};
 use clippy_utils::{higher, is_from_proc_macro};
@@ -69,8 +68,6 @@ declare_clippy_lint! {
     ///
     /// Use instead:
     /// ```no_run
-    /// # #![allow(unused)]
-    ///
     /// # let x = vec![0; 5];
     /// # let y = [0, 1, 2, 3];
     /// x.get(2);
@@ -87,28 +84,22 @@ declare_clippy_lint! {
 
 impl_lint_pass!(IndexingSlicing => [INDEXING_SLICING, OUT_OF_BOUNDS_INDEXING]);
 
-#[derive(Copy, Clone)]
 pub struct IndexingSlicing {
     suppress_restriction_lint_in_const: bool,
 }
 
 impl IndexingSlicing {
-    pub fn new(suppress_restriction_lint_in_const: bool) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            suppress_restriction_lint_in_const,
+            suppress_restriction_lint_in_const: conf.suppress_restriction_lint_in_const,
         }
     }
 }
 
 impl<'tcx> LateLintPass<'tcx> for IndexingSlicing {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
-        if (self.suppress_restriction_lint_in_const && cx.tcx.hir().is_inside_const_context(expr.hir_id))
-            || is_from_proc_macro(cx, expr)
-        {
-            return;
-        }
-
         if let ExprKind::Index(array, index, _) = &expr.kind
+            && (!self.suppress_restriction_lint_in_const || !cx.tcx.hir().is_inside_const_context(expr.hir_id))
             && let expr_ty = cx.typeck_results().expr_ty(array)
             && let mut deref = deref_chain(cx, expr_ty)
             && deref.any(|l| {
@@ -116,6 +107,7 @@ impl<'tcx> LateLintPass<'tcx> for IndexingSlicing {
                     || l.peel_refs().is_array()
                     || ty_has_applicable_get_function(cx, l.peel_refs(), expr_ty, expr)
             })
+            && !is_from_proc_macro(cx, expr)
         {
             let note = "the suggestion might not be applicable in constant blocks";
             let ty = cx.typeck_results().expr_ty(array).peel_refs();
@@ -183,7 +175,7 @@ impl<'tcx> LateLintPass<'tcx> for IndexingSlicing {
                         return;
                     }
                     // Index is a constant uint.
-                    if let Some(constant) = constant(cx, cx.typeck_results(), index) {
+                    if let Some(constant) = ConstEvalCtxt::new(cx).eval(index) {
                         // only `usize` index is legal in rust array index
                         // leave other type to rustc
                         if let Constant::Int(off) = constant
@@ -221,14 +213,15 @@ impl<'tcx> LateLintPass<'tcx> for IndexingSlicing {
 /// Returns a tuple of options with the start and end (exclusive) values of
 /// the range. If the start or end is not constant, None is returned.
 fn to_const_range(cx: &LateContext<'_>, range: higher::Range<'_>, array_size: u128) -> (Option<u128>, Option<u128>) {
-    let s = range.start.map(|expr| constant(cx, cx.typeck_results(), expr));
+    let ecx = ConstEvalCtxt::new(cx);
+    let s = range.start.map(|expr| ecx.eval(expr));
     let start = match s {
         Some(Some(Constant::Int(x))) => Some(x),
         Some(_) => None,
         None => Some(0),
     };
 
-    let e = range.end.map(|expr| constant(cx, cx.typeck_results(), expr));
+    let e = range.end.map(|expr| ecx.eval(expr));
     let end = match e {
         Some(Some(Constant::Int(x))) => {
             if range.limits == RangeLimits::Closed {

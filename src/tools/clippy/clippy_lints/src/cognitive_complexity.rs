@@ -1,5 +1,4 @@
-//! calculate cognitive complexity and warn about overly complex functions
-
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_help;
 use clippy_utils::source::{IntoSpan, SpanRangeExt};
 use clippy_utils::ty::is_type_diagnostic_item;
@@ -39,10 +38,9 @@ pub struct CognitiveComplexity {
 }
 
 impl CognitiveComplexity {
-    #[must_use]
-    pub fn new(limit: u64) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            limit: LimitStack::new(limit),
+            limit: LimitStack::new(conf.cognitive_complexity_threshold),
         }
     }
 }

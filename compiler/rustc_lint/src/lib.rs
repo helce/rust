@@ -39,6 +39,7 @@
 #![feature(rustc_attrs)]
 #![feature(rustdoc_internals)]
 #![feature(trait_upcasting)]
+#![warn(unreachable_pub)]
 // tidy-alphabetical-end
 
 mod async_closures;
@@ -73,20 +74,16 @@ mod noop_method_call;
 mod opaque_hidden_inferred_bound;
 mod pass_by_value;
 mod passes;
+mod precedence;
 mod ptr_nulls;
 mod redundant_semicolon;
 mod reference_casting;
 mod shadowed_into_iter;
+mod tail_expr_drop_order;
 mod traits;
 mod types;
 mod unit_bindings;
 mod unused;
-
-pub use shadowed_into_iter::{ARRAY_INTO_ITER, BOXED_SLICE_INTO_ITER};
-
-use rustc_hir::def_id::LocalModDefId;
-use rustc_middle::query::Providers;
-use rustc_middle::ty::TyCtxt;
 
 use async_closures::AsyncClosureUsage;
 use async_fn_in_trait::AsyncFnInTrait;
@@ -111,24 +108,33 @@ use nonstandard_style::*;
 use noop_method_call::*;
 use opaque_hidden_inferred_bound::*;
 use pass_by_value::*;
+use precedence::*;
 use ptr_nulls::*;
 use redundant_semicolon::*;
 use reference_casting::*;
+use rustc_hir::def_id::LocalModDefId;
+use rustc_middle::query::Providers;
+use rustc_middle::ty::TyCtxt;
 use shadowed_into_iter::ShadowedIntoIter;
+pub use shadowed_into_iter::{ARRAY_INTO_ITER, BOXED_SLICE_INTO_ITER};
+use tail_expr_drop_order::TailExprDropOrder;
 use traits::*;
 use types::*;
 use unit_bindings::*;
 use unused::*;
 
+#[rustfmt::skip]
 pub use builtin::{MissingDoc, SoftLints};
-pub use context::{CheckLintNameResult, FindLintError, LintStore};
-pub use context::{EarlyContext, LateContext, LintContext};
+pub use context::{
+    CheckLintNameResult, EarlyContext, FindLintError, LateContext, LintContext, LintStore,
+};
 pub use early::{check_ast_node, EarlyCheckNode};
 pub use late::{check_crate, late_lint_mod, unerased_lint_store};
 pub use passes::{EarlyLintPass, LateLintPass};
 pub use rustc_session::lint::Level::{self, *};
-pub use rustc_session::lint::{BufferedEarlyLint, FutureIncompatibleInfo, Lint, LintId};
-pub use rustc_session::lint::{LintPass, LintVec};
+pub use rustc_session::lint::{
+    BufferedEarlyLint, FutureIncompatibleInfo, Lint, LintId, LintPass, LintVec,
+};
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
@@ -174,6 +180,7 @@ early_lint_methods!(
             RedundantSemicolons: RedundantSemicolons,
             UnusedDocComment: UnusedDocComment,
             Expr2024: Expr2024,
+            Precedence: Precedence,
         ]
     ]
 );
@@ -234,6 +241,7 @@ late_lint_methods!(
             AsyncFnInTrait: AsyncFnInTrait,
             NonLocalDefinitions: NonLocalDefinitions::default(),
             ImplTraitOvercaptures: ImplTraitOvercaptures,
+            TailExprDropOrder: TailExprDropOrder,
         ]
     ]
 );
@@ -321,6 +329,8 @@ fn register_builtins(store: &mut LintStore) {
         REFINING_IMPL_TRAIT_REACHABLE,
         REFINING_IMPL_TRAIT_INTERNAL
     );
+
+    add_lint_group!("deprecated_safe", DEPRECATED_SAFE_2024);
 
     // Register renamed and removed lints.
     store.register_renamed("single_use_lifetime", "single_use_lifetimes");
@@ -537,7 +547,7 @@ fn register_builtins(store: &mut LintStore) {
     );
     store.register_removed(
         "suspicious_auto_trait_impls",
-        "no longer needed, see #93367 \
+        "no longer needed, see issue #93367 \
          <https://github.com/rust-lang/rust/issues/93367> for more information",
     );
     store.register_removed(
@@ -559,6 +569,12 @@ fn register_builtins(store: &mut LintStore) {
         "box_pointers",
         "it does not detect other kinds of allocations, and existed only for historical reasons",
     );
+    store.register_removed(
+        "byte_slice_in_packed_struct_with_derive",
+        "converted into hard error, see issue #107457 \
+         <https://github.com/rust-lang/rust/issues/107457> for more information",
+    );
+    store.register_removed("writes_through_immutable_pointer", "converted into hard error");
 }
 
 fn register_internals(store: &mut LintStore) {

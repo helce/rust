@@ -1,19 +1,22 @@
+use std::fmt::{Debug, Formatter};
+use std::io;
+
+use serde::Serialize;
+
 use crate::abi::FnAbi;
 use crate::crate_def::CrateDef;
 use crate::mir::Body;
 use crate::ty::{Allocation, ClosureDef, ClosureKind, FnDef, GenericArgs, IndexedVal, Ty};
 use crate::{with, CrateItem, DefId, Error, ItemKind, Opaque, Symbol};
-use std::fmt::{Debug, Formatter};
-use std::io;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum MonoItem {
     Fn(Instance),
     Static(StaticDef),
     GlobalAsm(Opaque),
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Instance {
     /// The type of instance.
     pub kind: InstanceKind,
@@ -22,7 +25,7 @@ pub struct Instance {
     pub def: InstanceDef,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum InstanceKind {
     /// A user defined item.
     Item,
@@ -240,7 +243,7 @@ impl From<StaticDef> for CrateItem {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct InstanceDef(usize);
 
 impl CrateDef for InstanceDef {
@@ -251,6 +254,7 @@ impl CrateDef for InstanceDef {
 
 crate_def! {
     /// Holds information about a static variable definition.
+    #[derive(Serialize)]
     pub StaticDef;
 }
 

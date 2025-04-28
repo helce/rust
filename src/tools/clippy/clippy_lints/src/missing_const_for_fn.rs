@@ -1,4 +1,5 @@
 use clippy_config::msrvs::{self, Msrv};
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::qualify_min_const_fn::is_min_const_fn;
 use clippy_utils::{fn_has_unsatisfiable_preds, is_entrypoint_fn, is_from_proc_macro, trait_ref_of_method};
@@ -79,9 +80,10 @@ pub struct MissingConstForFn {
 }
 
 impl MissingConstForFn {
-    #[must_use]
-    pub fn new(msrv: Msrv) -> Self {
-        Self { msrv }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            msrv: conf.msrv.clone(),
+        }
     }
 }
 
@@ -184,7 +186,7 @@ fn already_const(header: hir::FnHeader) -> bool {
 fn could_be_const_with_abi(cx: &LateContext<'_>, msrv: &Msrv, abi: Abi) -> bool {
     match abi {
         Abi::Rust => true,
-        // `const extern "C"` was stablized after 1.62.0
+        // `const extern "C"` was stabilized after 1.62.0
         Abi::C { unwind: false } => msrv.meets(msrvs::CONST_EXTERN_FN),
         // Rest ABIs are still unstable and need the `const_extern_fn` feature enabled.
         _ => cx.tcx.features().const_extern_fn,

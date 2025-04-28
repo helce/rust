@@ -1,13 +1,3 @@
-use crate::ImplTraitPosition;
-
-use super::errors::{
-    AsyncBoundNotOnTrait, AsyncBoundOnlyForFnTraits, BadReturnTypeNotation,
-    GenericTypeWithParentheses, UseAngleBrackets,
-};
-use super::ResolverAstLoweringExt;
-use super::{GenericArgsCtor, LifetimeRes, ParenthesizedGenericArgs};
-use super::{ImplTraitContext, LoweringContext, ParamMode};
-
 use rustc_ast::{self as ast, *};
 use rustc_data_structures::sync::Lrc;
 use rustc_hir as hir;
@@ -17,9 +7,18 @@ use rustc_hir::GenericArg;
 use rustc_middle::span_bug;
 use rustc_span::symbol::{kw, sym, Ident};
 use rustc_span::{BytePos, DesugaringKind, Span, Symbol, DUMMY_SP};
-
 use smallvec::{smallvec, SmallVec};
 use tracing::{debug, instrument};
+
+use super::errors::{
+    AsyncBoundNotOnTrait, AsyncBoundOnlyForFnTraits, BadReturnTypeNotation,
+    GenericTypeWithParentheses, UseAngleBrackets,
+};
+use super::{
+    GenericArgsCtor, GenericArgsMode, ImplTraitContext, LifetimeRes, LoweringContext, ParamMode,
+    ResolverAstLoweringExt,
+};
+use crate::ImplTraitPosition;
 
 impl<'a, 'hir> LoweringContext<'a, 'hir> {
     #[instrument(level = "trace", skip(self))]
@@ -44,13 +43,11 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         let mut res = self.lower_res(base_res);
 
         // When we have an `async` kw on a bound, map the trait it resolves to.
-        let mut bound_modifier_allowed_features = None;
         if let Some(TraitBoundModifiers { asyncness: BoundAsyncness::Async(_), .. }) = modifiers {
             match res {
                 Res::Def(DefKind::Trait, def_id) => {
-                    if let Some((async_def_id, features)) = self.map_trait_to_async_trait(def_id) {
+                    if let Some(async_def_id) = self.map_trait_to_async_trait(def_id) {
                         res = Res::Def(DefKind::Trait, async_def_id);
-                        bound_modifier_allowed_features = Some(features);
                     } else {
                         self.dcx().emit_err(AsyncBoundOnlyForFnTraits { span: p.span });
                     }
@@ -66,6 +63,16 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                 }
             }
         }
+
+        // Ungate the `async_fn_traits` feature in the path if the trait is
+        // named via either `async Fn*()` or `AsyncFn*()`.
+        let bound_modifier_allowed_features = if let Res::Def(DefKind::Trait, async_def_id) = res
+            && self.tcx.async_fn_trait_kind_from_def_id(async_def_id).is_some()
+        {
+            Some(self.allow_async_fn_traits.clone())
+        } else {
+            None
+        };
 
         let path_span_lo = p.span.shrink_to_lo();
         let proj_start = p.segments.len() - unresolved_segments;
@@ -83,10 +90,10 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                         _ => param_mode,
                     };
 
-                    let parenthesized_generic_args = match base_res {
+                    let generic_args_mode = match base_res {
                         // `a::b::Trait(Args)`
                         Res::Def(DefKind::Trait, _) if i + 1 == proj_start => {
-                            ParenthesizedGenericArgs::ParenSugar
+                            GenericArgsMode::ParenSugar
                         }
                         // `a::b::Trait(Args)::TraitItem`
                         Res::Def(DefKind::AssocFn, _)
@@ -94,19 +101,19 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                         | Res::Def(DefKind::AssocTy, _)
                             if i + 2 == proj_start =>
                         {
-                            ParenthesizedGenericArgs::ParenSugar
+                            GenericArgsMode::ParenSugar
                         }
                         // Avoid duplicated errors.
-                        Res::Err => ParenthesizedGenericArgs::ParenSugar,
+                        Res::Err => GenericArgsMode::ParenSugar,
                         // An error
-                        _ => ParenthesizedGenericArgs::Err,
+                        _ => GenericArgsMode::Err,
                     };
 
                     self.lower_path_segment(
                         p.span,
                         segment,
                         param_mode,
-                        parenthesized_generic_args,
+                        generic_args_mode,
                         itctx,
                         bound_modifier_allowed_features.clone(),
                     )
@@ -161,7 +168,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                 p.span,
                 segment,
                 param_mode,
-                ParenthesizedGenericArgs::Err,
+                GenericArgsMode::Err,
                 itctx,
                 None,
             ));
@@ -203,7 +210,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     p.span,
                     segment,
                     param_mode,
-                    ParenthesizedGenericArgs::Err,
+                    GenericArgsMode::Err,
                     ImplTraitContext::Disallowed(ImplTraitPosition::Path),
                     None,
                 )
@@ -217,7 +224,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         path_span: Span,
         segment: &PathSegment,
         param_mode: ParamMode,
-        parenthesized_generic_args: ParenthesizedGenericArgs,
+        generic_args_mode: GenericArgsMode,
         itctx: ImplTraitContext,
         // Additional features ungated with a bound modifier like `async`.
         // This is passed down to the implicit associated type binding in
@@ -230,14 +237,13 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                 GenericArgs::AngleBracketed(data) => {
                     self.lower_angle_bracketed_parameter_data(data, param_mode, itctx)
                 }
-                GenericArgs::Parenthesized(data) => match parenthesized_generic_args {
-                    ParenthesizedGenericArgs::ParenSugar => self
-                        .lower_parenthesized_parameter_data(
-                            data,
-                            itctx,
-                            bound_modifier_allowed_features,
-                        ),
-                    ParenthesizedGenericArgs::Err => {
+                GenericArgs::Parenthesized(data) => match generic_args_mode {
+                    GenericArgsMode::ParenSugar => self.lower_parenthesized_parameter_data(
+                        data,
+                        itctx,
+                        bound_modifier_allowed_features,
+                    ),
+                    GenericArgsMode::Err => {
                         // Suggest replacing parentheses with angle brackets `Trait(params...)` to `Trait<params...>`
                         let sub = if !data.inputs.is_empty() {
                             // Start of the span to the 1st character of 1st argument
@@ -506,14 +512,14 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     /// This only needs to be done until we unify `AsyncFn` and `Fn` traits into one
     /// that is generic over `async`ness, if that's ever possible, or modify the
     /// lowering of `async Fn()` bounds to desugar to another trait like `LendingFn`.
-    fn map_trait_to_async_trait(&self, def_id: DefId) -> Option<(DefId, Lrc<[Symbol]>)> {
+    fn map_trait_to_async_trait(&self, def_id: DefId) -> Option<DefId> {
         let lang_items = self.tcx.lang_items();
         if Some(def_id) == lang_items.fn_trait() {
-            Some((lang_items.async_fn_trait()?, self.allow_async_fn_traits.clone()))
+            lang_items.async_fn_trait()
         } else if Some(def_id) == lang_items.fn_mut_trait() {
-            Some((lang_items.async_fn_mut_trait()?, self.allow_async_fn_traits.clone()))
+            lang_items.async_fn_mut_trait()
         } else if Some(def_id) == lang_items.fn_once_trait() {
-            Some((lang_items.async_fn_once_trait()?, self.allow_async_fn_traits.clone()))
+            lang_items.async_fn_once_trait()
         } else {
             None
         }

@@ -1,8 +1,3 @@
-use super::command::Command;
-use super::symbol_export;
-use crate::errors;
-use rustc_span::symbol::sym;
-
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::prelude::*;
@@ -10,8 +5,9 @@ use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
 use std::{env, iter, mem, str};
 
+use cc::windows_registry;
 use rustc_hir::def_id::{CrateNum, LOCAL_CRATE};
-use rustc_metadata::find_native_static_library;
+use rustc_metadata::{find_native_static_library, try_find_native_static_library};
 use rustc_middle::bug;
 use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::middle::exported_symbols;
@@ -19,10 +15,13 @@ use rustc_middle::middle::exported_symbols::{ExportedSymbol, SymbolExportInfo, S
 use rustc_middle::ty::TyCtxt;
 use rustc_session::config::{self, CrateType, DebugInfo, LinkerPluginLto, Lto, OptLevel, Strip};
 use rustc_session::Session;
+use rustc_span::symbol::sym;
 use rustc_target::spec::{Cc, LinkOutputKind, LinkerFlavor, Lld};
-
-use cc::windows_registry;
 use tracing::{debug, warn};
+
+use super::command::Command;
+use super::symbol_export;
+use crate::errors;
 
 /// Disables non-English messages from localized linkers.
 /// Such messages may cause issues with text encoding on Windows (#35785)
@@ -267,7 +266,12 @@ pub trait Linker {
     fn is_cc(&self) -> bool {
         false
     }
-    fn set_output_kind(&mut self, output_kind: LinkOutputKind, out_filename: &Path);
+    fn set_output_kind(
+        &mut self,
+        output_kind: LinkOutputKind,
+        crate_type: CrateType,
+        out_filename: &Path,
+    );
     fn link_dylib_by_name(&mut self, _name: &str, _verbatim: bool, _as_needed: bool) {
         bug!("dylib linked with unsupported linker")
     }
@@ -388,7 +392,7 @@ impl<'a> GccLinker<'a> {
         ]);
     }
 
-    fn build_dylib(&mut self, out_filename: &Path) {
+    fn build_dylib(&mut self, crate_type: CrateType, out_filename: &Path) {
         // On mac we need to tell the linker to let this library be rpathed
         if self.sess.target.is_like_osx {
             if !self.is_ld {
@@ -419,7 +423,7 @@ impl<'a> GccLinker<'a> {
                     let mut out_implib = OsString::from("--out-implib=");
                     out_implib.push(out_filename.with_file_name(implib_name));
                     self.link_arg(out_implib);
-                } else {
+                } else if crate_type == CrateType::Dylib {
                     // When dylibs are linked by a full path this value will get into `DT_NEEDED`
                     // instead of the full path, so the library can be later found in some other
                     // location than that specific path.
@@ -466,7 +470,12 @@ impl<'a> Linker for GccLinker<'a> {
         !self.is_ld
     }
 
-    fn set_output_kind(&mut self, output_kind: LinkOutputKind, out_filename: &Path) {
+    fn set_output_kind(
+        &mut self,
+        output_kind: LinkOutputKind,
+        crate_type: CrateType,
+        out_filename: &Path,
+    ) {
         match output_kind {
             LinkOutputKind::DynamicNoPicExe => {
                 if !self.is_ld && self.is_gnu {
@@ -501,10 +510,10 @@ impl<'a> Linker for GccLinker<'a> {
                     self.link_args(&["-static", "-pie", "--no-dynamic-linker", "-z", "text"]);
                 }
             }
-            LinkOutputKind::DynamicDylib => self.build_dylib(out_filename),
+            LinkOutputKind::DynamicDylib => self.build_dylib(crate_type, out_filename),
             LinkOutputKind::StaticDylib => {
                 self.link_or_cc_arg("-static");
-                self.build_dylib(out_filename);
+                self.build_dylib(crate_type, out_filename);
             }
             LinkOutputKind::WasiReactorExe => {
                 self.link_args(&["--entry", "_initialize"]);
@@ -860,7 +869,12 @@ impl<'a> Linker for MsvcLinker<'a> {
         &mut self.cmd
     }
 
-    fn set_output_kind(&mut self, output_kind: LinkOutputKind, out_filename: &Path) {
+    fn set_output_kind(
+        &mut self,
+        output_kind: LinkOutputKind,
+        _crate_type: CrateType,
+        out_filename: &Path,
+    ) {
         match output_kind {
             LinkOutputKind::DynamicNoPicExe
             | LinkOutputKind::DynamicPicExe
@@ -892,9 +906,15 @@ impl<'a> Linker for MsvcLinker<'a> {
     }
 
     fn link_staticlib_by_name(&mut self, name: &str, verbatim: bool, whole_archive: bool) {
-        let prefix = if whole_archive { "/WHOLEARCHIVE:" } else { "" };
-        let suffix = if verbatim { "" } else { ".lib" };
-        self.link_arg(format!("{prefix}{name}{suffix}"));
+        // On MSVC-like targets rustc supports static libraries using alternative naming
+        // scheme (`libfoo.a`) unsupported by linker, search for such libraries manually.
+        if let Some(path) = try_find_native_static_library(self.sess, name, verbatim) {
+            self.link_staticlib_by_path(&path, whole_archive);
+        } else {
+            let prefix = if whole_archive { "/WHOLEARCHIVE:" } else { "" };
+            let suffix = if verbatim { "" } else { ".lib" };
+            self.link_arg(format!("{prefix}{name}{suffix}"));
+        }
     }
 
     fn link_staticlib_by_path(&mut self, path: &Path, whole_archive: bool) {
@@ -1106,7 +1126,13 @@ impl<'a> Linker for EmLinker<'a> {
         true
     }
 
-    fn set_output_kind(&mut self, _output_kind: LinkOutputKind, _out_filename: &Path) {}
+    fn set_output_kind(
+        &mut self,
+        _output_kind: LinkOutputKind,
+        _crate_type: CrateType,
+        _out_filename: &Path,
+    ) {
+    }
 
     fn link_dylib_by_name(&mut self, name: &str, _verbatim: bool, _as_needed: bool) {
         // Emscripten always links statically
@@ -1255,7 +1281,12 @@ impl<'a> Linker for WasmLd<'a> {
         &mut self.cmd
     }
 
-    fn set_output_kind(&mut self, output_kind: LinkOutputKind, _out_filename: &Path) {
+    fn set_output_kind(
+        &mut self,
+        output_kind: LinkOutputKind,
+        _crate_type: CrateType,
+        _out_filename: &Path,
+    ) {
         match output_kind {
             LinkOutputKind::DynamicNoPicExe
             | LinkOutputKind::DynamicPicExe
@@ -1404,7 +1435,13 @@ impl<'a> Linker for L4Bender<'a> {
         &mut self.cmd
     }
 
-    fn set_output_kind(&mut self, _output_kind: LinkOutputKind, _out_filename: &Path) {}
+    fn set_output_kind(
+        &mut self,
+        _output_kind: LinkOutputKind,
+        _crate_type: CrateType,
+        _out_filename: &Path,
+    ) {
+    }
 
     fn link_staticlib_by_name(&mut self, name: &str, _verbatim: bool, whole_archive: bool) {
         self.hint_static();
@@ -1501,7 +1538,7 @@ impl<'a> Linker for L4Bender<'a> {
 
 impl<'a> L4Bender<'a> {
     pub fn new(cmd: Command, sess: &'a Session) -> L4Bender<'a> {
-        L4Bender { cmd, sess: sess, hinted_static: false }
+        L4Bender { cmd, sess, hinted_static: false }
     }
 
     fn hint_static(&mut self) {
@@ -1521,7 +1558,7 @@ pub struct AixLinker<'a> {
 
 impl<'a> AixLinker<'a> {
     pub fn new(cmd: Command, sess: &'a Session) -> AixLinker<'a> {
-        AixLinker { cmd, sess: sess, hinted_static: None }
+        AixLinker { cmd, sess, hinted_static: None }
     }
 
     fn hint_static(&mut self) {
@@ -1551,7 +1588,12 @@ impl<'a> Linker for AixLinker<'a> {
         &mut self.cmd
     }
 
-    fn set_output_kind(&mut self, output_kind: LinkOutputKind, out_filename: &Path) {
+    fn set_output_kind(
+        &mut self,
+        output_kind: LinkOutputKind,
+        _crate_type: CrateType,
+        out_filename: &Path,
+    ) {
         match output_kind {
             LinkOutputKind::DynamicDylib => {
                 self.hint_dynamic();
@@ -1758,7 +1800,13 @@ impl<'a> Linker for PtxLinker<'a> {
         &mut self.cmd
     }
 
-    fn set_output_kind(&mut self, _output_kind: LinkOutputKind, _out_filename: &Path) {}
+    fn set_output_kind(
+        &mut self,
+        _output_kind: LinkOutputKind,
+        _crate_type: CrateType,
+        _out_filename: &Path,
+    ) {
+    }
 
     fn link_staticlib_by_name(&mut self, _name: &str, _verbatim: bool, _whole_archive: bool) {
         panic!("staticlibs not supported")
@@ -1824,7 +1872,13 @@ impl<'a> Linker for LlbcLinker<'a> {
         &mut self.cmd
     }
 
-    fn set_output_kind(&mut self, _output_kind: LinkOutputKind, _out_filename: &Path) {}
+    fn set_output_kind(
+        &mut self,
+        _output_kind: LinkOutputKind,
+        _crate_type: CrateType,
+        _out_filename: &Path,
+    ) {
+    }
 
     fn link_staticlib_by_name(&mut self, _name: &str, _verbatim: bool, _whole_archive: bool) {
         panic!("staticlibs not supported")
@@ -1895,7 +1949,13 @@ impl<'a> Linker for BpfLinker<'a> {
         &mut self.cmd
     }
 
-    fn set_output_kind(&mut self, _output_kind: LinkOutputKind, _out_filename: &Path) {}
+    fn set_output_kind(
+        &mut self,
+        _output_kind: LinkOutputKind,
+        _crate_type: CrateType,
+        _out_filename: &Path,
+    ) {
+    }
 
     fn link_staticlib_by_name(&mut self, _name: &str, _verbatim: bool, _whole_archive: bool) {
         panic!("staticlibs not supported")

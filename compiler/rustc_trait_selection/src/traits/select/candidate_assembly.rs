@@ -12,19 +12,17 @@ use hir::def_id::DefId;
 use hir::LangItem;
 use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
 use rustc_hir as hir;
-use rustc_infer::traits::ObligationCause;
-use rustc_infer::traits::{Obligation, PolyTraitObligation, SelectionError};
+use rustc_infer::traits::{Obligation, ObligationCause, PolyTraitObligation, SelectionError};
 use rustc_middle::ty::fast_reject::{DeepRejectCtxt, TreatParams};
 use rustc_middle::ty::{self, ToPolyTraitRef, Ty, TypeVisitableExt};
 use rustc_middle::{bug, span_bug};
+use tracing::{debug, instrument, trace};
 
+use super::SelectionCandidate::*;
+use super::{BuiltinImplConditions, SelectionCandidateSet, SelectionContext, TraitObligationStack};
 use crate::traits;
 use crate::traits::query::evaluate_obligation::InferCtxtExt;
 use crate::traits::util;
-
-use super::BuiltinImplConditions;
-use super::SelectionCandidate::*;
-use super::{SelectionCandidateSet, SelectionContext, TraitObligationStack};
 
 impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     #[instrument(skip(self, stack), level = "debug")]
@@ -470,8 +468,20 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 }
                 candidates.vec.push(AsyncClosureCandidate);
             }
-            ty::FnDef(..) | ty::FnPtr(..) => {
-                candidates.vec.push(AsyncClosureCandidate);
+            // Provide an impl, but only for suitable `fn` pointers.
+            ty::FnPtr(sig_tys, hdr) => {
+                if sig_tys.with(hdr).is_fn_trait_compatible() {
+                    candidates.vec.push(AsyncClosureCandidate);
+                }
+            }
+            // Provide an impl for suitable functions, rejecting `#[target_feature]` functions (RFC 2396).
+            ty::FnDef(def_id, _) => {
+                let tcx = self.tcx();
+                if tcx.fn_sig(def_id).skip_binder().is_fn_trait_compatible()
+                    && tcx.codegen_fn_attrs(def_id).target_features.is_empty()
+                {
+                    candidates.vec.push(AsyncClosureCandidate);
+                }
             }
             _ => {}
         }
@@ -526,8 +536,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 candidates.ambiguous = true; // Could wind up being a fn() type.
             }
             // Provide an impl, but only for suitable `fn` pointers.
-            ty::FnPtr(sig) => {
-                if sig.is_fn_trait_compatible() {
+            ty::FnPtr(sig_tys, hdr) => {
+                if sig_tys.with(hdr).is_fn_trait_compatible() {
                     candidates
                         .vec
                         .push(FnPointerCandidate { fn_host_effect: self.tcx().consts.true_ });
@@ -536,6 +546,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // Provide an impl for suitable functions, rejecting `#[target_feature]` functions (RFC 2396).
             ty::FnDef(def_id, args) => {
                 let tcx = self.tcx();
+                // FIXME(struct_target_features): should a function that inherits target_features
+                // through an argument implement Fn traits?
                 if tcx.fn_sig(def_id).skip_binder().is_fn_trait_compatible()
                     && tcx.codegen_fn_attrs(def_id).target_features.is_empty()
                 {
@@ -772,7 +784,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     );
                 }
 
-                ty::Alias(ty::Opaque, _) => {
+                ty::Alias(ty::Opaque, alias) => {
                     if candidates.vec.iter().any(|c| matches!(c, ProjectionCandidate(_))) {
                         // We do not generate an auto impl candidate for `impl Trait`s which already
                         // reference our auto trait.
@@ -786,6 +798,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     } else if self.infcx.intercrate {
                         // We do not emit auto trait candidates for opaque types in coherence.
                         // Doing so can result in weird dependency cycles.
+                        candidates.ambiguous = true;
+                    } else if self.infcx.can_define_opaque_ty(alias.def_id) {
+                        // We do not emit auto trait candidates for opaque types in their defining scope, as
+                        // we need to know the hidden type first, which we can't reliably know within the defining
+                        // scope.
                         candidates.ambiguous = true;
                     } else {
                         candidates.vec.push(AutoImplCandidate)
@@ -805,7 +822,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 | ty::RawPtr(_, _)
                 | ty::Ref(..)
                 | ty::FnDef(..)
-                | ty::FnPtr(_)
+                | ty::FnPtr(..)
                 | ty::Closure(..)
                 | ty::CoroutineClosure(..)
                 | ty::Coroutine(..)
@@ -1193,7 +1210,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             | ty::RawPtr(_, _)
             | ty::Ref(..)
             | ty::FnDef(..)
-            | ty::FnPtr(_)
+            | ty::FnPtr(..)
             | ty::Never
             | ty::Foreign(_)
             | ty::Array(..)
@@ -1276,7 +1293,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             | ty::Ref(_, _, _)
             | ty::FnDef(_, _)
             | ty::Pat(_, _)
-            | ty::FnPtr(_)
+            | ty::FnPtr(..)
             | ty::Dynamic(_, _, _)
             | ty::Closure(..)
             | ty::CoroutineClosure(..)
@@ -1325,7 +1342,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         let self_ty = self.infcx.resolve_vars_if_possible(obligation.self_ty());
 
         match self_ty.skip_binder().kind() {
-            ty::FnPtr(_) => candidates.vec.push(BuiltinCandidate { has_nested: false }),
+            ty::FnPtr(..) => candidates.vec.push(BuiltinCandidate { has_nested: false }),
             ty::Bool
             | ty::Char
             | ty::Int(_)

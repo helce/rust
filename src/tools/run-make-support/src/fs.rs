@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // FIXME(jieyouxu): modify create_symlink to panic on windows.
 
@@ -9,11 +9,19 @@ pub fn create_symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) {
     if link.as_ref().exists() {
         std::fs::remove_dir(link.as_ref()).unwrap();
     }
-    std::os::windows::fs::symlink_file(original.as_ref(), link.as_ref()).expect(&format!(
-        "failed to create symlink {:?} for {:?}",
-        link.as_ref().display(),
-        original.as_ref().display(),
-    ));
+    if original.as_ref().is_file() {
+        std::os::windows::fs::symlink_file(original.as_ref(), link.as_ref()).expect(&format!(
+            "failed to create symlink {:?} for {:?}",
+            link.as_ref().display(),
+            original.as_ref().display(),
+        ));
+    } else {
+        std::os::windows::fs::symlink_dir(original.as_ref(), link.as_ref()).expect(&format!(
+            "failed to create symlink {:?} for {:?}",
+            link.as_ref().display(),
+            original.as_ref().display(),
+        ));
+    }
 }
 
 /// Creates a new symlink to a path on the filesystem, adjusting for Windows or Unix.
@@ -41,6 +49,8 @@ pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) {
             let ty = entry.file_type()?;
             if ty.is_dir() {
                 copy_dir_all_inner(entry.path(), dst.join(entry.file_name()))?;
+            } else if ty.is_symlink() {
+                copy_symlink(entry.path(), dst.join(entry.file_name()))?;
             } else {
                 std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
             }
@@ -57,6 +67,12 @@ pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) {
             e
         );
     }
+}
+
+fn copy_symlink<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> {
+    let target_path = std::fs::read_link(from).unwrap();
+    create_symlink(target_path, to);
+    Ok(())
 }
 
 /// Helper for reading entries in a given directory.
@@ -175,4 +191,17 @@ pub fn set_permissions<P: AsRef<Path>>(path: P, perm: std::fs::Permissions) {
         "the file's permissions in path \"{}\" could not be changed",
         path.as_ref().display()
     ));
+}
+
+/// A function which prints all file names in the directory `dir` similarly to Unix's `ls`.
+/// Useful for debugging.
+/// Usage: `eprintln!("{:#?}", shallow_find_dir_entries(some_dir));`
+#[track_caller]
+pub fn shallow_find_dir_entries<P: AsRef<Path>>(dir: P) -> Vec<PathBuf> {
+    let paths = read_dir(dir);
+    let mut output = Vec::new();
+    for path in paths {
+        output.push(path.unwrap().path());
+    }
+    output
 }

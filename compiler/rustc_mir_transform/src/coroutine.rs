@@ -51,13 +51,9 @@
 //! Otherwise it drops all the values in scope at the last suspension point.
 
 mod by_move_body;
-pub use by_move_body::ByMoveBody;
+use std::{iter, ops};
 
-use crate::abort_unwinding_calls;
-use crate::deref_separator::deref_finder;
-use crate::errors;
-use crate::pass_manager as pm;
-use crate::simplify;
+pub use by_move_body::coroutine_by_move_body_def_id;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::pluralize;
 use rustc_hir as hir;
@@ -67,9 +63,7 @@ use rustc_index::bit_set::{BitMatrix, BitSet, GrowableBitSet};
 use rustc_index::{Idx, IndexVec};
 use rustc_middle::mir::visit::{MutVisitor, PlaceContext, Visitor};
 use rustc_middle::mir::*;
-use rustc_middle::ty::CoroutineArgs;
-use rustc_middle::ty::InstanceKind;
-use rustc_middle::ty::{self, CoroutineArgsExt, Ty, TyCtxt};
+use rustc_middle::ty::{self, CoroutineArgs, CoroutineArgsExt, InstanceKind, Ty, TyCtxt};
 use rustc_middle::{bug, span_bug};
 use rustc_mir_dataflow::impls::{
     MaybeBorrowedLocals, MaybeLiveLocals, MaybeRequiresStorage, MaybeStorageLive,
@@ -81,11 +75,13 @@ use rustc_span::symbol::sym;
 use rustc_span::Span;
 use rustc_target::abi::{FieldIdx, VariantIdx};
 use rustc_target::spec::PanicStrategy;
-use rustc_trait_selection::error_reporting::traits::TypeErrCtxtExt as _;
+use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
 use rustc_trait_selection::infer::TyCtxtInferExt as _;
-use rustc_trait_selection::traits::ObligationCtxt;
-use rustc_trait_selection::traits::{ObligationCause, ObligationCauseCode};
-use std::{iter, ops};
+use rustc_trait_selection::traits::{ObligationCause, ObligationCauseCode, ObligationCtxt};
+use tracing::{debug, instrument, trace};
+
+use crate::deref_separator::deref_finder;
+use crate::{abort_unwinding_calls, errors, pass_manager as pm, simplify};
 
 pub struct StateTransform;
 
@@ -936,7 +932,7 @@ fn compute_storage_conflicts<'mir, 'tcx>(
     // Compute the storage conflicts for all eligible locals.
     let mut visitor = StorageConflictVisitor {
         body,
-        saved_locals: saved_locals,
+        saved_locals,
         local_conflicts: BitMatrix::from_row_n(&ineligible_locals, body.local_decls.len()),
         eligible_storage_live: BitSet::new_empty(body.local_decls.len()),
     };
@@ -1167,9 +1163,10 @@ fn insert_switch<'tcx>(
 }
 
 fn elaborate_coroutine_drops<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-    use crate::shim::DropShimElaborator;
     use rustc_middle::mir::patch::MirPatch;
     use rustc_mir_dataflow::elaborate_drops::{elaborate_drop, Unwind};
+
+    use crate::shim::DropShimElaborator;
 
     // Note that `elaborate_drops` only drops the upvars of a coroutine, and
     // this is ok because `open_drop` can only be reached within that own

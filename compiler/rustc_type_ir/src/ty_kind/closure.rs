@@ -1,5 +1,6 @@
 use std::ops::ControlFlow;
 
+use derive_where::derive_where;
 use rustc_type_ir_macros::{Lift_Generic, TypeFoldable_Generic, TypeVisitable_Generic};
 
 use crate::fold::{shift_region, TypeFoldable, TypeFolder, TypeSuperFoldable};
@@ -100,15 +101,7 @@ use crate::{self as ty, Interner};
 /// * `GR`: The "return type", which is the type of value returned upon
 ///   completion of the coroutine.
 /// * `GW`: The "coroutine witness".
-#[derive(derivative::Derivative)]
-#[derivative(
-    Clone(bound = ""),
-    Copy(bound = ""),
-    Hash(bound = ""),
-    PartialEq(bound = ""),
-    Eq(bound = ""),
-    Debug(bound = "")
-)]
+#[derive_where(Clone, Copy, PartialEq, Eq, Hash, Debug; I: Interner)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic, Lift_Generic)]
 pub struct ClosureArgs<I: Interner> {
     /// Lifetime and type parameters from the enclosing function,
@@ -204,21 +197,13 @@ impl<I: Interner> ClosureArgs<I> {
     /// Extracts the signature from the closure.
     pub fn sig(self) -> ty::Binder<I, ty::FnSig<I>> {
         match self.sig_as_fn_ptr_ty().kind() {
-            ty::FnPtr(sig) => sig,
+            ty::FnPtr(sig_tys, hdr) => sig_tys.with(hdr),
             ty => panic!("closure_sig_as_fn_ptr_ty is not a fn-ptr: {ty:?}"),
         }
     }
 }
 
-#[derive(derivative::Derivative)]
-#[derivative(
-    Clone(bound = ""),
-    Copy(bound = ""),
-    Hash(bound = ""),
-    PartialEq(bound = ""),
-    Eq(bound = ""),
-    Debug(bound = "")
-)]
+#[derive_where(Clone, Copy, PartialEq, Eq, Hash, Debug; I: Interner)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic, Lift_Generic)]
 pub struct CoroutineClosureArgs<I: Interner> {
     pub args: I::GenericArgs,
@@ -307,21 +292,23 @@ impl<I: Interner> CoroutineClosureArgs<I> {
 
     pub fn coroutine_closure_sig(self) -> ty::Binder<I, CoroutineClosureSignature<I>> {
         let interior = self.coroutine_witness_ty();
-        let ty::FnPtr(sig) = self.signature_parts_ty().kind() else { panic!() };
-        sig.map_bound(|sig| {
-            let [resume_ty, tupled_inputs_ty] = *sig.inputs().as_slice() else {
+        let ty::FnPtr(sig_tys, hdr) = self.signature_parts_ty().kind() else { panic!() };
+        sig_tys.map_bound(|sig_tys| {
+            let [resume_ty, tupled_inputs_ty] = *sig_tys.inputs().as_slice() else {
                 panic!();
             };
-            let [yield_ty, return_ty] = *sig.output().tuple_fields().as_slice() else { panic!() };
+            let [yield_ty, return_ty] = *sig_tys.output().tuple_fields().as_slice() else {
+                panic!()
+            };
             CoroutineClosureSignature {
                 interior,
                 tupled_inputs_ty,
                 resume_ty,
                 yield_ty,
                 return_ty,
-                c_variadic: sig.c_variadic,
-                safety: sig.safety,
-                abi: sig.abi,
+                c_variadic: hdr.c_variadic,
+                safety: hdr.safety,
+                abi: hdr.abi,
             }
         })
     }
@@ -336,7 +323,7 @@ impl<I: Interner> CoroutineClosureArgs<I> {
 
     pub fn has_self_borrows(&self) -> bool {
         match self.coroutine_captures_by_ref_ty().kind() {
-            ty::FnPtr(sig) => sig
+            ty::FnPtr(sig_tys, _) => sig_tys
                 .skip_binder()
                 .visit_with(&mut HasRegionsBoundAt { binder: ty::INNERMOST })
                 .is_break(),
@@ -370,15 +357,7 @@ impl<I: Interner> TypeVisitor<I> for HasRegionsBoundAt {
     }
 }
 
-#[derive(derivative::Derivative)]
-#[derivative(
-    Clone(bound = ""),
-    Copy(bound = ""),
-    Hash(bound = ""),
-    PartialEq(bound = ""),
-    Eq(bound = ""),
-    Debug(bound = "")
-)]
+#[derive_where(Clone, Copy, PartialEq, Eq, Hash, Debug; I: Interner)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic)]
 pub struct CoroutineClosureSignature<I: Interner> {
     pub interior: I::Ty,
@@ -483,11 +462,11 @@ impl<I: Interner> CoroutineClosureSignature<I> {
     ) -> I::Ty {
         match kind {
             ty::ClosureKind::Fn | ty::ClosureKind::FnMut => {
-                let ty::FnPtr(sig) = coroutine_captures_by_ref_ty.kind() else {
+                let ty::FnPtr(sig_tys, _) = coroutine_captures_by_ref_ty.kind() else {
                     panic!();
                 };
                 let coroutine_captures_by_ref_ty =
-                    sig.output().skip_binder().fold_with(&mut FoldEscapingRegions {
+                    sig_tys.output().skip_binder().fold_with(&mut FoldEscapingRegions {
                         interner: cx,
                         region: env_region,
                         debruijn: ty::INNERMOST,
@@ -552,15 +531,7 @@ impl<I: Interner> TypeFolder<I> for FoldEscapingRegions<I> {
     }
 }
 
-#[derive(derivative::Derivative)]
-#[derivative(
-    Clone(bound = ""),
-    Copy(bound = ""),
-    Hash(bound = ""),
-    PartialEq(bound = ""),
-    Eq(bound = ""),
-    Debug(bound = "")
-)]
+#[derive_where(Clone, Copy, PartialEq, Eq, Hash, Debug; I: Interner)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic)]
 pub struct GenSig<I: Interner> {
     pub resume_ty: I::Ty,
@@ -569,15 +540,7 @@ pub struct GenSig<I: Interner> {
 }
 
 /// Similar to `ClosureArgs`; see the above documentation for more.
-#[derive(derivative::Derivative)]
-#[derivative(
-    Clone(bound = ""),
-    Copy(bound = ""),
-    Hash(bound = ""),
-    PartialEq(bound = ""),
-    Eq(bound = ""),
-    Debug(bound = "")
-)]
+#[derive_where(Clone, Copy, PartialEq, Eq, Hash, Debug; I: Interner)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic, Lift_Generic)]
 pub struct CoroutineArgs<I: Interner> {
     pub args: I::GenericArgs,

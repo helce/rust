@@ -1,11 +1,8 @@
-//! Checks for usage of const which the type is not `Freeze` (`Cell`-free).
-//!
-//! This lint is **warn** by default.
-
 use std::ptr;
 
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::in_constant;
+use clippy_utils::is_in_const_context;
 use clippy_utils::macros::macro_backtrace;
 use clippy_utils::ty::{implements_trait, InteriorMut};
 use rustc_hir::def::{DefKind, Res};
@@ -179,17 +176,15 @@ fn lint<'tcx>(cx: &LateContext<'tcx>, source: Source<'tcx>) {
 }
 
 pub struct NonCopyConst<'tcx> {
-    ignore_interior_mutability: Vec<String>,
     interior_mut: InteriorMut<'tcx>,
 }
 
 impl_lint_pass!(NonCopyConst<'_> => [DECLARE_INTERIOR_MUTABLE_CONST, BORROW_INTERIOR_MUTABLE_CONST]);
 
 impl<'tcx> NonCopyConst<'tcx> {
-    pub fn new(ignore_interior_mutability: Vec<String>) -> Self {
+    pub fn new(tcx: TyCtxt<'tcx>, conf: &'static Conf) -> Self {
         Self {
-            ignore_interior_mutability,
-            interior_mut: InteriorMut::default(),
+            interior_mut: InteriorMut::without_pointers(tcx, &conf.ignore_interior_mutability),
         }
     }
 
@@ -308,10 +303,6 @@ impl<'tcx> NonCopyConst<'tcx> {
 }
 
 impl<'tcx> LateLintPass<'tcx> for NonCopyConst<'tcx> {
-    fn check_crate(&mut self, cx: &LateContext<'tcx>) {
-        self.interior_mut = InteriorMut::without_pointers(cx, &self.ignore_interior_mutability);
-    }
-
     fn check_item(&mut self, cx: &LateContext<'tcx>, it: &'tcx Item<'_>) {
         if let ItemKind::Const(.., body_id) = it.kind {
             let ty = cx.tcx.type_of(it.owner_id).instantiate_identity();
@@ -411,7 +402,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst<'tcx> {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if let ExprKind::Path(qpath) = &expr.kind {
             // Only lint if we use the const item inside a function.
-            if in_constant(cx, expr.hir_id) {
+            if is_in_const_context(cx) {
                 return;
             }
 

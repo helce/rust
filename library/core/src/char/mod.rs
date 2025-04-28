@@ -24,6 +24,8 @@ mod convert;
 mod decode;
 mod methods;
 
+// stable re-exports
+#[rustfmt::skip]
 #[stable(feature = "try_from", since = "1.34.0")]
 pub use self::convert::CharTryFromError;
 #[stable(feature = "char_from_str", since = "1.20.0")]
@@ -31,19 +33,21 @@ pub use self::convert::ParseCharError;
 #[stable(feature = "decode_utf16", since = "1.9.0")]
 pub use self::decode::{DecodeUtf16, DecodeUtf16Error};
 
+// perma-unstable re-exports
+#[rustfmt::skip]
 #[unstable(feature = "char_internals", reason = "exposed only for libstd", issue = "none")]
 pub use self::methods::encode_utf16_raw; // perma-unstable
 #[unstable(feature = "char_internals", reason = "exposed only for libstd", issue = "none")]
 pub use self::methods::encode_utf8_raw; // perma-unstable
 
+#[rustfmt::skip]
 use crate::ascii;
+pub(crate) use self::methods::EscapeDebugExtArgs;
 use crate::error::Error;
 use crate::escape;
 use crate::fmt::{self, Write};
 use crate::iter::{FusedIterator, TrustedLen, TrustedRandomAccess, TrustedRandomAccessNoCoerce};
 use crate::num::NonZero;
-
-pub(crate) use self::methods::EscapeDebugExtArgs;
 
 // UTF-8 ranges and tags for encoding characters
 const TAG_CONT: u8 = 0b1000_0000;

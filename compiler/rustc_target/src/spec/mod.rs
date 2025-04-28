@@ -34,16 +34,6 @@
 //! the target's settings, though `target-feature` and `link-args` will *add*
 //! to the list specified by the target, rather than replace.
 
-use crate::abi::call::Conv;
-use crate::abi::{Endian, Integer, Size, TargetDataLayout, TargetDataLayoutErrors};
-use crate::json::{Json, ToJson};
-use crate::spec::abi::Abi;
-use crate::spec::crt_objects::CrtObjects;
-use rustc_fs_util::try_canonicalize;
-use rustc_macros::{Decodable, Encodable, HashStable_Generic};
-use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
-use rustc_span::symbol::{kw, sym, Symbol};
-use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -51,15 +41,28 @@ use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fmt, io};
+
+use rustc_fs_util::try_canonicalize;
+use rustc_macros::{Decodable, Encodable, HashStable_Generic};
+use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
+use rustc_span::symbol::{kw, sym, Symbol};
+use serde_json::Value;
 use tracing::debug;
+
+use crate::abi::call::Conv;
+use crate::abi::{Endian, Integer, Size, TargetDataLayout, TargetDataLayoutErrors};
+use crate::json::{Json, ToJson};
+use crate::spec::abi::Abi;
+use crate::spec::crt_objects::CrtObjects;
 
 pub mod abi;
 pub mod crt_objects;
 
 mod base;
-pub use base::apple::deployment_target as current_apple_deployment_target;
-pub use base::apple::platform as current_apple_platform;
-pub use base::apple::sdk_version as current_apple_sdk_version;
+pub use base::apple::{
+    deployment_target as current_apple_deployment_target, platform as current_apple_platform,
+    sdk_version as current_apple_sdk_version,
+};
 pub use base::avr_gnu::ef_avr_arch;
 
 /// Linker is called through a C/C++ compiler.
@@ -1558,6 +1561,7 @@ supported_targets! {
     ("powerpc-unknown-linux-gnu", powerpc_unknown_linux_gnu),
     ("powerpc-unknown-linux-gnuspe", powerpc_unknown_linux_gnuspe),
     ("powerpc-unknown-linux-musl", powerpc_unknown_linux_musl),
+    ("powerpc-unknown-linux-muslspe", powerpc_unknown_linux_muslspe),
     ("powerpc64-ibm-aix", powerpc64_ibm_aix),
     ("powerpc64-unknown-linux-gnu", powerpc64_unknown_linux_gnu),
     ("powerpc64-unknown-linux-musl", powerpc64_unknown_linux_musl),
@@ -1746,6 +1750,9 @@ supported_targets! {
 
     ("x86_64-unikraft-linux-musl", x86_64_unikraft_linux_musl),
 
+    ("armv7-unknown-trusty", armv7_unknown_trusty),
+    ("aarch64-unknown-trusty", aarch64_unknown_trusty),
+
     ("riscv32i-unknown-none-elf", riscv32i_unknown_none_elf),
     ("riscv32im-risc0-zkvm-elf", riscv32im_risc0_zkvm_elf),
     ("riscv32im-unknown-none-elf", riscv32im_unknown_none_elf),
@@ -1853,6 +1860,19 @@ supported_targets! {
     ("x86_64-unknown-linux-ohos", x86_64_unknown_linux_ohos),
 
     ("x86_64-unknown-linux-none", x86_64_unknown_linux_none),
+
+    ("thumbv6m-nuttx-eabi", thumbv6m_nuttx_eabi),
+    ("thumbv7m-nuttx-eabi", thumbv7m_nuttx_eabi),
+    ("thumbv7em-nuttx-eabi", thumbv7em_nuttx_eabi),
+    ("thumbv7em-nuttx-eabihf", thumbv7em_nuttx_eabihf),
+    ("thumbv8m.base-nuttx-eabi", thumbv8m_base_nuttx_eabi),
+    ("thumbv8m.main-nuttx-eabi", thumbv8m_main_nuttx_eabi),
+    ("thumbv8m.main-nuttx-eabihf", thumbv8m_main_nuttx_eabihf),
+    ("riscv32imc-unknown-nuttx-elf", riscv32imc_unknown_nuttx_elf),
+    ("riscv32imac-unknown-nuttx-elf", riscv32imac_unknown_nuttx_elf),
+    ("riscv32imafc-unknown-nuttx-elf", riscv32imafc_unknown_nuttx_elf),
+    ("riscv64imac-unknown-nuttx-elf", riscv64imac_unknown_nuttx_elf),
+    ("riscv64gc-unknown-nuttx-elf", riscv64gc_unknown_nuttx_elf),
 
 }
 
@@ -3147,11 +3167,10 @@ impl Target {
                     if let Some(a) = o.as_array() {
                         for o in a {
                             if let Some(s) = o.as_str() {
-                                let p = s.split('=').collect::<Vec<_>>();
-                                if p.len() == 2 {
-                                    let k = p[0].to_string();
-                                    let v = p[1].to_string();
-                                    base.$key_name.to_mut().push((k.into(), v.into()));
+                                if let [k, v] = *s.split('=').collect::<Vec<_>>() {
+                                    base.$key_name
+                                        .to_mut()
+                                        .push((k.to_string().into(), v.to_string().into()))
                                 }
                             }
                         }
@@ -3354,8 +3373,7 @@ impl Target {
         target_triple: &TargetTriple,
         sysroot: &Path,
     ) -> Result<(Target, TargetWarnings), String> {
-        use std::env;
-        use std::fs;
+        use std::{env, fs};
 
         fn load_file(path: &Path) -> Result<(Target, TargetWarnings), String> {
             let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;

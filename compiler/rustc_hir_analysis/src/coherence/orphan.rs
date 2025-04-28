@@ -1,19 +1,22 @@
 //! Orphan checker: every impl either implements a trait defined in this
 //! crate or pertains to a type defined in this crate.
 
-use crate::errors;
-
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_errors::ErrorGuaranteed;
 use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
 use rustc_lint_defs::builtin::UNCOVERED_PARAM_IN_PROJECTION;
-use rustc_middle::ty::{self, Ty, TyCtxt};
-use rustc_middle::ty::{TypeFoldable, TypeFolder, TypeSuperFoldable};
-use rustc_middle::ty::{TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor};
+use rustc_middle::ty::{
+    self, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable, TypeSuperVisitable,
+    TypeVisitable, TypeVisitableExt, TypeVisitor,
+};
 use rustc_middle::{bug, span_bug};
 use rustc_span::def_id::{DefId, LocalDefId};
-use rustc_trait_selection::traits::{self, IsFirstInputType, UncoveredTyParams};
-use rustc_trait_selection::traits::{OrphanCheckErr, OrphanCheckMode};
+use rustc_trait_selection::traits::{
+    self, IsFirstInputType, OrphanCheckErr, OrphanCheckMode, UncoveredTyParams,
+};
+use tracing::{debug, instrument};
+
+use crate::errors;
 
 #[instrument(level = "debug", skip(tcx))]
 pub(crate) fn orphan_check_impl(
@@ -517,9 +520,10 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for UncoveredTyParamCollector<'_, 'tcx> {
         if !ty.has_type_flags(ty::TypeFlags::HAS_TY_INFER) {
             return;
         }
-        let Some(origin) = self.infcx.type_var_origin(ty) else {
+        let ty::Infer(ty::TyVar(vid)) = *ty.kind() else {
             return ty.super_visit_with(self);
         };
+        let origin = self.infcx.type_var_origin(vid);
         if let Some(def_id) = origin.param_def_id {
             self.uncovered_params.insert(def_id);
         }
@@ -546,9 +550,10 @@ impl<'cx, 'tcx> TypeFolder<TyCtxt<'tcx>> for TyVarReplacer<'cx, 'tcx> {
         if !ty.has_type_flags(ty::TypeFlags::HAS_TY_INFER) {
             return ty;
         }
-        let Some(origin) = self.infcx.type_var_origin(ty) else {
+        let ty::Infer(ty::TyVar(vid)) = *ty.kind() else {
             return ty.super_fold_with(self);
         };
+        let origin = self.infcx.type_var_origin(vid);
         if let Some(def_id) = origin.param_def_id {
             // The generics of an `impl` don't have a parent, we can index directly.
             let index = self.generics.param_def_id_to_index[&def_id];

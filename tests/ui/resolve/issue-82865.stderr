@@ -1,10 +1,13 @@
-error[E0433]: failed to resolve: maybe a missing crate `x`?
+error[E0433]: failed to resolve: you might be missing crate `x`
   --> $DIR/issue-82865.rs:5:5
    |
 LL | use x::y::z;
-   |     ^ maybe a missing crate `x`?
+   |     ^ you might be missing crate `x`
    |
-   = help: consider adding `extern crate x` to use the `x` crate
+help: consider importing the `x` crate
+   |
+LL + extern crate x;
+   |
 
 error[E0599]: no function or associated item named `z` found for struct `Box<_, _>` in the current scope
   --> $DIR/issue-82865.rs:8:10

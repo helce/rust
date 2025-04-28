@@ -4,6 +4,8 @@
 //! For more information about LLVM CFI and cross-language LLVM CFI support for the Rust compiler,
 //! see design document in the tracking issue #89653.
 
+use std::iter;
+
 use rustc_hir as hir;
 use rustc_hir::LangItem;
 use rustc_middle::bug;
@@ -12,9 +14,9 @@ use rustc_middle::ty::{
     self, ExistentialPredicateStableCmpExt as _, Instance, InstanceKind, IntTy, List, TraitRef, Ty,
     TyCtxt, TypeFoldable, TypeVisitableExt, UintTy,
 };
-use rustc_span::{def_id::DefId, sym};
+use rustc_span::def_id::DefId;
+use rustc_span::sym;
 use rustc_trait_selection::traits;
-use std::iter;
 use tracing::{debug, instrument};
 
 use crate::cfi::typeid::itanium_cxx_abi::encode::EncodeTyOptions;
@@ -144,7 +146,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for TransformTy<'tcx> {
                         !is_zst
                     });
                     if let Some(field) = field {
-                        let ty0 = self.tcx.type_of(field.did).instantiate(self.tcx, args);
+                        let ty0 = self.tcx.erase_regions(field.ty(self.tcx, args));
                         // Generalize any repr(transparent) user-defined type that is either a
                         // pointer or reference, and either references itself or any other type that
                         // contains or references itself, to avoid a reference cycle.
@@ -230,6 +232,7 @@ fn trait_object_ty<'tcx>(tcx: TyCtxt<'tcx>, poly_trait_ref: ty::PolyTraitRef<'tc
             tcx.associated_items(super_poly_trait_ref.def_id())
                 .in_definition_order()
                 .filter(|item| item.kind == ty::AssocKind::Type)
+                .filter(|item| !tcx.generics_require_sized_self(item.def_id))
                 .map(move |assoc_ty| {
                     super_poly_trait_ref.map_bound(|super_trait_ref| {
                         let alias_ty =
@@ -313,7 +316,7 @@ pub fn transform_instance<'tcx>(
             .drop_trait()
             .unwrap_or_else(|| bug!("typeid_for_instance: couldn't get drop_trait lang item"));
         let predicate = ty::ExistentialPredicate::Trait(ty::ExistentialTraitRef {
-            def_id: def_id,
+            def_id,
             args: List::empty(),
         });
         let predicates = tcx.mk_poly_existential_predicates(&[ty::Binder::dummy(predicate)]);

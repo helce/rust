@@ -1,4 +1,5 @@
-use crate::{ImplTraitContext, Resolver};
+use std::mem;
+
 use rustc_ast::visit::FnKind;
 use rustc_ast::*;
 use rustc_expand::expand::AstFragment;
@@ -8,8 +9,9 @@ use rustc_hir::def_id::LocalDefId;
 use rustc_span::hygiene::LocalExpnId;
 use rustc_span::symbol::{kw, sym, Symbol};
 use rustc_span::Span;
-use std::mem;
 use tracing::debug;
+
+use crate::{ImplTraitContext, Resolver};
 
 pub(crate) fn collect_definitions(
     resolver: &mut Resolver<'_, '_>,
@@ -312,8 +314,21 @@ impl<'a, 'b, 'tcx> visit::Visitor<'a> for DefCollector<'a, 'b, 'tcx> {
     }
 
     fn visit_anon_const(&mut self, constant: &'a AnonConst) {
-        let def = self.create_def(constant.id, kw::Empty, DefKind::AnonConst, constant.value.span);
-        self.with_parent(def, |this| visit::walk_anon_const(this, constant));
+        if self.resolver.tcx.features().const_arg_path
+            && constant.value.is_potential_trivial_const_arg()
+        {
+            // HACK(min_generic_const_args): don't create defs for anon consts if we think they will
+            // later be turned into ConstArgKind::Path's. because this is before resolve is done, we
+            // may accidentally identify a construction of a unit struct as a param and not create a
+            // def. we'll then create a def later in ast lowering in this case. the parent of nested
+            // items will be messed up, but that's ok because there can't be any if we're just looking
+            // for bare idents.
+            visit::walk_anon_const(self, constant)
+        } else {
+            let def =
+                self.create_def(constant.id, kw::Empty, DefKind::AnonConst, constant.value.span);
+            self.with_parent(def, |this| visit::walk_anon_const(this, constant));
+        }
     }
 
     fn visit_expr(&mut self, expr: &'a Expr) {

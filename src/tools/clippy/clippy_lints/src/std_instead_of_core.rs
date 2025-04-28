@@ -1,6 +1,6 @@
 use clippy_config::msrvs::Msrv;
 use clippy_config::Conf;
-use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::is_from_proc_macro;
 use rustc_attr::{StabilityLevel, StableSince};
 use rustc_errors::Applicability;
@@ -9,7 +9,6 @@ use rustc_hir::def_id::DefId;
 use rustc_hir::{HirId, Path, PathSegment};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
-use rustc_semver::RustcVersion;
 use rustc_session::impl_lint_pass;
 use rustc_span::symbol::kw;
 use rustc_span::{sym, Span};
@@ -136,14 +135,20 @@ impl<'tcx> LateLintPass<'tcx> for StdReexports {
                 _ => return,
             };
             if first_segment.ident.span != self.prev_span {
-                span_lint_and_sugg(
+                #[expect(clippy::collapsible_span_lint_calls, reason = "rust-clippy#7797")]
+                span_lint_and_then(
                     cx,
                     lint,
                     first_segment.ident.span,
                     format!("used import from `{used_mod}` instead of `{replace_with}`"),
-                    format!("consider importing the item from `{replace_with}`"),
-                    replace_with.to_string(),
-                    Applicability::MachineApplicable,
+                    |diag| {
+                        diag.span_suggestion(
+                            first_segment.ident.span,
+                            format!("consider importing the item from `{replace_with}`"),
+                            replace_with.to_string(),
+                            Applicability::MachineApplicable,
+                        );
+                    },
                 );
                 self.prev_span = first_segment.ident.span;
             }
@@ -179,9 +184,7 @@ fn is_stable(cx: &LateContext<'_>, mut def_id: DefId, msrv: &Msrv) -> bool {
             } = stability.level
         {
             let stable = match since {
-                StableSince::Version(v) => {
-                    msrv.meets(RustcVersion::new(v.major.into(), v.minor.into(), v.patch.into()))
-                },
+                StableSince::Version(v) => msrv.meets(v),
                 StableSince::Current => msrv.current().is_none(),
                 StableSince::Err => false,
             };

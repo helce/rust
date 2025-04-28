@@ -36,6 +36,24 @@ pub fn llvm_ar() -> LlvmAr {
     LlvmAr::new()
 }
 
+/// Construct a new `llvm-nm` invocation. This assumes that `llvm-nm` is available
+/// at `$LLVM_BIN_DIR/llvm-nm`.
+pub fn llvm_nm() -> LlvmNm {
+    LlvmNm::new()
+}
+
+/// Construct a new `llvm-bcanalyzer` invocation. This assumes that `llvm-bcanalyzer` is available
+/// at `$LLVM_BIN_DIR/llvm-bcanalyzer`.
+pub fn llvm_bcanalyzer() -> LlvmBcanalyzer {
+    LlvmBcanalyzer::new()
+}
+
+/// Construct a new `llvm-dwarfdump` invocation. This assumes that `llvm-dwarfdump` is available
+/// at `$LLVM_BIN_DIR/llvm-dwarfdump`.
+pub fn llvm_dwarfdump() -> LlvmDwarfdump {
+    LlvmDwarfdump::new()
+}
+
 /// A `llvm-readobj` invocation builder.
 #[derive(Debug)]
 #[must_use]
@@ -71,11 +89,35 @@ pub struct LlvmAr {
     cmd: Command,
 }
 
+/// A `llvm-nm` invocation builder.
+#[derive(Debug)]
+#[must_use]
+pub struct LlvmNm {
+    cmd: Command,
+}
+
+/// A `llvm-bcanalyzer` invocation builder.
+#[derive(Debug)]
+#[must_use]
+pub struct LlvmBcanalyzer {
+    cmd: Command,
+}
+
+/// A `llvm-dwarfdump` invocation builder.
+#[derive(Debug)]
+#[must_use]
+pub struct LlvmDwarfdump {
+    cmd: Command,
+}
+
 crate::macros::impl_common_helpers!(LlvmReadobj);
 crate::macros::impl_common_helpers!(LlvmProfdata);
 crate::macros::impl_common_helpers!(LlvmFilecheck);
 crate::macros::impl_common_helpers!(LlvmObjdump);
 crate::macros::impl_common_helpers!(LlvmAr);
+crate::macros::impl_common_helpers!(LlvmNm);
+crate::macros::impl_common_helpers!(LlvmBcanalyzer);
+crate::macros::impl_common_helpers!(LlvmDwarfdump);
 
 /// Generate the path to the bin directory of LLVM.
 #[must_use]
@@ -123,7 +165,8 @@ impl LlvmReadobj {
         self
     }
 
-    /// Pass `--symbols` to display the symbol.
+    /// Pass `--symbols` to display the symbol table, including both local
+    /// and global symbols.
     pub fn symbols(&mut self) -> &mut Self {
         self.cmd.arg("--symbols");
         self
@@ -218,6 +261,12 @@ impl LlvmObjdump {
         self.cmd.arg(path.as_ref());
         self
     }
+
+    /// Disassemble all executable sections found in the input files.
+    pub fn disassemble(&mut self) -> &mut Self {
+        self.cmd.arg("-d");
+        self
+    }
 }
 
 impl LlvmAr {
@@ -229,8 +278,28 @@ impl LlvmAr {
         Self { cmd }
     }
 
+    /// Automatically pass the commonly used arguments `rcus`, used for combining one or more
+    /// input object files into one output static library file.
     pub fn obj_to_ar(&mut self) -> &mut Self {
         self.cmd.arg("rcus");
+        self
+    }
+
+    /// Like `obj_to_ar` except creating a thin archive.
+    pub fn obj_to_thin_ar(&mut self) -> &mut Self {
+        self.cmd.arg("rcus").arg("--thin");
+        self
+    }
+
+    /// Extract archive members back to files.
+    pub fn extract(&mut self) -> &mut Self {
+        self.cmd.arg("x");
+        self
+    }
+
+    /// Print the table of contents.
+    pub fn table_of_contents(&mut self) -> &mut Self {
+        self.cmd.arg("t");
         self
     }
 
@@ -239,6 +308,54 @@ impl LlvmAr {
     pub fn output_input(&mut self, out: impl AsRef<Path>, input: impl AsRef<Path>) -> &mut Self {
         self.cmd.arg(out.as_ref());
         self.cmd.arg(input.as_ref());
+        self
+    }
+}
+
+impl LlvmNm {
+    /// Construct a new `llvm-nm` invocation. This assumes that `llvm-nm` is available
+    /// at `$LLVM_BIN_DIR/llvm-nm`.
+    pub fn new() -> Self {
+        let llvm_nm = llvm_bin_dir().join("llvm-nm");
+        let cmd = Command::new(llvm_nm);
+        Self { cmd }
+    }
+
+    /// Provide an input file.
+    pub fn input<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+        self.cmd.arg(path.as_ref());
+        self
+    }
+}
+
+impl LlvmBcanalyzer {
+    /// Construct a new `llvm-bcanalyzer` invocation. This assumes that `llvm-bcanalyzer` is available
+    /// at `$LLVM_BIN_DIR/llvm-bcanalyzer`.
+    pub fn new() -> Self {
+        let llvm_bcanalyzer = llvm_bin_dir().join("llvm-bcanalyzer");
+        let cmd = Command::new(llvm_bcanalyzer);
+        Self { cmd }
+    }
+
+    /// Provide an input file.
+    pub fn input<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+        self.cmd.arg(path.as_ref());
+        self
+    }
+}
+
+impl LlvmDwarfdump {
+    /// Construct a new `llvm-dwarfdump` invocation. This assumes that `llvm-dwarfdump` is available
+    /// at `$LLVM_BIN_DIR/llvm-dwarfdump`.
+    pub fn new() -> Self {
+        let llvm_dwarfdump = llvm_bin_dir().join("llvm-dwarfdump");
+        let cmd = Command::new(llvm_dwarfdump);
+        Self { cmd }
+    }
+
+    /// Provide an input file.
+    pub fn input<P: AsRef<Path>>(&mut self, path: P) -> &mut Self {
+        self.cmd.arg(path.as_ref());
         self
     }
 }

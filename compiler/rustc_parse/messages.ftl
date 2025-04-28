@@ -53,6 +53,12 @@ parse_bare_cr = {$double_quotes ->
 
 parse_bare_cr_in_raw_string = bare CR not allowed in raw string
 
+parse_binder_and_polarity = `for<...>` binder not allowed with `{$polarity}` trait polarity modifier
+    .label = there is not a well-defined meaning for a higher-ranked `{$polarity}` trait
+
+parse_binder_before_modifiers = `for<...>` binder should be placed before trait bound modifiers
+    .label = place the `for<...>` binder before any modifiers
+
 parse_bounds_not_allowed_on_trait_aliases = bounds are not allowed on trait aliases
 
 parse_box_not_pat = expected pattern, found {$descr}
@@ -60,7 +66,7 @@ parse_box_not_pat = expected pattern, found {$descr}
     .suggestion = escape `box` to use it as an identifier
 
 parse_box_syntax_removed = `box_syntax` has been removed
-    .suggestion = use `Box::new()` instead
+parse_box_syntax_removed_suggestion = use `Box::new()` instead
 
 parse_cannot_be_raw_ident = `{$ident}` cannot be a raw identifier
 
@@ -359,6 +365,7 @@ parse_inner_doc_comment_not_permitted = expected outer doc comment
     .sugg_change_inner_to_outer = to annotate the {$item}, change the doc comment from inner to outer style
 
 parse_invalid_attr_unsafe = `{$name}` is not an unsafe attribute
+    .label = this is not an unsafe attribute
     .suggestion = remove the `unsafe(...)`
     .note = extraneous unsafe is not allowed in attributes
 
@@ -576,6 +583,9 @@ parse_missing_trait_in_trait_impl = missing trait in a trait impl
 
 parse_modifier_lifetime = `{$modifier}` may only modify trait bounds, not lifetime bounds
     .suggestion = remove the `{$modifier}`
+
+parse_modifiers_and_polarity = `{$modifiers_concatenated}` trait not allowed with `{$polarity}` trait polarity modifier
+    .label = there is not a well-defined meaning for a `{$modifiers_concatenated} {$polarity}` trait
 
 parse_more_than_one_char = character literal may only contain one codepoint
     .followed_by = this `{$chr}` is followed by the combining {$len ->

@@ -51,15 +51,17 @@ impl RustcIce {
 /// A single warning that clippy issued while checking a `Crate`
 #[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ClippyWarning {
-    pub lint: String,
+    pub name: String,
     pub diag: Diagnostic,
+    pub krate: String,
+    /// The URL that points to the file and line of the lint emission
+    pub url: String,
 }
 
-#[allow(unused)]
 impl ClippyWarning {
-    pub fn new(mut diag: Diagnostic) -> Option<Self> {
-        let lint = diag.code.clone()?.code;
-        if !(lint.contains("clippy") || diag.message.contains("clippy"))
+    pub fn new(mut diag: Diagnostic, base_url: &str, krate: &str) -> Option<Self> {
+        let name = diag.code.clone()?.code;
+        if !(name.contains("clippy") || diag.message.contains("clippy"))
             || diag.message.contains("could not read cargo metadata")
         {
             return None;
@@ -69,7 +71,32 @@ impl ClippyWarning {
         let rendered = diag.rendered.as_mut().unwrap();
         *rendered = strip_ansi_escapes::strip_str(&rendered);
 
-        Some(Self { lint, diag })
+        // Turns out that there are lints without spans... For example Rust's
+        // `renamed_and_removed_lints` if the lint is given via the CLI.
+        let span = diag
+            .spans
+            .iter()
+            .find(|span| span.is_primary)
+            .or(diag.spans.first())
+            .unwrap_or_else(|| panic!("Diagnostic without span: {diag}"));
+        let file = &span.file_name;
+        let url = if let Some(src_split) = file.find("/src/") {
+            // This removes the initial `target/lintcheck/sources/<crate>-<version>/`
+            let src_split = src_split + "/src/".len();
+            let (_, file) = file.split_at(src_split);
+
+            let line_no = span.line_start;
+            base_url.replace("{file}", file).replace("{line}", &line_no.to_string())
+        } else {
+            file.clone()
+        };
+
+        Some(Self {
+            name,
+            diag,
+            url,
+            krate: krate.to_string(),
+        })
     }
 
     pub fn span(&self) -> &DiagnosticSpan {
@@ -81,7 +108,7 @@ impl ClippyWarning {
         let mut file = span.file_name.clone();
         let file_with_pos = format!("{file}:{}:{}", span.line_start, span.line_end);
         match format {
-            OutputFormat::Text => format!("{file_with_pos} {} \"{}\"\n", self.lint, self.diag.message),
+            OutputFormat::Text => format!("{file_with_pos} {} \"{}\"\n", self.name, self.diag.message),
             OutputFormat::Markdown => {
                 if file.starts_with("target") {
                     file.insert_str(0, "../");
@@ -89,7 +116,7 @@ impl ClippyWarning {
 
                 let mut output = String::from("| ");
                 write!(output, "[`{file_with_pos}`]({file}#L{})", span.line_start).unwrap();
-                write!(output, r#" | `{:<50}` | "{}" |"#, self.lint, self.diag.message).unwrap();
+                write!(output, r#" | `{:<50}` | "{}" |"#, self.name, self.diag.message).unwrap();
                 output.push('\n');
                 output
             },
@@ -137,7 +164,7 @@ fn gather_stats(warnings: &[ClippyWarning]) -> (String, HashMap<&String, usize>)
     let mut counter: HashMap<&String, usize> = HashMap::new();
     warnings
         .iter()
-        .for_each(|wrn| *counter.entry(&wrn.lint).or_insert(0) += 1);
+        .for_each(|wrn| *counter.entry(&wrn.name).or_insert(0) += 1);
 
     // collect into a tupled list for sorting
     let mut stats: Vec<(&&String, &usize)> = counter.iter().collect();

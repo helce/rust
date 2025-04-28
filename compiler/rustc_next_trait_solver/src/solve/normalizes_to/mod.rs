@@ -6,8 +6,7 @@ mod weak_types;
 use rustc_type_ir::fast_reject::{DeepRejectCtxt, TreatParams};
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
-use rustc_type_ir::Upcast as _;
-use rustc_type_ir::{self as ty, Interner, NormalizesTo};
+use rustc_type_ir::{self as ty, Interner, NormalizesTo, Upcast as _};
 use tracing::instrument;
 
 use crate::delegate::SolverDelegate;
@@ -863,7 +862,7 @@ where
         _ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
     ) -> Result<Candidate<I>, NoSolution> {
-        panic!("`BikeshedIntrinsicFrom` does not have an associated type: {:?}", goal)
+        panic!("`TransmuteFrom` does not have an associated type: {:?}", goal)
     }
 
     fn consider_builtin_effects_intersection_candidate(

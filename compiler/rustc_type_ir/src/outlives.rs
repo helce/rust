@@ -2,6 +2,7 @@
 //! refers to rules defined in RFC 1214 (`OutlivesFooBar`), so see that
 //! RFC for reference.
 
+use derive_where::derive_where;
 use smallvec::{smallvec, SmallVec};
 
 use crate::data_structures::SsoHashSet;
@@ -9,8 +10,7 @@ use crate::inherent::*;
 use crate::visit::{TypeSuperVisitable, TypeVisitable, TypeVisitableExt as _, TypeVisitor};
 use crate::{self as ty, Interner};
 
-#[derive(derivative::Derivative)]
-#[derivative(Debug(bound = ""))]
+#[derive_where(Debug; I: Interner)]
 pub enum Component<I: Interner> {
     Region(I::Region),
     Param(I::ParamTy),
@@ -68,6 +68,9 @@ struct OutlivesCollector<'a, I: Interner> {
 }
 
 impl<I: Interner> TypeVisitor<I> for OutlivesCollector<'_, I> {
+    #[cfg(not(feature = "nightly"))]
+    type Result = ();
+
     fn visit_ty(&mut self, ty: I::Ty) -> Self::Result {
         if !self.visited.insert(ty) {
             return;
@@ -186,7 +189,7 @@ impl<I: Interner> TypeVisitor<I> for OutlivesCollector<'_, I> {
             | ty::Slice(_)
             | ty::RawPtr(_, _)
             | ty::Ref(_, _, _)
-            | ty::FnPtr(_)
+            | ty::FnPtr(..)
             | ty::Dynamic(_, _, _)
             | ty::Tuple(_) => {
                 ty.super_visit_with(self);

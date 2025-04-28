@@ -1,4 +1,5 @@
-use clippy_utils::diagnostics::span_lint_and_note;
+use clippy_config::Conf;
+use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::macros::root_macro_call_first_node;
 use rustc_ast::LitKind;
 use rustc_hir::{Expr, ExprKind};
@@ -41,9 +42,10 @@ pub struct LargeIncludeFile {
 }
 
 impl LargeIncludeFile {
-    #[must_use]
-    pub fn new(max_file_size: u64) -> Self {
-        Self { max_file_size }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            max_file_size: conf.max_include_file_size,
+        }
     }
 }
 
@@ -64,16 +66,18 @@ impl LateLintPass<'_> for LargeIncludeFile {
             && (cx.tcx.is_diagnostic_item(sym::include_bytes_macro, macro_call.def_id)
                 || cx.tcx.is_diagnostic_item(sym::include_str_macro, macro_call.def_id))
         {
-            span_lint_and_note(
+            #[expect(clippy::collapsible_span_lint_calls, reason = "rust-clippy#7797")]
+            span_lint_and_then(
                 cx,
                 LARGE_INCLUDE_FILE,
                 expr.span.source_callsite(),
                 "attempted to include a large file",
-                None,
-                format!(
-                    "the configuration allows a maximum size of {} bytes",
-                    self.max_file_size
-                ),
+                |diag| {
+                    diag.note(format!(
+                        "the configuration allows a maximum size of {} bytes",
+                        self.max_file_size
+                    ));
+                },
             );
         }
     }

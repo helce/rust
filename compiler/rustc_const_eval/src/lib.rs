@@ -6,7 +6,6 @@
 #![feature(box_patterns)]
 #![feature(decl_macro)]
 #![feature(if_let_guard)]
-#![feature(is_none_or)]
 #![feature(let_chains)]
 #![feature(never_type)]
 #![feature(rustdoc_internals)]
@@ -26,8 +25,8 @@ pub mod util;
 use std::sync::atomic::AtomicBool;
 
 pub use errors::ReportErrorExt;
-
-use rustc_middle::{ty, util::Providers};
+use rustc_middle::ty;
+use rustc_middle::util::Providers;
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 

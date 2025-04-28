@@ -1,19 +1,20 @@
 use std::collections::BTreeMap;
 
-use super::NormalizeExt;
-use super::{ObligationCause, PredicateObligation, SelectionContext};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_errors::Diag;
 use rustc_hir::def_id::DefId;
 use rustc_infer::infer::{InferCtxt, InferOk};
+pub use rustc_infer::traits::util::*;
 use rustc_middle::bug;
-use rustc_middle::ty::GenericArgsRef;
-use rustc_middle::ty::{self, ImplSubject, Ty, TyCtxt, TypeVisitableExt, Upcast};
-use rustc_middle::ty::{TypeFoldable, TypeFolder, TypeSuperFoldable};
+use rustc_middle::ty::{
+    self, GenericArgsRef, ImplSubject, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable,
+    TypeVisitableExt, Upcast,
+};
 use rustc_span::Span;
 use smallvec::{smallvec, SmallVec};
+use tracing::debug;
 
-pub use rustc_infer::traits::util::*;
+use super::{NormalizeExt, ObligationCause, PredicateObligation, SelectionContext};
 
 ///////////////////////////////////////////////////////////////////////////
 // `TraitAliasExpander` iterator
@@ -131,7 +132,7 @@ impl<'tcx> TraitAliasExpander<'tcx> {
         let predicates = tcx.explicit_super_predicates_of(trait_ref.def_id());
         debug!(?predicates);
 
-        let items = predicates.predicates.iter().rev().filter_map(|(pred, span)| {
+        let items = predicates.skip_binder().iter().rev().filter_map(|(pred, span)| {
             pred.instantiate_supertrait(tcx, trait_ref)
                 .as_trait_clause()
                 .map(|trait_ref| item.clone_and_push(trait_ref.map_bound(|t| t.trait_ref), *span))

@@ -1,5 +1,5 @@
+#![feature(exhaustive_patterns)]
 #![deny(unreachable_patterns)]
-#![feature(min_exhaustive_patterns)]
 #![feature(never_type)]
 
 #[non_exhaustive]

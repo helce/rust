@@ -1,9 +1,8 @@
 use crate::ffi::{OsStr, OsString};
-use crate::io;
 use crate::path::{Path, PathBuf, Prefix};
-use crate::ptr;
 use crate::sys::api::utf16;
 use crate::sys::pal::{c, fill_utf16_buf, os2path, to_u16s};
+use crate::{io, ptr};
 
 #[cfg(test)]
 mod tests;
@@ -223,7 +222,7 @@ pub(crate) fn maybe_verbatim(path: &Path) -> io::Result<Vec<u16>> {
     get_long_path(path, true)
 }
 
-/// Get a normalized absolute path that can bypass path length limits.
+/// Gets a normalized absolute path that can bypass path length limits.
 ///
 /// Setting prefer_verbatim to true suggests a stronger preference for verbatim
 /// paths even when not strictly necessary. This allows the Windows API to avoid

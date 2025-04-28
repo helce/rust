@@ -1,26 +1,21 @@
 use core::ptr::addr_of;
 
-use crate::os::windows::prelude::*;
-
+use super::api::{self, WinError};
+use super::{to_u16s, IoResult};
 use crate::borrow::Cow;
 use crate::ffi::{c_void, OsStr, OsString};
-use crate::fmt;
 use crate::io::{self, BorrowedCursor, Error, IoSlice, IoSliceMut, SeekFrom};
 use crate::mem::{self, MaybeUninit};
 use crate::os::windows::io::{AsHandle, BorrowedHandle};
+use crate::os::windows::prelude::*;
 use crate::path::{Path, PathBuf};
-use crate::ptr;
-use crate::slice;
 use crate::sync::Arc;
 use crate::sys::handle::Handle;
+use crate::sys::path::maybe_verbatim;
 use crate::sys::time::SystemTime;
 use crate::sys::{c, cvt, Align8};
-use crate::sys_common::{AsInner, FromInner, IntoInner};
-use crate::thread;
-
-use super::api::{self, WinError};
-use super::{to_u16s, IoResult};
-use crate::sys::path::maybe_verbatim;
+use crate::sys_common::{ignore_notfound, AsInner, FromInner, IntoInner};
+use crate::{fmt, ptr, slice, thread};
 
 pub struct File {
     handle: Handle,
@@ -416,8 +411,8 @@ impl File {
                     dwHighDateTime: (info.LastWriteTime >> 32) as u32,
                 },
                 change_time: Some(c::FILETIME {
-                    dhLowDateTime: info.ChangeTime as c::DWORD,
-                    dhHighDateTime: (info.ChangeTime >> 32) as c::DWORD,
+                    dwLowDateTime: info.ChangeTime as u32,
+                    dwHighDateTime: (info.ChangeTime >> 32) as u32,
                 }),
                 file_size: 0,
                 reparse_tag: 0,
@@ -637,7 +632,7 @@ impl File {
         Ok(())
     }
 
-    /// Get only basic file information such as attributes and file times.
+    /// Gets only basic file information such as attributes and file times.
     fn basic_info(&self) -> io::Result<c::FILE_BASIC_INFO> {
         unsafe {
             let mut info: c::FILE_BASIC_INFO = mem::zeroed();
@@ -1165,7 +1160,7 @@ pub fn remove_dir_all(path: &Path) -> io::Result<()> {
         return Err(io::Error::from_raw_os_error(c::ERROR_DIRECTORY as _));
     }
 
-    match remove_dir_all_iterative(&file, File::posix_delete) {
+    match ignore_notfound(remove_dir_all_iterative(&file, File::posix_delete)) {
         Err(e) => {
             if let Some(code) = e.raw_os_error() {
                 match code as u32 {

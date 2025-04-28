@@ -1,8 +1,3 @@
-use super::errors::{InvalidAbi, InvalidAbiReason, InvalidAbiSuggestion, MisplacedRelaxTraitBound};
-use super::ResolverAstLoweringExt;
-use super::{AstOwner, ImplTraitContext, ImplTraitPosition};
-use super::{FnDeclKind, LoweringContext, ParamMode};
-
 use rustc_ast::ptr::P;
 use rustc_ast::visit::AssocCtxt;
 use rustc_ast::*;
@@ -21,6 +16,12 @@ use rustc_target::spec::abi;
 use smallvec::{smallvec, SmallVec};
 use thin_vec::ThinVec;
 use tracing::instrument;
+
+use super::errors::{InvalidAbi, InvalidAbiReason, InvalidAbiSuggestion, MisplacedRelaxTraitBound};
+use super::{
+    AstOwner, FnDeclKind, ImplTraitContext, ImplTraitPosition, LoweringContext, ParamMode,
+    ResolverAstLoweringExt,
+};
 
 pub(super) struct ItemLowerer<'a, 'hir> {
     pub(super) tcx: TyCtxt<'hir>,
@@ -61,7 +62,10 @@ impl<'a, 'hir> ItemLowerer<'a, 'hir> {
 
         for (def_id, info) in lctx.children {
             let owner = self.owners.ensure_contains_elem(def_id, || hir::MaybeOwner::Phantom);
-            debug_assert!(matches!(owner, hir::MaybeOwner::Phantom));
+            debug_assert!(
+                matches!(owner, hir::MaybeOwner::Phantom),
+                "duplicate copy of {def_id:?} in lctx.children"
+            );
             *owner = info;
         }
     }
@@ -169,7 +173,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         id: NodeId,
         hir_id: hir::HirId,
         ident: &mut Ident,
-        attrs: Option<&'hir [Attribute]>,
+        attrs: &'hir [Attribute],
         vis_span: Span,
         i: &ItemKind,
     ) -> hir::ItemKind<'hir> {
@@ -233,7 +237,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         });
                     let sig = hir::FnSig {
                         decl,
-                        header: this.lower_fn_header(*header),
+                        header: this.lower_fn_header(*header, hir::Safety::Safe),
                         span: this.lower_span(*fn_sig_span),
                     };
                     hir::ItemKind::Fn(sig, generics, body_id)
@@ -485,7 +489,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         id: NodeId,
         vis_span: Span,
         ident: &mut Ident,
-        attrs: Option<&'hir [Attribute]>,
+        attrs: &'hir [Attribute],
     ) -> hir::ItemKind<'hir> {
         let path = &tree.prefix;
         let segments = prefix.segments.iter().chain(path.segments.iter()).cloned().collect();
@@ -563,7 +567,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         // `ItemLocalId` and the new owner. (See `lower_node_id`)
                         let kind =
                             this.lower_use_tree(use_tree, &prefix, id, vis_span, &mut ident, attrs);
-                        if let Some(attrs) = attrs {
+                        if !attrs.is_empty() {
                             this.attrs.insert(hir::ItemLocalId::ZERO, attrs);
                         }
 
@@ -664,7 +668,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 ForeignItemKind::Fn(box Fn { sig, generics, .. }) => {
                     let fdec = &sig.decl;
                     let itctx = ImplTraitContext::Universal;
-                    let (generics, (fn_dec, fn_args)) =
+                    let (generics, (decl, fn_args)) =
                         self.lower_generics(generics, Const::No, false, i.id, itctx, |this| {
                             (
                                 // Disallow `impl Trait` in foreign items.
@@ -678,9 +682,15 @@ impl<'hir> LoweringContext<'_, 'hir> {
                                 this.lower_fn_params_to_names(fdec),
                             )
                         });
-                    let safety = self.lower_safety(sig.header.safety, hir::Safety::Unsafe);
 
-                    hir::ForeignItemKind::Fn(fn_dec, fn_args, generics, safety)
+                    // Unmarked safety in unsafe block defaults to unsafe.
+                    let header = self.lower_fn_header(sig.header, hir::Safety::Unsafe);
+
+                    hir::ForeignItemKind::Fn(
+                        hir::FnSig { header, decl, span: self.lower_span(sig.span) },
+                        fn_args,
+                        generics,
+                    )
                 }
                 ForeignItemKind::Static(box StaticItem { ty, mutability, expr: _, safety }) => {
                     let ty = self
@@ -713,7 +723,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             hir_id,
             def_id: self.local_def_id(v.id),
             data: self.lower_variant_data(hir_id, &v.data),
-            disr_expr: v.disr_expr.as_ref().map(|e| self.lower_anon_const(e)),
+            disr_expr: v.disr_expr.as_ref().map(|e| self.lower_anon_const_to_anon_const(e)),
             ident: self.lower_ident(v.ident),
             span: self.lower_span(v.span),
         }
@@ -754,18 +764,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         &mut self,
         (index, f): (usize, &FieldDef),
     ) -> hir::FieldDef<'hir> {
-        let ty = if let TyKind::Path(qself, path) = &f.ty.kind {
-            let t = self.lower_path_ty(
-                &f.ty,
-                qself,
-                path,
-                ParamMode::ExplicitNamed, // no `'_` in declarations (Issue #61124)
-                ImplTraitContext::Disallowed(ImplTraitPosition::FieldTy),
-            );
-            self.arena.alloc(t)
-        } else {
-            self.lower_ty(&f.ty, ImplTraitContext::Disallowed(ImplTraitPosition::FieldTy))
-        };
+        let ty = self.lower_ty(&f.ty, ImplTraitContext::Disallowed(ImplTraitPosition::FieldTy));
         let hir_id = self.lower_node_id(f.id);
         self.lower_attrs(hir_id, &f.attrs);
         hir::FieldDef {
@@ -1178,7 +1177,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
     /// into the body. This is to make sure that the future actually owns the
     /// arguments that are passed to the function, and to ensure things like
     /// drop order are stable.
-    pub fn lower_coroutine_body_with_moved_arguments(
+    pub(crate) fn lower_coroutine_body_with_moved_arguments(
         &mut self,
         decl: &FnDecl,
         lower_body: impl FnOnce(&mut LoweringContext<'_, 'hir>) -> hir::Expr<'hir>,
@@ -1386,7 +1385,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         coroutine_kind: Option<CoroutineKind>,
         parent_constness: Const,
     ) -> (&'hir hir::Generics<'hir>, hir::FnSig<'hir>) {
-        let header = self.lower_fn_header(sig.header);
+        let header = self.lower_fn_header(sig.header, hir::Safety::Safe);
         // Don't pass along the user-provided constness of trait associated functions; we don't want to
         // synthesize a host effect param for them. We reject `const` on them during AST validation.
         let constness =
@@ -1399,15 +1398,19 @@ impl<'hir> LoweringContext<'_, 'hir> {
         (generics, hir::FnSig { header, decl, span: self.lower_span(sig.span) })
     }
 
-    pub(super) fn lower_fn_header(&mut self, h: FnHeader) -> hir::FnHeader {
+    pub(super) fn lower_fn_header(
+        &mut self,
+        h: FnHeader,
+        default_safety: hir::Safety,
+    ) -> hir::FnHeader {
         let asyncness = if let Some(CoroutineKind::Async { span, .. }) = h.coroutine_kind {
             hir::IsAsync::Async(span)
         } else {
             hir::IsAsync::NotAsync
         };
         hir::FnHeader {
-            safety: self.lower_safety(h.safety, hir::Safety::Safe),
-            asyncness: asyncness,
+            safety: self.lower_safety(h.safety, default_safety),
+            asyncness,
             constness: self.lower_constness(h.constness),
             abi: self.lower_extern(h.ext),
         }
@@ -1522,8 +1525,14 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     continue;
                 }
                 let is_param = *is_param.get_or_insert_with(compute_is_param);
-                if !is_param {
-                    self.dcx().emit_err(MisplacedRelaxTraitBound { span: bound.span() });
+                if !is_param && !self.tcx.features().more_maybe_bounds {
+                    self.tcx
+                        .sess
+                        .create_feature_err(
+                            MisplacedRelaxTraitBound { span: bound.span() },
+                            sym::more_maybe_bounds,
+                        )
+                        .emit();
                 }
             }
         }
@@ -1601,7 +1610,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
 
         if let Some((span, hir_id, def_id)) = host_param_parts {
             let const_node_id = self.next_node_id();
-            let anon_const =
+            let anon_const_did =
                 self.create_def(def_id, const_node_id, kw::Empty, DefKind::AnonConst, span);
 
             let const_id = self.next_id();
@@ -1609,7 +1618,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             let bool_id = self.next_id();
 
             self.children.push((def_id, hir::MaybeOwner::NonOwner(hir_id)));
-            self.children.push((anon_const, hir::MaybeOwner::NonOwner(const_id)));
+            self.children.push((anon_const_did, hir::MaybeOwner::NonOwner(const_id)));
 
             let const_body = self.lower_body(|this| {
                 (
@@ -1624,6 +1633,17 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 )
             });
 
+            let default_ac = self.arena.alloc(hir::AnonConst {
+                def_id: anon_const_did,
+                hir_id: const_id,
+                body: const_body,
+                span,
+            });
+            let default_ct = self.arena.alloc(hir::ConstArg {
+                hir_id: self.next_id(),
+                kind: hir::ConstArgKind::Anon(default_ac),
+                is_desugared_from_effects: false,
+            });
             let param = hir::GenericParam {
                 def_id,
                 hir_id,
@@ -1647,13 +1667,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                             }),
                         )),
                     )),
-                    // FIXME(effects) we might not need a default.
-                    default: Some(self.arena.alloc(hir::AnonConst {
-                        def_id: anon_const,
-                        hir_id: const_id,
-                        body: const_body,
-                        span,
-                    })),
+                    default: Some(default_ct),
                     is_host_effect: true,
                     synthetic: true,
                 },

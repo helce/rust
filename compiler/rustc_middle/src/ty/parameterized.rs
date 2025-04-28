@@ -1,7 +1,8 @@
+use std::hash::Hash;
+
 use rustc_data_structures::unord::UnordMap;
 use rustc_hir::def_id::DefIndex;
 use rustc_index::{Idx, IndexVec};
-use std::hash::Hash;
 
 use crate::ty;
 
@@ -58,6 +59,7 @@ trivially_parameterized_over_tcx! {
     std::string::String,
     crate::metadata::ModChild,
     crate::middle::codegen_fn_attrs::CodegenFnAttrs,
+    crate::middle::codegen_fn_attrs::TargetFeature,
     crate::middle::debugger_visualizer::DebuggerVisualizerFile,
     crate::middle::exported_symbols::SymbolExportInfo,
     crate::middle::lib_features::FeatureStability,

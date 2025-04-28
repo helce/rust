@@ -9,13 +9,15 @@ use rustc_errors::Diag;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_middle::ty::print::RegionHighlightMode;
-use rustc_middle::ty::{self, RegionVid, Ty};
-use rustc_middle::ty::{GenericArgKind, GenericArgsRef};
+use rustc_middle::ty::{self, GenericArgKind, GenericArgsRef, RegionVid, Ty};
 use rustc_middle::{bug, span_bug};
 use rustc_span::symbol::{kw, sym, Symbol};
 use rustc_span::{Span, DUMMY_SP};
+use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
+use tracing::{debug, instrument};
 
-use crate::{universal_regions::DefiningTy, MirBorrowckCtxt};
+use crate::universal_regions::DefiningTy;
+use crate::MirBorrowckCtxt;
 
 /// A name for a particular region used in emitting diagnostics. This name could be a generated
 /// name like `'1`, a name used by the user like `'a`, or a name like `'static`.
@@ -457,8 +459,11 @@ impl<'tcx> MirBorrowckCtxt<'_, '_, '_, 'tcx> {
     ) -> RegionNameHighlight {
         let mut highlight = RegionHighlightMode::default();
         highlight.highlighting_region_vid(self.infcx.tcx, needle_fr, counter);
-        let type_name =
-            self.infcx.extract_inference_diagnostics_data(ty.into(), Some(highlight)).name;
+        let type_name = self
+            .infcx
+            .err_ctxt()
+            .extract_inference_diagnostics_data(ty.into(), Some(highlight))
+            .name;
 
         debug!(
             "highlight_if_we_cannot_match_hir_ty: type_name={:?} needle_fr={:?}",
@@ -872,8 +877,11 @@ impl<'tcx> MirBorrowckCtxt<'_, '_, '_, 'tcx> {
 
         let mut highlight = RegionHighlightMode::default();
         highlight.highlighting_region_vid(tcx, fr, *self.next_region_name.try_borrow().unwrap());
-        let type_name =
-            self.infcx.extract_inference_diagnostics_data(yield_ty.into(), Some(highlight)).name;
+        let type_name = self
+            .infcx
+            .err_ctxt()
+            .extract_inference_diagnostics_data(yield_ty.into(), Some(highlight))
+            .name;
 
         let yield_span = match tcx.hir_node(self.mir_hir_id()) {
             hir::Node::Expr(hir::Expr {

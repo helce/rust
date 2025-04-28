@@ -11,18 +11,18 @@
 // wasm and nvptx targets don't produce rlib files that object can parse.
 //@ ignore-wasm
 //@ ignore-nvptx64
+//@ only-nightly
 
 #![deny(warnings)]
 
-use run_make_support::object::read::archive::ArchiveFile;
-use run_make_support::object::read::Object;
-use run_make_support::object::ObjectSection;
-use run_make_support::object::ObjectSymbol;
-use run_make_support::object::RelocationTarget;
-use run_make_support::rfs::{read, read_dir};
-use run_make_support::{cmd, env_var, object};
 use std::collections::HashSet;
 use std::path::PathBuf;
+
+use run_make_support::object::read::archive::ArchiveFile;
+use run_make_support::object::read::Object;
+use run_make_support::object::{ObjectSection, ObjectSymbol, RelocationTarget};
+use run_make_support::rfs::{read, read_dir};
+use run_make_support::{cmd, env_var, object};
 
 fn main() {
     let target_dir = PathBuf::from("target");

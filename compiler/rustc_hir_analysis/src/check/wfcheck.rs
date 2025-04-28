@@ -1,14 +1,10 @@
-use crate::autoderef::Autoderef;
-use crate::collect::CollectItemTypesVisitor;
-use crate::constrained_generic_params::{identify_constrained_generic_params, Parameter};
-use crate::errors;
-use crate::fluent_generated as fluent;
+use std::cell::LazyCell;
+use std::ops::{ControlFlow, Deref};
 
 use hir::intravisit::{self, Visitor};
-use rustc_ast as ast;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
-use rustc_errors::{codes::*, pluralize, struct_span_code_err, Applicability, ErrorGuaranteed};
-use rustc_hir as hir;
+use rustc_errors::codes::*;
+use rustc_errors::{pluralize, struct_span_code_err, Applicability, ErrorGuaranteed};
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId, LocalModDefId};
 use rustc_hir::lang_items::LangItem;
@@ -20,16 +16,15 @@ use rustc_middle::query::Providers;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::trait_def::TraitSpecializationKind;
 use rustc_middle::ty::{
-    self, AdtKind, GenericParamDefKind, Ty, TyCtxt, TypeFoldable, TypeSuperVisitable,
-    TypeVisitable, TypeVisitableExt, TypeVisitor, Upcast,
+    self, AdtKind, GenericArgKind, GenericArgs, GenericParamDefKind, Ty, TyCtxt, TypeFoldable,
+    TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor, Upcast,
 };
-use rustc_middle::ty::{GenericArgKind, GenericArgs};
 use rustc_middle::{bug, span_bug};
 use rustc_session::parse::feature_err;
 use rustc_span::symbol::{sym, Ident};
 use rustc_span::{Span, DUMMY_SP};
 use rustc_target::spec::abi::Abi;
-use rustc_trait_selection::error_reporting::traits::TypeErrCtxtExt;
+use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
 use rustc_trait_selection::regions::InferCtxtRegionExt;
 use rustc_trait_selection::traits::misc::{
     type_allowed_to_implement_const_param_ty, ConstParamTyImplementationError,
@@ -41,9 +36,13 @@ use rustc_trait_selection::traits::{
 };
 use rustc_type_ir::solve::NoSolution;
 use rustc_type_ir::TypeFlags;
+use tracing::{debug, instrument};
+use {rustc_ast as ast, rustc_hir as hir};
 
-use std::cell::LazyCell;
-use std::ops::{ControlFlow, Deref};
+use crate::autoderef::Autoderef;
+use crate::collect::CollectItemTypesVisitor;
+use crate::constrained_generic_params::{identify_constrained_generic_params, Parameter};
+use crate::{errors, fluent_generated as fluent};
 
 pub(super) struct WfCheckingCtxt<'a, 'tcx> {
     pub(super) ocx: ObligationCtxt<'a, 'tcx, FulfillmentError<'tcx>>,
@@ -352,8 +351,8 @@ fn check_foreign_item<'tcx>(
     );
 
     match item.kind {
-        hir::ForeignItemKind::Fn(decl, ..) => {
-            check_item_fn(tcx, def_id, item.ident, item.span, decl)
+        hir::ForeignItemKind::Fn(sig, ..) => {
+            check_item_fn(tcx, def_id, item.ident, item.span, sig.decl)
         }
         hir::ForeignItemKind::Static(ty, ..) => {
             check_item_type(tcx, def_id, ty.span, UnsizedHandling::AllowIfForeignTail)
@@ -749,7 +748,7 @@ fn region_known_to_outlive<'tcx>(
     region_b: ty::Region<'tcx>,
 ) -> bool {
     test_region_obligations(tcx, id, param_env, wf_tys, |infcx| {
-        infcx.sub_regions(infer::RelateRegionParamBound(DUMMY_SP), region_b, region_a);
+        infcx.sub_regions(infer::RelateRegionParamBound(DUMMY_SP, None), region_b, region_a);
     })
 }
 
@@ -831,7 +830,7 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for GATArgsCollector<'tcx> {
 
 fn could_be_self(trait_def_id: LocalDefId, ty: &hir::Ty<'_>) -> bool {
     match ty.kind {
-        hir::TyKind::TraitObject([trait_ref], ..) => match trait_ref.trait_ref.path.segments {
+        hir::TyKind::TraitObject([(trait_ref, _)], ..) => match trait_ref.trait_ref.path.segments {
             [s] => s.res.opt_def_id() == Some(trait_def_id.to_def_id()),
             _ => false,
         },
@@ -922,10 +921,8 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) -> Result<(), 
         } => {
             let ty = tcx.type_of(param.def_id).instantiate_identity();
 
-            if tcx.features().adt_const_params {
+            if tcx.features().unsized_const_params {
                 enter_wf_checking_ctxt(tcx, hir_ty.span, param.def_id, |wfcx| {
-                    let trait_def_id =
-                        tcx.require_lang_item(LangItem::ConstParamTy, Some(hir_ty.span));
                     wfcx.register_bound(
                         ObligationCause::new(
                             hir_ty.span,
@@ -934,14 +931,28 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) -> Result<(), 
                         ),
                         wfcx.param_env,
                         ty,
-                        trait_def_id,
+                        tcx.require_lang_item(LangItem::UnsizedConstParamTy, Some(hir_ty.span)),
+                    );
+                    Ok(())
+                })
+            } else if tcx.features().adt_const_params {
+                enter_wf_checking_ctxt(tcx, hir_ty.span, param.def_id, |wfcx| {
+                    wfcx.register_bound(
+                        ObligationCause::new(
+                            hir_ty.span,
+                            param.def_id,
+                            ObligationCauseCode::ConstParam(ty),
+                        ),
+                        wfcx.param_env,
+                        ty,
+                        tcx.require_lang_item(LangItem::ConstParamTy, Some(hir_ty.span)),
                     );
                     Ok(())
                 })
             } else {
                 let mut diag = match ty.kind() {
                     ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::Error(_) => return Ok(()),
-                    ty::FnPtr(_) => tcx.dcx().struct_span_err(
+                    ty::FnPtr(..) => tcx.dcx().struct_span_err(
                         hir_ty.span,
                         "using function pointers as const generic parameters is forbidden",
                     ),
@@ -958,14 +969,29 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) -> Result<(), 
                 diag.note("the only supported types are integers, `bool` and `char`");
 
                 let cause = ObligationCause::misc(hir_ty.span, param.def_id);
+                let adt_const_params_feature_string =
+                    " more complex and user defined types".to_string();
                 let may_suggest_feature = match type_allowed_to_implement_const_param_ty(
                     tcx,
                     tcx.param_env(param.def_id),
                     ty,
+                    LangItem::ConstParamTy,
                     cause,
                 ) {
                     // Can never implement `ConstParamTy`, don't suggest anything.
-                    Err(ConstParamTyImplementationError::NotAnAdtOrBuiltinAllowed) => false,
+                    Err(
+                        ConstParamTyImplementationError::NotAnAdtOrBuiltinAllowed
+                        | ConstParamTyImplementationError::InvalidInnerTyOfBuiltinTy(..),
+                    ) => None,
+                    Err(ConstParamTyImplementationError::UnsizedConstParamsFeatureRequired) => {
+                        Some(vec![
+                            (adt_const_params_feature_string, sym::adt_const_params),
+                            (
+                                " references to implement the `ConstParamTy` trait".into(),
+                                sym::unsized_const_params,
+                            ),
+                        ])
+                    }
                     // May be able to implement `ConstParamTy`. Only emit the feature help
                     // if the type is local, since the user may be able to fix the local type.
                     Err(ConstParamTyImplementationError::InfrigingFields(..)) => {
@@ -985,20 +1011,16 @@ fn check_param_wf(tcx: TyCtxt<'_>, param: &hir::GenericParam<'_>) -> Result<(), 
                             }
                         }
 
-                        ty_is_local(ty)
+                        ty_is_local(ty).then_some(vec![(
+                            adt_const_params_feature_string,
+                            sym::adt_const_params,
+                        )])
                     }
                     // Implments `ConstParamTy`, suggest adding the feature to enable.
-                    Ok(..) => true,
+                    Ok(..) => Some(vec![(adt_const_params_feature_string, sym::adt_const_params)]),
                 };
-                if may_suggest_feature {
-                    tcx.disabled_nightly_features(
-                        &mut diag,
-                        Some(param.hir_id),
-                        [(
-                            " more complex and user defined types".to_string(),
-                            sym::adt_const_params,
-                        )],
-                    );
+                if let Some(features) = may_suggest_feature {
+                    tcx.disabled_nightly_features(&mut diag, Some(param.hir_id), features);
                 }
 
                 Err(diag.emit())
@@ -1255,7 +1277,7 @@ fn check_item_type(
             UnsizedHandling::Forbid => true,
             UnsizedHandling::Allow => false,
             UnsizedHandling::AllowIfForeignTail => {
-                let tail = tcx.struct_tail_erasing_lifetimes(item_ty, wfcx.param_env);
+                let tail = tcx.struct_tail_for_codegen(item_ty, wfcx.param_env);
                 !matches!(tail.kind(), ty::Foreign(_))
             }
         };
@@ -1951,8 +1973,7 @@ fn report_bivariance<'tcx>(
     }
 
     let const_param_help =
-        matches!(param.kind, hir::GenericParamKind::Type { .. } if !has_explicit_bounds)
-            .then_some(());
+        matches!(param.kind, hir::GenericParamKind::Type { .. } if !has_explicit_bounds);
 
     let mut diag = tcx.dcx().create_err(errors::UnusedGenericParameter {
         span: param.span,
@@ -2154,7 +2175,8 @@ fn lint_redundant_lifetimes<'tcx>(
         | DefKind::Field
         | DefKind::LifetimeParam
         | DefKind::GlobalAsm
-        | DefKind::Closure => return,
+        | DefKind::Closure
+        | DefKind::SyntheticCoroutineBody => return,
     }
 
     // The ordering of this lifetime map is a bit subtle.

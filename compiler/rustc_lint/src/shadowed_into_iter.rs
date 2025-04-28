@@ -1,10 +1,11 @@
-use crate::lints::{ShadowedIntoIterDiag, ShadowedIntoIterDiagSub};
-use crate::{LateContext, LateLintPass, LintContext};
 use rustc_hir as hir;
 use rustc_middle::ty::{self, Ty};
 use rustc_session::lint::FutureIncompatibilityReason;
 use rustc_session::{declare_lint, impl_lint_pass};
 use rustc_span::edition::Edition;
+
+use crate::lints::{ShadowedIntoIterDiag, ShadowedIntoIterDiagSub};
+use crate::{LateContext, LateLintPass, LintContext};
 
 declare_lint! {
     /// The `array_into_iter` lint detects calling `into_iter` on arrays.
@@ -64,7 +65,7 @@ declare_lint! {
 }
 
 #[derive(Copy, Clone)]
-pub struct ShadowedIntoIter;
+pub(crate) struct ShadowedIntoIter;
 
 impl_lint_pass!(ShadowedIntoIter => [ARRAY_INTO_ITER, BOXED_SLICE_INTO_ITER]);
 

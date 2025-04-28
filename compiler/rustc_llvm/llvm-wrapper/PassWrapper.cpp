@@ -720,7 +720,7 @@ extern "C" LLVMRustResult LLVMRustOptimize(
     LLVMModuleRef ModuleRef, LLVMTargetMachineRef TMRef,
     LLVMRustPassBuilderOptLevel OptLevelRust, LLVMRustOptStage OptStage,
     bool IsLinkerPluginLTO, bool NoPrepopulatePasses, bool VerifyIR,
-    bool UseThinLTOBuffers, bool MergeFunctions, bool UnrollLoops,
+    bool LintIR, bool UseThinLTOBuffers, bool MergeFunctions, bool UnrollLoops,
     bool SLPVectorize, bool LoopVectorize, bool DisableSimplifyLibCalls,
     bool EmitLifetimeMarkers, LLVMRustSanitizerOptions *SanitizerOptions,
     const char *PGOGenPath, const char *PGOUsePath, bool InstrumentCoverage,
@@ -846,6 +846,13 @@ extern "C" LLVMRustResult LLVMRustOptimize(
     PipelineStartEPCallbacks.push_back(
         [VerifyIR](ModulePassManager &MPM, OptimizationLevel Level) {
           MPM.addPass(VerifierPass());
+        });
+  }
+
+  if (LintIR) {
+    PipelineStartEPCallbacks.push_back(
+        [](ModulePassManager &MPM, OptimizationLevel Level) {
+          MPM.addPass(createModuleToFunctionPassAdaptor(LintPass()));
         });
   }
 
@@ -1614,8 +1621,13 @@ extern "C" void LLVMRustComputeLTOCacheKey(RustStringRef KeyOut,
   const auto &ExportList = Data->ExportLists.lookup(ModId);
   const auto &ResolvedODR = Data->ResolvedODR.lookup(ModId);
   const auto &DefinedGlobals = Data->ModuleToDefinedGVSummaries.lookup(ModId);
+#if LLVM_VERSION_GE(20, 0)
+  DenseSet<GlobalValue::GUID> CfiFunctionDefs;
+  DenseSet<GlobalValue::GUID> CfiFunctionDecls;
+#else
   std::set<GlobalValue::GUID> CfiFunctionDefs;
   std::set<GlobalValue::GUID> CfiFunctionDecls;
+#endif
 
   // Based on the 'InProcessThinBackend' constructor in LLVM
   for (auto &Name : Data->Index.cfiFunctionDefs())
@@ -1625,9 +1637,15 @@ extern "C" void LLVMRustComputeLTOCacheKey(RustStringRef KeyOut,
     CfiFunctionDecls.insert(
         GlobalValue::getGUID(GlobalValue::dropLLVMManglingEscape(Name)));
 
+#if LLVM_VERSION_GE(20, 0)
+  Key = llvm::computeLTOCacheKey(conf, Data->Index, ModId, ImportList,
+                                 ExportList, ResolvedODR, DefinedGlobals,
+                                 CfiFunctionDefs, CfiFunctionDecls);
+#else
   llvm::computeLTOCacheKey(Key, conf, Data->Index, ModId, ImportList,
                            ExportList, ResolvedODR, DefinedGlobals,
                            CfiFunctionDefs, CfiFunctionDecls);
+#endif
 
   LLVMRustStringWriteImpl(KeyOut, Key.c_str(), Key.size());
 }

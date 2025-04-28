@@ -18,22 +18,20 @@
 //! On success, the  LUB/GLB operations return the appropriate bound. The
 //! return value of `Equate` or `Sub` shouldn't really be used.
 
-pub use rustc_next_trait_solver::relate::combine::*;
-
-use super::glb::Glb;
-use super::lub::Lub;
-use super::type_relating::TypeRelating;
-use super::RelateResult;
-use super::StructurallyRelateAliases;
-use crate::infer::relate;
-use crate::infer::{DefineOpaqueTypes, InferCtxt, TypeTrace};
-use crate::traits::{Obligation, PredicateObligation};
 use rustc_middle::bug;
 use rustc_middle::infer::unify_key::EffectVarValue;
 use rustc_middle::traits::solve::Goal;
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
-use rustc_middle::ty::{self, InferConst, Ty, TyCtxt, TypeVisitableExt, Upcast};
-use rustc_middle::ty::{IntType, UintType};
+use rustc_middle::ty::{self, InferConst, IntType, Ty, TyCtxt, TypeVisitableExt, UintType, Upcast};
+pub use rustc_next_trait_solver::relate::combine::*;
+use tracing::debug;
+
+use super::glb::Glb;
+use super::lub::Lub;
+use super::type_relating::TypeRelating;
+use super::{RelateResult, StructurallyRelateAliases};
+use crate::infer::{relate, DefineOpaqueTypes, InferCtxt, TypeTrace};
+use crate::traits::{Obligation, PredicateObligation};
 
 #[derive(Clone)]
 pub struct CombineFields<'infcx, 'tcx> {

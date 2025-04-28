@@ -1,4 +1,5 @@
 use core::ops::ControlFlow;
+
 use rustc_errors::{Applicability, StashKey};
 use rustc_hir as hir;
 use rustc_hir::def_id::{DefId, LocalDefId};
@@ -6,16 +7,15 @@ use rustc_hir::HirId;
 use rustc_middle::query::plumbing::CyclePlaceholder;
 use rustc_middle::ty::print::with_forced_trimmed_paths;
 use rustc_middle::ty::util::IntTypeExt;
-use rustc_middle::ty::{self, IsSuggestable, Ty, TyCtxt, TypeVisitableExt};
+use rustc_middle::ty::{self, Article, IsSuggestable, Ty, TyCtxt, TypeVisitableExt};
 use rustc_middle::{bug, span_bug};
 use rustc_span::symbol::Ident;
 use rustc_span::{Span, DUMMY_SP};
+use tracing::debug;
 
+use super::{bad_placeholder, ItemCtxt};
 use crate::errors::TypeofReservedKeywordUsed;
 use crate::hir_ty_lowering::HirTyLowerer;
-
-use super::bad_placeholder;
-use super::ItemCtxt;
 
 mod opaque;
 
@@ -35,16 +35,84 @@ fn anon_const_type_of<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Ty<'tcx> {
     let parent_node_id = tcx.parent_hir_id(hir_id);
     let parent_node = tcx.hir_node(parent_node_id);
 
-    let (generics, arg_idx) = match parent_node {
-        // Easy case: arrays repeat expressions.
-        Node::Ty(&hir::Ty { kind: TyKind::Array(_, ref constant), .. })
-        | Node::Expr(&Expr { kind: ExprKind::Repeat(_, ref constant), .. })
-            if constant.hir_id() == hir_id =>
-        {
-            return tcx.types.usize;
+    let find_sym_fn = |&(op, op_sp)| match op {
+        hir::InlineAsmOperand::SymFn { anon_const } if anon_const.hir_id == hir_id => {
+            Some((anon_const, op_sp))
         }
+        _ => None,
+    };
+
+    let find_const = |&(op, op_sp)| match op {
+        hir::InlineAsmOperand::Const { anon_const } if anon_const.hir_id == hir_id => {
+            Some((anon_const, op_sp))
+        }
+        _ => None,
+    };
+
+    match parent_node {
+        // Anon consts "inside" the type system.
+        Node::ConstArg(&ConstArg {
+            hir_id: arg_hir_id,
+            kind: ConstArgKind::Anon(&AnonConst { hir_id: anon_hir_id, .. }),
+            ..
+        }) if anon_hir_id == hir_id => const_arg_anon_type_of(tcx, arg_hir_id, span),
+
+        // Anon consts outside the type system.
+        Node::Expr(&Expr { kind: ExprKind::InlineAsm(asm), .. })
+        | Node::Item(&Item { kind: ItemKind::GlobalAsm(asm), .. })
+            if let Some((anon_const, op_sp)) = asm.operands.iter().find_map(find_sym_fn) =>
+        {
+            let ty = tcx.typeck(def_id).node_type(hir_id);
+
+            match ty.kind() {
+                ty::Error(_) => ty,
+                ty::FnDef(..) => ty,
+                _ => {
+                    let guar = tcx
+                        .dcx()
+                        .struct_span_err(op_sp, "invalid `sym` operand")
+                        .with_span_label(
+                            tcx.def_span(anon_const.def_id),
+                            format!("is {} `{}`", ty.kind().article(), ty),
+                        )
+                        .with_help("`sym` operands must refer to either a function or a static")
+                        .emit();
+
+                    Ty::new_error(tcx, guar)
+                }
+            }
+        }
+        Node::Expr(&Expr { kind: ExprKind::InlineAsm(asm), .. })
+        | Node::Item(&Item { kind: ItemKind::GlobalAsm(asm), .. })
+            if let Some((anon_const, op_sp)) = asm.operands.iter().find_map(find_const) =>
+        {
+            let ty = tcx.typeck(def_id).node_type(hir_id);
+
+            match ty.kind() {
+                ty::Error(_) => ty,
+                ty::Int(_) | ty::Uint(_) => ty,
+                _ => {
+                    let guar = tcx
+                        .dcx()
+                        .struct_span_err(op_sp, "invalid type for `const` operand")
+                        .with_span_label(
+                            tcx.def_span(anon_const.def_id),
+                            format!("is {} `{}`", ty.kind().article(), ty),
+                        )
+                        .with_help("`const` operands must be of an integer type")
+                        .emit();
+
+                    Ty::new_error(tcx, guar)
+                }
+            }
+        }
+        Node::Variant(Variant { disr_expr: Some(ref e), .. }) if e.hir_id == hir_id => {
+            tcx.adt_def(tcx.hir().get_parent_item(hir_id)).repr().discr_type().to_ty(tcx)
+        }
+        // Sort of affects the type system, but only for the purpose of diagnostics
+        // so no need for ConstArg.
         Node::Ty(&hir::Ty { kind: TyKind::Typeof(ref e), span, .. }) if e.hir_id == hir_id => {
-            let ty = tcx.typeck(def_id).node_type(e.hir_id);
+            let ty = tcx.typeck(def_id).node_type(tcx.local_def_id_to_hir_id(def_id));
             let ty = tcx.fold_regions(ty, |r, _| {
                 if r.is_erased() { ty::Region::new_error_misc(tcx) } else { r }
             });
@@ -56,24 +124,35 @@ fn anon_const_type_of<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Ty<'tcx> {
             tcx.dcx().emit_err(TypeofReservedKeywordUsed { span, ty, opt_sugg });
             return ty;
         }
-        Node::Expr(&Expr { kind: ExprKind::InlineAsm(asm), .. })
-        | Node::Item(&Item { kind: ItemKind::GlobalAsm(asm), .. })
-            if asm.operands.iter().any(|(op, _op_sp)| match op {
-                hir::InlineAsmOperand::Const { anon_const }
-                | hir::InlineAsmOperand::SymFn { anon_const } => anon_const.hir_id == hir_id,
-                _ => false,
-            }) =>
+
+        _ => Ty::new_error_with_message(
+            tcx,
+            span,
+            format!("unexpected anon const parent in type_of(): {parent_node:?}"),
+        ),
+    }
+}
+
+fn const_arg_anon_type_of<'tcx>(tcx: TyCtxt<'tcx>, arg_hir_id: HirId, span: Span) -> Ty<'tcx> {
+    use hir::*;
+    use rustc_middle::ty::Ty;
+
+    let parent_node_id = tcx.parent_hir_id(arg_hir_id);
+    let parent_node = tcx.hir_node(parent_node_id);
+
+    let (generics, arg_idx) = match parent_node {
+        // Easy case: arrays repeat expressions.
+        Node::Ty(&hir::Ty { kind: TyKind::Array(_, ref constant), .. })
+        | Node::Expr(&Expr { kind: ExprKind::Repeat(_, ref constant), .. })
+            if constant.hir_id() == arg_hir_id =>
         {
-            return tcx.typeck(def_id).node_type(hir_id);
-        }
-        Node::Variant(Variant { disr_expr: Some(ref e), .. }) if e.hir_id == hir_id => {
-            return tcx.adt_def(tcx.hir().get_parent_item(hir_id)).repr().discr_type().to_ty(tcx);
+            return tcx.types.usize;
         }
         Node::GenericParam(&GenericParam {
             def_id: param_def_id,
             kind: GenericParamKind::Const { default: Some(ct), .. },
             ..
-        }) if ct.hir_id == hir_id => {
+        }) if ct.hir_id == arg_hir_id => {
             return tcx
                 .type_of(param_def_id)
                 .no_bound_vars()
@@ -104,7 +183,7 @@ fn anon_const_type_of<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Ty<'tcx> {
             // to a ty::Alias(ty::Projection, `<Self as Foo>::Assoc<3>`).
             let item_def_id = tcx
                 .hir()
-                .parent_owner_iter(hir_id)
+                .parent_owner_iter(arg_hir_id)
                 .find(|(_, node)| matches!(node, OwnerNode::Item(_)))
                 .unwrap()
                 .0
@@ -124,7 +203,7 @@ fn anon_const_type_of<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Ty<'tcx> {
                         args.args
                             .iter()
                             .filter(|arg| arg.is_ty_or_const())
-                            .position(|arg| arg.hir_id() == hir_id)
+                            .position(|arg| arg.hir_id() == arg_hir_id)
                     })
                     .unwrap_or_else(|| {
                         bug!("no arg matching AnonConst in segment");
@@ -145,7 +224,7 @@ fn anon_const_type_of<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Ty<'tcx> {
                 ExprKind::MethodCall(segment, ..) | ExprKind::Path(QPath::TypeRelative(_, segment)),
             ..
         }) => {
-            let body_owner = tcx.hir().enclosing_body_owner(hir_id);
+            let body_owner = tcx.hir().enclosing_body_owner(arg_hir_id);
             let tables = tcx.typeck(body_owner);
             // This may fail in case the method/path does not actually exist.
             // As there is no relevant param for `def_id`, we simply return
@@ -163,10 +242,10 @@ fn anon_const_type_of<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Ty<'tcx> {
                     args.args
                         .iter()
                         .filter(|arg| arg.is_ty_or_const())
-                        .position(|arg| arg.hir_id() == hir_id)
+                        .position(|arg| arg.hir_id() == arg_hir_id)
                 })
                 .unwrap_or_else(|| {
-                    bug!("no arg matching AnonConst in segment");
+                    bug!("no arg matching ConstArg in segment");
                 });
 
             (tcx.generics_of(type_dependent_def), idx)
@@ -185,18 +264,18 @@ fn anon_const_type_of<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Ty<'tcx> {
                         | ExprKind::Struct(&QPath::Resolved(_, path), ..),
                     ..
                 }) => {
-                    let body_owner = tcx.hir().enclosing_body_owner(hir_id);
+                    let body_owner = tcx.hir().enclosing_body_owner(arg_hir_id);
                     let _tables = tcx.typeck(body_owner);
                     &*path
                 }
                 Node::Pat(pat) => {
-                    if let Some(path) = get_path_containing_arg_in_pat(pat, hir_id) {
+                    if let Some(path) = get_path_containing_arg_in_pat(pat, arg_hir_id) {
                         path
                     } else {
                         return Ty::new_error_with_message(
                             tcx,
                             span,
-                            format!("unable to find const parent for {hir_id} in pat {pat:?}"),
+                            format!("unable to find const parent for {arg_hir_id} in pat {pat:?}"),
                         );
                     }
                 }
@@ -217,14 +296,14 @@ fn anon_const_type_of<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Ty<'tcx> {
                 args.args
                     .iter()
                     .filter(|arg| arg.is_ty_or_const())
-                    .position(|arg| arg.hir_id() == hir_id)
+                    .position(|arg| arg.hir_id() == arg_hir_id)
                     .map(|index| (index, seg))
                     .or_else(|| {
                         args.constraints
                             .iter()
                             .copied()
                             .filter_map(AssocItemConstraint::ct)
-                            .position(|ct| ct.hir_id == hir_id)
+                            .position(|ct| ct.hir_id == arg_hir_id)
                             .map(|idx| (idx, seg))
                     })
             }) else {
@@ -249,7 +328,7 @@ fn anon_const_type_of<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> Ty<'tcx> {
             return Ty::new_error_with_message(
                 tcx,
                 span,
-                format!("unexpected const parent in type_of(): {parent_node:?}"),
+                format!("unexpected const arg parent in type_of(): {parent_node:?}"),
             );
         }
     };
@@ -647,7 +726,7 @@ fn check_feature_inherent_assoc_ty(tcx: TyCtxt<'_>, span: Span) {
     }
 }
 
-pub fn type_alias_is_lazy<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> bool {
+pub(crate) fn type_alias_is_lazy<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> bool {
     use hir::intravisit::Visitor;
     if tcx.features().lazy_type_alias {
         return true;

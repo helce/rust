@@ -1,7 +1,8 @@
 use clippy_config::msrvs::{self, Msrv};
+use clippy_config::Conf;
 use clippy_utils::diagnostics::{span_lint_and_then, span_lint_hir_and_then};
 use clippy_utils::is_doc_hidden;
-use clippy_utils::source::snippet_opt;
+use clippy_utils::source::SpanRangeExt;
 use rustc_ast::ast::{self, VisibilityKind};
 use rustc_ast::attr;
 use rustc_data_structures::fx::FxHashSet;
@@ -67,9 +68,10 @@ pub struct ManualNonExhaustiveStruct {
 }
 
 impl ManualNonExhaustiveStruct {
-    #[must_use]
-    pub fn new(msrv: Msrv) -> Self {
-        Self { msrv }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            msrv: conf.msrv.clone(),
+        }
     }
 }
 
@@ -83,10 +85,9 @@ pub struct ManualNonExhaustiveEnum {
 }
 
 impl ManualNonExhaustiveEnum {
-    #[must_use]
-    pub fn new(msrv: Msrv) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
-            msrv,
+            msrv: conf.msrv.clone(),
             constructed_enum_variants: FxHashSet::default(),
             potential_enums: Vec::new(),
         }
@@ -123,7 +124,7 @@ impl EarlyLintPass for ManualNonExhaustiveStruct {
                     |diag| {
                         if !item.attrs.iter().any(|attr| attr.has_name(sym::non_exhaustive))
                             && let header_span = cx.sess().source_map().span_until_char(item.span, delimiter)
-                            && let Some(snippet) = snippet_opt(cx, header_span)
+                            && let Some(snippet) = header_span.get_source_text(cx)
                         {
                             diag.span_suggestion(
                                 header_span,
@@ -193,7 +194,7 @@ impl<'tcx> LateLintPass<'tcx> for ManualNonExhaustiveEnum {
                 "this seems like a manual implementation of the non-exhaustive pattern",
                 |diag| {
                     let header_span = cx.sess().source_map().span_until_char(enum_span, '{');
-                    if let Some(snippet) = snippet_opt(cx, header_span) {
+                    if let Some(snippet) = header_span.get_source_text(cx) {
                         diag.span_suggestion(
                             header_span,
                             "add the attribute",

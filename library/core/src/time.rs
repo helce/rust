@@ -617,8 +617,6 @@ impl Duration {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```
     /// use std::time::Duration;
     ///
@@ -639,8 +637,6 @@ impl Duration {
     /// if overflow occurred.
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```
     /// use std::time::Duration;
@@ -700,8 +696,6 @@ impl Duration {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```
     /// use std::time::Duration;
     ///
@@ -758,8 +752,6 @@ impl Duration {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```
     /// use std::time::Duration;
     ///
@@ -813,8 +805,6 @@ impl Duration {
     /// if `other == 0`.
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```
     /// use std::time::Duration;
@@ -1037,7 +1027,7 @@ impl Duration {
         Duration::from_secs_f32(rhs * self.as_secs_f32())
     }
 
-    /// Divide `Duration` by `f64`.
+    /// Divides `Duration` by `f64`.
     ///
     /// # Panics
     /// This method will panic if result is negative, overflows `Duration` or not finite.
@@ -1058,7 +1048,7 @@ impl Duration {
         Duration::from_secs_f64(self.as_secs_f64() / rhs)
     }
 
-    /// Divide `Duration` by `f32`.
+    /// Divides `Duration` by `f32`.
     ///
     /// # Panics
     /// This method will panic if result is negative, overflows `Duration` or not finite.
@@ -1081,7 +1071,7 @@ impl Duration {
         Duration::from_secs_f32(self.as_secs_f32() / rhs)
     }
 
-    /// Divide `Duration` by `Duration` and return `f64`.
+    /// Divides `Duration` by `Duration` and returns `f64`.
     ///
     /// # Examples
     /// ```
@@ -1102,7 +1092,7 @@ impl Duration {
         self_nanos / rhs_nanos
     }
 
-    /// Divide `Duration` by `Duration` and return `f32`.
+    /// Divides `Duration` by `Duration` and returns `f32`.
     ///
     /// # Examples
     /// ```

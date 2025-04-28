@@ -1,15 +1,15 @@
-use rustc_errors::{
-    codes::*, pluralize, Applicability, Diag, Diagnostic, EmissionGuarantee, MultiSpan,
-};
+use std::iter;
+
+use rustc_errors::codes::*;
+use rustc_errors::{pluralize, Applicability, Diag, Diagnostic, EmissionGuarantee, MultiSpan};
 use rustc_hir as hir;
 use rustc_middle::ty::{self as ty, AssocItems, AssocKind, TyCtxt};
 use rustc_span::def_id::DefId;
-use std::iter;
-
+use tracing::debug;
 use GenericArgsInfo::*;
 
 /// Handles the `wrong number of type / lifetime / ... arguments` family of error messages.
-pub struct WrongNumberOfGenericArgs<'a, 'tcx> {
+pub(crate) struct WrongNumberOfGenericArgs<'a, 'tcx> {
     pub(crate) tcx: TyCtxt<'tcx>,
 
     pub(crate) angle_brackets: AngleBrackets,
@@ -50,7 +50,7 @@ pub(crate) enum AngleBrackets {
 
 // Information about the kind of arguments that are either missing or are unexpected
 #[derive(Debug)]
-pub enum GenericArgsInfo {
+pub(crate) enum GenericArgsInfo {
     MissingLifetimes {
         num_missing_args: usize,
     },
@@ -88,7 +88,7 @@ pub enum GenericArgsInfo {
 }
 
 impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
-    pub fn new(
+    pub(crate) fn new(
         tcx: TyCtxt<'tcx>,
         gen_args_info: GenericArgsInfo,
         path_segment: &'a hir::PathSegment<'_>,
@@ -888,7 +888,7 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
         let comma = if args.len() > 0 { ", " } else { "" };
         let trait_path = self.tcx.def_path_str(trait_def_id);
         let method_name = self.tcx.item_name(self.def_id);
-        err.span_suggestion(
+        err.span_suggestion_verbose(
             expr.span,
             msg,
             format!("{trait_path}::{generics}::{method_name}({rcvr}{comma}{rest})"),
@@ -939,18 +939,20 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
                 }
             }
 
-            let span_lo_redundant_lt_args = lt_arg_spans[self.num_expected_lifetime_args()];
+            let span_lo_redundant_lt_args = if self.num_expected_lifetime_args() == 0 {
+                lt_arg_spans[0]
+            } else {
+                lt_arg_spans[self.num_expected_lifetime_args() - 1]
+            };
             let span_hi_redundant_lt_args = lt_arg_spans[lt_arg_spans.len() - 1];
 
-            let span_redundant_lt_args = span_lo_redundant_lt_args.to(span_hi_redundant_lt_args);
+            let span_redundant_lt_args =
+                span_lo_redundant_lt_args.shrink_to_hi().to(span_hi_redundant_lt_args);
             debug!("span_redundant_lt_args: {:?}", span_redundant_lt_args);
 
             let num_redundant_lt_args = lt_arg_spans.len() - self.num_expected_lifetime_args();
-            let msg_lifetimes = format!(
-                "remove {these} lifetime argument{s}",
-                these = pluralize!("this", num_redundant_lt_args),
-                s = pluralize!(num_redundant_lt_args),
-            );
+            let msg_lifetimes =
+                format!("remove the lifetime argument{s}", s = pluralize!(num_redundant_lt_args));
 
             err.span_suggestion(
                 span_redundant_lt_args,
@@ -979,18 +981,22 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
             }
 
             let span_lo_redundant_type_or_const_args =
-                gen_arg_spans[self.num_expected_type_or_const_args()];
+                if self.num_expected_type_or_const_args() == 0 {
+                    gen_arg_spans[0]
+                } else {
+                    gen_arg_spans[self.num_expected_type_or_const_args() - 1]
+                };
             let span_hi_redundant_type_or_const_args = gen_arg_spans[gen_arg_spans.len() - 1];
+            let span_redundant_type_or_const_args = span_lo_redundant_type_or_const_args
+                .shrink_to_hi()
+                .to(span_hi_redundant_type_or_const_args);
 
-            let span_redundant_type_or_const_args =
-                span_lo_redundant_type_or_const_args.to(span_hi_redundant_type_or_const_args);
             debug!("span_redundant_type_or_const_args: {:?}", span_redundant_type_or_const_args);
 
             let num_redundant_gen_args =
                 gen_arg_spans.len() - self.num_expected_type_or_const_args();
             let msg_types_or_consts = format!(
-                "remove {these} generic argument{s}",
-                these = pluralize!("this", num_redundant_gen_args),
+                "remove the unnecessary generic argument{s}",
                 s = pluralize!(num_redundant_gen_args),
             );
 
@@ -1036,7 +1042,7 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
                 .with_lo(self.path_segment.ident.span.hi());
 
             let msg = format!(
-                "remove these {}generics",
+                "remove the unnecessary {}generics",
                 if self.gen_args.parenthesized == hir::GenericArgsParentheses::ParenSugar {
                     "parenthetical "
                 } else {

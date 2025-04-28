@@ -4,7 +4,6 @@ use std::rc::Rc;
 use std::{fmt, iter, mem};
 
 use either::Either;
-
 use rustc_data_structures::frozen::Frozen;
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_errors::ErrorGuaranteed;
@@ -28,44 +27,39 @@ use rustc_middle::ty::cast::CastTy;
 use rustc_middle::ty::visit::TypeVisitableExt;
 use rustc_middle::ty::{
     self, Binder, CanonicalUserTypeAnnotation, CanonicalUserTypeAnnotations, CoroutineArgsExt,
-    Dynamic, OpaqueHiddenType, OpaqueTypeKey, RegionVid, Ty, TyCtxt, UserType,
-    UserTypeAnnotationIndex,
+    Dynamic, GenericArgsRef, OpaqueHiddenType, OpaqueTypeKey, RegionVid, Ty, TyCtxt, UserArgs,
+    UserType, UserTypeAnnotationIndex,
 };
-use rustc_middle::ty::{GenericArgsRef, UserArgs};
 use rustc_middle::{bug, span_bug};
+use rustc_mir_dataflow::impls::MaybeInitializedPlaces;
+use rustc_mir_dataflow::move_paths::MoveData;
 use rustc_mir_dataflow::points::DenseLocationMap;
+use rustc_mir_dataflow::ResultsCursor;
 use rustc_span::def_id::CRATE_DEF_ID;
 use rustc_span::source_map::Spanned;
 use rustc_span::symbol::sym;
-use rustc_span::Span;
-use rustc_span::DUMMY_SP;
+use rustc_span::{Span, DUMMY_SP};
 use rustc_target::abi::{FieldIdx, FIRST_VARIANT};
-use rustc_trait_selection::traits::query::type_op::custom::scrape_region_constraints;
-use rustc_trait_selection::traits::query::type_op::custom::CustomTypeOp;
+use rustc_trait_selection::traits::query::type_op::custom::{
+    scrape_region_constraints, CustomTypeOp,
+};
 use rustc_trait_selection::traits::query::type_op::{TypeOp, TypeOpOutput};
-
 use rustc_trait_selection::traits::PredicateObligation;
+use tracing::{debug, instrument, trace};
 
-use rustc_mir_dataflow::impls::MaybeInitializedPlaces;
-use rustc_mir_dataflow::move_paths::MoveData;
-use rustc_mir_dataflow::ResultsCursor;
-
+use crate::borrow_set::BorrowSet;
+use crate::constraints::{OutlivesConstraint, OutlivesConstraintSet};
+use crate::diagnostics::UniverseInfo;
+use crate::facts::AllFacts;
+use crate::location::LocationTable;
+use crate::member_constraints::MemberConstraintSet;
+use crate::region_infer::values::{LivenessValues, PlaceholderIndex, PlaceholderIndices};
+use crate::region_infer::TypeTest;
 use crate::renumber::RegionCtxt;
 use crate::session_diagnostics::{MoveUnsized, SimdIntrinsicArgConst};
-use crate::{
-    borrow_set::BorrowSet,
-    constraints::{OutlivesConstraint, OutlivesConstraintSet},
-    diagnostics::UniverseInfo,
-    facts::AllFacts,
-    location::LocationTable,
-    member_constraints::MemberConstraintSet,
-    path_utils,
-    region_infer::values::{LivenessValues, PlaceholderIndex, PlaceholderIndices},
-    region_infer::TypeTest,
-    type_check::free_region_relations::{CreateResult, UniversalRegionRelations},
-    universal_regions::{DefiningTy, UniversalRegions},
-    BorrowckInferCtxt,
-};
+use crate::type_check::free_region_relations::{CreateResult, UniversalRegionRelations};
+use crate::universal_regions::{DefiningTy, UniversalRegions};
+use crate::{path_utils, BorrowckInferCtxt};
 
 macro_rules! span_mirbug {
     ($context:expr, $elem:expr, $($message:tt)*) => ({
@@ -93,7 +87,7 @@ macro_rules! span_mirbug_and_err {
 
 mod canonical;
 mod constraint_conversion;
-pub mod free_region_relations;
+pub(crate) mod free_region_relations;
 mod input_output;
 pub(crate) mod liveness;
 mod relate_tys;
@@ -763,7 +757,7 @@ impl<'a, 'b, 'tcx> TypeVerifier<'a, 'b, 'tcx> {
             PlaceContext::MutatingUse(_) => ty::Invariant,
             PlaceContext::NonUse(StorageDead | StorageLive | VarDebugInfo) => ty::Invariant,
             PlaceContext::NonMutatingUse(
-                Inspect | Copy | Move | PlaceMention | SharedBorrow | FakeBorrow | AddressOf
+                Inspect | Copy | Move | PlaceMention | SharedBorrow | FakeBorrow | RawBorrow
                 | Projection,
             ) => ty::Covariant,
             PlaceContext::NonUse(AscribeUserTy(variance)) => variance,
@@ -1371,7 +1365,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 debug!("func_ty.kind: {:?}", func_ty.kind());
 
                 let sig = match func_ty.kind() {
-                    ty::FnDef(..) | ty::FnPtr(_) => func_ty.fn_sig(tcx),
+                    ty::FnDef(..) | ty::FnPtr(..) => func_ty.fn_sig(tcx),
                     _ => {
                         span_mirbug!(self, term, "call to non-function {:?}", func_ty);
                         return;
@@ -1996,9 +1990,9 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
 
                         let ty_fn_ptr_from = Ty::new_fn_ptr(tcx, fn_sig);
 
-                        if let Err(terr) = self.eq_types(
-                            *ty,
+                        if let Err(terr) = self.sub_types(
                             ty_fn_ptr_from,
+                            *ty,
                             location.to_locations(),
                             ConstraintCategory::Cast { unsize_to: None },
                         ) {
@@ -2021,9 +2015,9 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         let ty_fn_ptr_from =
                             Ty::new_fn_ptr(tcx, tcx.signature_unclosure(sig, *safety));
 
-                        if let Err(terr) = self.eq_types(
-                            *ty,
+                        if let Err(terr) = self.sub_types(
                             ty_fn_ptr_from,
+                            *ty,
                             location.to_locations(),
                             ConstraintCategory::Cast { unsize_to: None },
                         ) {
@@ -2050,9 +2044,9 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
 
                         let ty_fn_ptr_from = tcx.safe_to_unsafe_fn_ty(fn_sig);
 
-                        if let Err(terr) = self.eq_types(
-                            *ty,
+                        if let Err(terr) = self.sub_types(
                             ty_fn_ptr_from,
+                            *ty,
                             location.to_locations(),
                             ConstraintCategory::Cast { unsize_to: None },
                         ) {
@@ -2336,17 +2330,8 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         let cast_ty_to = CastTy::from_ty(*ty);
                         match (cast_ty_from, cast_ty_to) {
                             (Some(CastTy::Ptr(src)), Some(CastTy::Ptr(dst))) => {
-                                let mut normalize = |t| self.normalize(t, location);
-
-                                // N.B. `struct_tail_with_normalize` only "structurally resolves"
-                                // the type. It is not fully normalized, so we have to normalize it
-                                // afterwards.
-                                let src_tail =
-                                    tcx.struct_tail_with_normalize(src.ty, &mut normalize, || ());
-                                let src_tail = normalize(src_tail);
-                                let dst_tail =
-                                    tcx.struct_tail_with_normalize(dst.ty, &mut normalize, || ());
-                                let dst_tail = normalize(dst_tail);
+                                let src_tail = self.struct_tail(src.ty, location);
+                                let dst_tail = self.struct_tail(dst.ty, location);
 
                                 // This checks (lifetime part of) vtable validity for pointer casts,
                                 // which is irrelevant when there are aren't principal traits on both sides (aka only auto traits).
@@ -2427,7 +2412,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 let ty_left = left.ty(body, tcx);
                 match ty_left.kind() {
                     // Types with regions are comparable if they have a common super-type.
-                    ty::RawPtr(_, _) | ty::FnPtr(_) => {
+                    ty::RawPtr(_, _) | ty::FnPtr(..) => {
                         let ty_right = right.ty(body, tcx);
                         let common_ty = self.infcx.next_ty_var(body.source_info(location).span);
                         self.sub_types(
@@ -2484,7 +2469,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 self.check_operand(right, location);
             }
 
-            Rvalue::AddressOf(..)
+            Rvalue::RawPtr(..)
             | Rvalue::ThreadLocalRef(..)
             | Rvalue::Len(..)
             | Rvalue::Discriminant(..)
@@ -2501,7 +2486,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             | Rvalue::ThreadLocalRef(_)
             | Rvalue::Repeat(..)
             | Rvalue::Ref(..)
-            | Rvalue::AddressOf(..)
+            | Rvalue::RawPtr(..)
             | Rvalue::Len(..)
             | Rvalue::Cast(..)
             | Rvalue::ShallowInitBox(..)

@@ -1,9 +1,11 @@
-#[cfg(feature = "nightly")]
-use rustc_macros::{HashStable_NoContext, TyDecodable, TyEncodable};
-use rustc_type_ir_macros::{Lift_Generic, TypeFoldable_Generic, TypeVisitable_Generic};
 use std::fmt;
 use std::hash::Hash;
 use std::ops::Index;
+
+use derive_where::derive_where;
+#[cfg(feature = "nightly")]
+use rustc_macros::{HashStable_NoContext, TyDecodable, TyEncodable};
+use rustc_type_ir_macros::{Lift_Generic, TypeFoldable_Generic, TypeVisitable_Generic};
 
 use crate::inherent::*;
 use crate::{self as ty, Interner, UniverseIndex};
@@ -11,15 +13,12 @@ use crate::{self as ty, Interner, UniverseIndex};
 /// A "canonicalized" type `V` is one where all free inference
 /// variables have been rewritten to "canonical vars". These are
 /// numbered starting from 0 in order of first appearance.
-#[derive(derivative::Derivative)]
-#[derivative(
-    Clone(bound = "V: Clone"),
-    Hash(bound = "V: Hash"),
-    PartialEq(bound = "V: PartialEq"),
-    Eq(bound = "V: Eq"),
-    Debug(bound = "V: fmt::Debug"),
-    Copy(bound = "V: Copy")
-)]
+#[derive_where(Clone; I: Interner, V: Clone)]
+#[derive_where(Hash; I: Interner, V: Hash)]
+#[derive_where(PartialEq; I: Interner, V: PartialEq)]
+#[derive_where(Eq; I: Interner, V: Eq)]
+#[derive_where(Debug; I: Interner, V: fmt::Debug)]
+#[derive_where(Copy; I: Interner, V: Copy)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic)]
 #[cfg_attr(feature = "nightly", derive(TyEncodable, TyDecodable, HashStable_NoContext))]
 pub struct Canonical<I: Interner, V> {
@@ -84,15 +83,7 @@ impl<I: Interner, V: fmt::Display> fmt::Display for Canonical<I, V> {
 /// canonical value. This is sufficient information for code to create
 /// a copy of the canonical value in some other inference context,
 /// with fresh inference variables replacing the canonical values.
-#[derive(derivative::Derivative)]
-#[derivative(
-    Clone(bound = ""),
-    Copy(bound = ""),
-    Hash(bound = ""),
-    Debug(bound = ""),
-    Eq(bound = ""),
-    PartialEq(bound = "")
-)]
+#[derive_where(Clone, Copy, Hash, PartialEq, Eq, Debug; I: Interner)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic)]
 #[cfg_attr(feature = "nightly", derive(TyDecodable, TyEncodable, HashStable_NoContext))]
 pub struct CanonicalVarInfo<I: Interner> {
@@ -149,8 +140,7 @@ impl<I: Interner> CanonicalVarInfo<I> {
 /// Describes the "kind" of the canonical variable. This is a "kind"
 /// in the type-theory sense of the term -- i.e., a "meta" type system
 /// that analyzes type-like values.
-#[derive(derivative::Derivative)]
-#[derivative(Clone(bound = ""), Copy(bound = ""), Hash(bound = ""), Debug(bound = ""))]
+#[derive_where(Clone, Copy, Hash, PartialEq, Eq, Debug; I: Interner)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic)]
 #[cfg_attr(feature = "nightly", derive(TyDecodable, TyEncodable, HashStable_NoContext))]
 pub enum CanonicalVarKind<I: Interner> {
@@ -176,20 +166,6 @@ pub enum CanonicalVarKind<I: Interner> {
 
     /// A "placeholder" that represents "any const".
     PlaceholderConst(I::PlaceholderConst),
-}
-
-impl<I: Interner> PartialEq for CanonicalVarKind<I> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Ty(l0), Self::Ty(r0)) => l0 == r0,
-            (Self::PlaceholderTy(l0), Self::PlaceholderTy(r0)) => l0 == r0,
-            (Self::Region(l0), Self::Region(r0)) => l0 == r0,
-            (Self::PlaceholderRegion(l0), Self::PlaceholderRegion(r0)) => l0 == r0,
-            (Self::Const(l0), Self::Const(r0)) => l0 == r0,
-            (Self::PlaceholderConst(l0), Self::PlaceholderConst(r0)) => l0 == r0,
-            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
-        }
-    }
 }
 
 impl<I: Interner> CanonicalVarKind<I> {
@@ -266,15 +242,7 @@ pub enum CanonicalTyVarKind {
 /// vectors with the original values that were replaced by canonical
 /// variables. You will need to supply it later to instantiate the
 /// canonicalized query response.
-#[derive(derivative::Derivative)]
-#[derivative(
-    Clone(bound = ""),
-    Copy(bound = ""),
-    PartialEq(bound = ""),
-    Eq(bound = ""),
-    Hash(bound = ""),
-    Debug(bound = "")
-)]
+#[derive_where(Clone, Copy, Hash, PartialEq, Eq, Debug; I: Interner)]
 #[cfg_attr(feature = "nightly", derive(TyEncodable, TyDecodable, HashStable_NoContext))]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic, Lift_Generic)]
 pub struct CanonicalVarValues<I: Interner> {

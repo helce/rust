@@ -20,11 +20,11 @@ pub struct Ptr<'a, #[pointee] T: ?Sized> {
     data: &'a mut T,
 }
 #[automatically_derived]
-impl<'a, T: ?Sized + ::core::marker::Unsize<__S>, __S: ?::core::marker::Sized>
+impl<'a, T: ?Sized + ::core::marker::Unsize<__S>, __S: ?Sized>
     ::core::ops::DispatchFromDyn<Ptr<'a, __S>> for Ptr<'a, T> {
 }
 #[automatically_derived]
-impl<'a, T: ?Sized + ::core::marker::Unsize<__S>, __S: ?::core::marker::Sized>
+impl<'a, T: ?Sized + ::core::marker::Unsize<__S>, __S: ?Sized>
     ::core::ops::CoerceUnsized<Ptr<'a, __S>> for Ptr<'a, T> {
 }
 

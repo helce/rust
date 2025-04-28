@@ -1,63 +1,52 @@
-use super::suggest;
-use super::CandidateSource;
-use super::MethodError;
-use super::NoMatchData;
+use std::cell::{Cell, RefCell};
+use std::cmp::max;
+use std::iter;
+use std::ops::Deref;
 
-use crate::FnCtxt;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::HirId;
 use rustc_hir_analysis::autoderef::{self, Autoderef};
-use rustc_infer::infer::canonical::OriginalQueryValues;
-use rustc_infer::infer::canonical::{Canonical, QueryResponse};
-use rustc_infer::infer::need_type_info::TypeAnnotationNeeded;
-use rustc_infer::infer::DefineOpaqueTypes;
-use rustc_infer::infer::{self, InferOk, TyCtxtInferExt};
+use rustc_infer::infer::canonical::{Canonical, OriginalQueryValues, QueryResponse};
+use rustc_infer::infer::{self, DefineOpaqueTypes, InferOk, TyCtxtInferExt};
 use rustc_infer::traits::ObligationCauseCode;
 use rustc_middle::middle::stability;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::fast_reject::{simplify_type, TreatParams};
-use rustc_middle::ty::AssocItem;
-use rustc_middle::ty::AssocItemContainer;
-use rustc_middle::ty::GenericParamDefKind;
-use rustc_middle::ty::Upcast;
-use rustc_middle::ty::{self, ParamEnvAnd, Ty, TyCtxt, TypeVisitableExt};
-use rustc_middle::ty::{GenericArgs, GenericArgsRef};
+use rustc_middle::ty::{
+    self, AssocItem, AssocItemContainer, GenericArgs, GenericArgsRef, GenericParamDefKind,
+    ParamEnvAnd, Ty, TyCtxt, TypeVisitableExt, Upcast,
+};
 use rustc_middle::{bug, span_bug};
 use rustc_session::lint;
-use rustc_span::def_id::DefId;
-use rustc_span::def_id::LocalDefId;
+use rustc_span::def_id::{DefId, LocalDefId};
 use rustc_span::edit_distance::{
     edit_distance_with_substrings, find_best_match_for_name_with_substrings,
 };
-use rustc_span::symbol::sym;
-use rustc_span::{symbol::Ident, Span, Symbol, DUMMY_SP};
+use rustc_span::symbol::{sym, Ident};
+use rustc_span::{Span, Symbol, DUMMY_SP};
+use rustc_trait_selection::error_reporting::infer::need_type_info::TypeAnnotationNeeded;
 use rustc_trait_selection::infer::InferCtxtExt as _;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt;
-use rustc_trait_selection::traits::query::method_autoderef::MethodAutoderefBadTy;
 use rustc_trait_selection::traits::query::method_autoderef::{
-    CandidateStep, MethodAutoderefStepsResult,
+    CandidateStep, MethodAutoderefBadTy, MethodAutoderefStepsResult,
 };
 use rustc_trait_selection::traits::query::CanonicalTyGoal;
-use rustc_trait_selection::traits::ObligationCtxt;
-use rustc_trait_selection::traits::{self, ObligationCause};
-use std::cell::Cell;
-use std::cell::RefCell;
-use std::cmp::max;
-use std::iter;
-use std::ops::Deref;
-
+use rustc_trait_selection::traits::{self, ObligationCause, ObligationCtxt};
 use smallvec::{smallvec, SmallVec};
+use tracing::{debug, instrument};
 
 use self::CandidateKind::*;
-pub use self::PickKind::*;
+pub(crate) use self::PickKind::*;
+use super::{suggest, CandidateSource, MethodError, NoMatchData};
+use crate::FnCtxt;
 
 /// Boolean flag used to indicate if this search is for a suggestion
 /// or not. If true, we can allow ambiguity and so forth.
 #[derive(Clone, Copy, Debug)]
-pub struct IsSuggestion(pub bool);
+pub(crate) struct IsSuggestion(pub bool);
 
 pub(crate) struct ProbeContext<'a, 'tcx> {
     fcx: &'a FnCtxt<'a, 'tcx>,
@@ -146,7 +135,7 @@ enum ProbeResult {
 /// (at most) one of these. Either the receiver has type `T` and we convert it to `&T` (or with
 /// `mut`), or it has type `*mut T` and we convert it to `*const T`.
 #[derive(Debug, PartialEq, Copy, Clone)]
-pub enum AutorefOrPtrAdjustment {
+pub(crate) enum AutorefOrPtrAdjustment {
     /// Receiver has type `T`, add `&` or `&mut` (it `T` is `mut`), and maybe also "unsize" it.
     /// Unsizing is used to convert a `[T; N]` to `[T]`, which only makes sense when autorefing.
     Autoref {
@@ -170,7 +159,7 @@ impl AutorefOrPtrAdjustment {
 }
 
 #[derive(Debug, Clone)]
-pub struct Pick<'tcx> {
+pub(crate) struct Pick<'tcx> {
     pub item: ty::AssocItem,
     pub kind: PickKind<'tcx>,
     pub import_ids: SmallVec<[LocalDefId; 1]>,
@@ -191,7 +180,7 @@ pub struct Pick<'tcx> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PickKind<'tcx> {
+pub(crate) enum PickKind<'tcx> {
     InherentImplPick,
     ObjectPick,
     TraitPick,
@@ -201,10 +190,10 @@ pub enum PickKind<'tcx> {
     ),
 }
 
-pub type PickResult<'tcx> = Result<Pick<'tcx>, MethodError<'tcx>>;
+pub(crate) type PickResult<'tcx> = Result<Pick<'tcx>, MethodError<'tcx>>;
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
-pub enum Mode {
+pub(crate) enum Mode {
     // An expression of the form `receiver.method_name(...)`.
     // Autoderefs are performed on `receiver`, lookup is done based on the
     // `self` argument of the method, and static methods aren't considered.
@@ -216,7 +205,7 @@ pub enum Mode {
 }
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
-pub enum ProbeScope {
+pub(crate) enum ProbeScope {
     // Single candidate coming from pre-resolved delegation method.
     Single(DefId),
 
@@ -519,7 +508,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 }
 
-pub fn provide(providers: &mut Providers) {
+pub(crate) fn provide(providers: &mut Providers) {
     providers.method_autoderef_steps = method_autoderef_steps;
 }
 
@@ -786,18 +775,23 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
         // instantiation that replaces `Self` with the object type itself. Hence,
         // a `&self` method will wind up with an argument type like `&dyn Trait`.
         let trait_ref = principal.with_self_ty(self.tcx, self_ty);
-        self.elaborate_bounds(iter::once(trait_ref), |this, new_trait_ref, item| {
-            this.push_candidate(
-                Candidate { item, kind: ObjectCandidate(new_trait_ref), import_ids: smallvec![] },
-                true,
-            );
-        });
+        self.assemble_candidates_for_bounds(
+            traits::supertraits(self.tcx, trait_ref),
+            |this, new_trait_ref, item| {
+                this.push_candidate(
+                    Candidate {
+                        item,
+                        kind: ObjectCandidate(new_trait_ref),
+                        import_ids: smallvec![],
+                    },
+                    true,
+                );
+            },
+        );
     }
 
     #[instrument(level = "debug", skip(self))]
     fn assemble_inherent_candidates_from_param(&mut self, param_ty: ty::ParamTy) {
-        // FIXME: do we want to commit to this behavior for param bounds?
-
         let bounds = self.param_env.caller_bounds().iter().filter_map(|predicate| {
             let bound_predicate = predicate.kind();
             match bound_predicate.skip_binder() {
@@ -818,7 +812,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
             }
         });
 
-        self.elaborate_bounds(bounds, |this, poly_trait_ref, item| {
+        self.assemble_candidates_for_bounds(bounds, |this, poly_trait_ref, item| {
             this.push_candidate(
                 Candidate {
                     item,
@@ -832,15 +826,14 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
 
     // Do a search through a list of bounds, using a callback to actually
     // create the candidates.
-    fn elaborate_bounds<F>(
+    fn assemble_candidates_for_bounds<F>(
         &mut self,
         bounds: impl Iterator<Item = ty::PolyTraitRef<'tcx>>,
         mut mk_cand: F,
     ) where
         F: for<'b> FnMut(&mut ProbeContext<'b, 'tcx>, ty::PolyTraitRef<'tcx>, ty::AssocItem),
     {
-        let tcx = self.tcx;
-        for bound_trait_ref in traits::transitive_bounds(tcx, bounds) {
+        for bound_trait_ref in bounds {
             debug!("elaborate_bounds(bound_trait_ref={:?})", bound_trait_ref);
             for item in self.impl_or_trait_item(bound_trait_ref.def_id()) {
                 if !self.has_applicable_self(&item) {
@@ -1296,7 +1289,7 @@ impl<'tcx> Pick<'tcx> {
     /// Checks whether two picks do not refer to the same trait item for the same `Self` type.
     /// Only useful for comparisons of picks in order to improve diagnostics.
     /// Do not use for type checking.
-    pub fn differs_from(&self, other: &Self) -> bool {
+    pub(crate) fn differs_from(&self, other: &Self) -> bool {
         let Self {
             item:
                 AssocItem {
@@ -1320,7 +1313,7 @@ impl<'tcx> Pick<'tcx> {
     }
 
     /// In case there were unstable name collisions, emit them as a lint.
-    pub fn maybe_emit_unstable_name_collision_hint(
+    pub(crate) fn maybe_emit_unstable_name_collision_hint(
         &self,
         tcx: TyCtxt<'tcx>,
         span: Span,
@@ -1846,7 +1839,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
     /// Determine if the associated item with the given DefId matches
     /// the desired name via a doc alias.
     fn matches_by_doc_alias(&self, def_id: DefId) -> bool {
-        let Some(name) = self.method_name else {
+        let Some(method) = self.method_name else {
             return false;
         };
         let Some(local_def_id) = def_id.as_local() else {
@@ -1863,7 +1856,7 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                 // #[rustc_confusables("foo", "bar"))]
                 for n in confusables {
                     if let Some(lit) = n.lit()
-                        && name.as_str() == lit.symbol.as_str()
+                        && method.name == lit.symbol
                     {
                         return true;
                     }
@@ -1883,14 +1876,14 @@ impl<'a, 'tcx> ProbeContext<'a, 'tcx> {
                     // #[doc(alias("foo", "bar"))]
                     for n in nested {
                         if let Some(lit) = n.lit()
-                            && name.as_str() == lit.symbol.as_str()
+                            && method.name == lit.symbol
                         {
                             return true;
                         }
                     }
                 } else if let Some(meta) = v.meta_item()
                     && let Some(lit) = meta.name_value_literal()
-                    && name.as_str() == lit.symbol.as_str()
+                    && method.name == lit.symbol
                 {
                     // #[doc(alias = "foo")]
                     return true;

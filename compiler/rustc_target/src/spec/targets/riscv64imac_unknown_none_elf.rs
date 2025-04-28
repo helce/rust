@@ -1,5 +1,7 @@
-use crate::spec::{Cc, CodeModel, LinkerFlavor, Lld, PanicStrategy};
-use crate::spec::{RelocModel, SanitizerSet, Target, TargetOptions};
+use crate::spec::{
+    Cc, CodeModel, LinkerFlavor, Lld, PanicStrategy, RelocModel, SanitizerSet, Target,
+    TargetOptions,
+};
 
 pub fn target() -> Target {
     Target {
@@ -25,7 +27,7 @@ pub fn target() -> Target {
             code_model: Some(CodeModel::Medium),
             emit_debug_gdb_scripts: false,
             eh_frame_header: false,
-            supported_sanitizers: SanitizerSet::KERNELADDRESS,
+            supported_sanitizers: SanitizerSet::KERNELADDRESS | SanitizerSet::SHADOWCALLSTACK,
             ..Default::default()
         },
     }
