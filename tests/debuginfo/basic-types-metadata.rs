@@ -1,4 +1,5 @@
 //@ compile-flags:-g
+//@ min-gdb-version: 11.2
 
 // gdb-command:run
 // gdb-command:whatis unit

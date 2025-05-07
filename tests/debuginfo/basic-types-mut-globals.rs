@@ -4,8 +4,8 @@
 // about UTF-32 character encoding and will print a rust char as only
 // its numerical value.
 
-//@ min-gdb-version 11.2
 //@ compile-flags:-g
+//@ min-gdb-version: 11.2
 
 // gdb-command:run
 
