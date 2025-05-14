@@ -133,7 +133,7 @@ impl<T: Sized> NonNull<T> {
     #[inline]
     #[must_use]
     #[unstable(feature = "ptr_as_uninit", issue = "75402")]
-    #[rustc_const_unstable(feature = "const_ptr_as_ref", issue = "91822")]
+    #[rustc_const_unstable(feature = "ptr_as_uninit", issue = "75402")]
     pub const unsafe fn as_uninit_ref<'a>(self) -> &'a MaybeUninit<T> {
         // SAFETY: the caller must guarantee that `self` meets all the
         // requirements for a reference.
@@ -157,7 +157,7 @@ impl<T: Sized> NonNull<T> {
     #[inline]
     #[must_use]
     #[unstable(feature = "ptr_as_uninit", issue = "75402")]
-    #[rustc_const_unstable(feature = "const_ptr_as_ref", issue = "91822")]
+    #[rustc_const_unstable(feature = "ptr_as_uninit", issue = "75402")]
     pub const unsafe fn as_uninit_mut<'a>(self) -> &'a mut MaybeUninit<T> {
         // SAFETY: the caller must guarantee that `self` meets all the
         // requirements for a reference.
@@ -394,7 +394,8 @@ impl<T: ?Sized> NonNull<T> {
     ///
     /// [the module documentation]: crate::ptr#safety
     #[stable(feature = "nonnull", since = "1.25.0")]
-    #[rustc_const_unstable(feature = "const_ptr_as_ref", issue = "91822")]
+    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
+    #[rustc_const_stable(feature = "const_ptr_as_ref", since = "1.83.0")]
     #[must_use]
     #[inline(always)]
     pub const unsafe fn as_mut<'a>(&mut self) -> &'a mut T {
@@ -567,7 +568,6 @@ impl<T: ?Sized> NonNull<T> {
     #[must_use]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
-    #[rustc_allow_const_fn_unstable(set_ptr_value)]
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
     #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
     pub const unsafe fn byte_add(self, count: usize) -> Self {
@@ -651,7 +651,6 @@ impl<T: ?Sized> NonNull<T> {
     #[must_use]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
-    #[rustc_allow_const_fn_unstable(set_ptr_value)]
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
     #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
     pub const unsafe fn byte_sub(self, count: usize) -> Self {
@@ -924,7 +923,7 @@ impl<T: ?Sized> NonNull<T> {
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.83.0")]
     pub const unsafe fn copy_to(self, dest: NonNull<T>, count: usize)
     where
         T: Sized,
@@ -944,7 +943,7 @@ impl<T: ?Sized> NonNull<T> {
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.83.0")]
     pub const unsafe fn copy_to_nonoverlapping(self, dest: NonNull<T>, count: usize)
     where
         T: Sized,
@@ -964,7 +963,7 @@ impl<T: ?Sized> NonNull<T> {
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.83.0")]
     pub const unsafe fn copy_from(self, src: NonNull<T>, count: usize)
     where
         T: Sized,
@@ -984,7 +983,7 @@ impl<T: ?Sized> NonNull<T> {
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.83.0")]
     pub const unsafe fn copy_from_nonoverlapping(self, src: NonNull<T>, count: usize)
     where
         T: Sized,
@@ -1014,7 +1013,7 @@ impl<T: ?Sized> NonNull<T> {
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    #[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
+    #[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
     pub const unsafe fn write(self, val: T)
     where
         T: Sized,
@@ -1033,7 +1032,7 @@ impl<T: ?Sized> NonNull<T> {
     #[doc(alias = "memset")]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    #[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
+    #[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
     pub const unsafe fn write_bytes(self, val: u8, count: usize)
     where
         T: Sized,
@@ -1074,7 +1073,7 @@ impl<T: ?Sized> NonNull<T> {
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    #[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
+    #[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
     pub const unsafe fn write_unaligned(self, val: T)
     where
         T: Sized,
@@ -1212,7 +1211,6 @@ impl<T: ?Sized> NonNull<T> {
     ///
     /// ```
     /// #![feature(const_nonnull_new)]
-    /// #![feature(const_option)]
     /// #![feature(const_pointer_is_aligned)]
     /// use std::ptr::NonNull;
     ///
@@ -1265,7 +1263,6 @@ impl<T: ?Sized> NonNull<T> {
     ///
     /// ```
     /// #![feature(const_pointer_is_aligned)]
-    /// #![feature(const_option)]
     /// #![feature(const_nonnull_new)]
     /// use std::ptr::NonNull;
     ///
@@ -1435,7 +1432,7 @@ impl<T> NonNull<[T]> {
     /// (Note that this example artificially demonstrates a use of this method,
     /// but `let slice = NonNull::from(&x[..]);` would be a better way to write code like this.)
     #[stable(feature = "nonnull_slice_from_raw_parts", since = "1.70.0")]
-    #[rustc_const_unstable(feature = "const_slice_from_raw_parts_mut", issue = "67456")]
+    #[rustc_const_stable(feature = "const_slice_from_raw_parts_mut", since = "1.83.0")]
     #[must_use]
     #[inline]
     pub const fn slice_from_raw_parts(data: NonNull<T>, len: usize) -> Self {
@@ -1563,7 +1560,7 @@ impl<T> NonNull<[T]> {
     #[inline]
     #[must_use]
     #[unstable(feature = "ptr_as_uninit", issue = "75402")]
-    #[rustc_const_unstable(feature = "const_ptr_as_ref", issue = "91822")]
+    #[rustc_const_unstable(feature = "ptr_as_uninit", issue = "75402")]
     pub const unsafe fn as_uninit_slice<'a>(self) -> &'a [MaybeUninit<T>] {
         // SAFETY: the caller must uphold the safety contract for `as_uninit_slice`.
         unsafe { slice::from_raw_parts(self.cast().as_ptr(), self.len()) }
@@ -1628,7 +1625,7 @@ impl<T> NonNull<[T]> {
     #[inline]
     #[must_use]
     #[unstable(feature = "ptr_as_uninit", issue = "75402")]
-    #[rustc_const_unstable(feature = "const_ptr_as_ref", issue = "91822")]
+    #[rustc_const_unstable(feature = "ptr_as_uninit", issue = "75402")]
     pub const unsafe fn as_uninit_slice_mut<'a>(self) -> &'a mut [MaybeUninit<T>] {
         // SAFETY: the caller must uphold the safety contract for `as_uninit_slice_mut`.
         unsafe { slice::from_raw_parts_mut(self.cast().as_ptr(), self.len()) }

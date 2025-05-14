@@ -45,7 +45,7 @@ use std::{fmt, io};
 use rustc_fs_util::try_canonicalize;
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
-use rustc_span::symbol::{kw, sym, Symbol};
+use rustc_span::symbol::{Symbol, kw, sym};
 use serde_json::Value;
 use tracing::debug;
 
@@ -60,8 +60,8 @@ pub mod crt_objects;
 
 mod base;
 pub use base::apple::{
-    deployment_target as current_apple_deployment_target, platform as current_apple_platform,
-    sdk_version as current_apple_sdk_version,
+    deployment_target_for_target as current_apple_deployment_target,
+    platform as current_apple_platform,
 };
 pub use base::avr_gnu::ef_avr_arch;
 
@@ -830,6 +830,46 @@ impl RelroLevel {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Hash)]
+pub enum SymbolVisibility {
+    Hidden,
+    Protected,
+    Interposable,
+}
+
+impl SymbolVisibility {
+    pub fn desc(&self) -> &str {
+        match *self {
+            SymbolVisibility::Hidden => "hidden",
+            SymbolVisibility::Protected => "protected",
+            SymbolVisibility::Interposable => "interposable",
+        }
+    }
+}
+
+impl FromStr for SymbolVisibility {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<SymbolVisibility, ()> {
+        match s {
+            "hidden" => Ok(SymbolVisibility::Hidden),
+            "protected" => Ok(SymbolVisibility::Protected),
+            "interposable" => Ok(SymbolVisibility::Interposable),
+            _ => Err(()),
+        }
+    }
+}
+
+impl ToJson for SymbolVisibility {
+    fn to_json(&self) -> Json {
+        match *self {
+            SymbolVisibility::Hidden => "hidden".to_json(),
+            SymbolVisibility::Protected => "protected".to_json(),
+            SymbolVisibility::Interposable => "interposable".to_json(),
+        }
+    }
+}
+
 impl FromStr for RelroLevel {
     type Err = ();
 
@@ -851,6 +891,43 @@ impl ToJson for RelroLevel {
             RelroLevel::Partial => "partial".to_json(),
             RelroLevel::Off => "off".to_json(),
             RelroLevel::None => "None".to_json(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Hash)]
+pub enum SmallDataThresholdSupport {
+    None,
+    DefaultForArch,
+    LlvmModuleFlag(StaticCow<str>),
+    LlvmArg(StaticCow<str>),
+}
+
+impl FromStr for SmallDataThresholdSupport {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "none" {
+            Ok(Self::None)
+        } else if s == "default-for-arch" {
+            Ok(Self::DefaultForArch)
+        } else if let Some(flag) = s.strip_prefix("llvm-module-flag=") {
+            Ok(Self::LlvmModuleFlag(flag.to_string().into()))
+        } else if let Some(arg) = s.strip_prefix("llvm-arg=") {
+            Ok(Self::LlvmArg(arg.to_string().into()))
+        } else {
+            Err(())
+        }
+    }
+}
+
+impl ToJson for SmallDataThresholdSupport {
+    fn to_json(&self) -> Value {
+        match self {
+            Self::None => "none".to_json(),
+            Self::DefaultForArch => "default-for-arch".to_json(),
+            Self::LlvmModuleFlag(flag) => format!("llvm-module-flag={flag}").to_json(),
+            Self::LlvmArg(arg) => format!("llvm-arg={arg}").to_json(),
         }
     }
 }
@@ -1645,6 +1722,7 @@ supported_targets! {
     ("x86_64-unknown-haiku", x86_64_unknown_haiku),
 
     ("i686-unknown-hurd-gnu", i686_unknown_hurd_gnu),
+    ("x86_64-unknown-hurd-gnu", x86_64_unknown_hurd_gnu),
 
     ("aarch64-apple-darwin", aarch64_apple_darwin),
     ("arm64e-apple-darwin", arm64e_apple_darwin),
@@ -1652,12 +1730,8 @@ supported_targets! {
     ("x86_64h-apple-darwin", x86_64h_apple_darwin),
     ("i686-apple-darwin", i686_apple_darwin),
 
-    // FIXME(#106649): Remove aarch64-fuchsia in favor of aarch64-unknown-fuchsia
-    ("aarch64-fuchsia", aarch64_fuchsia),
     ("aarch64-unknown-fuchsia", aarch64_unknown_fuchsia),
     ("riscv64gc-unknown-fuchsia", riscv64gc_unknown_fuchsia),
-    // FIXME(#106649): Remove x86_64-fuchsia in favor of x86_64-unknown-fuchsia
-    ("x86_64-fuchsia", x86_64_fuchsia),
     ("x86_64-unknown-fuchsia", x86_64_unknown_fuchsia),
 
     ("avr-unknown-gnu-atmega328", avr_unknown_gnu_atmega328),
@@ -1676,8 +1750,10 @@ supported_targets! {
     ("x86_64-apple-ios-macabi", x86_64_apple_ios_macabi),
     ("aarch64-apple-ios-macabi", aarch64_apple_ios_macabi),
     ("aarch64-apple-ios-sim", aarch64_apple_ios_sim),
+
     ("aarch64-apple-tvos", aarch64_apple_tvos),
     ("aarch64-apple-tvos-sim", aarch64_apple_tvos_sim),
+    ("arm64e-apple-tvos", arm64e_apple_tvos),
     ("x86_64-apple-tvos", x86_64_apple_tvos),
 
     ("armv7k-apple-watchos", armv7k_apple_watchos),
@@ -1694,6 +1770,8 @@ supported_targets! {
     ("armv7r-none-eabi", armv7r_none_eabi),
     ("armv7r-none-eabihf", armv7r_none_eabihf),
     ("armv8r-none-eabihf", armv8r_none_eabihf),
+
+    ("armv7-rtems-eabihf", armv7_rtems_eabihf),
 
     ("x86_64-pc-solaris", x86_64_pc_solaris),
     ("sparcv9-sun-solaris", sparcv9_sun_solaris),
@@ -1752,6 +1830,7 @@ supported_targets! {
 
     ("armv7-unknown-trusty", armv7_unknown_trusty),
     ("aarch64-unknown-trusty", aarch64_unknown_trusty),
+    ("x86_64-unknown-trusty", x86_64_unknown_trusty),
 
     ("riscv32i-unknown-none-elf", riscv32i_unknown_none_elf),
     ("riscv32im-risc0-zkvm-elf", riscv32im_risc0_zkvm_elf),
@@ -1761,6 +1840,10 @@ supported_targets! {
     ("riscv32imc-esp-espidf", riscv32imc_esp_espidf),
     ("riscv32imac-esp-espidf", riscv32imac_esp_espidf),
     ("riscv32imafc-esp-espidf", riscv32imafc_esp_espidf),
+
+    ("riscv32e-unknown-none-elf", riscv32e_unknown_none_elf),
+    ("riscv32em-unknown-none-elf", riscv32em_unknown_none_elf),
+    ("riscv32emc-unknown-none-elf", riscv32emc_unknown_none_elf),
 
     ("riscv32imac-unknown-none-elf", riscv32imac_unknown_none_elf),
     ("riscv32imafc-unknown-none-elf", riscv32imafc_unknown_none_elf),
@@ -1802,6 +1885,8 @@ supported_targets! {
     ("powerpc-wrs-vxworks", powerpc_wrs_vxworks),
     ("powerpc-wrs-vxworks-spe", powerpc_wrs_vxworks_spe),
     ("powerpc64-wrs-vxworks", powerpc64_wrs_vxworks),
+    ("riscv32-wrs-vxworks", riscv32_wrs_vxworks),
+    ("riscv64-wrs-vxworks", riscv64_wrs_vxworks),
 
     ("aarch64-kmc-solid_asp3", aarch64_kmc_solid_asp3),
     ("armv7a-kmc-solid_asp3-eabi", armv7a_kmc_solid_asp3_eabi),
@@ -1853,12 +1938,14 @@ supported_targets! {
 
     ("mips64-openwrt-linux-musl", mips64_openwrt_linux_musl),
 
+    ("aarch64-unknown-nto-qnx700", aarch64_unknown_nto_qnx700),
     ("aarch64-unknown-nto-qnx710", aarch64_unknown_nto_qnx710),
     ("x86_64-pc-nto-qnx710", x86_64_pc_nto_qnx710),
     ("i586-pc-nto-qnx700", i586_pc_nto_qnx700),
 
     ("aarch64-unknown-linux-ohos", aarch64_unknown_linux_ohos),
     ("armv7-unknown-linux-ohos", armv7_unknown_linux_ohos),
+    ("loongarch64-unknown-linux-ohos", loongarch64_unknown_linux_ohos),
     ("x86_64-unknown-linux-ohos", x86_64_unknown_linux_ohos),
 
     ("x86_64-unknown-linux-none", x86_64_unknown_linux_none),
@@ -2112,9 +2199,10 @@ pub struct TargetOptions {
     /// Default CPU to pass to LLVM. Corresponds to `llc -mcpu=$cpu`. Defaults
     /// to "generic".
     pub cpu: StaticCow<str>,
-    /// Default target features to pass to LLVM. These features will *always* be
-    /// passed, and cannot be disabled even via `-C`. Corresponds to `llc
-    /// -mattr=$features`.
+    /// Default target features to pass to LLVM. These features overwrite
+    /// `-Ctarget-cpu` but can be overwritten with `-Ctarget-features`.
+    /// Corresponds to `llc -mattr=$features`.
+    /// Note that these are LLVM feature names, not Rust feature names!
     pub features: StaticCow<str>,
     /// Direct or use GOT indirect to reference external data symbols
     pub direct_access_external_data: Option<bool>,
@@ -2164,7 +2252,7 @@ pub struct TargetOptions {
     pub is_like_aix: bool,
     /// Whether the target toolchain is like macOS's. Only useful for compiling against iOS/macOS,
     /// in particular running dsymutil and some other stuff like `-dead_strip`. Defaults to false.
-    /// Also indiates whether to use Apple-specific ABI changes, such as extending function
+    /// Also indicates whether to use Apple-specific ABI changes, such as extending function
     /// parameters to 32-bits.
     pub is_like_osx: bool,
     /// Whether the target toolchain is like Solaris's.
@@ -2299,13 +2387,12 @@ pub struct TargetOptions {
     /// for this target unconditionally.
     pub no_builtins: bool,
 
-    /// The default visibility for symbols in this target should be "hidden"
-    /// rather than "default".
+    /// The default visibility for symbols in this target.
     ///
-    /// This value typically shouldn't be accessed directly, but through
-    /// the `rustc_session::Session::default_hidden_visibility` method, which
-    /// allows `rustc` users to override this setting using cmdline flags.
-    pub default_hidden_visibility: bool,
+    /// This value typically shouldn't be accessed directly, but through the
+    /// `rustc_session::Session::default_visibility` method, which allows `rustc` users to override
+    /// this setting using cmdline flags.
+    pub default_visibility: Option<SymbolVisibility>,
 
     /// Whether a .debug_gdb_scripts section will be added to the output object file
     pub emit_debug_gdb_scripts: bool,
@@ -2403,6 +2490,9 @@ pub struct TargetOptions {
 
     /// Whether the target supports XRay instrumentation.
     pub supports_xray: bool,
+
+    /// Whether the targets supports -Z small-data-threshold
+    small_data_threshold_support: SmallDataThresholdSupport,
 }
 
 /// Add arguments for the given flavor and also for its "twin" flavors
@@ -2593,7 +2683,7 @@ impl Default for TargetOptions {
             requires_lto: false,
             singlethread: false,
             no_builtins: false,
-            default_hidden_visibility: false,
+            default_visibility: None,
             emit_debug_gdb_scripts: true,
             requires_uwtable: false,
             default_uwtable: false,
@@ -2620,6 +2710,7 @@ impl Default for TargetOptions {
             entry_name: "main".into(),
             entry_abi: Conv::C,
             supports_xray: false,
+            small_data_threshold_support: SmallDataThresholdSupport::DefaultForArch,
         }
     }
 }
@@ -2692,7 +2783,10 @@ impl Target {
             }
             X86Interrupt => ["x86", "x86_64"].contains(&&self.arch[..]),
             Aapcs { .. } => "arm" == self.arch,
-            CCmseNonSecureCall => ["arm", "aarch64"].contains(&&self.arch[..]),
+            CCmseNonSecureCall | CCmseNonSecureEntry => {
+                ["thumbv8m.main-none-eabi", "thumbv8m.main-none-eabihf", "thumbv8m.base-none-eabi"]
+                    .contains(&&self.llvm_target[..])
+            }
             Win64 { .. } | SysV64 { .. } => self.arch == "x86_64",
             PtxKernel => self.arch == "nvptx64",
             Msp430Interrupt => self.arch == "msp430",
@@ -2895,6 +2989,15 @@ impl Target {
                     Some(Ok(()))
                 })).unwrap_or(Ok(()))
             } );
+            ($key_name:ident, SmallDataThresholdSupport) => ( {
+                obj.remove("small-data-threshold-support").and_then(|o| o.as_str().and_then(|s| {
+                    match s.parse::<SmallDataThresholdSupport>() {
+                        Ok(support) => base.small_data_threshold_support = support,
+                        _ => return Some(Err(format!("'{s}' is not a valid value for small-data-threshold-support."))),
+                    }
+                    Some(Ok(()))
+                })).unwrap_or(Ok(()))
+            } );
             ($key_name:ident, PanicStrategy) => ( {
                 let name = (stringify!($key_name)).replace("_", "-");
                 obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
@@ -2915,6 +3018,18 @@ impl Target {
                         Ok(level) => base.$key_name = level,
                         _ => return Some(Err(format!("'{}' is not a valid value for \
                                                       relro-level. Use 'full', 'partial, or 'off'.",
+                                                      s))),
+                    }
+                    Some(Ok(()))
+                })).unwrap_or(Ok(()))
+            } );
+            ($key_name:ident, Option<SymbolVisibility>) => ( {
+                let name = (stringify!($key_name)).replace("_", "-");
+                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
+                    match s.parse::<SymbolVisibility>() {
+                        Ok(level) => base.$key_name = Some(level),
+                        _ => return Some(Err(format!("'{}' is not a valid value for \
+                                                      symbol-visibility. Use 'hidden', 'protected, or 'interposable'.",
                                                       s))),
                     }
                     Some(Ok(()))
@@ -3310,7 +3425,7 @@ impl Target {
         key!(requires_lto, bool);
         key!(singlethread, bool);
         key!(no_builtins, bool);
-        key!(default_hidden_visibility, bool);
+        key!(default_visibility, Option<SymbolVisibility>)?;
         key!(emit_debug_gdb_scripts, bool);
         key!(requires_uwtable, bool);
         key!(default_uwtable, bool);
@@ -3332,6 +3447,7 @@ impl Target {
         key!(supported_sanitizers, SanitizerSet)?;
         key!(generate_arange_section, bool);
         key!(supports_stack_protector, bool);
+        key!(small_data_threshold_support, SmallDataThresholdSupport)?;
         key!(entry_name);
         key!(entry_abi, Conv)?;
         key!(supports_xray, bool);
@@ -3344,10 +3460,10 @@ impl Target {
 
         // Each field should have been read using `Json::remove` so any keys remaining are unused.
         let remaining_keys = obj.keys();
-        Ok((
-            base,
-            TargetWarnings { unused_fields: remaining_keys.cloned().collect(), incorrect_type },
-        ))
+        Ok((base, TargetWarnings {
+            unused_fields: remaining_keys.cloned().collect(),
+            incorrect_type,
+        }))
     }
 
     /// Load a built-in target
@@ -3424,6 +3540,30 @@ impl Target {
                 let obj = serde_json::from_str(contents).map_err(|e| e.to_string())?;
                 Target::from_json(obj)
             }
+        }
+    }
+
+    /// Return the target's small data threshold support, converting
+    /// `DefaultForArch` into a concrete value.
+    pub fn small_data_threshold_support(&self) -> SmallDataThresholdSupport {
+        match &self.options.small_data_threshold_support {
+            // Avoid having to duplicate the small data support in every
+            // target file by supporting a default value for each
+            // architecture.
+            SmallDataThresholdSupport::DefaultForArch => match self.arch.as_ref() {
+                "mips" | "mips64" | "mips32r6" => {
+                    SmallDataThresholdSupport::LlvmArg("mips-ssection-threshold".into())
+                }
+                "hexagon" => {
+                    SmallDataThresholdSupport::LlvmArg("hexagon-small-data-threshold".into())
+                }
+                "m68k" => SmallDataThresholdSupport::LlvmArg("m68k-ssection-threshold".into()),
+                "riscv32" | "riscv64" => {
+                    SmallDataThresholdSupport::LlvmModuleFlag("SmallDataLimit".into())
+                }
+                _ => SmallDataThresholdSupport::None,
+            },
+            s => s.clone(),
         }
     }
 }
@@ -3565,7 +3705,7 @@ impl ToJson for Target {
         target_option_val!(requires_lto);
         target_option_val!(singlethread);
         target_option_val!(no_builtins);
-        target_option_val!(default_hidden_visibility);
+        target_option_val!(default_visibility);
         target_option_val!(emit_debug_gdb_scripts);
         target_option_val!(requires_uwtable);
         target_option_val!(default_uwtable);
@@ -3588,6 +3728,7 @@ impl ToJson for Target {
         target_option_val!(c_enum_min_bits);
         target_option_val!(generate_arange_section);
         target_option_val!(supports_stack_protector);
+        target_option_val!(small_data_threshold_support);
         target_option_val!(entry_name);
         target_option_val!(entry_abi);
         target_option_val!(supports_xray);

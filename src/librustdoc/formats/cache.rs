@@ -1,6 +1,6 @@
 use std::mem;
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexSet};
+use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, DefIdSet};
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::Symbol;
@@ -10,12 +10,12 @@ use crate::clean::types::ExternalLocation;
 use crate::clean::{self, ExternalCrate, ItemId, PrimitiveType};
 use crate::core::DocContext;
 use crate::fold::DocFolder;
-use crate::formats::item_type::ItemType;
 use crate::formats::Impl;
+use crate::formats::item_type::ItemType;
 use crate::html::format::join_with_double_colon;
 use crate::html::markdown::short_markdown_summary;
-use crate::html::render::search_index::get_function_type_for_search;
 use crate::html::render::IndexItem;
+use crate::html::render::search_index::get_function_type_for_search;
 use crate::visit_lib::RustdocEffectiveVisibilities;
 
 /// This cache is used to store information about the [`clean::Crate`] being
@@ -42,7 +42,7 @@ pub(crate) struct Cache {
     /// URLs when a type is being linked to. External paths are not located in
     /// this map because the `External` type itself has all the information
     /// necessary.
-    pub(crate) paths: FxHashMap<DefId, (Vec<Symbol>, ItemType)>,
+    pub(crate) paths: FxIndexMap<DefId, (Vec<Symbol>, ItemType)>,
 
     /// Similar to `paths`, but only holds external paths. This is only used for
     /// generating explicit hyperlinks to other crates.
@@ -64,18 +64,18 @@ pub(crate) struct Cache {
     /// Implementations of a crate should inherit the documentation of the
     /// parent trait if no extra documentation is specified, and default methods
     /// should show up in documentation about trait implementations.
-    pub(crate) traits: FxHashMap<DefId, clean::Trait>,
+    pub(crate) traits: FxIndexMap<DefId, clean::Trait>,
 
     /// When rendering traits, it's often useful to be able to list all
     /// implementors of the trait, and this mapping is exactly, that: a mapping
     /// of trait ids to the list of known implementors of the trait
-    pub(crate) implementors: FxHashMap<DefId, Vec<Impl>>,
+    pub(crate) implementors: FxIndexMap<DefId, Vec<Impl>>,
 
     /// Cache of where external crate documentation can be found.
-    pub(crate) extern_locations: FxHashMap<CrateNum, ExternalLocation>,
+    pub(crate) extern_locations: FxIndexMap<CrateNum, ExternalLocation>,
 
     /// Cache of where documentation for primitives can be found.
-    pub(crate) primitive_locations: FxHashMap<clean::PrimitiveType, DefId>,
+    pub(crate) primitive_locations: FxIndexMap<clean::PrimitiveType, DefId>,
 
     // Note that external items for which `doc(hidden)` applies to are shown as
     // non-reachable while local items aren't. This is because we're reusing
@@ -118,7 +118,7 @@ pub(crate) struct Cache {
     // crawl. In order to prevent crashes when looking for notable traits or
     // when gathering trait documentation on a type, hold impls here while
     // folding and add them to the cache later on if we find the trait.
-    orphan_trait_impls: Vec<(DefId, FxHashSet<DefId>, Impl)>,
+    orphan_trait_impls: Vec<(DefId, FxIndexSet<DefId>, Impl)>,
 
     /// All intra-doc links resolved so far.
     ///
@@ -153,7 +153,8 @@ impl Cache {
 
         // Crawl the crate to build various caches used for the output
         debug!(?cx.cache.crate_version);
-        cx.cache.traits = krate.external_traits.take();
+        assert!(cx.external_traits.is_empty());
+        cx.cache.traits = mem::take(&mut krate.external_traits);
 
         // Cache where all our extern crates are located
         // FIXME: this part is specific to HTML so it'd be nice to remove it from the common code
@@ -216,7 +217,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
 
         // If this is a stripped module,
         // we don't want it or its children in the search index.
-        let orig_stripped_mod = match *item.kind {
+        let orig_stripped_mod = match item.kind {
             clean::StrippedItem(box clean::ModuleItem(..)) => {
                 mem::replace(&mut self.cache.stripped_mod, true)
             }
@@ -232,7 +233,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
 
         // If the impl is from a masked crate or references something from a
         // masked crate then remove it completely.
-        if let clean::ImplItem(ref i) = *item.kind
+        if let clean::ImplItem(ref i) = item.kind
             && (self.cache.masked_crates.contains(&item.item_id.krate())
                 || i.trait_
                     .as_ref()
@@ -246,9 +247,9 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
 
         // Propagate a trait method's documentation to all implementors of the
         // trait.
-        if let clean::TraitItem(ref t) = *item.kind {
+        if let clean::TraitItem(ref t) = item.kind {
             self.cache.traits.entry(item.item_id.expect_def_id()).or_insert_with(|| (**t).clone());
-        } else if let clean::ImplItem(ref i) = *item.kind
+        } else if let clean::ImplItem(ref i) = item.kind
             && let Some(trait_) = &i.trait_
             && !i.kind.is_blanket()
         {
@@ -263,7 +264,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
         // Index this method for searching later on.
         let search_name = if !item.is_stripped() {
             item.name.or_else(|| {
-                if let clean::ImportItem(ref i) = *item.kind
+                if let clean::ImportItem(ref i) = item.kind
                     && let clean::ImportKind::Simple(s) = i.kind
                 {
                     Some(s)
@@ -287,7 +288,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
             _ => false,
         };
 
-        match *item.kind {
+        match item.kind {
             clean::StructItem(..)
             | clean::EnumItem(..)
             | clean::TypeAliasItem(..)
@@ -350,7 +351,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
         }
 
         // Maintain the parent stack.
-        let (item, parent_pushed) = match *item.kind {
+        let (item, parent_pushed) = match item.kind {
             clean::TraitItem(..)
             | clean::EnumItem(..)
             | clean::ForeignTypeItem
@@ -367,11 +368,15 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
 
         // Once we've recursively found all the generics, hoard off all the
         // implementations elsewhere.
-        let ret = if let clean::Item { kind: box clean::ImplItem(ref i), .. } = item {
+        let ret = if let clean::Item {
+            inner: box clean::ItemInner { kind: clean::ImplItem(ref i), .. },
+            ..
+        } = item
+        {
             // Figure out the id of this impl. This may map to a
             // primitive rather than always to a struct/enum.
             // Note: matching twice to restrict the lifetime of the `i` borrow.
-            let mut dids = FxHashSet::default();
+            let mut dids = FxIndexSet::default();
             match i.for_ {
                 clean::Type::Path { ref path }
                 | clean::BorrowedRef { type_: box clean::Type::Path { ref path }, .. } => {
@@ -436,7 +441,7 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
 fn add_item_to_search_index(tcx: TyCtxt<'_>, cache: &mut Cache, item: &clean::Item, name: Symbol) {
     // Item has a name, so it must also have a DefId (can't be an impl, let alone a blanket or auto impl).
     let item_def_id = item.item_id.as_def_id().unwrap();
-    let (parent_did, parent_path) = match *item.kind {
+    let (parent_did, parent_path) = match item.kind {
         clean::StrippedItem(..) => return,
         clean::AssocConstItem(..) | clean::AssocTypeItem(..)
             if cache.parent_stack.last().is_some_and(|parent| parent.is_trait_impl()) =>
@@ -528,7 +533,7 @@ fn add_item_to_search_index(tcx: TyCtxt<'_>, cache: &mut Cache, item: &clean::It
     // - It's either an inline, or a true re-export
     // - It's got the same name
     // - Both of them have the same exact path
-    let defid = match &*item.kind {
+    let defid = match &item.kind {
         clean::ItemKind::ImportItem(import) => import.source.did.unwrap_or(item_def_id),
         _ => item_def_id,
     };
@@ -605,7 +610,7 @@ enum ParentStackItem {
 
 impl ParentStackItem {
     fn new(item: &clean::Item) -> Self {
-        match &*item.kind {
+        match &item.kind {
             clean::ItemKind::ImplItem(box clean::Impl { for_, trait_, generics, kind, .. }) => {
                 ParentStackItem::Impl {
                     for_: for_.clone(),

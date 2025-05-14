@@ -4,8 +4,8 @@ use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::mir::AssertKind;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::lint::{self, Lint};
-use rustc_span::def_id::DefId;
 use rustc_span::Span;
+use rustc_span::def_id::DefId;
 
 use crate::fluent_generated as fluent;
 
@@ -64,7 +64,7 @@ impl<'a, P: std::fmt::Debug> LintDiagnostic<'a, ()> for AssertLint<P> {
 }
 
 impl AssertLintKind {
-    pub fn lint(&self) -> &'static Lint {
+    pub(crate) fn lint(&self) -> &'static Lint {
         match self {
             AssertLintKind::ArithmeticOverflow => lint::builtin::ARITHMETIC_OVERFLOW,
             AssertLintKind::UnconditionalPanic => lint::builtin::UNCONDITIONAL_PANIC,
@@ -89,7 +89,15 @@ pub(crate) struct FnItemRef {
     pub ident: String,
 }
 
-pub(crate) struct MustNotSupend<'tcx, 'a> {
+#[derive(Diagnostic)]
+#[diag(mir_transform_exceeds_mcdc_test_vector_limit)]
+pub(crate) struct MCDCExceedsTestVectorLimit {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) max_num_test_vectors: usize,
+}
+
+pub(crate) struct MustNotSupend<'a, 'tcx> {
     pub tcx: TyCtxt<'tcx>,
     pub yield_sp: Span,
     pub reason: Option<MustNotSuspendReason>,
@@ -121,3 +129,10 @@ pub(crate) struct MustNotSuspendReason {
     pub span: Span,
     pub reason: String,
 }
+
+#[derive(LintDiagnostic)]
+#[diag(mir_transform_undefined_transmute)]
+#[note]
+#[note(mir_transform_note2)]
+#[help]
+pub(crate) struct UndefinedTransmute;

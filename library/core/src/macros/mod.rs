@@ -229,8 +229,8 @@ pub macro assert_matches {
 pub macro cfg_match {
     // with a final wildcard
     (
-        $(cfg($initial_meta:meta) => { $($initial_tokens:item)* })+
-        _ => { $($extra_tokens:item)* }
+        $(cfg($initial_meta:meta) => { $($initial_tokens:tt)* })+
+        _ => { $($extra_tokens:tt)* }
     ) => {
         cfg_match! {
             @__items ();
@@ -241,7 +241,7 @@ pub macro cfg_match {
 
     // without a final wildcard
     (
-        $(cfg($extra_meta:meta) => { $($extra_tokens:item)* })*
+        $(cfg($extra_meta:meta) => { $($extra_tokens:tt)* })*
     ) => {
         cfg_match! {
             @__items ();
@@ -256,7 +256,7 @@ pub macro cfg_match {
     (@__items ($($_:meta,)*);) => {},
     (
         @__items ($($no:meta,)*);
-        (($($yes:meta)?) ($($tokens:item)*)),
+        (($($yes:meta)?) ($($tokens:tt)*)),
         $($rest:tt,)*
     ) => {
         // Emit all items within one block, applying an appropriate #[cfg]. The
@@ -279,7 +279,7 @@ pub macro cfg_match {
 
     // Internal macro to make __apply work out right for different match types,
     // because of how macros match/expand stuff.
-    (@__identity $($tokens:item)*) => {
+    (@__identity $($tokens:tt)*) => {
         $($tokens)*
     }
 }
@@ -1072,7 +1072,7 @@ pub(crate) mod builtin {
     /// If the environment variable is not defined, then a compilation error
     /// will be emitted. To not emit a compile error, use the [`option_env!`]
     /// macro instead. A compilation error will also be emitted if the
-    /// environment variable is not a vaild Unicode string.
+    /// environment variable is not a valid Unicode string.
     ///
     /// # Examples
     ///

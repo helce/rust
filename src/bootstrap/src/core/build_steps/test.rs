@@ -15,17 +15,17 @@ use crate::core::build_steps::tool::{self, SourceType, Tool};
 use crate::core::build_steps::toolstate::ToolState;
 use crate::core::build_steps::{compile, dist, llvm};
 use crate::core::builder::{
-    self, crate_description, Alias, Builder, Compiler, Kind, RunConfig, ShouldRun, Step,
+    self, Alias, Builder, Compiler, Kind, RunConfig, ShouldRun, Step, crate_description,
 };
-use crate::core::config::flags::{get_completion, Subcommand};
 use crate::core::config::TargetSelection;
-use crate::utils::exec::{command, BootstrapCommand};
+use crate::core::config::flags::{Subcommand, get_completion};
+use crate::utils::exec::{BootstrapCommand, command};
 use crate::utils::helpers::{
-    self, add_link_lib_path, add_rustdoc_cargo_linker_args, dylib_path, dylib_path_var,
-    linker_args, linker_flags, t, target_supports_cranelift_backend, up_to_date, LldThreads,
+    self, LldThreads, add_link_lib_path, add_rustdoc_cargo_linker_args, dylib_path, dylib_path_var,
+    linker_args, linker_flags, t, target_supports_cranelift_backend, up_to_date,
 };
 use crate::utils::render_tests::{add_flags_and_try_run_tests, try_run_tests};
-use crate::{envify, CLang, DocTests, GitRepo, Mode};
+use crate::{CLang, DocTests, GitRepo, Mode, envify};
 
 const ADB_TEST_DIR: &str = "/data/local/tmp/work";
 
@@ -1075,12 +1075,8 @@ HELP: to skip test's attempt to check tidiness, pass `--skip src/tools/tidy` to 
                 crate::exit!(1);
             }
             let all = false;
-            crate::core::build_steps::format::format(
-                builder,
-                !builder.config.cmd.bless(),
-                all,
-                &[],
-            );
+            crate::core::build_steps::format::format(builder, !builder.config.cmd.bless(), all, &[
+            ]);
         }
 
         builder.info("tidy check");
@@ -1398,12 +1394,6 @@ default_test!(Ui { path: "tests/ui", mode: "ui", suite: "ui" });
 
 default_test!(Crashes { path: "tests/crashes", mode: "crashes", suite: "crashes" });
 
-default_test!(RunPassValgrind {
-    path: "tests/run-pass-valgrind",
-    mode: "run-pass-valgrind",
-    suite: "run-pass-valgrind"
-});
-
 default_test!(Codegen { path: "tests/codegen", mode: "codegen", suite: "codegen" });
 
 default_test!(CodegenUnits {
@@ -1707,7 +1697,11 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
         builder.ensure(TestHelpers { target: compiler.host });
 
         // ensure that `libproc_macro` is available on the host.
-        builder.ensure(compile::Std::new(compiler, compiler.host));
+        if suite == "mir-opt" {
+            builder.ensure(compile::Std::new_for_mir_opt_tests(compiler, compiler.host));
+        } else {
+            builder.ensure(compile::Std::new(compiler, compiler.host));
+        }
 
         // As well as the target
         if suite != "mir-opt" {
@@ -1732,6 +1726,26 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
         cmd.arg("--rustc-path").arg(builder.rustc(compiler));
 
         let is_rustdoc = suite.ends_with("rustdoc-ui") || suite.ends_with("rustdoc-js");
+
+        if mode == "run-make" {
+            let cargo_path = if builder.top_stage == 0 {
+                // If we're using `--stage 0`, we should provide the bootstrap cargo.
+                builder.initial_cargo.clone()
+            } else {
+                // We need to properly build cargo using the suitable stage compiler.
+
+                // HACK: currently tool stages are off-by-one compared to compiler stages, i.e. if
+                // you give `tool::Cargo` a stage 1 rustc, it will cause stage 2 rustc to be built
+                // and produce a cargo built with stage 2 rustc. To fix this, we need to chop off
+                // the compiler stage by 1 to align with expected `./x test run-make --stage N`
+                // behavior, i.e. we need to pass `N - 1` compiler stage to cargo. See also Miri
+                // which does a similar hack.
+                let compiler = builder.compiler(builder.top_stage - 1, compiler.host);
+                builder.ensure(tool::Cargo { compiler, target: compiler.host })
+            };
+
+            cmd.arg("--cargo-path").arg(cargo_path);
+        }
 
         // Avoid depending on rustdoc when we don't need it.
         if mode == "rustdoc"
@@ -1776,6 +1790,10 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
         cmd.arg("--host").arg(&*compiler.host.triple);
         cmd.arg("--llvm-filecheck").arg(builder.llvm_filecheck(builder.config.build));
 
+        if builder.build.config.llvm_enzyme {
+            cmd.arg("--has-enzyme");
+        }
+
         if builder.config.cmd.bless() {
             cmd.arg("--bless");
         }
@@ -1809,6 +1827,9 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
         }
         if builder.config.rust_optimize_tests {
             cmd.arg("--optimize-tests");
+        }
+        if builder.config.rust_randomize_layout {
+            cmd.arg("--rust-randomized-layout");
         }
         if builder.config.cmd.only_modified() {
             cmd.arg("--only-modified");
@@ -2065,7 +2086,7 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
         }
 
         if builder.config.profiler_enabled(target) {
-            cmd.arg("--profiler-support");
+            cmd.arg("--profiler-runtime");
         }
 
         cmd.env("RUST_TEST_TMPDIR", builder.tempdir());
@@ -2084,8 +2105,6 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
             cmd.arg("--rustfix-coverage");
         }
 
-        cmd.env("BOOTSTRAP_CARGO", &builder.initial_cargo);
-
         cmd.arg("--channel").arg(&builder.config.channel);
 
         if !builder.config.omit_git_hash {
@@ -2095,6 +2114,7 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
         let git_config = builder.config.git_config();
         cmd.arg("--git-repository").arg(git_config.git_repository);
         cmd.arg("--nightly-branch").arg(git_config.nightly_branch);
+        cmd.arg("--git-merge-commit-email").arg(git_config.git_merge_commit_email);
         cmd.force_coloring_in_ci();
 
         #[cfg(feature = "build-metrics")]
@@ -2687,7 +2707,7 @@ impl Step for Crate {
                 }
             }
             Mode::Rustc => {
-                compile::rustc_cargo(builder, &mut cargo, target, &compiler);
+                compile::rustc_cargo(builder, &mut cargo, target, &compiler, &self.crates);
             }
             _ => panic!("can only test libraries"),
         };
@@ -3431,11 +3451,10 @@ impl Step for CodegenGCC {
         let compiler = self.compiler;
         let target = self.target;
 
-        builder.ensure(compile::Std::new_with_extra_rust_args(
-            compiler,
-            target,
-            &["-Csymbol-mangling-version=v0", "-Cpanic=abort"],
-        ));
+        builder.ensure(compile::Std::new_with_extra_rust_args(compiler, target, &[
+            "-Csymbol-mangling-version=v0",
+            "-Cpanic=abort",
+        ]));
 
         // If we're not doing a full bootstrap but we're testing a stage2
         // version of libstd, then what we're actually testing is the libstd
@@ -3526,11 +3545,13 @@ impl Step for TestFloatParse {
 
     fn run(self, builder: &Builder<'_>) {
         let bootstrap_host = builder.config.build;
-        let compiler = builder.compiler(0, bootstrap_host);
+        let compiler = builder.compiler(builder.top_stage, bootstrap_host);
         let path = self.path.to_str().unwrap();
         let crate_name = self.path.components().last().unwrap().as_os_str().to_str().unwrap();
 
-        builder.ensure(compile::Std::new(compiler, self.host));
+        if !builder.download_rustc() {
+            builder.ensure(compile::Std::new(compiler, self.host));
+        }
 
         // Run any unit tests in the crate
         let cargo_test = tool::prepare_tool_cargo(

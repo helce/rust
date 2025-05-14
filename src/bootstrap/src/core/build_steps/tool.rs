@@ -1,15 +1,17 @@
 use std::path::PathBuf;
 use std::{env, fs};
 
+use build_helper::git::get_closest_merge_commit;
+
 use crate::core::build_steps::compile;
 use crate::core::build_steps::toolstate::ToolState;
 use crate::core::builder;
 use crate::core::builder::{Builder, Cargo as CargoCommand, RunConfig, ShouldRun, Step};
 use crate::core::config::TargetSelection;
 use crate::utils::channel::GitInfo;
-use crate::utils::exec::{command, BootstrapCommand};
-use crate::utils::helpers::{add_dylib_path, exe, get_closest_merge_base_commit, git, t};
-use crate::{gha, Compiler, Kind, Mode};
+use crate::utils::exec::{BootstrapCommand, command};
+use crate::utils::helpers::{add_dylib_path, exe, git, t};
+use crate::{Compiler, Kind, Mode, gha};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum SourceType {
@@ -207,11 +209,28 @@ pub fn prepare_tool_cargo(
     // See https://github.com/rust-lang/rust/issues/116538
     cargo.rustflag("-Zunstable-options");
 
-    // `-Zon-broken-pipe=kill` breaks cargo tests
+    // NOTE: The root cause of needing `-Zon-broken-pipe=kill` in the first place is because `rustc`
+    // and `rustdoc` doesn't gracefully handle I/O errors due to usages of raw std `println!` macros
+    // which panics upon encountering broken pipes. `-Zon-broken-pipe=kill` just papers over that
+    // and stops rustc/rustdoc ICEing on e.g. `rustc --print=sysroot | false`.
+    //
+    // cargo explicitly does not want the `-Zon-broken-pipe=kill` paper because it does actually use
+    // variants of `println!` that handles I/O errors gracefully. It's also a breaking change for a
+    // spawn process not written in Rust, especially if the language default handler is not
+    // `SIG_IGN`. Thankfully cargo tests will break if we do set the flag.
+    //
+    // For the cargo discussion, see
+    // <https://rust-lang.zulipchat.com/#narrow/stream/246057-t-cargo/topic/Applying.20.60-Zon-broken-pipe.3Dkill.60.20flags.20in.20bootstrap.3F>.
+    //
+    // For the rustc discussion, see
+    // <https://rust-lang.zulipchat.com/#narrow/stream/131828-t-compiler/topic/Internal.20lint.20for.20raw.20.60print!.60.20and.20.60println!.60.3F>
+    // for proper solutions.
     if !path.ends_with("cargo") {
-        // If the output is piped to e.g. `head -n1` we want the process to be killed,
-        // rather than having an error bubble up and cause a panic.
-        cargo.rustflag("-Zon-broken-pipe=kill");
+        // Use an untracked env var `FORCE_ON_BROKEN_PIPE_KILL` here instead of `RUSTFLAGS`.
+        // `RUSTFLAGS` is tracked by cargo. Conditionally omitting `-Zon-broken-pipe=kill` from
+        // `RUSTFLAGS` causes unnecessary tool rebuilds due to cache invalidation from building e.g.
+        // cargo *without* `-Zon-broken-pipe=kill` but then rustdoc *with* `-Zon-broken-pipe=kill`.
+        cargo.env("FORCE_ON_BROKEN_PIPE_KILL", "-Zon-broken-pipe=kill");
     }
 
     cargo
@@ -576,10 +595,9 @@ impl Step for Rustdoc {
             && target_compiler.stage > 0
             && builder.rust_info().is_managed_git_subrepository()
         {
-            let commit = get_closest_merge_base_commit(
+            let commit = get_closest_merge_commit(
                 Some(&builder.config.src),
                 &builder.config.git_config(),
-                &builder.config.stage0_metadata.config.git_merge_commit_email,
                 &[],
             )
             .unwrap();
@@ -693,14 +711,7 @@ impl Step for Cargo {
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         let builder = run.builder;
-        run.path("src/tools/cargo").default_condition(
-            builder.config.extended
-                && builder.config.tools.as_ref().map_or(
-                    true,
-                    // If `tools` is set, search list for this tool.
-                    |tools| tools.iter().any(|tool| tool == "cargo"),
-                ),
-        )
+        run.path("src/tools/cargo").default_condition(builder.tool_enabled("cargo"))
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -772,14 +783,7 @@ impl Step for RustAnalyzer {
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         let builder = run.builder;
-        run.path("src/tools/rust-analyzer").default_condition(
-            builder.config.extended
-                && builder
-                    .config
-                    .tools
-                    .as_ref()
-                    .map_or(true, |tools| tools.iter().any(|tool| tool == "rust-analyzer")),
-        )
+        run.path("src/tools/rust-analyzer").default_condition(builder.tool_enabled("rust-analyzer"))
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -821,12 +825,8 @@ impl Step for RustAnalyzerProcMacroSrv {
         run.path("src/tools/rust-analyzer")
             .path("src/tools/rust-analyzer/crates/proc-macro-srv-cli")
             .default_condition(
-                builder.config.extended
-                    && builder.config.tools.as_ref().map_or(true, |tools| {
-                        tools.iter().any(|tool| {
-                            tool == "rust-analyzer" || tool == "rust-analyzer-proc-macro-srv"
-                        })
-                    }),
+                builder.tool_enabled("rust-analyzer")
+                    || builder.tool_enabled("rust-analyzer-proc-macro-srv"),
             )
     }
 
@@ -874,16 +874,8 @@ impl Step for LlvmBitcodeLinker {
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         let builder = run.builder;
-        run.path("src/tools/llvm-bitcode-linker").default_condition(
-            builder.config.extended
-                && builder
-                    .config
-                    .tools
-                    .as_ref()
-                    .map_or(builder.build.unstable_features(), |tools| {
-                        tools.iter().any(|tool| tool == "llvm-bitcode-linker")
-                    }),
-        )
+        run.path("src/tools/llvm-bitcode-linker")
+            .default_condition(builder.tool_enabled("llvm-bitcode-linker"))
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -897,8 +889,11 @@ impl Step for LlvmBitcodeLinker {
     fn run(self, builder: &Builder<'_>) -> PathBuf {
         let bin_name = "llvm-bitcode-linker";
 
-        builder.ensure(compile::Std::new(self.compiler, self.compiler.host));
-        builder.ensure(compile::Rustc::new(self.compiler, self.target));
+        // If enabled, use ci-rustc and skip building the in-tree compiler.
+        if !builder.download_rustc() {
+            builder.ensure(compile::Std::new(self.compiler, self.compiler.host));
+            builder.ensure(compile::Rustc::new(self.compiler, self.target));
+        }
 
         let cargo = prepare_tool_cargo(
             builder,

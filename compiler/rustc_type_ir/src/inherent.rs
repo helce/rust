@@ -162,7 +162,7 @@ pub trait Ty<I: Interner<Ty = Self>>:
 
     /// Returns `true` when the outermost type cannot be further normalized,
     /// resolved, or instantiated. This includes all primitive types, but also
-    /// things like ADTs and trait objects, sice even if their arguments or
+    /// things like ADTs and trait objects, since even if their arguments or
     /// nested types may be further simplified, the outermost [`ty::TyKind`] or
     /// type constructor remains the same.
     fn is_known_rigid(self) -> bool {
@@ -460,6 +460,8 @@ pub trait Clause<I: Interner<Clause = Self>>:
     + IntoKind<Kind = ty::Binder<I, ty::ClauseKind<I>>>
     + Elaboratable<I>
 {
+    fn as_predicate(self) -> I::Predicate;
+
     fn as_trait_clause(self) -> Option<ty::Binder<I, ty::TraitPredicate<I>>> {
         self.kind()
             .map_bound(|clause| if let ty::ClauseKind::Trait(t) = clause { Some(t) } else { None })
@@ -561,6 +563,10 @@ pub trait BoundExistentialPredicates<I: Interner>:
     fn projection_bounds(
         self,
     ) -> impl IntoIterator<Item = ty::Binder<I, ty::ExistentialProjection<I>>>;
+}
+
+pub trait Span<I: Interner>: Copy + Debug + Hash + Eq + TypeFoldable<I> {
+    fn dummy() -> Self;
 }
 
 pub trait SliceLike: Sized + Copy {

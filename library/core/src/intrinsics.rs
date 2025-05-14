@@ -1020,17 +1020,10 @@ pub const fn unlikely(b: bool) -> bool {
 /// any safety invariants.
 ///
 /// This intrinsic does not have a stable counterpart.
-#[cfg(not(bootstrap))]
 #[unstable(feature = "core_intrinsics", issue = "none")]
 #[rustc_intrinsic]
 #[rustc_nounwind]
 #[miri::intrinsic_fallback_is_spec]
-#[inline]
-pub fn select_unpredictable<T>(b: bool, true_val: T, false_val: T) -> T {
-    if b { true_val } else { false_val }
-}
-
-#[cfg(bootstrap)]
 #[inline]
 pub fn select_unpredictable<T>(b: bool, true_val: T, false_val: T) -> T {
     if b { true_val } else { false_val }
@@ -1091,7 +1084,7 @@ extern "rust-intrinsic" {
     /// it does not require an `unsafe` block.
     /// Therefore, implementations must not require the user to uphold
     /// any safety invariants.
-    #[rustc_const_unstable(feature = "const_intrinsic_forget", issue = "none")]
+    #[rustc_const_stable(feature = "const_intrinsic_forget", since = "1.83.0")]
     #[rustc_safe_intrinsic]
     #[rustc_nounwind]
     pub fn forget<T: ?Sized>(_: T);
@@ -1432,8 +1425,7 @@ extern "rust-intrinsic" {
     ///
     /// If the computed offset is non-zero, then both the starting and resulting pointer must be
     /// either in bounds or at the end of an allocated object. If either pointer is out
-    /// of bounds or arithmetic overflow occurs then any further use of the returned value will
-    /// result in undefined behavior.
+    /// of bounds or arithmetic overflow occurs then this operation is undefined behavior.
     ///
     /// The stabilized version of this intrinsic is [`pointer::offset`].
     #[must_use = "returns a new pointer rather than modifying its argument"]
@@ -1802,6 +1794,59 @@ extern "rust-intrinsic" {
     /// [`f128::mul_add`](../../std/primitive.f128.html#method.mul_add)
     #[rustc_nounwind]
     pub fn fmaf128(a: f128, b: f128, c: f128) -> f128;
+
+    /// Returns `a * b + c` for `f16` values, non-deterministically executing
+    /// either a fused multiply-add or two operations with rounding of the
+    /// intermediate result.
+    ///
+    /// The operation is fused if the code generator determines that target
+    /// instruction set has support for a fused operation, and that the fused
+    /// operation is more efficient than the equivalent, separate pair of mul
+    /// and add instructions. It is unspecified whether or not a fused operation
+    /// is selected, and that may depend on optimization level and context, for
+    /// example.
+    #[rustc_nounwind]
+    #[cfg(not(bootstrap))]
+    pub fn fmuladdf16(a: f16, b: f16, c: f16) -> f16;
+    /// Returns `a * b + c` for `f32` values, non-deterministically executing
+    /// either a fused multiply-add or two operations with rounding of the
+    /// intermediate result.
+    ///
+    /// The operation is fused if the code generator determines that target
+    /// instruction set has support for a fused operation, and that the fused
+    /// operation is more efficient than the equivalent, separate pair of mul
+    /// and add instructions. It is unspecified whether or not a fused operation
+    /// is selected, and that may depend on optimization level and context, for
+    /// example.
+    #[rustc_nounwind]
+    #[cfg(not(bootstrap))]
+    pub fn fmuladdf32(a: f32, b: f32, c: f32) -> f32;
+    /// Returns `a * b + c` for `f64` values, non-deterministically executing
+    /// either a fused multiply-add or two operations with rounding of the
+    /// intermediate result.
+    ///
+    /// The operation is fused if the code generator determines that target
+    /// instruction set has support for a fused operation, and that the fused
+    /// operation is more efficient than the equivalent, separate pair of mul
+    /// and add instructions. It is unspecified whether or not a fused operation
+    /// is selected, and that may depend on optimization level and context, for
+    /// example.
+    #[rustc_nounwind]
+    #[cfg(not(bootstrap))]
+    pub fn fmuladdf64(a: f64, b: f64, c: f64) -> f64;
+    /// Returns `a * b + c` for `f128` values, non-deterministically executing
+    /// either a fused multiply-add or two operations with rounding of the
+    /// intermediate result.
+    ///
+    /// The operation is fused if the code generator determines that target
+    /// instruction set has support for a fused operation, and that the fused
+    /// operation is more efficient than the equivalent, separate pair of mul
+    /// and add instructions. It is unspecified whether or not a fused operation
+    /// is selected, and that may depend on optimization level and context, for
+    /// example.
+    #[rustc_nounwind]
+    #[cfg(not(bootstrap))]
+    pub fn fmuladdf128(a: f128, b: f128, c: f128) -> f128;
 
     /// Returns the absolute value of an `f16`.
     ///
@@ -2643,7 +2688,7 @@ extern "rust-intrinsic" {
     /// This intrinsic can *only* be called where the pointer is a local without
     /// projections (`write_via_move(ptr, x)`, not `write_via_move(*ptr, x)`) so
     /// that it trivially obeys runtime-MIR rules about derefs in operands.
-    #[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
+    #[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
     #[rustc_nounwind]
     pub fn write_via_move<T>(ptr: *mut T, value: T);
 
@@ -2666,12 +2711,17 @@ extern "rust-intrinsic" {
     ///
     /// `catch_fn` must not unwind.
     ///
-    /// The third argument is a function called if an unwind occurs (both Rust unwinds and foreign
-    /// unwinds). This function takes the data pointer and a pointer to the target-specific
-    /// exception object that was caught. For more information, see the compiler's source as well as
-    /// std's `catch_unwind` implementation.
+    /// The third argument is a function called if an unwind occurs (both Rust `panic` and foreign
+    /// unwinds). This function takes the data pointer and a pointer to the target- and
+    /// runtime-specific exception object that was caught.
     ///
-    /// The stable version of this intrinsic is `std::panic::catch_unwind`.
+    /// Note that in the case of a foreign unwinding operation, the exception object data may not be
+    /// safely usable from Rust, and should not be directly exposed via the standard library. To
+    /// prevent unsafe access, the library implementation may either abort the process or present an
+    /// opaque error type to the user.
+    ///
+    /// For more information, see the compiler's source, as well as the documentation for the stable
+    /// version of this intrinsic, `std::panic::catch_unwind`.
     #[rustc_nounwind]
     pub fn catch_unwind(try_fn: fn(*mut u8), data: *mut u8, catch_fn: fn(*mut u8, *mut u8)) -> i32;
 
@@ -2740,7 +2790,7 @@ extern "rust-intrinsic" {
 
     /// Lexicographically compare `[left, left + bytes)` and `[right, right + bytes)`
     /// as unsigned bytes, returning negative if `left` is less, zero if all the
-    /// bytes match, or positive if `right` is greater.
+    /// bytes match, or positive if `left` is greater.
     ///
     /// This underlies things like `<[u8]>::cmp`, and will usually lower to `memcmp`.
     ///
@@ -3167,7 +3217,7 @@ pub const fn type_id<T: ?Sized + 'static>() -> u128 {
 /// change the possible layouts of pointers.
 #[rustc_nounwind]
 #[unstable(feature = "core_intrinsics", issue = "none")]
-#[rustc_const_unstable(feature = "ptr_metadata", issue = "81513")]
+#[rustc_const_stable(feature = "ptr_metadata_const", since = "1.83.0")]
 #[rustc_intrinsic]
 #[rustc_intrinsic_must_be_overridden]
 pub const fn aggregate_raw_ptr<P: AggregateRawPtr<D, Metadata = M>, D, M>(_data: D, _meta: M) -> P {
@@ -3192,7 +3242,7 @@ impl<P: ?Sized, T: ptr::Thin> AggregateRawPtr<*mut T> for *mut P {
 /// This is used to implement functions like `ptr::metadata`.
 #[rustc_nounwind]
 #[unstable(feature = "core_intrinsics", issue = "none")]
-#[rustc_const_unstable(feature = "ptr_metadata", issue = "81513")]
+#[rustc_const_stable(feature = "ptr_metadata_const", since = "1.83.0")]
 #[rustc_intrinsic]
 #[rustc_intrinsic_must_be_overridden]
 pub const fn ptr_metadata<P: ptr::Pointee<Metadata = M> + ?Sized, M>(_ptr: *const P) -> M {
@@ -3293,13 +3343,13 @@ pub const fn ptr_metadata<P: ptr::Pointee<Metadata = M> + ?Sized, M>(_ptr: *cons
 #[doc(alias = "memcpy")]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_allowed_through_unstable_modules]
-#[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+#[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.83.0")]
 #[inline(always)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 #[rustc_diagnostic_item = "ptr_copy_nonoverlapping"]
 pub const unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize) {
     extern "rust-intrinsic" {
-        #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+        #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.83.0")]
         #[rustc_nounwind]
         pub fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize);
     }
@@ -3395,13 +3445,13 @@ pub const unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: us
 #[doc(alias = "memmove")]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_allowed_through_unstable_modules]
-#[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+#[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.83.0")]
 #[inline(always)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 #[rustc_diagnostic_item = "ptr_copy"]
 pub const unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
     extern "rust-intrinsic" {
-        #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
+        #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.83.0")]
         #[rustc_nounwind]
         fn copy<T>(src: *const T, dst: *mut T, count: usize);
     }
@@ -3475,13 +3525,13 @@ pub const unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
 #[doc(alias = "memset")]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_allowed_through_unstable_modules]
-#[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
+#[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
 #[inline(always)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 #[rustc_diagnostic_item = "ptr_write_bytes"]
 pub const unsafe fn write_bytes<T>(dst: *mut T, val: u8, count: usize) {
     extern "rust-intrinsic" {
-        #[rustc_const_unstable(feature = "const_ptr_write", issue = "86302")]
+        #[rustc_const_stable(feature = "const_ptr_write", since = "1.83.0")]
         #[rustc_nounwind]
         fn write_bytes<T>(dst: *mut T, val: u8, count: usize);
     }

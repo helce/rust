@@ -160,13 +160,13 @@ pub(crate) fn collect_trait_impls(mut krate: Crate, cx: &mut DocContext<'_>) -> 
 
     // scan through included items ahead of time to splice in Deref targets to the "valid" sets
     for it in new_items_external.iter().chain(new_items_local.iter()) {
-        if let ImplItem(box Impl { ref for_, ref trait_, ref items, .. }) = *it.kind
+        if let ImplItem(box Impl { ref for_, ref trait_, ref items, .. }) = it.kind
             && trait_.as_ref().map(|t| t.def_id()) == tcx.lang_items().deref_trait()
             && cleaner.keep_impl(for_, true)
         {
             let target = items
                 .iter()
-                .find_map(|item| match *item.kind {
+                .find_map(|item| match item.kind {
                     AssocTypeItem(ref t, _) => Some(&t.type_),
                     _ => None,
                 })
@@ -200,7 +200,7 @@ pub(crate) fn collect_trait_impls(mut krate: Crate, cx: &mut DocContext<'_>) -> 
 
     // Filter out external items that are not needed
     new_items_external.retain(|it| {
-        if let ImplItem(box Impl { ref for_, ref trait_, ref kind, .. }) = *it.kind {
+        if let ImplItem(box Impl { ref for_, ref trait_, ref kind, .. }) = it.kind {
             cleaner.keep_impl(
                 for_,
                 trait_.as_ref().map(|t| t.def_id()) == tcx.lang_items().deref_trait(),
@@ -211,13 +211,15 @@ pub(crate) fn collect_trait_impls(mut krate: Crate, cx: &mut DocContext<'_>) -> 
         }
     });
 
-    if let ModuleItem(Module { items, .. }) = &mut *krate.module.kind {
+    if let ModuleItem(Module { items, .. }) = &mut krate.module.inner.kind {
         items.extend(synth_impls);
         items.extend(new_items_external);
         items.extend(new_items_local);
     } else {
         panic!("collect-trait-impls can't run");
     };
+
+    krate.external_traits.extend(cx.external_traits.drain(..));
 
     krate
 }
@@ -227,7 +229,7 @@ struct SyntheticImplCollector<'a, 'tcx> {
     impls: Vec<Item>,
 }
 
-impl<'a, 'tcx> DocVisitor for SyntheticImplCollector<'a, 'tcx> {
+impl<'a, 'tcx> DocVisitor<'_> for SyntheticImplCollector<'a, 'tcx> {
     fn visit_item(&mut self, i: &Item) {
         if i.is_struct() || i.is_enum() || i.is_union() {
             // FIXME(eddyb) is this `doc(hidden)` check needed?
@@ -254,11 +256,11 @@ impl<'cache> ItemAndAliasCollector<'cache> {
     }
 }
 
-impl<'cache> DocVisitor for ItemAndAliasCollector<'cache> {
+impl<'cache> DocVisitor<'_> for ItemAndAliasCollector<'cache> {
     fn visit_item(&mut self, i: &Item) {
         self.items.insert(i.item_id);
 
-        if let TypeAliasItem(alias) = &*i.kind
+        if let TypeAliasItem(alias) = &i.inner.kind
             && let Some(did) = alias.type_.def_id(self.cache)
         {
             self.items.insert(ItemId::DefId(did));

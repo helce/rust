@@ -19,15 +19,15 @@ use rustc_middle::middle::stability::EvalResult;
 use rustc_middle::span_bug;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{
-    self, suggest_constraining_type_params, Article, Binder, IsSuggestable, Ty, TyCtxt,
-    TypeVisitableExt, Upcast,
+    self, Article, Binder, IsSuggestable, Ty, TyCtxt, TypeVisitableExt, Upcast,
+    suggest_constraining_type_params,
 };
 use rustc_session::errors::ExprParenthesesNeeded;
 use rustc_span::source_map::Spanned;
-use rustc_span::symbol::{sym, Ident};
+use rustc_span::symbol::{Ident, sym};
 use rustc_span::{Span, Symbol};
-use rustc_trait_selection::error_reporting::traits::DefIdOrName;
 use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
+use rustc_trait_selection::error_reporting::traits::DefIdOrName;
 use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::traits;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt as _;
@@ -79,9 +79,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // `break` type mismatches provide better context for tail `loop` expressions.
             return false;
         }
-        if let Some((fn_id, fn_decl, can_suggest)) = self.get_fn_decl(blk_id) {
+        if let Some((fn_id, fn_decl)) = self.get_fn_decl(blk_id) {
             pointing_at_return_type =
-                self.suggest_missing_return_type(err, fn_decl, expected, found, can_suggest, fn_id);
+                self.suggest_missing_return_type(err, fn_decl, expected, found, fn_id);
             self.suggest_missing_break_or_return_expr(
                 err, expr, fn_decl, expected, found, blk_id, fn_id,
             );
@@ -813,7 +813,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         fn_decl: &hir::FnDecl<'tcx>,
         expected: Ty<'tcx>,
         found: Ty<'tcx>,
-        can_suggest: bool,
         fn_id: LocalDefId,
     ) -> bool {
         // Can't suggest `->` on a block-like coroutine
@@ -826,35 +825,30 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let found =
             self.resolve_numeric_literals_with_default(self.resolve_vars_if_possible(found));
         // Only suggest changing the return type for methods that
-        // haven't set a return type at all (and aren't `fn main()` or an impl).
+        // haven't set a return type at all (and aren't `fn main()`, impl or closure).
         match &fn_decl.output {
-            &hir::FnRetTy::DefaultReturn(span) if expected.is_unit() && !can_suggest => {
-                // `fn main()` must return `()`, do not suggest changing return type
-                err.subdiagnostic(errors::ExpectedReturnTypeLabel::Unit { span });
-                return true;
-            }
+            // For closure with default returns, don't suggest adding return type
+            &hir::FnRetTy::DefaultReturn(_) if self.tcx.is_closure_like(fn_id.to_def_id()) => {}
             &hir::FnRetTy::DefaultReturn(span) if expected.is_unit() => {
-                if let Some(found) = found.make_suggestable(self.tcx, false, None) {
+                if !self.can_add_return_type(fn_id) {
+                    err.subdiagnostic(errors::ExpectedReturnTypeLabel::Unit { span });
+                } else if let Some(found) = found.make_suggestable(self.tcx, false, None) {
                     err.subdiagnostic(errors::AddReturnTypeSuggestion::Add {
                         span,
                         found: found.to_string(),
                     });
-                    return true;
                 } else if let Some(sugg) = suggest_impl_trait(self, self.param_env, found) {
                     err.subdiagnostic(errors::AddReturnTypeSuggestion::Add { span, found: sugg });
-                    return true;
                 } else {
                     // FIXME: if `found` could be `impl Iterator` we should suggest that.
                     err.subdiagnostic(errors::AddReturnTypeSuggestion::MissingHere { span });
-                    return true;
                 }
+
+                return true;
             }
             hir::FnRetTy::Return(hir_ty) => {
-                if let hir::TyKind::OpaqueDef(item_id, ..) = hir_ty.kind
+                if let hir::TyKind::OpaqueDef(op_ty, ..) = hir_ty.kind
                     // FIXME: account for RPITIT.
-                    && let hir::Node::Item(hir::Item {
-                        kind: hir::ItemKind::OpaqueTy(op_ty), ..
-                    }) = self.tcx.hir_node(item_id.hir_id())
                     && let [hir::GenericBound::Trait(trait_ref, _)] = op_ty.bounds
                     && let Some(hir::PathSegment { args: Some(generic_args), .. }) =
                         trait_ref.trait_ref.path.segments.last()
@@ -885,7 +879,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     let ty = self.lowerer().lower_ty(hir_ty);
                     debug!(?ty, "return type (lowered)");
                     debug!(?expected, "expected type");
-                    let bound_vars = self.tcx.late_bound_vars(hir_ty.hir_id.owner.into());
+                    let bound_vars =
+                        self.tcx.late_bound_vars(self.tcx.local_def_id_to_hir_id(fn_id));
                     let ty = Binder::bind_with_vars(ty, bound_vars);
                     let ty = self.normalize(hir_ty.span, ty);
                     let ty = self.tcx.instantiate_bound_regions_with_erased(ty);
@@ -903,6 +898,32 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             _ => {}
         }
         false
+    }
+
+    /// Checks whether we can add a return type to a function.
+    /// Assumes given function doesn't have a explicit return type.
+    fn can_add_return_type(&self, fn_id: LocalDefId) -> bool {
+        match self.tcx.hir_node_by_def_id(fn_id) {
+            Node::Item(&hir::Item { ident, .. }) => {
+                // This is less than ideal, it will not suggest a return type span on any
+                // method called `main`, regardless of whether it is actually the entry point,
+                // but it will still present it as the reason for the expected type.
+                ident.name != sym::main
+            }
+            Node::ImplItem(item) => {
+                // If it doesn't impl a trait, we can add a return type
+                let Node::Item(&hir::Item {
+                    kind: hir::ItemKind::Impl(&hir::Impl { of_trait, .. }),
+                    ..
+                }) = self.tcx.parent_hir_node(item.hir_id())
+                else {
+                    unreachable!();
+                };
+
+                of_trait.is_none()
+            }
+            _ => true,
+        }
     }
 
     fn try_note_caller_chooses_ty_for_ty_param(
@@ -1438,7 +1459,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     pub(crate) fn suggest_deref_unwrap_or(
         &self,
         err: &mut Diag<'_>,
-        error_span: Span,
         callee_ty: Option<Ty<'tcx>>,
         call_ident: Option<Ident>,
         expected_ty: Ty<'tcx>,
@@ -1479,7 +1499,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // Create an dummy type `&[_]` so that both &[] and `&Vec<T>` can coerce to it.
         let dummy_ty = if let ty::Array(elem_ty, size) = peeled.kind()
             && let ty::Infer(_) = elem_ty.kind()
-            && size.try_eval_target_usize(self.tcx, self.param_env) == Some(0)
+            && self
+                .try_structurally_resolve_const(provided_expr.span, *size)
+                .try_to_target_usize(self.tcx)
+                == Some(0)
         {
             let slice = Ty::new_slice(self.tcx, *elem_ty);
             Ty::new_imm_ref(self.tcx, self.tcx.lifetimes.re_static, slice)
@@ -1978,17 +2001,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             expr.kind,
             hir::ExprKind::Call(
                 hir::Expr {
-                    kind: hir::ExprKind::Path(hir::QPath::Resolved(
-                        None,
-                        hir::Path { res: Res::Def(hir::def::DefKind::Ctor(_, _), _), .. },
-                    )),
+                    kind: hir::ExprKind::Path(hir::QPath::Resolved(None, hir::Path {
+                        res: Res::Def(hir::def::DefKind::Ctor(_, _), _),
+                        ..
+                    },)),
                     ..
                 },
                 ..,
-            ) | hir::ExprKind::Path(hir::QPath::Resolved(
-                None,
-                hir::Path { res: Res::Def(hir::def::DefKind::Ctor(_, _), _), .. },
-            )),
+            ) | hir::ExprKind::Path(hir::QPath::Resolved(None, hir::Path {
+                res: Res::Def(hir::def::DefKind::Ctor(_, _), _),
+                ..
+            },)),
         );
 
         let (article, kind, variant, sugg_operator) =
@@ -2028,7 +2051,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let span = expr.span.find_oldest_ancestor_in_same_ctxt();
         err.span_suggestion_verbose(span.shrink_to_hi(), msg, sugg, Applicability::HasPlaceholders);
-        return true;
+        true
     }
 
     pub(crate) fn suggest_coercing_result_via_try_operator(
@@ -2585,7 +2608,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
 
                     if let hir::ExprKind::Unary(hir::UnOp::Deref, inner) = expr.kind
-                        && let Some(1) = self.deref_steps(expected, checked_ty)
+                        && let Some(1) = self.deref_steps_for_suggestion(expected, checked_ty)
                     {
                         // We have `*&T`, check if what was expected was `&T`.
                         // If so, we may want to suggest removing a `*`.
@@ -2715,7 +2738,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
             }
             (_, &ty::RawPtr(ty_b, mutbl_b), &ty::Ref(_, ty_a, mutbl_a)) => {
-                if let Some(steps) = self.deref_steps(ty_a, ty_b)
+                if let Some(steps) = self.deref_steps_for_suggestion(ty_a, ty_b)
                     // Only suggest valid if dereferencing needed.
                     && steps > 0
                     // The pointer type implements `Copy` trait so the suggestion is always valid.
@@ -2759,7 +2782,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
             }
             _ if sp == expr.span => {
-                if let Some(mut steps) = self.deref_steps(checked_ty, expected) {
+                if let Some(mut steps) = self.deref_steps_for_suggestion(checked_ty, expected) {
                     let mut expr = expr.peel_blocks();
                     let mut prefix_span = expr.span.shrink_to_lo();
                     let mut remove = String::new();

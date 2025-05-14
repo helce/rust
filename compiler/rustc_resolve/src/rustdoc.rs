@@ -6,11 +6,11 @@ use pulldown_cmark::{
 };
 use rustc_ast as ast;
 use rustc_ast::util::comments::beautify_doc_string;
-use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::fx::FxIndexMap;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::DefId;
-use rustc_span::symbol::{kw, sym, Symbol};
-use rustc_span::{InnerSpan, Span, DUMMY_SP};
+use rustc_span::symbol::{Symbol, kw, sym};
+use rustc_span::{DUMMY_SP, InnerSpan, Span};
 use tracing::{debug, trace};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -235,8 +235,8 @@ fn span_for_value(attr: &ast::Attribute) -> Span {
 /// early and late doc link resolution regardless of their position.
 pub fn prepare_to_doc_link_resolution(
     doc_fragments: &[DocFragment],
-) -> FxHashMap<Option<DefId>, String> {
-    let mut res = FxHashMap::default();
+) -> FxIndexMap<Option<DefId>, String> {
+    let mut res = FxIndexMap::default();
     for fragment in doc_fragments {
         let out_str = res.entry(fragment.item_id).or_default();
         add_doc_fragment(out_str, fragment);
@@ -270,12 +270,10 @@ fn strip_generics_from_path_segment(segment: Vec<char>) -> Result<String, Malfor
                 // Give a helpful error message instead of completely ignoring the angle brackets.
                 return Err(MalformedGenerics::HasFullyQualifiedSyntax);
             }
+        } else if param_depth == 0 {
+            stripped_segment.push(c);
         } else {
-            if param_depth == 0 {
-                stripped_segment.push(c);
-            } else {
-                latest_generics_chunk.push(c);
-            }
+            latest_generics_chunk.push(c);
         }
     }
 
@@ -417,7 +415,7 @@ pub(crate) fn attrs_to_preprocessed_links(attrs: &[ast::Attribute]) -> Vec<Box<s
     parse_links(&doc)
 }
 
-/// Similiar version of `markdown_links` from rustdoc.
+/// Similar version of `markdown_links` from rustdoc.
 /// This will collect destination links and display text if exists.
 fn parse_links<'md>(doc: &'md str) -> Vec<Box<str>> {
     let mut broken_link_callback = |link: BrokenLink<'md>| Some((link.reference, "".into()));

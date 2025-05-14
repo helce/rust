@@ -4,13 +4,14 @@ use rustc_infer::infer::relate::{
     PredicateEmittingRelation, Relate, RelateResult, StructurallyRelateAliases, TypeRelation,
 };
 use rustc_infer::infer::{InferCtxt, NllRegionVariableOrigin};
-use rustc_infer::traits::solve::Goal;
 use rustc_infer::traits::Obligation;
+use rustc_infer::traits::solve::Goal;
 use rustc_middle::mir::ConstraintCategory;
 use rustc_middle::span_bug;
-use rustc_middle::traits::query::NoSolution;
 use rustc_middle::traits::ObligationCause;
+use rustc_middle::traits::query::NoSolution;
 use rustc_middle::ty::fold::FnMutDelegate;
+use rustc_middle::ty::relate::combine::{super_combine_consts, super_combine_tys};
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
 use rustc_span::symbol::sym;
 use rustc_span::{Span, Symbol};
@@ -58,8 +59,8 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
     }
 }
 
-struct NllTypeRelating<'me, 'bccx, 'tcx> {
-    type_checker: &'me mut TypeChecker<'bccx, 'tcx>,
+struct NllTypeRelating<'a, 'b, 'tcx> {
+    type_checker: &'a mut TypeChecker<'b, 'tcx>,
 
     /// Where (and why) is this relation taking place?
     locations: Locations,
@@ -82,9 +83,9 @@ struct NllTypeRelating<'me, 'bccx, 'tcx> {
     ambient_variance_info: ty::VarianceDiagInfo<TyCtxt<'tcx>>,
 }
 
-impl<'me, 'bccx, 'tcx> NllTypeRelating<'me, 'bccx, 'tcx> {
+impl<'a, 'b, 'tcx> NllTypeRelating<'a, 'b, 'tcx> {
     fn new(
-        type_checker: &'me mut TypeChecker<'bccx, 'tcx>,
+        type_checker: &'a mut TypeChecker<'b, 'tcx>,
         locations: Locations,
         category: ConstraintCategory<'tcx>,
         universe_info: UniverseInfo<'tcx>,
@@ -214,7 +215,7 @@ impl<'me, 'bccx, 'tcx> NllTypeRelating<'me, 'bccx, 'tcx> {
         let delegate = FnMutDelegate {
             regions: &mut |br: ty::BoundRegion| {
                 if let Some(ex_reg_var) = reg_map.get(&br) {
-                    return *ex_reg_var;
+                    *ex_reg_var
                 } else {
                     let ex_reg_var = self.next_existential_region_var(true, br.kind.get_name());
                     debug!(?ex_reg_var);
@@ -309,7 +310,7 @@ impl<'me, 'bccx, 'tcx> NllTypeRelating<'me, 'bccx, 'tcx> {
     }
 }
 
-impl<'bccx, 'tcx> TypeRelation<TyCtxt<'tcx>> for NllTypeRelating<'_, 'bccx, 'tcx> {
+impl<'b, 'tcx> TypeRelation<TyCtxt<'tcx>> for NllTypeRelating<'_, 'b, 'tcx> {
     fn cx(&self) -> TyCtxt<'tcx> {
         self.type_checker.infcx.tcx
     }
@@ -362,7 +363,7 @@ impl<'bccx, 'tcx> TypeRelation<TyCtxt<'tcx>> for NllTypeRelating<'_, 'bccx, 'tcx
                 &ty::Alias(ty::Opaque, ty::AliasTy { def_id: a_def_id, .. }),
                 &ty::Alias(ty::Opaque, ty::AliasTy { def_id: b_def_id, .. }),
             ) if a_def_id == b_def_id || infcx.next_trait_solver() => {
-                infcx.super_combine_tys(self, a, b).map(|_| ()).or_else(|err| {
+                super_combine_tys(&infcx.infcx, self, a, b).map(|_| ()).or_else(|err| {
                     // This behavior is only there for the old solver, the new solver
                     // shouldn't ever fail. Instead, it unconditionally emits an
                     // alias-relate goal.
@@ -385,7 +386,7 @@ impl<'bccx, 'tcx> TypeRelation<TyCtxt<'tcx>> for NllTypeRelating<'_, 'bccx, 'tcx
                 debug!(?a, ?b, ?self.ambient_variance);
 
                 // Will also handle unification of `IntVar` and `FloatVar`.
-                self.type_checker.infcx.super_combine_tys(self, a, b)?;
+                super_combine_tys(&self.type_checker.infcx.infcx, self, a, b)?;
             }
         }
 
@@ -422,7 +423,7 @@ impl<'bccx, 'tcx> TypeRelation<TyCtxt<'tcx>> for NllTypeRelating<'_, 'bccx, 'tcx
         assert!(!a.has_non_region_infer(), "unexpected inference var {:?}", a);
         assert!(!b.has_non_region_infer(), "unexpected inference var {:?}", b);
 
-        self.type_checker.infcx.super_combine_consts(self, a, b)
+        super_combine_consts(&self.type_checker.infcx.infcx, self, a, b)
     }
 
     #[instrument(skip(self), level = "trace")]
@@ -520,7 +521,7 @@ impl<'bccx, 'tcx> TypeRelation<TyCtxt<'tcx>> for NllTypeRelating<'_, 'bccx, 'tcx
     }
 }
 
-impl<'bccx, 'tcx> PredicateEmittingRelation<InferCtxt<'tcx>> for NllTypeRelating<'_, 'bccx, 'tcx> {
+impl<'b, 'tcx> PredicateEmittingRelation<InferCtxt<'tcx>> for NllTypeRelating<'_, 'b, 'tcx> {
     fn span(&self) -> Span {
         self.locations.span(self.type_checker.body)
     }

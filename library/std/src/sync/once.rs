@@ -3,7 +3,7 @@
 //! This primitive is meant to be used to run one-time initialization. An
 //! example use case would be for initializing an FFI library.
 
-#[cfg(all(test, not(target_os = "emscripten")))]
+#[cfg(all(test, not(any(target_os = "emscripten", target_os = "wasi"))))]
 mod tests;
 
 use crate::fmt;
@@ -313,6 +313,16 @@ impl Once {
     #[inline]
     pub(crate) fn state(&mut self) -> ExclusiveState {
         self.inner.state()
+    }
+
+    /// Sets current state of the `Once` instance.
+    ///
+    /// Since this takes a mutable reference, no initialization can currently
+    /// be running, so the state must be either "incomplete", "poisoned" or
+    /// "complete".
+    #[inline]
+    pub(crate) fn set_state(&mut self, new_state: ExclusiveState) {
+        self.inner.set_state(new_state);
     }
 }
 

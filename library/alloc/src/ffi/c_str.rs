@@ -4,7 +4,7 @@
 mod tests;
 
 use core::borrow::Borrow;
-use core::ffi::{c_char, CStr};
+use core::ffi::{CStr, c_char};
 use core::num::NonZero;
 use core::slice::memchr;
 use core::str::{self, Utf8Error};
@@ -576,6 +576,7 @@ impl CString {
     #[inline]
     #[must_use]
     #[stable(feature = "as_c_str", since = "1.20.0")]
+    #[cfg_attr(not(test), rustc_diagnostic_item = "cstring_as_c_str")]
     pub fn as_c_str(&self) -> &CStr {
         &*self
     }
@@ -695,6 +696,7 @@ impl CString {
 // memory-unsafe code from working by accident. Inline
 // to prevent LLVM from optimizing it away in debug builds.
 #[stable(feature = "cstring_drop", since = "1.13.0")]
+#[rustc_insignificant_dtor]
 impl Drop for CString {
     #[inline]
     fn drop(&mut self) {

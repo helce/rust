@@ -37,7 +37,7 @@ hir_analysis_assoc_kind_mismatch = expected {$expected}, found {$got}
 
 hir_analysis_assoc_kind_mismatch_wrap_in_braces_sugg = consider adding braces here
 
-hir_analysis_associated_type_trait_uninferred_generic_params = cannot use the associated type of a trait with uninferred generic parameters
+hir_analysis_associated_type_trait_uninferred_generic_params = cannot use the associated {$what} of a trait with uninferred generic parameters
     .suggestion = use a fully qualified path with inferred lifetimes
 
 hir_analysis_associated_type_trait_uninferred_generic_params_multipart_suggestion = use a fully qualified path with explicit lifetimes
@@ -47,6 +47,8 @@ hir_analysis_auto_deref_reached_recursion_limit = reached the recursion limit wh
     .help = consider increasing the recursion limit by adding a `#![recursion_limit = "{$suggested_limit}"]` attribute to your crate (`{$crate_name}`)
 
 hir_analysis_bad_precise_capture = expected {$kind} parameter in `use<...>` precise captures list, found {$found}
+
+hir_analysis_bad_return_type_notation_position = return type notation not allowed in this position yet
 
 hir_analysis_cannot_capture_late_bound_const =
     cannot capture late-bound const parameter in {$what}
@@ -246,8 +248,6 @@ hir_analysis_invalid_union_field =
 hir_analysis_invalid_union_field_sugg =
     wrap the field type in `ManuallyDrop<...>`
 
-hir_analysis_invalid_unnamed_field_ty = unnamed fields can only have struct or union types
-
 hir_analysis_late_bound_const_in_apit = `impl Trait` can only mention const parameters from an fn or impl
     .label = const parameter declared here
 
@@ -256,6 +256,9 @@ hir_analysis_late_bound_lifetime_in_apit = `impl Trait` can only mention lifetim
 
 hir_analysis_late_bound_type_in_apit = `impl Trait` can only mention type parameters from an fn or impl
     .label = type parameter declared here
+
+hir_analysis_lifetime_implicitly_captured = `impl Trait` captures lifetime parameter, but it is not mentioned in `use<...>` precise captures list
+    .param_label = all lifetime parameters originating from a trait are captured implicitly
 
 hir_analysis_lifetime_must_be_first = lifetime parameter `{$name}` must be listed before non-lifetime parameters
     .label = move the lifetime before this parameter
@@ -467,25 +470,6 @@ hir_analysis_start_not_target_feature = `#[start]` function is not allowed to ha
 hir_analysis_start_not_track_caller = `#[start]` function is not allowed to be `#[track_caller]`
     .label = `#[start]` function is not allowed to be `#[track_caller]`
 
-hir_analysis_static_mut_ref = creating a {$shared} reference to a mutable static
-    .label = {$shared} reference to mutable static
-    .note = {$shared ->
-        [shared] this shared reference has lifetime `'static`, but if the static ever gets mutated, or a mutable reference is created, then any further use of this shared reference is Undefined Behavior
-        *[mutable] this mutable reference has lifetime `'static`, but if the static gets accessed (read or written) by any other means, or any other reference is created, then any further use of this mutable reference is Undefined Behavior
-    }
-    .suggestion = use `addr_of!` instead to create a raw pointer
-    .suggestion_mut = use `addr_of_mut!` instead to create a raw pointer
-
-hir_analysis_static_mut_refs_lint = creating a {$shared} reference to mutable static is discouraged
-    .label = {$shared} reference to mutable static
-    .suggestion = use `addr_of!` instead to create a raw pointer
-    .suggestion_mut = use `addr_of_mut!` instead to create a raw pointer
-    .note = this will be a hard error in the 2024 edition
-    .why_note = {$shared ->
-        [shared] this shared reference has lifetime `'static`, but if the static ever gets mutated, or a mutable reference is created, then any further use of this shared reference is Undefined Behavior
-        *[mutable] this mutable reference has lifetime `'static`, but if the static gets accessed (read or written) by any other means, or any other reference is created, then any further use of this mutable reference is Undefined Behavior
-    }
-
 hir_analysis_static_specialize = cannot specialize on `'static` lifetime
 
 hir_analysis_tait_forward_compat = item constrains opaque type that is not in its signature
@@ -497,7 +481,7 @@ hir_analysis_tait_forward_compat2 = item does not constrain `{$opaque_type}`, bu
 
 hir_analysis_target_feature_on_main = `main` function is not allowed to have `#[target_feature]`
 
-hir_analysis_too_large_static = extern static is too large for the current architecture
+hir_analysis_too_large_static = extern static is too large for the target architecture
 
 hir_analysis_track_caller_on_main = `main` function is not allowed to be `#[track_caller]`
     .suggestion = remove this annotation
@@ -552,19 +536,6 @@ hir_analysis_unconstrained_generic_parameter = the {$param_def_kind} `{$param_na
 hir_analysis_unconstrained_opaque_type = unconstrained opaque type
     .note = `{$name}` must be used in combination with a concrete type within the same {$what}
 
-hir_analysis_unnamed_fields_repr_field_defined = unnamed field defined here
-
-hir_analysis_unnamed_fields_repr_field_missing_repr_c =
-    named type of unnamed field must have `#[repr(C)]` representation
-    .label = unnamed field defined here
-    .field_ty_label = `{$field_ty}` defined here
-    .suggestion = add `#[repr(C)]` to this {$field_adt_kind}
-
-hir_analysis_unnamed_fields_repr_missing_repr_c =
-    {$adt_kind} with unnamed fields must have `#[repr(C)]` representation
-    .label = {$adt_kind} `{$adt_name}` defined here
-    .suggestion = add `#[repr(C)]` to this {$adt_kind}
-
 hir_analysis_unrecognized_atomic_operation =
     unrecognized atomic operation function: `{$op}`
     .label = unrecognized atomic operation
@@ -575,7 +546,7 @@ hir_analysis_unrecognized_intrinsic_function =
     .help = if you're adding an intrinsic, be sure to update `check_intrinsic_type`
 
 hir_analysis_unused_associated_type_bounds =
-    unnecessary associated type bound for not object safe associated type
+    unnecessary associated type bound for dyn-incompatible associated type
     .note = this associated type has a `where Self: Sized` bound, and while the associated type can be specified, it cannot be used because trait objects are never `Sized`
     .suggestion = remove this bound
 

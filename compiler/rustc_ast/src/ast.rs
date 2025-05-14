@@ -21,19 +21,19 @@
 use std::borrow::Cow;
 use std::{cmp, fmt, mem};
 
+pub use GenericArgs::*;
+pub use UnsafeSource::*;
 pub use rustc_ast_ir::{Movability, Mutability};
 use rustc_data_structures::packed::Pu128;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_data_structures::sync::Lrc;
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
-use rustc_span::source_map::{respan, Spanned};
-use rustc_span::symbol::{kw, sym, Ident, Symbol};
 pub use rustc_span::AttrId;
-use rustc_span::{ErrorGuaranteed, Span, DUMMY_SP};
-use thin_vec::{thin_vec, ThinVec};
-pub use GenericArgs::*;
-pub use UnsafeSource::*;
+use rustc_span::source_map::{Spanned, respan};
+use rustc_span::symbol::{Ident, Symbol, kw, sym};
+use rustc_span::{DUMMY_SP, ErrorGuaranteed, Span};
+use thin_vec::{ThinVec, thin_vec};
 
 pub use crate::format::*;
 use crate::ptr::P;
@@ -288,7 +288,7 @@ impl ParenthesizedArgs {
     }
 }
 
-pub use crate::node_id::{NodeId, CRATE_NODE_ID, DUMMY_NODE_ID};
+pub use crate::node_id::{CRATE_NODE_ID, DUMMY_NODE_ID, NodeId};
 
 /// Modifiers on a trait bound like `~const`, `?` and `!`.
 #[derive(Copy, Clone, PartialEq, Eq, Encodable, Decodable, Debug)]
@@ -511,7 +511,7 @@ pub enum MetaItemKind {
     /// List meta item.
     ///
     /// E.g., `#[derive(..)]`, where the field represents the `..`.
-    List(ThinVec<NestedMetaItem>),
+    List(ThinVec<MetaItemInner>),
 
     /// Name value meta item.
     ///
@@ -523,7 +523,7 @@ pub enum MetaItemKind {
 ///
 /// E.g., each of `Clone`, `Copy` in `#[derive(Clone, Copy)]`.
 #[derive(Clone, Encodable, Decodable, Debug, HashStable_Generic)]
-pub enum NestedMetaItem {
+pub enum MetaItemInner {
     /// A full MetaItem, for recursive meta items.
     MetaItem(MetaItem),
 
@@ -1187,15 +1187,8 @@ impl Expr {
     /// `min_const_generics` as more complex expressions are not supported.
     ///
     /// Does not ensure that the path resolves to a const param, the caller should check this.
-    pub fn is_potential_trivial_const_arg(&self) -> bool {
-        let this = if let ExprKind::Block(block, None) = &self.kind
-            && let [stmt] = block.stmts.as_slice()
-            && let StmtKind::Expr(expr) = &stmt.kind
-        {
-            expr
-        } else {
-            self
-        };
+    pub fn is_potential_trivial_const_arg(&self, strip_identity_block: bool) -> bool {
+        let this = if strip_identity_block { self.maybe_unwrap_block().1 } else { self };
 
         if let ExprKind::Path(None, path) = &this.kind
             && path.is_potential_trivial_const_arg()
@@ -1203,6 +1196,18 @@ impl Expr {
             true
         } else {
             false
+        }
+    }
+
+    /// Returns an expression with (when possible) *one* outter brace removed
+    pub fn maybe_unwrap_block(&self) -> (bool, &Expr) {
+        if let ExprKind::Block(block, None) = &self.kind
+            && let [stmt] = block.stmts.as_slice()
+            && let StmtKind::Expr(expr) = &stmt.kind
+        {
+            (true, expr)
+        } else {
+            (false, self)
         }
     }
 
@@ -1289,7 +1294,7 @@ impl Expr {
             ExprKind::Binary(op, ..) => ExprPrecedence::Binary(op.node),
             ExprKind::Unary(..) => ExprPrecedence::Unary,
             ExprKind::Lit(_) | ExprKind::IncludedBytes(..) => ExprPrecedence::Lit,
-            ExprKind::Type(..) | ExprKind::Cast(..) => ExprPrecedence::Cast,
+            ExprKind::Cast(..) => ExprPrecedence::Cast,
             ExprKind::Let(..) => ExprPrecedence::Let,
             ExprKind::If(..) => ExprPrecedence::If,
             ExprKind::While(..) => ExprPrecedence::While,
@@ -1313,17 +1318,18 @@ impl Expr {
             ExprKind::Break(..) => ExprPrecedence::Break,
             ExprKind::Continue(..) => ExprPrecedence::Continue,
             ExprKind::Ret(..) => ExprPrecedence::Ret,
-            ExprKind::InlineAsm(..) => ExprPrecedence::InlineAsm,
-            ExprKind::OffsetOf(..) => ExprPrecedence::OffsetOf,
-            ExprKind::MacCall(..) => ExprPrecedence::Mac,
             ExprKind::Struct(..) => ExprPrecedence::Struct,
             ExprKind::Repeat(..) => ExprPrecedence::Repeat,
             ExprKind::Paren(..) => ExprPrecedence::Paren,
             ExprKind::Try(..) => ExprPrecedence::Try,
             ExprKind::Yield(..) => ExprPrecedence::Yield,
             ExprKind::Yeet(..) => ExprPrecedence::Yeet,
-            ExprKind::FormatArgs(..) => ExprPrecedence::FormatArgs,
             ExprKind::Become(..) => ExprPrecedence::Become,
+            ExprKind::InlineAsm(..)
+            | ExprKind::Type(..)
+            | ExprKind::OffsetOf(..)
+            | ExprKind::FormatArgs(..)
+            | ExprKind::MacCall(..) => ExprPrecedence::Mac,
             ExprKind::Err(_) | ExprKind::Dummy => ExprPrecedence::Err,
         }
     }
@@ -2161,10 +2167,6 @@ pub enum TyKind {
     Never,
     /// A tuple (`(A, B, C, D,...)`).
     Tup(ThinVec<P<Ty>>),
-    /// An anonymous struct type i.e. `struct { foo: Type }`.
-    AnonStruct(NodeId, ThinVec<FieldDef>),
-    /// An anonymous union type i.e. `union { bar: Type }`.
-    AnonUnion(NodeId, ThinVec<FieldDef>),
     /// A path (`module::module::...::Type`), optionally
     /// "qualified", e.g., `<Vec<T> as SomeTrait>::SomeType`.
     ///
@@ -2221,10 +2223,6 @@ impl TyKind {
             None
         }
     }
-
-    pub fn is_anon_adt(&self) -> bool {
-        matches!(self, TyKind::AnonStruct(..) | TyKind::AnonUnion(..))
-    }
 }
 
 /// Syntax used to declare a trait object.
@@ -2272,7 +2270,7 @@ impl InlineAsmOptions {
     pub const COUNT: usize = Self::all().bits().count_ones() as usize;
 
     pub const GLOBAL_OPTIONS: Self = Self::ATT_SYNTAX.union(Self::RAW);
-    pub const NAKED_OPTIONS: Self = Self::ATT_SYNTAX.union(Self::RAW).union(Self::NORETURN);
+    pub const NAKED_OPTIONS: Self = Self::ATT_SYNTAX.union(Self::RAW);
 
     pub fn human_readable_names(&self) -> Vec<&'static str> {
         let mut options = vec![];
@@ -2418,11 +2416,48 @@ impl InlineAsmOperand {
     }
 }
 
+#[derive(Clone, Copy, Encodable, Decodable, Debug, HashStable_Generic)]
+pub enum AsmMacro {
+    /// The `asm!` macro
+    Asm,
+    /// The `global_asm!` macro
+    GlobalAsm,
+    /// The `naked_asm!` macro
+    NakedAsm,
+}
+
+impl AsmMacro {
+    pub const fn macro_name(self) -> &'static str {
+        match self {
+            AsmMacro::Asm => "asm",
+            AsmMacro::GlobalAsm => "global_asm",
+            AsmMacro::NakedAsm => "naked_asm",
+        }
+    }
+
+    pub const fn is_supported_option(self, option: InlineAsmOptions) -> bool {
+        match self {
+            AsmMacro::Asm => true,
+            AsmMacro::GlobalAsm => InlineAsmOptions::GLOBAL_OPTIONS.contains(option),
+            AsmMacro::NakedAsm => InlineAsmOptions::NAKED_OPTIONS.contains(option),
+        }
+    }
+
+    pub const fn diverges(self, options: InlineAsmOptions) -> bool {
+        match self {
+            AsmMacro::Asm => options.contains(InlineAsmOptions::NORETURN),
+            AsmMacro::GlobalAsm => true,
+            AsmMacro::NakedAsm => true,
+        }
+    }
+}
+
 /// Inline assembly.
 ///
 /// E.g., `asm!("NOP");`.
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct InlineAsm {
+    pub asm_macro: AsmMacro,
     pub template: Vec<InlineAsmTemplatePiece>,
     pub template_strs: Box<[(Symbol, Option<Symbol>, Span)]>,
     pub operands: Vec<(InlineAsmOperand, Span)>,
@@ -2591,12 +2626,12 @@ impl CoroutineKind {
         }
     }
 
-    pub fn is_async(self) -> bool {
-        matches!(self, CoroutineKind::Async { .. })
-    }
-
-    pub fn is_gen(self) -> bool {
-        matches!(self, CoroutineKind::Gen { .. })
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CoroutineKind::Async { .. } => "async",
+            CoroutineKind::Gen { .. } => "gen",
+            CoroutineKind::AsyncGen { .. } => "async gen",
+        }
     }
 
     pub fn closure_id(self) -> NodeId {
@@ -3475,7 +3510,7 @@ impl From<ForeignItemKind> for ItemKind {
     fn from(foreign_item_kind: ForeignItemKind) -> ItemKind {
         match foreign_item_kind {
             ForeignItemKind::Static(box static_foreign_item) => {
-                ItemKind::Static(Box::new(static_foreign_item.into()))
+                ItemKind::Static(Box::new(static_foreign_item))
             }
             ForeignItemKind::Fn(fn_kind) => ItemKind::Fn(fn_kind),
             ForeignItemKind::TyAlias(ty_alias_kind) => ItemKind::TyAlias(ty_alias_kind),
@@ -3489,9 +3524,7 @@ impl TryFrom<ItemKind> for ForeignItemKind {
 
     fn try_from(item_kind: ItemKind) -> Result<ForeignItemKind, ItemKind> {
         Ok(match item_kind {
-            ItemKind::Static(box static_item) => {
-                ForeignItemKind::Static(Box::new(static_item.into()))
-            }
+            ItemKind::Static(box static_item) => ForeignItemKind::Static(Box::new(static_item)),
             ItemKind::Fn(fn_kind) => ForeignItemKind::Fn(fn_kind),
             ItemKind::TyAlias(ty_alias_kind) => ForeignItemKind::TyAlias(ty_alias_kind),
             ItemKind::MacCall(a) => ForeignItemKind::MacCall(a),

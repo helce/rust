@@ -66,19 +66,19 @@ error: `[[usize; v4]; v4]` is forbidden as the type of a const generic parameter
 LL |     pub struct v17<const v10: usize, const v7: v11> {
    |                                                ^^^
    |
-   = note: the only supported types are integers, `bool` and `char`
+   = note: the only supported types are integers, `bool`, and `char`
 help: add `#![feature(adt_const_params)]` to the crate attributes to enable more complex and user defined types
    |
 LL + #![feature(adt_const_params)]
    |
 
-error: maximum number of nodes exceeded in constant v20::v17::<v10, v2>::{constant#1}
+error: maximum number of nodes exceeded in constant v20::v17::<v10, v2>::{constant#0}
   --> $DIR/unevaluated-const-ice-119731.rs:27:37
    |
 LL |     impl<const v10: usize> v17<v10, v2> {
    |                                     ^^
 
-error: maximum number of nodes exceeded in constant v20::v17::<v10, v2>::{constant#1}
+error: maximum number of nodes exceeded in constant v20::v17::<v10, v2>::{constant#0}
   --> $DIR/unevaluated-const-ice-119731.rs:27:37
    |
 LL |     impl<const v10: usize> v17<v10, v2> {

@@ -8,23 +8,23 @@
 //! LLVM and compiler-rt are essentially just wired up to everything else to
 //! ensure that they're always in place if needed.
 
+use std::env;
 use std::env::consts::EXE_EXTENSION;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::{env, io};
 
 use build_helper::ci::CiEnv;
+use build_helper::git::get_closest_merge_commit;
 
 use crate::core::builder::{Builder, RunConfig, ShouldRun, Step};
 use crate::core::config::{Config, TargetSelection};
-use crate::utils::channel;
 use crate::utils::exec::command;
 use crate::utils::helpers::{
-    self, exe, get_clang_cl_resource_dir, output, t, unhashed_basename, up_to_date,
+    self, HashStamp, exe, get_clang_cl_resource_dir, t, unhashed_basename, up_to_date,
 };
-use crate::{generate_smart_stamp_hash, CLang, GitRepo, Kind};
+use crate::{CLang, GitRepo, Kind, generate_smart_stamp_hash};
 
 #[derive(Clone)]
 pub struct LlvmResult {
@@ -86,10 +86,14 @@ impl LdFlags {
 ///
 /// This will return the llvm-config if it can get it (but it will not build it
 /// if not).
-pub fn prebuilt_llvm_config(builder: &Builder<'_>, target: TargetSelection) -> LlvmBuildStatus {
-    // If we have llvm submodule initialized already, sync it.
-    builder.update_existing_submodule("src/llvm-project");
-
+pub fn prebuilt_llvm_config(
+    builder: &Builder<'_>,
+    target: TargetSelection,
+    // Certain commands (like `x test mir-opt --bless`) may call this function with different targets,
+    // which could bypass the CI LLVM early-return even if `builder.config.llvm_from_ci` is true.
+    // This flag should be `true` only if the caller needs the LLVM sources (e.g., if it will build LLVM).
+    handle_submodule_when_needed: bool,
+) -> LlvmBuildStatus {
     builder.config.maybe_download_ci_llvm();
 
     // If we're using a custom LLVM bail out here, but we can only use a
@@ -108,9 +112,10 @@ pub fn prebuilt_llvm_config(builder: &Builder<'_>, target: TargetSelection) -> L
         }
     }
 
-    // Initialize the llvm submodule if not initialized already.
-    // If submodules are disabled, this does nothing.
-    builder.config.update_submodule("src/llvm-project");
+    if handle_submodule_when_needed {
+        // If submodules are disabled, this does nothing.
+        builder.config.update_submodule("src/llvm-project");
+    }
 
     let root = "src/llvm-project/llvm";
     let out_dir = builder.llvm_out(target);
@@ -153,19 +158,14 @@ pub fn prebuilt_llvm_config(builder: &Builder<'_>, target: TargetSelection) -> L
 /// This retrieves the LLVM sha we *want* to use, according to git history.
 pub(crate) fn detect_llvm_sha(config: &Config, is_git: bool) -> String {
     let llvm_sha = if is_git {
-        helpers::get_closest_merge_base_commit(
-            Some(&config.src),
-            &config.git_config(),
-            &config.stage0_metadata.config.git_merge_commit_email,
-            &[
-                config.src.join("src/llvm-project"),
-                config.src.join("src/bootstrap/download-ci-llvm-stamp"),
-                // the LLVM shared object file is named `LLVM-12-rust-{version}-nightly`
-                config.src.join("src/version"),
-            ],
-        )
+        get_closest_merge_commit(Some(&config.src), &config.git_config(), &[
+            config.src.join("src/llvm-project"),
+            config.src.join("src/bootstrap/download-ci-llvm-stamp"),
+            // the LLVM shared object file is named `LLVM-12-rust-{version}-nightly`
+            config.src.join("src/version"),
+        ])
         .unwrap()
-    } else if let Some(info) = channel::read_commit_info_file(&config.src) {
+    } else if let Some(info) = crate::utils::channel::read_commit_info_file(&config.src) {
         info.sha.trim().to_owned()
     } else {
         "".to_owned()
@@ -241,15 +241,29 @@ pub(crate) fn is_ci_llvm_available(config: &Config, asserts: bool) -> bool {
 
 /// Returns true if we're running in CI with modified LLVM (and thus can't download it)
 pub(crate) fn is_ci_llvm_modified(config: &Config) -> bool {
-    CiEnv::is_ci() && config.rust_info.is_managed_git_subrepository() && {
-        // We assume we have access to git, so it's okay to unconditionally pass
-        // `true` here.
-        let llvm_sha = detect_llvm_sha(config, true);
-        let head_sha =
-            output(helpers::git(Some(&config.src)).arg("rev-parse").arg("HEAD").as_command_mut());
-        let head_sha = head_sha.trim();
-        llvm_sha == head_sha
+    // If not running in a CI environment, return false.
+    if !CiEnv::is_ci() {
+        return false;
     }
+
+    // In rust-lang/rust managed CI, assert the existence of the LLVM submodule.
+    if CiEnv::is_rust_lang_managed_ci_job() {
+        assert!(
+            config.in_tree_llvm_info.is_managed_git_subrepository(),
+            "LLVM submodule must be fetched in rust-lang/rust managed CI builders."
+        );
+    }
+    // If LLVM submodule isn't present, skip the change check as it won't work.
+    else if !config.in_tree_llvm_info.is_managed_git_subrepository() {
+        return false;
+    }
+
+    let llvm_sha = detect_llvm_sha(config, true);
+    let head_sha = crate::output(
+        helpers::git(Some(&config.src)).arg("rev-parse").arg("HEAD").as_command_mut(),
+    );
+    let head_sha = head_sha.trim();
+    llvm_sha == head_sha
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -288,7 +302,7 @@ impl Step for Llvm {
         };
 
         // If LLVM has already been built or been downloaded through download-ci-llvm, we avoid building it again.
-        let Meta { stamp, res, out_dir, root } = match prebuilt_llvm_config(builder, target) {
+        let Meta { stamp, res, out_dir, root } = match prebuilt_llvm_config(builder, target, true) {
             LlvmBuildStatus::AlreadyBuilt(p) => return p,
             LlvmBuildStatus::ShouldBuild(m) => m,
         };
@@ -343,6 +357,7 @@ impl Step for Llvm {
             .define("LLVM_INCLUDE_DOCS", "OFF")
             .define("LLVM_INCLUDE_BENCHMARKS", "OFF")
             .define("LLVM_INCLUDE_TESTS", enable_tests)
+            // FIXME: remove this when minimal llvm is 19
             .define("LLVM_ENABLE_TERMINFO", "OFF")
             .define("LLVM_ENABLE_LIBEDIT", "OFF")
             .define("LLVM_ENABLE_BINDINGS", "OFF")
@@ -529,6 +544,7 @@ impl Step for Llvm {
             }
         };
 
+        // FIXME(ZuseZ4): Do we need that for Enzyme too?
         // When building LLVM with LLVM_LINK_LLVM_DYLIB for macOS, an unversioned
         // libLLVM.dylib will be built. However, llvm-config will still look
         // for a versioned path like libLLVM-14.dylib. Manually create a symbolic
@@ -579,11 +595,11 @@ fn check_llvm_version(builder: &Builder<'_>, llvm_config: &Path) {
     let version = command(llvm_config).arg("--version").run_capture_stdout(builder).stdout();
     let mut parts = version.split('.').take(2).filter_map(|s| s.parse::<u32>().ok());
     if let (Some(major), Some(_minor)) = (parts.next(), parts.next()) {
-        if major >= 17 {
+        if major >= 18 {
             return;
         }
     }
-    panic!("\n\nbad LLVM version: {version}, need >=17.0\n\n")
+    panic!("\n\nbad LLVM version: {version}, need >=18\n\n")
 }
 
 fn configure_cmake(
@@ -847,6 +863,100 @@ fn get_var(var_base: &str, host: &str, target: &str) -> Option<OsString> {
         .or_else(|| env::var_os(format!("{}_{}", var_base, target_u)))
         .or_else(|| env::var_os(format!("{}_{}", kind, var_base)))
         .or_else(|| env::var_os(var_base))
+}
+
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct Enzyme {
+    pub target: TargetSelection,
+}
+
+impl Step for Enzyme {
+    type Output = PathBuf;
+    const ONLY_HOSTS: bool = true;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        run.path("src/tools/enzyme/enzyme")
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(Enzyme { target: run.target });
+    }
+
+    /// Compile Enzyme for `target`.
+    fn run(self, builder: &Builder<'_>) -> PathBuf {
+        builder.require_submodule(
+            "src/tools/enzyme",
+            Some("The Enzyme sources are required for autodiff."),
+        );
+        if builder.config.dry_run() {
+            let out_dir = builder.enzyme_out(self.target);
+            return out_dir;
+        }
+        let target = self.target;
+
+        let LlvmResult { llvm_config, .. } = builder.ensure(Llvm { target: self.target });
+
+        static STAMP_HASH_MEMO: OnceLock<String> = OnceLock::new();
+        let smart_stamp_hash = STAMP_HASH_MEMO.get_or_init(|| {
+            generate_smart_stamp_hash(
+                builder,
+                &builder.config.src.join("src/tools/enzyme"),
+                builder.enzyme_info.sha().unwrap_or_default(),
+            )
+        });
+
+        let out_dir = builder.enzyme_out(target);
+        let stamp = out_dir.join("enzyme-finished-building");
+        let stamp = HashStamp::new(stamp, Some(smart_stamp_hash));
+
+        if stamp.is_done() {
+            if stamp.hash.is_none() {
+                builder.info(
+                    "Could not determine the Enzyme submodule commit hash. \
+                     Assuming that an Enzyme rebuild is not necessary.",
+                );
+                builder.info(&format!(
+                    "To force Enzyme to rebuild, remove the file `{}`",
+                    stamp.path.display()
+                ));
+            }
+            return out_dir;
+        }
+
+        builder.info(&format!("Building Enzyme for {}", target));
+        t!(stamp.remove());
+        let _time = helpers::timeit(builder);
+        t!(fs::create_dir_all(&out_dir));
+
+        builder
+            .config
+            .update_submodule(Path::new("src").join("tools").join("enzyme").to_str().unwrap());
+        let mut cfg = cmake::Config::new(builder.src.join("src/tools/enzyme/enzyme/"));
+        // FIXME(ZuseZ4): Find a nicer way to use Enzyme Debug builds
+        //cfg.profile("Debug");
+        //cfg.define("CMAKE_BUILD_TYPE", "Debug");
+        configure_cmake(builder, target, &mut cfg, true, LdFlags::default(), &[]);
+
+        // Re-use the same flags as llvm to control the level of debug information
+        // generated for lld.
+        let profile = match (builder.config.llvm_optimize, builder.config.llvm_release_debuginfo) {
+            (false, _) => "Debug",
+            (true, false) => "Release",
+            (true, true) => "RelWithDebInfo",
+        };
+
+        cfg.out_dir(&out_dir)
+            .profile(profile)
+            .env("LLVM_CONFIG_REAL", &llvm_config)
+            .define("LLVM_ENABLE_ASSERTIONS", "ON")
+            .define("ENZYME_EXTERNAL_SHARED_LIB", "ON")
+            .define("LLVM_DIR", builder.llvm_out(target));
+
+        cfg.build();
+
+        t!(stamp.write());
+        out_dir
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -1118,6 +1228,9 @@ fn supported_sanitizers(
         "aarch64-unknown-linux-ohos" => {
             common_libs("linux", "aarch64", &["asan", "lsan", "msan", "tsan", "hwasan"])
         }
+        "loongarch64-unknown-linux-gnu" | "loongarch64-unknown-linux-musl" => {
+            common_libs("linux", "loongarch64", &["asan", "lsan", "msan", "tsan"])
+        }
         "x86_64-apple-darwin" => darwin_libs("osx", &["asan", "lsan", "tsan"]),
         "x86_64-unknown-fuchsia" => common_libs("fuchsia", "x86_64", &["asan"]),
         "x86_64-apple-ios" => darwin_libs("iossim", &["asan", "tsan"]),
@@ -1144,44 +1257,6 @@ fn supported_sanitizers(
             common_libs("linux", "x86_64", &["asan", "lsan", "msan", "tsan"])
         }
         _ => Vec::new(),
-    }
-}
-
-struct HashStamp {
-    path: PathBuf,
-    hash: Option<Vec<u8>>,
-}
-
-impl HashStamp {
-    fn new(path: PathBuf, hash: Option<&str>) -> Self {
-        HashStamp { path, hash: hash.map(|s| s.as_bytes().to_owned()) }
-    }
-
-    fn is_done(&self) -> bool {
-        match fs::read(&self.path) {
-            Ok(h) => self.hash.as_deref().unwrap_or(b"") == h.as_slice(),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => false,
-            Err(e) => {
-                panic!("failed to read stamp file `{}`: {}", self.path.display(), e);
-            }
-        }
-    }
-
-    fn remove(&self) -> io::Result<()> {
-        match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                if e.kind() == io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    fn write(&self) -> io::Result<()> {
-        fs::write(&self.path, self.hash.as_deref().unwrap_or(b""))
     }
 }
 

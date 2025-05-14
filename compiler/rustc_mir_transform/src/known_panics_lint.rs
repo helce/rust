@@ -1,20 +1,18 @@
-//! A lint that checks for known panics like
-//! overflows, division by zero,
-//! out-of-bound access etc.
-//! Uses const propagation to determine the
-//! values of operands during checks.
+//! A lint that checks for known panics like overflows, division by zero,
+//! out-of-bound access etc. Uses const propagation to determine the values of
+//! operands during checks.
 
 use std::fmt::Debug;
 
 use rustc_const_eval::const_eval::DummyMachine;
 use rustc_const_eval::interpret::{
-    format_interp_error, ImmTy, InterpCx, InterpResult, Projectable, Scalar,
+    ImmTy, InterpCx, InterpResult, Projectable, Scalar, format_interp_error, interp_ok,
 };
 use rustc_data_structures::fx::FxHashSet;
-use rustc_hir::def::DefKind;
 use rustc_hir::HirId;
-use rustc_index::bit_set::BitSet;
+use rustc_hir::def::DefKind;
 use rustc_index::IndexVec;
+use rustc_index::bit_set::BitSet;
 use rustc_middle::bug;
 use rustc_middle::mir::visit::{MutatingUseContext, NonMutatingUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::*;
@@ -25,11 +23,10 @@ use rustc_target::abi::{Abi, FieldIdx, HasDataLayout, Size, TargetDataLayout, Va
 use tracing::{debug, instrument, trace};
 
 use crate::errors::{AssertLint, AssertLintKind};
-use crate::MirLint;
 
-pub struct KnownPanicsLint;
+pub(super) struct KnownPanicsLint;
 
-impl<'tcx> MirLint<'tcx> for KnownPanicsLint {
+impl<'tcx> crate::MirLint<'tcx> for KnownPanicsLint {
     fn run_lint(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>) {
         if body.tainted_by_errors.is_some() {
             return;
@@ -104,7 +101,7 @@ impl<'tcx> Value<'tcx> {
                 }
                 (PlaceElem::Index(idx), Value::Aggregate { fields, .. }) => {
                     let idx = prop.get_const(idx.into())?.immediate()?;
-                    let idx = prop.ecx.read_target_usize(idx).ok()?.try_into().ok()?;
+                    let idx = prop.ecx.read_target_usize(idx).discard_err()?.try_into().ok()?;
                     if idx <= FieldIdx::MAX_AS_U32 {
                         fields.get(FieldIdx::from_u32(idx)).unwrap_or(&Value::Uninit)
                     } else {
@@ -234,21 +231,20 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
     where
         F: FnOnce(&mut Self) -> InterpResult<'tcx, T>,
     {
-        match f(self) {
-            Ok(val) => Some(val),
-            Err(error) => {
-                trace!("InterpCx operation failed: {:?}", error);
+        f(self)
+            .map_err(|err| {
+                trace!("InterpCx operation failed: {:?}", err);
                 // Some errors shouldn't come up because creating them causes
                 // an allocation, which we should avoid. When that happens,
                 // dedicated error variants should be introduced instead.
                 assert!(
-                    !error.kind().formatted_string(),
+                    !err.kind().formatted_string(),
                     "known panics lint encountered formatting error: {}",
-                    format_interp_error(self.ecx.tcx.dcx(), error),
+                    format_interp_error(self.ecx.tcx.dcx(), err),
                 );
-                None
-            }
-        }
+                err
+            })
+            .discard_err()
     }
 
     /// Returns the value, if any, of evaluating `c`.
@@ -299,12 +295,11 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
         let source_info = self.body.source_info(location);
         if let Some(lint_root) = self.lint_root(*source_info) {
             let span = source_info.span;
-            self.tcx.emit_node_span_lint(
-                lint_kind.lint(),
-                lint_root,
+            self.tcx.emit_node_span_lint(lint_kind.lint(), lint_root, span, AssertLint {
                 span,
-                AssertLint { span, assert_kind, lint_kind },
-            );
+                assert_kind,
+                lint_kind,
+            });
         }
     }
 
@@ -319,7 +314,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                     .ecx
                     .binary_op(BinOp::SubWithOverflow, &ImmTy::from_int(0, arg.layout), &arg)?
                     .to_scalar_pair();
-                Ok((arg, overflow.to_bool()?))
+                interp_ok((arg, overflow.to_bool()?))
             })?;
             if overflow {
                 self.report_assert_as_lint(
@@ -353,7 +348,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
             let left_ty = left.ty(self.local_decls(), self.tcx);
             let left_size = self.ecx.layout_of(left_ty).ok()?.size;
             let right_size = r.layout.size;
-            let r_bits = r.to_scalar().to_bits(right_size).ok();
+            let r_bits = r.to_scalar().to_bits(right_size).discard_err();
             if r_bits.is_some_and(|b| b >= left_size.bits() as u128) {
                 debug!("check_binary_op: reporting assert for {:?}", location);
                 let panic = AssertKind::Overflow(
@@ -381,19 +376,19 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
         if let (Some(l), Some(r)) = (l, r)
             && l.layout.ty.is_integral()
             && op.is_overflowing()
-        {
-            if self.use_ecx(|this| {
+            && self.use_ecx(|this| {
                 let (_res, overflow) = this.ecx.binary_op(op, &l, &r)?.to_scalar_pair();
                 overflow.to_bool()
-            })? {
-                self.report_assert_as_lint(
-                    location,
-                    AssertLintKind::ArithmeticOverflow,
-                    AssertKind::Overflow(op, l.to_const_int(), r.to_const_int()),
-                );
-                return None;
-            }
+            })?
+        {
+            self.report_assert_as_lint(
+                location,
+                AssertLintKind::ArithmeticOverflow,
+                AssertKind::Overflow(op, l.to_const_int(), r.to_const_int()),
+            );
+            return None;
         }
+
         Some(())
     }
 
@@ -500,7 +495,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                 // This can be `None` if the lhs wasn't const propagated and we just
                 // triggered the assert on the value of the rhs.
                 self.eval_operand(op)
-                    .and_then(|op| self.ecx.read_immediate(&op).ok())
+                    .and_then(|op| self.ecx.read_immediate(&op).discard_err())
                     .map_or(DbgVal::Underscore, |op| DbgVal::Val(op.to_const_int()))
             };
             let msg = match msg {
@@ -563,7 +558,8 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
 
                 let val = self.use_ecx(|this| this.ecx.binary_op(bin_op, &left, &right))?;
                 if matches!(val.layout.abi, Abi::ScalarPair(..)) {
-                    // FIXME `Value` should properly support pairs in `Immediate`... but currently it does not.
+                    // FIXME `Value` should properly support pairs in `Immediate`... but currently
+                    // it does not.
                     let (val, overflow) = val.to_pair(&self.ecx);
                     Value::Aggregate {
                         variant: VariantIdx::ZERO,
@@ -604,13 +600,15 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
             }
 
             Len(place) => {
-                let len = match self.get_const(place)? {
-                    Value::Immediate(src) => src.len(&self.ecx).ok()?,
-                    Value::Aggregate { fields, .. } => fields.len() as u64,
-                    Value::Uninit => match place.ty(self.local_decls(), self.tcx).ty.kind() {
-                        ty::Array(_, n) => n.try_eval_target_usize(self.tcx, self.param_env)?,
-                        _ => return None,
-                    },
+                let len = if let ty::Array(_, n) = place.ty(self.local_decls(), self.tcx).ty.kind()
+                {
+                    n.try_eval_target_usize(self.tcx, self.param_env)?
+                } else {
+                    match self.get_const(place)? {
+                        Value::Immediate(src) => src.len(&self.ecx).discard_err()?,
+                        Value::Aggregate { fields, .. } => fields.len() as u64,
+                        Value::Uninit => return None,
+                    }
                 };
                 ImmTy::from_scalar(Scalar::from_target_usize(len, self), layout).into()
             }
@@ -618,7 +616,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
             Ref(..) | RawPtr(..) => return None,
 
             NullaryOp(ref null_op, ty) => {
-                let op_layout = self.use_ecx(|this| this.ecx.layout_of(ty))?;
+                let op_layout = self.ecx.layout_of(ty).ok()?;
                 let val = match null_op {
                     NullOp::SizeOf => op_layout.size.bytes(),
                     NullOp::AlignOf => op_layout.align.abi.bytes(),
@@ -636,16 +634,16 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
             Cast(ref kind, ref value, to) => match kind {
                 CastKind::IntToInt | CastKind::IntToFloat => {
                     let value = self.eval_operand(value)?;
-                    let value = self.ecx.read_immediate(&value).ok()?;
+                    let value = self.ecx.read_immediate(&value).discard_err()?;
                     let to = self.ecx.layout_of(to).ok()?;
-                    let res = self.ecx.int_to_int_or_float(&value, to).ok()?;
+                    let res = self.ecx.int_to_int_or_float(&value, to).discard_err()?;
                     res.into()
                 }
                 CastKind::FloatToFloat | CastKind::FloatToInt => {
                     let value = self.eval_operand(value)?;
-                    let value = self.ecx.read_immediate(&value).ok()?;
+                    let value = self.ecx.read_immediate(&value).discard_err()?;
                     let to = self.ecx.layout_of(to).ok()?;
-                    let res = self.ecx.float_to_float_or_int(&value, to).ok()?;
+                    let res = self.ecx.float_to_float_or_int(&value, to).discard_err()?;
                     res.into()
                 }
                 CastKind::Transmute => {
@@ -659,7 +657,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                         _ => return None,
                     }
 
-                    value.offset(Size::ZERO, to, &self.ecx).ok()?.into()
+                    value.offset(Size::ZERO, to, &self.ecx).discard_err()?.into()
                 }
                 _ => return None,
             },
@@ -784,7 +782,7 @@ impl<'tcx> Visitor<'tcx> for ConstPropagator<'_, 'tcx> {
             TerminatorKind::SwitchInt { ref discr, ref targets } => {
                 if let Some(ref value) = self.eval_operand(discr)
                     && let Some(value_const) = self.use_ecx(|this| this.ecx.read_scalar(value))
-                    && let Ok(constant) = value_const.to_bits(value_const.size())
+                    && let Some(constant) = value_const.to_bits(value_const.size()).discard_err()
                 {
                     // We managed to evaluate the discriminant, so we know we only need to visit
                     // one target.
@@ -853,7 +851,7 @@ const MAX_ALLOC_LIMIT: u64 = 1024;
 
 /// The mode that `ConstProp` is allowed to run in for a given `Local`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ConstPropMode {
+enum ConstPropMode {
     /// The `Local` can be propagated into and reads of this `Local` can also be propagated.
     FullConstProp,
     /// The `Local` can only be propagated into and from its own block.
@@ -865,7 +863,7 @@ pub enum ConstPropMode {
 
 /// A visitor that determines locals in a MIR body
 /// that can be const propagated
-pub struct CanConstProp {
+struct CanConstProp {
     can_const_prop: IndexVec<Local, ConstPropMode>,
     // False at the beginning. Once set, no more assignments are allowed to that local.
     found_assignment: BitSet<Local>,
@@ -873,7 +871,7 @@ pub struct CanConstProp {
 
 impl CanConstProp {
     /// Returns true if `local` can be propagated
-    pub fn check<'tcx>(
+    fn check<'tcx>(
         tcx: TyCtxt<'tcx>,
         param_env: ParamEnv<'tcx>,
         body: &Body<'tcx>,
@@ -914,7 +912,7 @@ impl<'tcx> Visitor<'tcx> for CanConstProp {
     fn visit_place(&mut self, place: &Place<'tcx>, mut context: PlaceContext, loc: Location) {
         use rustc_middle::mir::visit::PlaceContext::*;
 
-        // Dereferencing just read the addess of `place.local`.
+        // Dereferencing just read the address of `place.local`.
         if place.projection.first() == Some(&PlaceElem::Deref) {
             context = NonMutatingUse(NonMutatingUseContext::Copy);
         }

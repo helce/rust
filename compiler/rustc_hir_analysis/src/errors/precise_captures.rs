@@ -1,3 +1,4 @@
+use rustc_errors::E0799;
 use rustc_macros::Diagnostic;
 use rustc_span::{Span, Symbol};
 
@@ -34,6 +35,15 @@ pub(crate) struct LifetimeNotCaptured {
 }
 
 #[derive(Diagnostic)]
+#[diag(hir_analysis_lifetime_implicitly_captured)]
+pub(crate) struct LifetimeImplicitlyCaptured {
+    #[primary_span]
+    pub opaque_span: Span,
+    #[label(hir_analysis_param_label)]
+    pub param_span: Span,
+}
+
+#[derive(Diagnostic)]
 #[diag(hir_analysis_bad_precise_capture)]
 pub(crate) struct BadPreciseCapture {
     #[primary_span]
@@ -43,7 +53,7 @@ pub(crate) struct BadPreciseCapture {
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_analysis_precise_capture_self_alias)]
+#[diag(hir_analysis_precise_capture_self_alias, code = E0799)]
 pub(crate) struct PreciseCaptureSelfAlias {
     #[primary_span]
     pub span: Span,

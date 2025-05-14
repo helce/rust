@@ -7,28 +7,28 @@ use std::iter;
 #[cfg(feature = "master")]
 use gccjit::FunctionType;
 use gccjit::{ComparisonOp, Function, RValue, ToRValue, Type, UnaryOp};
+use rustc_codegen_ssa::MemFlags;
 use rustc_codegen_ssa::base::wants_msvc_seh;
 use rustc_codegen_ssa::common::IntPredicate;
 use rustc_codegen_ssa::errors::InvalidMonomorphization;
 use rustc_codegen_ssa::mir::operand::{OperandRef, OperandValue};
 use rustc_codegen_ssa::mir::place::{PlaceRef, PlaceValue};
 use rustc_codegen_ssa::traits::{
-    ArgAbiMethods, BuilderMethods, ConstMethods, IntrinsicCallMethods,
+    ArgAbiBuilderMethods, BuilderMethods, ConstCodegenMethods, IntrinsicCallBuilderMethods,
 };
 #[cfg(feature = "master")]
-use rustc_codegen_ssa::traits::{BaseTypeMethods, MiscMethods};
-use rustc_codegen_ssa::MemFlags;
+use rustc_codegen_ssa::traits::{BaseTypeCodegenMethods, MiscCodegenMethods};
 use rustc_middle::bug;
 use rustc_middle::ty::layout::LayoutOf;
 #[cfg(feature = "master")]
 use rustc_middle::ty::layout::{FnAbiOf, HasTyCtxt};
 use rustc_middle::ty::{self, Instance, Ty};
-use rustc_span::{sym, Span, Symbol};
-use rustc_target::abi::call::{ArgAbi, FnAbi, PassMode};
+use rustc_span::{Span, Symbol, sym};
 use rustc_target::abi::HasDataLayout;
+use rustc_target::abi::call::{ArgAbi, FnAbi, PassMode};
+use rustc_target::spec::PanicStrategy;
 #[cfg(feature = "master")]
 use rustc_target::spec::abi::Abi;
-use rustc_target::spec::PanicStrategy;
 
 #[cfg(feature = "master")]
 use crate::abi::FnAbiGccExt;
@@ -66,6 +66,9 @@ fn get_simple_intrinsic<'gcc, 'tcx>(
         sym::log2f64 => "log2",
         sym::fmaf32 => "fmaf",
         sym::fmaf64 => "fma",
+        // FIXME: calling `fma` from libc without FMA target feature uses expensive sofware emulation
+        sym::fmuladdf32 => "fmaf", // TODO: use gcc intrinsic analogous to llvm.fmuladd.f32
+        sym::fmuladdf64 => "fma",  // TODO: use gcc intrinsic analogous to llvm.fmuladd.f64
         sym::fabsf32 => "fabsf",
         sym::fabsf64 => "fabs",
         sym::minnumf32 => "fminf",
@@ -94,7 +97,7 @@ fn get_simple_intrinsic<'gcc, 'tcx>(
     Some(cx.context.get_builtin_function(gcc_name))
 }
 
-impl<'a, 'gcc, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'a, 'gcc, 'tcx> {
+impl<'a, 'gcc, 'tcx> IntrinsicCallBuilderMethods<'tcx> for Builder<'a, 'gcc, 'tcx> {
     fn codegen_intrinsic_call(
         &mut self,
         instance: Instance<'tcx>,
@@ -127,20 +130,13 @@ impl<'a, 'gcc, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'a, 'gcc, 'tcx> {
         // https://github.com/rust-lang/rust-clippy/issues/12497
         // and leave `else if use_integer_compare` to be placed "as is".
         #[allow(clippy::suspicious_else_formatting)]
-        let llval = match name {
+        let value = match name {
             _ if simple.is_some() => {
-                // FIXME(antoyo): remove this cast when the API supports function.
-                let func = unsafe {
-                    std::mem::transmute::<Function<'gcc>, RValue<'gcc>>(simple.expect("simple"))
-                };
-                self.call(
-                    self.type_void(),
-                    None,
-                    None,
+                let func = simple.expect("simple function");
+                self.cx.context.new_call(
+                    self.location,
                     func,
                     &args.iter().map(|arg| arg.immediate()).collect::<Vec<_>>(),
-                    None,
-                    None,
                 )
             }
             sym::likely => self.expect(args[0].immediate(), true),
@@ -383,7 +379,7 @@ impl<'a, 'gcc, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'a, 'gcc, 'tcx> {
 
             _ if name_str.starts_with("simd_") => {
                 match generic_simd_intrinsic(self, name, callee_ty, args, ret_ty, llret_ty, span) {
-                    Ok(llval) => llval,
+                    Ok(value) => value,
                     Err(()) => return Ok(()),
                 }
             }
@@ -396,9 +392,9 @@ impl<'a, 'gcc, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'a, 'gcc, 'tcx> {
             if let PassMode::Cast { cast: ref ty, .. } = fn_abi.ret.mode {
                 let ptr_llty = self.type_ptr_to(ty.gcc_type(self));
                 let ptr = self.pointercast(result.val.llval, ptr_llty);
-                self.store(llval, ptr, result.val.align);
+                self.store(value, ptr, result.val.align);
             } else {
-                OperandRef::from_immediate_or_packed_pair(self, llval, result.layout)
+                OperandRef::from_immediate_or_packed_pair(self, value, result.layout)
                     .val
                     .store(self, result);
             }
@@ -448,7 +444,7 @@ impl<'a, 'gcc, 'tcx> IntrinsicCallMethods<'tcx> for Builder<'a, 'gcc, 'tcx> {
     }
 }
 
-impl<'a, 'gcc, 'tcx> ArgAbiMethods<'tcx> for Builder<'a, 'gcc, 'tcx> {
+impl<'a, 'gcc, 'tcx> ArgAbiBuilderMethods<'tcx> for Builder<'a, 'gcc, 'tcx> {
     fn store_fn_arg(
         &mut self,
         arg_abi: &ArgAbi<'tcx, Ty<'tcx>>,

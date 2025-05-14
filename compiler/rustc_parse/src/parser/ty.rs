@@ -1,15 +1,15 @@
 use rustc_ast::ptr::P;
-use rustc_ast::token::{self, BinOpToken, Delimiter, Token, TokenKind};
+use rustc_ast::token::{self, BinOpToken, Delimiter, IdentIsRaw, Token, TokenKind};
 use rustc_ast::util::case::Case;
 use rustc_ast::{
-    self as ast, BareFnTy, BoundAsyncness, BoundConstness, BoundPolarity, FnRetTy, GenericBound,
-    GenericBounds, GenericParam, Generics, Lifetime, MacCall, MutTy, Mutability, PolyTraitRef,
-    PreciseCapturingArg, TraitBoundModifiers, TraitObjectSyntax, Ty, TyKind, DUMMY_NODE_ID,
+    self as ast, BareFnTy, BoundAsyncness, BoundConstness, BoundPolarity, DUMMY_NODE_ID, FnRetTy,
+    GenericBound, GenericBounds, GenericParam, Generics, Lifetime, MacCall, MutTy, Mutability,
+    PolyTraitRef, PreciseCapturingArg, TraitBoundModifiers, TraitObjectSyntax, Ty, TyKind,
 };
 use rustc_errors::{Applicability, PResult};
-use rustc_span::symbol::{kw, sym, Ident};
+use rustc_span::symbol::{Ident, kw, sym};
 use rustc_span::{ErrorGuaranteed, Span, Symbol};
-use thin_vec::{thin_vec, ThinVec};
+use thin_vec::{ThinVec, thin_vec};
 
 use super::{Parser, PathStyle, SeqSep, TokenType, Trailing};
 use crate::errors::{
@@ -126,17 +126,6 @@ impl<'a> Parser<'a> {
             Some(ty_params),
             RecoverQuestionMark::Yes,
         )
-    }
-
-    /// Parse a type suitable for a field definition.
-    /// The difference from `parse_ty` is that this version
-    /// allows anonymous structs and unions.
-    pub(super) fn parse_ty_for_field_def(&mut self) -> PResult<'a, P<Ty>> {
-        if self.can_begin_anon_struct_or_union() {
-            self.parse_anon_struct_or_union()
-        } else {
-            self.parse_ty()
-        }
     }
 
     /// Parse a type suitable for a function or function pointer parameter.
@@ -382,37 +371,6 @@ impl<'a> Parser<'a> {
         if allow_qpath_recovery { self.maybe_recover_from_bad_qpath(ty) } else { Ok(ty) }
     }
 
-    /// Parse an anonymous struct or union (only for field definitions):
-    /// ```ignore (feature-not-ready)
-    /// #[repr(C)]
-    /// struct Foo {
-    ///     _: struct { // anonymous struct
-    ///         x: u32,
-    ///         y: f64,
-    ///     }
-    ///     _: union { // anonymous union
-    ///         z: u32,
-    ///         w: f64,
-    ///     }
-    /// }
-    /// ```
-    fn parse_anon_struct_or_union(&mut self) -> PResult<'a, P<Ty>> {
-        assert!(self.token.is_keyword(kw::Union) || self.token.is_keyword(kw::Struct));
-        let is_union = self.token.is_keyword(kw::Union);
-
-        let lo = self.token.span;
-        self.bump();
-
-        let (fields, _recovered) =
-            self.parse_record_struct_body(if is_union { "union" } else { "struct" }, lo, false)?;
-        let span = lo.to(self.prev_token.span);
-        self.psess.gated_spans.gate(sym::unnamed_fields, span);
-        let id = ast::DUMMY_NODE_ID;
-        let kind =
-            if is_union { TyKind::AnonUnion(id, fields) } else { TyKind::AnonStruct(id, fields) };
-        Ok(self.mk_ty(span, kind))
-    }
-
     /// Parses either:
     /// - `(TYPE)`, a parenthesized type.
     /// - `(TYPE,)`, a tuple with a single field of type TYPE.
@@ -607,9 +565,6 @@ impl<'a> Parser<'a> {
         let decl = self.parse_fn_decl(|_| false, AllowPlus::No, recover_return_sign)?;
         let whole_span = lo.to(self.prev_token.span);
         if let ast::Const::Yes(span) = constness {
-            // If we ever start to allow `const fn()`, then update
-            // feature gating for `#![feature(const_extern_fn)]` to
-            // cover it.
             self.dcx().emit_err(FnPointerCannotBeConst { span: whole_span, qualifier: span });
         }
         if let Some(ast::CoroutineKind::Async { span, .. }) = coroutine_kind {
@@ -814,11 +769,6 @@ impl<'a> Parser<'a> {
         }
 
         Ok(bounds)
-    }
-
-    pub(super) fn can_begin_anon_struct_or_union(&mut self) -> bool {
-        (self.token.is_keyword(kw::Struct) || self.token.is_keyword(kw::Union))
-            && self.look_ahead(1, |t| t == &token::OpenDelim(Delimiter::Brace))
     }
 
     /// Can the current token begin a bound?
@@ -1285,8 +1235,9 @@ impl<'a> Parser<'a> {
 
     /// Parses a single lifetime `'a` or panics.
     pub(super) fn expect_lifetime(&mut self) -> Lifetime {
-        if let Some(ident) = self.token.lifetime() {
-            if ident.without_first_quote().is_reserved()
+        if let Some((ident, is_raw)) = self.token.lifetime() {
+            if matches!(is_raw, IdentIsRaw::No)
+                && ident.without_first_quote().is_reserved()
                 && ![kw::UnderscoreLifetime, kw::StaticLifetime].contains(&ident.name)
             {
                 self.dcx().emit_err(errors::KeywordLifetime { span: ident.span });

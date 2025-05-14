@@ -26,6 +26,13 @@ parse_async_move_block_in_2015 = `async move` blocks are only allowed in Rust 20
 parse_async_move_order_incorrect = the order of `move` and `async` is incorrect
     .suggestion = try switching the order
 
+parse_at_dot_dot_in_struct_pattern = `@ ..` is not supported in struct patterns
+    .suggestion = bind to each field separately or, if you don't need them, just remove `{$ident} @`
+
+parse_at_in_struct_pattern = Unexpected `@` in struct pattern
+    .note = struct patterns use `field: pattern` syntax to bind to fields
+    .help = consider replacing `new_name @ field_name` with `field_name: new_name` if that is what you intended
+
 parse_attr_after_generic = trailing attribute after generic parameter
     .label = attributes must go before parameters
 
@@ -69,6 +76,8 @@ parse_box_syntax_removed = `box_syntax` has been removed
 parse_box_syntax_removed_suggestion = use `Box::new()` instead
 
 parse_cannot_be_raw_ident = `{$ident}` cannot be a raw identifier
+
+parse_cannot_be_raw_lifetime = `{$ident}` cannot be a raw lifetime
 
 parse_catch_after_try = keyword `catch` cannot follow a `try` block
     .help = try using `match` on the result of the `try` block instead
@@ -381,6 +390,7 @@ parse_invalid_char_in_escape_msg = invalid character in {$is_hex ->
     *[false] unicode
     } escape
 
+
 parse_invalid_comparison_operator = invalid comparison operator `{$invalid}`
     .use_instead = `{$invalid}` is not a valid comparison operator, use `{$correct}`
     .spaceship_operator_invalid = `<=>` is not a valid comparison operator, use `std::cmp::Ordering`
@@ -413,6 +423,9 @@ parse_invalid_meta_item = expected unsuffixed literal, found `{$token}`
     .quote_ident_sugg = surround the identifier with quotation marks to make it into a string literal
 
 parse_invalid_offset_of = offset_of expects dot-separated field and variant names
+
+parse_invalid_path_sep_in_fn_definition = invalid path separator in function definition
+    .suggestion = remove invalid path separator
 
 parse_invalid_unicode_escape = invalid unicode character escape
     .label = invalid escape
@@ -581,6 +594,11 @@ parse_missing_trait_in_trait_impl = missing trait in a trait impl
     .suggestion_add_trait = add a trait here
     .suggestion_remove_for = for an inherent impl, drop this `for`
 
+parse_misspelled_kw = {$is_incorrect_case ->
+                    [true] write keyword `{$similar_kw}` in lowercase
+                    *[false] there is a keyword `{$similar_kw}` with a similar name
+}
+
 parse_modifier_lifetime = `{$modifier}` may only modify trait bounds, not lifetime bounds
     .suggestion = remove the `{$modifier}`
 
@@ -664,7 +682,7 @@ parse_parentheses_with_struct_fields = invalid `struct` delimiters or `fn` call 
 parse_parenthesized_lifetime = parenthesized lifetime bounds are not supported
 parse_parenthesized_lifetime_suggestion = remove the parentheses
 
-parse_path_single_colon = path separator must be a double colon
+parse_path_double_colon = path separator must be a double colon
     .suggestion = use a double colon instead
 
 parse_pattern_method_param_without_body = patterns aren't allowed in methods without bodies
@@ -692,6 +710,10 @@ parse_require_colon_after_labeled_expression = labeled expression must be follow
     .note = labels are used before loops and blocks, allowing e.g., `break 'label` to them
     .label = the label
     .suggestion = add `:` after the label
+
+parse_reserved_string = invalid string literal
+    .note = unprefixed guarded string literals are reserved for future use since Rust 2024
+    .suggestion_whitespace = consider inserting whitespace here
 
 parse_return_types_use_thin_arrow = return types are denoted using `->`
     .suggestion = use `->` instead
@@ -797,15 +819,18 @@ parse_unexpected_expr_in_pat =
     expected {$is_bound ->
         [true] a pattern range bound
        *[false] a pattern
-    }, found {$is_method_call ->
-        [true] a method call
-       *[false] an expression
-    }
+    }, found an expression
 
-    .label = {$is_method_call ->
-        [true] method calls
-       *[false] arbitrary expressions
-    } are not allowed in patterns
+    .label = not a pattern
+    .note = arbitrary expressions are not allowed in patterns: <https://doc.rust-lang.org/book/ch18-00-patterns.html>
+
+parse_unexpected_expr_in_pat_const_sugg = consider extracting the expression into a `const`
+
+parse_unexpected_expr_in_pat_create_guard_sugg = consider moving the expression to a match arm guard
+
+parse_unexpected_expr_in_pat_inline_const_sugg = consider wrapping the expression in an inline `const` (requires `{"#"}![feature(inline_const_pat)]`)
+
+parse_unexpected_expr_in_pat_update_guard_sugg = consider moving the expression to the match arm guard
 
 parse_unexpected_if_with_if = unexpected `if` in the condition expression
     .suggestion = remove the `if`

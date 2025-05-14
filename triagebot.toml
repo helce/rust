@@ -570,7 +570,7 @@ cc = ["@bjorn3"]
 cc = ["@antoyo", "@GuillaumeGomez"]
 
 [mentions."compiler/rustc_const_eval/src/interpret"]
-message = "Some changes occurred to the CTFE / Miri engine"
+message = "Some changes occurred to the CTFE / Miri interpreter"
 cc = ["@rust-lang/miri"]
 
 [mentions."compiler/rustc_infer/src/infer/error_reporting/need_type_info.rs"]
@@ -590,7 +590,7 @@ message = "changes to `inspect_obligations.rs`"
 cc = ["@compiler-errors", "@lcnr"]
 
 [mentions."compiler/rustc_middle/src/mir/interpret"]
-message = "Some changes occurred to the CTFE / Miri engine"
+message = "Some changes occurred to the CTFE / Miri interpreter"
 cc = ["@rust-lang/miri"]
 
 [mentions."compiler/rustc_mir_transform/src/"]
@@ -658,6 +658,13 @@ Some changes occurred to the platform-builtins intrinsics. Make sure the
 LLVM backend as well as portable-simd gets adapted for the changes.
 """
 cc = ["@antoyo", "@GuillaumeGomez", "@bjorn3", "@calebzulawski", "@programmerjake"]
+
+[mentions."library/core/src/intrinsics"]
+message = """
+Some changes occurred to the intrinsics. Make sure the CTFE / Miri interpreter
+gets adapted for the changes, if necessary.
+"""
+cc = ["@rust-lang/miri"]
 
 [mentions."library/portable-simd"]
 message = """
@@ -816,7 +823,7 @@ If appropriate, please update `CONFIG_CHANGE_HISTORY` in `src/bootstrap/src/util
 message = "This PR changes how LLVM is built. Consider updating src/bootstrap/download-ci-llvm-stamp."
 
 [mentions."test/crashes"]
-message = "This PR changes a file inside `tests/crashes`. If a crash was fixed, please move into the correspondig `ui` subdir and add 'Fixes #<issueNr>' to the pr description to autoclose the issue upon merge."
+message = "This PR changes a file inside `tests/crashes`. If a crash was fixed, please move into the corresponding `ui` subdir and add 'Fixes #<issueNr>' to the PR description to autoclose the issue upon merge."
 
 [mentions."tests/ui/deriving/deriving-all-codegen.stdout"]
 message = "Changes to the code generated for builtin derived traits."
@@ -913,7 +920,12 @@ cc = ["@kobzol"]
 [assign]
 warn_non_default_branch = true
 contributing_url = "https://rustc-dev-guide.rust-lang.org/getting-started.html"
-users_on_vacation = ["jyn514", "jhpratt", "oli-obk", "kobzol", "joboet"]
+users_on_vacation = [
+    "BoxyUwU",
+    "fmease",
+    "jyn514",
+    "oli-obk",
+]
 
 [assign.adhoc_groups]
 compiler-team = [
@@ -926,7 +938,6 @@ compiler-team = [
     "@oli-obk",
     "@pnkfelix",
     "@wesleywiser",
-    "@michaelwoerister",
 ]
 compiler-team-contributors = [
     "@TaKO8Ki",
@@ -952,12 +963,14 @@ libs = [
     "@jhpratt",
     "@tgross35",
     "@thomcc",
+    "@ibraheemdev",
 ]
 bootstrap = [
     "@Mark-Simulacrum",
     "@albertlarsan68",
     "@onur-ozkan",
     "@kobzol",
+    "@jieyouxu",
 ]
 infra-ci = [
     "@Mark-Simulacrum",
@@ -976,7 +989,6 @@ query-system = [
     "@cjgillot",
 ]
 incremental = [
-    "@michaelwoerister",
     "@wesleywiser",
 ]
 diagnostics = [
@@ -1035,7 +1047,6 @@ ast_lowering = [
     "@spastorino",
 ]
 debuginfo = [
-    "@michaelwoerister",
     "@davidtwco"
 ]
 fallback = [

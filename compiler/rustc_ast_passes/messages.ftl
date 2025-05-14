@@ -1,7 +1,3 @@
-ast_passes_anon_struct_or_union_not_allowed =
-    anonymous {$struct_or_union}s are not allowed outside of unnamed struct or union fields
-    .label = anonymous {$struct_or_union} declared here
-
 ast_passes_assoc_const_without_body =
     associated constant in `impl` without body
     .suggestion = provide a definition for the constant
@@ -40,14 +36,14 @@ ast_passes_body_in_extern = incorrect `{$kind}` inside `extern` block
 
 ast_passes_bound_in_context = bounds on `type`s in {$ctx} have no effect
 
-ast_passes_const_and_async = functions cannot be both `const` and `async`
-    .const = `const` because of this
-    .async = `async` because of this
-    .label = {""}
-
 ast_passes_const_and_c_variadic = functions cannot be both `const` and C-variadic
     .const = `const` because of this
     .variadic = C-variadic because of this
+
+ast_passes_const_and_coroutine = functions cannot be both `const` and `{$coroutine_kind}`
+    .const = `const` because of this
+    .coroutine = `{$coroutine_kind}` because of this
+    .label = {""}
 
 ast_passes_const_bound_trait_object = const trait bounds are not allowed in trait object types
 
@@ -159,14 +155,6 @@ ast_passes_inherent_cannot_be = inherent impls cannot be {$annotation}
     .because = {$annotation} because of this
     .type = inherent impl for this type
     .only_trait = only trait implementations may be annotated with {$annotation}
-
-ast_passes_invalid_unnamed_field =
-    unnamed fields are not allowed outside of structs or unions
-    .label = unnamed field declared here
-
-ast_passes_invalid_unnamed_field_ty =
-    unnamed fields can only have struct or union types
-    .label = not a struct or union
 
 ast_passes_item_invalid_safety = items outside of `unsafe extern {"{ }"}` cannot be declared with `safe` safety qualifier
     .suggestion = remove safe from this item

@@ -1,5 +1,4 @@
 //@ compile-flags: -O
-//@ min-llvm-version: 18
 //@ ignore-e2k not supported
 
 #![crate_type = "lib"]

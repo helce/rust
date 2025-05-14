@@ -5,26 +5,26 @@ use gccjit::{
 };
 use rustc_codegen_ssa::base::wants_msvc_seh;
 use rustc_codegen_ssa::errors as ssa_errors;
-use rustc_codegen_ssa::traits::{BackendTypes, BaseTypeMethods, MiscMethods};
-use rustc_data_structures::base_n::{ToBaseN, ALPHANUMERIC_ONLY};
+use rustc_codegen_ssa::traits::{BackendTypes, BaseTypeCodegenMethods, MiscCodegenMethods};
+use rustc_data_structures::base_n::{ALPHANUMERIC_ONLY, ToBaseN};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_middle::mir::mono::CodegenUnit;
 use rustc_middle::span_bug;
 use rustc_middle::ty::layout::{
     FnAbiError, FnAbiOf, FnAbiOfHelpers, FnAbiRequest, HasParamEnv, HasTyCtxt, LayoutError,
-    LayoutOfHelpers, TyAndLayout,
+    LayoutOfHelpers,
 };
 use rustc_middle::ty::{self, Instance, ParamEnv, PolyExistentialTraitRef, Ty, TyCtxt};
 use rustc_session::Session;
 use rustc_span::source_map::respan;
-use rustc_span::{Span, DUMMY_SP};
-use rustc_target::abi::call::FnAbi;
+use rustc_span::{DUMMY_SP, Span};
 use rustc_target::abi::{HasDataLayout, PointeeInfo, Size, TargetDataLayout, VariantIdx};
 use rustc_target::spec::{HasTargetSpec, HasWasmCAbiOpt, Target, TlsModel, WasmCAbi};
 
 use crate::callee::get_fn;
 use crate::common::SignType;
 
+#[cfg_attr(not(feature = "master"), allow(dead_code))]
 pub struct CodegenCx<'gcc, 'tcx> {
     pub codegen_unit: &'tcx CodegenUnit<'tcx>,
     pub context: &'gcc Context<'gcc>,
@@ -227,48 +227,14 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
             "__builtin_umul_overflow",
             "__builtin_usubll_overflow",
             "__builtin_usub_overflow",
-            "sqrtf",
-            "sqrt",
             "__builtin_powif",
             "__builtin_powi",
-            "sinf",
-            "sin",
-            "cosf",
-            "cos",
-            "powf",
-            "pow",
-            "expf",
-            "exp",
-            "exp2f",
-            "exp2",
-            "logf",
-            "log",
-            "log10f",
-            "log10",
-            "log2f",
-            "log2",
-            "fmaf",
-            "fma",
             "fabsf",
             "fabs",
-            "fminf",
-            "fmin",
-            "fmaxf",
-            "fmax",
             "copysignf",
             "copysign",
-            "floorf",
-            "floor",
-            "ceilf",
-            "ceil",
-            "truncf",
-            "trunc",
-            "rintf",
-            "rint",
             "nearbyintf",
             "nearbyint",
-            "roundf",
-            "round",
         ];
 
         for builtin in builtins.iter() {
@@ -415,6 +381,7 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
 
 impl<'gcc, 'tcx> BackendTypes for CodegenCx<'gcc, 'tcx> {
     type Value = RValue<'gcc>;
+    type Metadata = RValue<'gcc>;
     type Function = RValue<'gcc>;
 
     type BasicBlock = Block<'gcc>;
@@ -426,7 +393,7 @@ impl<'gcc, 'tcx> BackendTypes for CodegenCx<'gcc, 'tcx> {
     type DIVariable = (); // TODO(antoyo)
 }
 
-impl<'gcc, 'tcx> MiscMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
+impl<'gcc, 'tcx> MiscCodegenMethods<'tcx> for CodegenCx<'gcc, 'tcx> {
     fn vtables(
         &self,
     ) -> &RefCell<FxHashMap<(Ty<'tcx>, Option<PolyExistentialTraitRef<'tcx>>), RValue<'gcc>>> {
@@ -572,8 +539,6 @@ impl<'gcc, 'tcx> HasWasmCAbiOpt for CodegenCx<'gcc, 'tcx> {
 }
 
 impl<'gcc, 'tcx> LayoutOfHelpers<'tcx> for CodegenCx<'gcc, 'tcx> {
-    type LayoutOfResult = TyAndLayout<'tcx>;
-
     #[inline]
     fn handle_layout_err(&self, err: LayoutError<'tcx>, span: Span, ty: Ty<'tcx>) -> ! {
         if let LayoutError::SizeOverflow(_) | LayoutError::ReferencesError(_) = err {
@@ -585,8 +550,6 @@ impl<'gcc, 'tcx> LayoutOfHelpers<'tcx> for CodegenCx<'gcc, 'tcx> {
 }
 
 impl<'gcc, 'tcx> FnAbiOfHelpers<'tcx> for CodegenCx<'gcc, 'tcx> {
-    type FnAbiOfResult = &'tcx FnAbi<'tcx, Ty<'tcx>>;
-
     #[inline]
     fn handle_fn_abi_err(
         &self,

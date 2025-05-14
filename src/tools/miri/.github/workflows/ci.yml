@@ -87,6 +87,11 @@ jobs:
   cron-fail-notify:
     name: cronjob failure notification
     runs-on: ubuntu-latest
+    permissions:
+        # The cronjob needs to be able to push to the repo...
+        contents: write
+        # ... and create a PR.
+        pull-requests: write
     needs: [build, style]
     if: github.event_name == 'schedule' && failure()
     steps:

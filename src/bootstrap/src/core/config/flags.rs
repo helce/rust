@@ -9,7 +9,7 @@ use clap::{CommandFactory, Parser, ValueEnum};
 
 use crate::core::build_steps::setup::Profile;
 use crate::core::builder::{Builder, Kind};
-use crate::core::config::{target_selection_list, Config, TargetSelectionList};
+use crate::core::config::{Config, TargetSelectionList, target_selection_list};
 use crate::{Build, DocTests};
 
 #[derive(Copy, Clone, Default, Debug, ValueEnum)]
@@ -143,9 +143,6 @@ pub struct Flags {
     /// Unless you know exactly what you are doing, you probably don't need this.
     pub bypass_bootstrap_lock: bool,
 
-    /// whether rebuilding llvm should be skipped, overriding `skip-rebuld` in config.toml
-    #[arg(global = true, long, value_name = "VALUE")]
-    pub llvm_skip_rebuild: Option<bool>,
     /// generate PGO profile with rustc build
     #[arg(global = true, value_hint = clap::ValueHint::FilePath, long, value_name = "PROFILE")]
     pub rust_profile_generate: Option<String>,
@@ -450,14 +447,14 @@ Arguments:
     The profile is optional and you will be prompted interactively if it is not given.
     The following profiles are available:
 {}
-    To only set up the git hook, VS Code config or toolchain link, you may use
+    To only set up the git hook, editor config or toolchain link, you may use
         ./x.py setup hook
-        ./x.py setup vscode
+        ./x.py setup editor
         ./x.py setup link", Profile::all_for_help("        ").trim_end()))]
     Setup {
         /// Either the profile for `config.toml` or another setup action.
         /// May be omitted to set up interactively
-        #[arg(value_name = "<PROFILE>|hook|vscode|link")]
+        #[arg(value_name = "<PROFILE>|hook|editor|link")]
         profile: Option<PathBuf>,
     },
     /// Suggest a subset of tests to run, based on modified files

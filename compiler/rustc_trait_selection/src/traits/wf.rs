@@ -8,8 +8,8 @@ use rustc_middle::ty::{
     self, GenericArg, GenericArgKind, GenericArgsRef, Ty, TyCtxt, TypeSuperVisitable,
     TypeVisitable, TypeVisitableExt, TypeVisitor,
 };
-use rustc_span::def_id::{DefId, LocalDefId, CRATE_DEF_ID};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
+use rustc_span::{DUMMY_SP, Span};
 use tracing::{debug, instrument, trace};
 
 use crate::infer::InferCtxt;
@@ -829,7 +829,7 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
                 // obligations that don't refer to Self and
                 // checking those
 
-                let defer_to_coercion = tcx.features().object_safe_for_dispatch;
+                let defer_to_coercion = tcx.features().dyn_compatible_for_dispatch;
 
                 if !defer_to_coercion {
                     if let Some(principal) = data.principal_def_id() {
@@ -838,7 +838,7 @@ impl<'a, 'tcx> TypeVisitor<TyCtxt<'tcx>> for WfPredicates<'a, 'tcx> {
                             self.cause(ObligationCauseCode::WellFormed(None)),
                             self.recursion_depth,
                             self.param_env,
-                            ty::Binder::dummy(ty::PredicateKind::ObjectSafe(principal)),
+                            ty::Binder::dummy(ty::PredicateKind::DynCompatible(principal)),
                         ));
                     }
                 }

@@ -14,8 +14,9 @@
 //! munmap shim which would partially unmap a region of address space previously mapped by mmap will
 //! report UB.
 
-use crate::*;
 use rustc_target::abi::Size;
+
+use crate::*;
 
 impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
 pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
@@ -42,13 +43,13 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         let map_shared = this.eval_libc_i32("MAP_SHARED");
         let map_fixed = this.eval_libc_i32("MAP_FIXED");
 
-        // This is a horrible hack, but on MacOS and Solaris the guard page mechanism uses mmap
+        // This is a horrible hack, but on MacOS and Solarish the guard page mechanism uses mmap
         // in a way we do not support. We just give it the return value it expects.
         if this.frame_in_std()
-            && matches!(&*this.tcx.sess.target.os, "macos" | "solaris")
+            && matches!(&*this.tcx.sess.target.os, "macos" | "solaris" | "illumos")
             && (flags & map_fixed) != 0
         {
-            return Ok(Scalar::from_maybe_pointer(Pointer::from_addr_invalid(addr), this));
+            return interp_ok(Scalar::from_maybe_pointer(Pointer::from_addr_invalid(addr), this));
         }
 
         let prot_read = this.eval_libc_i32("PROT_READ");
@@ -57,11 +58,11 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         // First, we do some basic argument validation as required by mmap
         if (flags & (map_private | map_shared)).count_ones() != 1 {
             this.set_last_error(this.eval_libc("EINVAL"))?;
-            return Ok(this.eval_libc("MAP_FAILED"));
+            return interp_ok(this.eval_libc("MAP_FAILED"));
         }
         if length == 0 {
             this.set_last_error(this.eval_libc("EINVAL"))?;
-            return Ok(this.eval_libc("MAP_FAILED"));
+            return interp_ok(this.eval_libc("MAP_FAILED"));
         }
 
         // If a user tries to map a file, we want to loudly inform them that this is not going
@@ -103,11 +104,11 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         let align = this.machine.page_align();
         let Some(map_length) = length.checked_next_multiple_of(this.machine.page_size) else {
             this.set_last_error(this.eval_libc("EINVAL"))?;
-            return Ok(this.eval_libc("MAP_FAILED"));
+            return interp_ok(this.eval_libc("MAP_FAILED"));
         };
         if map_length > this.target_usize_max() {
             this.set_last_error(this.eval_libc("EINVAL"))?;
-            return Ok(this.eval_libc("MAP_FAILED"));
+            return interp_ok(this.eval_libc("MAP_FAILED"));
         }
 
         let ptr =
@@ -120,7 +121,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         )
         .unwrap();
 
-        Ok(Scalar::from_pointer(ptr, this))
+        interp_ok(Scalar::from_pointer(ptr, this))
     }
 
     fn munmap(&mut self, addr: &OpTy<'tcx>, length: &OpTy<'tcx>) -> InterpResult<'tcx, Scalar> {
@@ -134,16 +135,16 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         #[allow(clippy::arithmetic_side_effects)] // PAGE_SIZE is nonzero
         if addr.addr().bytes() % this.machine.page_size != 0 {
             this.set_last_error(this.eval_libc("EINVAL"))?;
-            return Ok(Scalar::from_i32(-1));
+            return interp_ok(Scalar::from_i32(-1));
         }
 
         let Some(length) = length.checked_next_multiple_of(this.machine.page_size) else {
             this.set_last_error(this.eval_libc("EINVAL"))?;
-            return Ok(Scalar::from_i32(-1));
+            return interp_ok(Scalar::from_i32(-1));
         };
         if length > this.target_usize_max() {
             this.set_last_error(this.eval_libc("EINVAL"))?;
-            return Ok(this.eval_libc("MAP_FAILED"));
+            return interp_ok(this.eval_libc("MAP_FAILED"));
         }
 
         let length = Size::from_bytes(length);
@@ -153,6 +154,6 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             MemoryKind::Machine(MiriMemoryKind::Mmap),
         )?;
 
-        Ok(Scalar::from_i32(0))
+        interp_ok(Scalar::from_i32(0))
     }
 }

@@ -10,21 +10,19 @@ use rustc_middle::traits::Reveal;
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{self, Ty, TyCtxt};
-use rustc_session::lint;
 use rustc_span::def_id::LocalDefId;
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::{DUMMY_SP, Span};
 use rustc_target::abi::{self, Abi};
 use tracing::{debug, instrument, trace};
 
 use super::{CanAccessMutGlobal, CompileTimeInterpCx, CompileTimeMachine};
 use crate::const_eval::CheckAlignment;
-use crate::errors::{self, ConstEvalError, DanglingPtrInFinal};
 use crate::interpret::{
-    create_static_alloc, eval_nullary_intrinsic, intern_const_alloc_recursive, throw_exhaust,
     CtfeValidationMode, GlobalId, Immediate, InternKind, InternResult, InterpCx, InterpError,
-    InterpResult, MPlaceTy, MemoryKind, OpTy, RefTracking, StackPopCleanup,
+    InterpResult, MPlaceTy, MemoryKind, OpTy, RefTracking, StackPopCleanup, create_static_alloc,
+    eval_nullary_intrinsic, intern_const_alloc_recursive, interp_ok, throw_exhaust,
 };
-use crate::CTRL_C_RECEIVED;
+use crate::{CTRL_C_RECEIVED, errors};
 
 // Returns a pointer to where the result lives
 #[instrument(level = "trace", skip(ecx, body))]
@@ -75,12 +73,7 @@ fn eval_body_using_ecx<'tcx, R: InterpretationResult<'tcx>>(
 
     // This can't use `init_stack_frame` since `body` is not a function,
     // so computing its ABI would fail. It's also not worth it since there are no arguments to pass.
-    ecx.push_stack_frame_raw(
-        cid.instance,
-        body,
-        &ret.clone().into(),
-        StackPopCleanup::Root { cleanup: false },
-    )?;
+    ecx.push_stack_frame_raw(cid.instance, body, &ret, StackPopCleanup::Root { cleanup: false })?;
     ecx.storage_live_for_always_live_locals()?;
 
     // The main interpreter loop.
@@ -94,7 +87,7 @@ fn eval_body_using_ecx<'tcx, R: InterpretationResult<'tcx>>(
     let intern_result = intern_const_alloc_recursive(ecx, intern_kind, &ret);
 
     // Since evaluation had no errors, validate the resulting constant.
-    const_validate_mplace(&ecx, &ret, cid)?;
+    const_validate_mplace(ecx, &ret, cid)?;
 
     // Only report this after validation, as validaiton produces much better diagnostics.
     // FIXME: ensure validation always reports this and stop making interning care about it.
@@ -105,22 +98,19 @@ fn eval_body_using_ecx<'tcx, R: InterpretationResult<'tcx>>(
             return Err(ecx
                 .tcx
                 .dcx()
-                .emit_err(DanglingPtrInFinal { span: ecx.tcx.span, kind: intern_kind })
-                .into());
+                .emit_err(errors::DanglingPtrInFinal { span: ecx.tcx.span, kind: intern_kind }))
+            .into();
         }
         Err(InternResult::FoundBadMutablePointer) => {
-            // only report mutable pointers if there were no dangling pointers
-            let err_diag = errors::MutablePtrInFinal { span: ecx.tcx.span, kind: intern_kind };
-            ecx.tcx.emit_node_span_lint(
-                lint::builtin::CONST_EVAL_MUTABLE_PTR_IN_FINAL_VALUE,
-                ecx.machine.best_lint_scope(*ecx.tcx),
-                err_diag.span,
-                err_diag,
-            )
+            return Err(ecx
+                .tcx
+                .dcx()
+                .emit_err(errors::MutablePtrInFinal { span: ecx.tcx.span, kind: intern_kind }))
+            .into();
         }
     }
 
-    Ok(R::make_result(ret, ecx))
+    interp_ok(R::make_result(ret, ecx))
 }
 
 /// The `InterpCx` is only meant to be used to do field and index projections into constants for
@@ -157,7 +147,8 @@ pub fn mk_eval_cx_for_const_val<'tcx>(
     ty: Ty<'tcx>,
 ) -> Option<(CompileTimeInterpCx<'tcx>, OpTy<'tcx>)> {
     let ecx = mk_eval_cx_to_read_const_val(tcx.tcx, tcx.span, param_env, CanAccessMutGlobal::No);
-    let op = ecx.const_val_to_op(val, ty, None).ok()?;
+    // FIXME: is it a problem to discard the error here?
+    let op = ecx.const_val_to_op(val, ty, None).discard_err()?;
     Some((ecx, op))
 }
 
@@ -195,12 +186,16 @@ pub(super) fn op_to_const<'tcx>(
         _ => false,
     };
     let immediate = if force_as_immediate {
-        match ecx.read_immediate(op) {
+        match ecx.read_immediate(op).report_err() {
             Ok(imm) => Right(imm),
-            Err(err) if !for_diagnostics => {
-                panic!("normalization works on validated constants: {err:?}")
+            Err(err) => {
+                if for_diagnostics {
+                    // This discard the error, but for diagnostics that's okay.
+                    op.as_mplace_or_imm()
+                } else {
+                    panic!("normalization works on validated constants: {err:?}")
+                }
             }
-            _ => op.as_mplace_or_imm(),
         }
     } else {
         op.as_mplace_or_imm()
@@ -293,17 +288,19 @@ pub fn eval_to_const_value_raw_provider<'tcx>(
         let ty::FnDef(_, args) = ty.kind() else {
             bug!("intrinsic with type {:?}", ty);
         };
-        return eval_nullary_intrinsic(tcx, key.param_env, def_id, args).map_err(|error| {
-            let span = tcx.def_span(def_id);
+        return eval_nullary_intrinsic(tcx, key.param_env, def_id, args).report_err().map_err(
+            |error| {
+                let span = tcx.def_span(def_id);
 
-            super::report(
-                tcx,
-                error.into_kind(),
-                span,
-                || (span, vec![]),
-                |span, _| errors::NullaryIntrinsicError { span },
-            )
-        });
+                super::report(
+                    tcx,
+                    error.into_kind(),
+                    span,
+                    || (span, vec![]),
+                    |span, _| errors::NullaryIntrinsicError { span },
+                )
+            },
+        );
     }
 
     tcx.eval_to_allocation_raw(key).map(|val| turn_into_const_value(tcx, val, key))
@@ -386,12 +383,13 @@ fn eval_in_interpreter<'tcx, R: InterpretationResult<'tcx>>(
     );
     let res = ecx.load_mir(cid.instance.def, cid.promoted);
     res.and_then(|body| eval_body_using_ecx(&mut ecx, cid, body))
+        .report_err()
         .map_err(|error| report_eval_error(&ecx, cid, error))
 }
 
 #[inline(always)]
 fn const_validate_mplace<'tcx>(
-    ecx: &InterpCx<'tcx, CompileTimeMachine<'tcx>>,
+    ecx: &mut InterpCx<'tcx, CompileTimeMachine<'tcx>>,
     mplace: &MPlaceTy<'tcx>,
     cid: GlobalId<'tcx>,
 ) -> Result<(), ErrorHandled> {
@@ -410,6 +408,7 @@ fn const_validate_mplace<'tcx>(
             }
         };
         ecx.const_validate_operand(&mplace.into(), path, &mut ref_tracking, mode)
+            .report_err()
             // Instead of just reporting the `InterpError` via the usual machinery, we give a more targeted
             // error about the validation failure.
             .map_err(|error| report_validation_error(&ecx, cid, error, alloc_id))?;
@@ -448,7 +447,12 @@ fn report_eval_error<'tcx>(
         error,
         DUMMY_SP,
         || super::get_span_and_frames(ecx.tcx, ecx.stack()),
-        |span, frames| ConstEvalError { span, error_kind: kind, instance, frame_notes: frames },
+        |span, frames| errors::ConstEvalError {
+            span,
+            error_kind: kind,
+            instance,
+            frame_notes: frames,
+        },
     )
 }
 

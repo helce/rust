@@ -15,8 +15,8 @@ use rustc_middle::mir::interpret::{
 };
 use rustc_middle::ty::{self, Mutability, Ty};
 use rustc_span::Span;
-use rustc_target::abi::call::AdjustForForeignAbiError;
 use rustc_target::abi::WrappingRange;
+use rustc_target::abi::call::AdjustForForeignAbiError;
 
 use crate::interpret::InternKind;
 
@@ -35,13 +35,10 @@ pub(crate) struct NestedStaticInThreadLocal {
     pub span: Span,
 }
 
-#[derive(LintDiagnostic)]
+#[derive(Diagnostic)]
 #[diag(const_eval_mutable_ptr_in_final)]
 pub(crate) struct MutablePtrInFinal {
-    // rust-lang/rust#122153: This was marked as `#[primary_span]` under
-    // `derive(Diagnostic)`. Since we expect we may hard-error in future, we are
-    // keeping the field (and skipping it under `derive(LintDiagnostic)`).
-    #[skip_arg]
+    #[primary_span]
     pub span: Span,
     pub kind: InternKind,
 }
@@ -97,30 +94,6 @@ pub(crate) struct PanicNonStrErr {
 }
 
 #[derive(Diagnostic)]
-#[diag(const_eval_mut_deref, code = E0658)]
-pub(crate) struct MutDerefErr {
-    #[primary_span]
-    pub span: Span,
-    pub kind: ConstContext,
-}
-
-#[derive(Diagnostic)]
-#[diag(const_eval_transient_mut_borrow, code = E0658)]
-pub(crate) struct TransientMutBorrowErr {
-    #[primary_span]
-    pub span: Span,
-    pub kind: ConstContext,
-}
-
-#[derive(Diagnostic)]
-#[diag(const_eval_transient_mut_raw, code = E0658)]
-pub(crate) struct TransientMutRawErr {
-    #[primary_span]
-    pub span: Span,
-    pub kind: ConstContext,
-}
-
-#[derive(Diagnostic)]
 #[diag(const_eval_max_num_nodes_in_const)]
 pub(crate) struct MaxNumNodesInConstErr {
     #[primary_span]
@@ -145,8 +118,8 @@ pub(crate) struct UnstableConstFn {
 }
 
 #[derive(Diagnostic)]
-#[diag(const_eval_unallowed_mutable_refs, code = E0764)]
-pub(crate) struct UnallowedMutableRefs {
+#[diag(const_eval_mutable_ref_escaping, code = E0764)]
+pub(crate) struct MutableRefEscaping {
     #[primary_span]
     pub span: Span,
     pub kind: ConstContext,
@@ -155,8 +128,8 @@ pub(crate) struct UnallowedMutableRefs {
 }
 
 #[derive(Diagnostic)]
-#[diag(const_eval_unallowed_mutable_raw, code = E0764)]
-pub(crate) struct UnallowedMutableRaw {
+#[diag(const_eval_mutable_raw_escaping, code = E0764)]
+pub(crate) struct MutableRawEscaping {
     #[primary_span]
     pub span: Span,
     pub kind: ConstContext,
@@ -208,8 +181,8 @@ pub(crate) struct UnallowedInlineAsm {
 }
 
 #[derive(Diagnostic)]
-#[diag(const_eval_interior_mutable_data_refer, code = E0492)]
-pub(crate) struct InteriorMutableDataRefer {
+#[diag(const_eval_interior_mutable_ref_escaping, code = E0492)]
+pub(crate) struct InteriorMutableRefEscaping {
     #[primary_span]
     #[label]
     pub span: Span,
@@ -218,13 +191,6 @@ pub(crate) struct InteriorMutableDataRefer {
     pub kind: ConstContext,
     #[note(const_eval_teach_note)]
     pub teach: bool,
-}
-
-#[derive(Diagnostic)]
-#[diag(const_eval_interior_mutability_borrow)]
-pub(crate) struct InteriorMutabilityBorrow {
-    #[primary_span]
-    pub span: Span,
 }
 
 #[derive(LintDiagnostic)]
@@ -243,6 +209,8 @@ pub struct LongRunningWarn {
     pub span: Span,
     #[help]
     pub item_span: Span,
+    // Used for evading `-Z deduplicate-diagnostics`.
+    pub force_duplicate: usize,
 }
 
 #[derive(Subdiagnostic)]
@@ -542,13 +510,10 @@ impl<'a> ReportErrorExt for UndefinedBehaviorInfo<'a> {
             }
             ShiftOverflow { intrinsic, shift_amount } => {
                 diag.arg("intrinsic", intrinsic);
-                diag.arg(
-                    "shift_amount",
-                    match shift_amount {
-                        Either::Left(v) => v.to_string(),
-                        Either::Right(v) => v.to_string(),
-                    },
-                );
+                diag.arg("shift_amount", match shift_amount {
+                    Either::Left(v) => v.to_string(),
+                    Either::Right(v) => v.to_string(),
+                });
             }
             BoundsCheckFailed { len, index } => {
                 diag.arg("len", len);
@@ -557,12 +522,9 @@ impl<'a> ReportErrorExt for UndefinedBehaviorInfo<'a> {
             UnterminatedCString(ptr) | InvalidFunctionPointer(ptr) | InvalidVTablePointer(ptr) => {
                 diag.arg("pointer", ptr);
             }
-            InvalidVTableTrait { expected_trait, vtable_trait } => {
-                diag.arg("expected_trait", expected_trait.to_string());
-                diag.arg(
-                    "vtable_trait",
-                    vtable_trait.map(|t| t.to_string()).unwrap_or_else(|| format!("<trivial>")),
-                );
+            InvalidVTableTrait { expected_dyn_type, vtable_dyn_type } => {
+                diag.arg("expected_dyn_type", expected_dyn_type.to_string());
+                diag.arg("vtable_dyn_type", vtable_dyn_type.to_string());
             }
             PointerUseAfterFree(alloc_id, msg) => {
                 diag.arg("alloc_id", alloc_id)
@@ -812,12 +774,9 @@ impl<'tcx> ReportErrorExt for ValidationErrorInfo<'tcx> {
             DanglingPtrNoProvenance { pointer, .. } => {
                 err.arg("pointer", pointer);
             }
-            InvalidMetaWrongTrait { expected_trait: ref_trait, vtable_trait } => {
-                err.arg("ref_trait", ref_trait.to_string());
-                err.arg(
-                    "vtable_trait",
-                    vtable_trait.map(|t| t.to_string()).unwrap_or_else(|| format!("<trivial>")),
-                );
+            InvalidMetaWrongTrait { vtable_dyn_type, expected_dyn_type } => {
+                err.arg("vtable_dyn_type", vtable_dyn_type.to_string());
+                err.arg("expected_dyn_type", expected_dyn_type.to_string());
             }
             NullPtr { .. }
             | ConstRefToMutable

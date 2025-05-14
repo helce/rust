@@ -10,7 +10,7 @@ use rustc_errors::{
 use rustc_hir::{self as hir, ExprKind, Target};
 use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::ty::{MainDefinition, Ty};
-use rustc_span::{Span, Symbol, DUMMY_SP};
+use rustc_span::{DUMMY_SP, Span, Symbol};
 
 use crate::check_attr::ProcMacroKind;
 use crate::fluent_generated as fluent;
@@ -80,15 +80,6 @@ pub(crate) struct AttrShouldBeAppliedToFn {
     #[label]
     pub defn_span: Span,
     pub on_crate: bool,
-}
-
-#[derive(Diagnostic)]
-#[diag(passes_should_be_applied_to_fn_or_unit_struct)]
-pub(crate) struct AttrShouldBeAppliedToFnOrUnitStruct {
-    #[primary_span]
-    pub attr_span: Span,
-    #[label]
-    pub defn_span: Span,
 }
 
 #[derive(Diagnostic)]
@@ -1021,12 +1012,12 @@ pub(crate) struct FeatureStableTwice {
 
 #[derive(Diagnostic)]
 #[diag(passes_feature_previously_declared, code = E0711)]
-pub(crate) struct FeaturePreviouslyDeclared<'a, 'b> {
+pub(crate) struct FeaturePreviouslyDeclared<'a> {
     #[primary_span]
     pub span: Span,
     pub feature: Symbol,
     pub declared: &'a str,
-    pub prev_declared: &'b str,
+    pub prev_declared: &'a str,
 }
 
 pub(crate) struct BreakNonLoop<'a> {
@@ -1196,27 +1187,11 @@ impl<G: EmissionGuarantee> Diagnostic<'_, G> for NakedFunctionsAsmBlock {
 }
 
 #[derive(Diagnostic)]
-#[diag(passes_naked_functions_operands, code = E0787)]
-pub(crate) struct NakedFunctionsOperands {
+#[diag(passes_naked_functions_must_naked_asm, code = E0787)]
+pub(crate) struct NakedFunctionsMustNakedAsm {
     #[primary_span]
-    pub unsupported_operands: Vec<Span>,
-}
-
-#[derive(Diagnostic)]
-#[diag(passes_naked_functions_asm_options, code = E0787)]
-pub(crate) struct NakedFunctionsAsmOptions {
-    #[primary_span]
+    #[label]
     pub span: Span,
-    pub unsupported_options: String,
-}
-
-#[derive(Diagnostic)]
-#[diag(passes_naked_functions_must_use_noreturn, code = E0787)]
-pub(crate) struct NakedFunctionsMustUseNoreturn {
-    #[primary_span]
-    pub span: Span,
-    #[suggestion(code = ", options(noreturn)", applicability = "machine-applicable")]
-    pub last_span: Span,
 }
 
 #[derive(Diagnostic)]
@@ -1228,6 +1203,13 @@ pub(crate) struct NakedFunctionIncompatibleAttribute {
     #[label(passes_naked_attribute)]
     pub naked_span: Span,
     pub attr: Symbol,
+}
+
+#[derive(Diagnostic)]
+#[diag(passes_naked_asm_outside_naked_fn)]
+pub(crate) struct NakedAsmOutsideNakedFn {
+    #[primary_span]
+    pub span: Span,
 }
 
 #[derive(Diagnostic)]
@@ -1339,15 +1321,11 @@ pub(crate) struct DuplicateLangItem {
 impl<G: EmissionGuarantee> Diagnostic<'_, G> for DuplicateLangItem {
     #[track_caller]
     fn into_diag(self, dcx: DiagCtxtHandle<'_>, level: Level) -> Diag<'_, G> {
-        let mut diag = Diag::new(
-            dcx,
-            level,
-            match self.duplicate {
-                Duplicate::Plain => fluent::passes_duplicate_lang_item,
-                Duplicate::Crate => fluent::passes_duplicate_lang_item_crate,
-                Duplicate::CrateDepends => fluent::passes_duplicate_lang_item_crate_depends,
-            },
-        );
+        let mut diag = Diag::new(dcx, level, match self.duplicate {
+            Duplicate::Plain => fluent::passes_duplicate_lang_item,
+            Duplicate::Crate => fluent::passes_duplicate_lang_item_crate,
+            Duplicate::CrateDepends => fluent::passes_duplicate_lang_item_crate_depends,
+        });
         diag.code(E0152);
         diag.arg("lang_item_name", self.lang_item_name);
         diag.arg("crate_name", self.crate_name);
@@ -1497,6 +1475,17 @@ pub(crate) struct UselessStability {
 pub(crate) struct CannotStabilizeDeprecated {
     #[primary_span]
     #[label]
+    pub span: Span,
+    #[label(passes_item)]
+    pub item_sp: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(passes_unstable_attr_for_already_stable_feature)]
+pub(crate) struct UnstableAttrForAlreadyStableFeature {
+    #[primary_span]
+    #[label]
+    #[help]
     pub span: Span,
     #[label(passes_item)]
     pub item_sp: Span,

@@ -9,8 +9,8 @@ use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_errors::codes::*;
 use rustc_errors::{
-    pluralize, struct_span_code_err, Applicability, Diag, EmissionGuarantee, MultiSpan, Style,
-    SuggestionStyle,
+    Applicability, Diag, EmissionGuarantee, MultiSpan, Style, SuggestionStyle, pluralize,
+    struct_span_code_err,
 };
 use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Res};
@@ -18,25 +18,25 @@ use rustc_hir::def_id::DefId;
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{
-    is_range_literal, CoroutineDesugaring, CoroutineKind, CoroutineSource, Expr, HirId, Node,
+    CoroutineDesugaring, CoroutineKind, CoroutineSource, Expr, HirId, Node, is_range_literal,
 };
 use rustc_infer::infer::{BoundRegionConversionTime, DefineOpaqueTypes, InferCtxt, InferOk};
 use rustc_middle::hir::map;
 use rustc_middle::traits::IsConstable;
 use rustc_middle::ty::error::TypeError;
 use rustc_middle::ty::print::{
-    with_forced_trimmed_paths, with_no_trimmed_paths, PrintPolyTraitPredicateExt as _,
-    PrintPolyTraitRefExt, PrintTraitPredicateExt as _,
+    PrintPolyTraitPredicateExt as _, PrintPolyTraitRefExt, PrintTraitPredicateExt as _,
+    with_forced_trimmed_paths, with_no_trimmed_paths,
 };
 use rustc_middle::ty::{
-    self, suggest_arbitrary_trait_bound, suggest_constraining_type_param, AdtKind, GenericArgs,
-    InferTy, IsSuggestable, ToPolyTraitRef, Ty, TyCtxt, TypeFoldable, TypeFolder,
-    TypeSuperFoldable, TypeVisitableExt, TypeckResults, Upcast,
+    self, AdtKind, GenericArgs, InferTy, IsSuggestable, ToPolyTraitRef, Ty, TyCtxt, TypeFoldable,
+    TypeFolder, TypeSuperFoldable, TypeVisitableExt, TypeckResults, Upcast,
+    suggest_arbitrary_trait_bound, suggest_constraining_type_param,
 };
 use rustc_middle::{bug, span_bug};
 use rustc_span::def_id::LocalDefId;
-use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::{BytePos, DesugaringKind, ExpnKind, MacroKind, Span, DUMMY_SP};
+use rustc_span::symbol::{Ident, Symbol, kw, sym};
+use rustc_span::{BytePos, DUMMY_SP, DesugaringKind, ExpnKind, MacroKind, Span};
 use rustc_target::spec::abi;
 use tracing::{debug, instrument};
 
@@ -61,9 +61,9 @@ pub enum CoroutineInteriorOrUpvar {
 // This type provides a uniform interface to retrieve data on coroutines, whether it originated from
 // the local crate being compiled or from a foreign crate.
 #[derive(Debug)]
-struct CoroutineData<'tcx, 'a>(&'a TypeckResults<'tcx>);
+struct CoroutineData<'a, 'tcx>(&'a TypeckResults<'tcx>);
 
-impl<'tcx, 'a> CoroutineData<'tcx, 'a> {
+impl<'a, 'tcx> CoroutineData<'a, 'tcx> {
     /// Try to get information about variables captured by the coroutine that matches a type we are
     /// looking for with `ty_matches` function. We uses it to find upvar which causes a failure to
     /// meet an obligation
@@ -355,12 +355,12 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                         | hir::ItemKind::Fn(_, generics, _)
                         | hir::ItemKind::TyAlias(_, generics)
                         | hir::ItemKind::Const(_, generics, _)
-                        | hir::ItemKind::TraitAlias(generics, _)
-                        | hir::ItemKind::OpaqueTy(hir::OpaqueTy { generics, .. }),
+                        | hir::ItemKind::TraitAlias(generics, _),
                     ..
                 })
                 | hir::Node::TraitItem(hir::TraitItem { generics, .. })
                 | hir::Node::ImplItem(hir::ImplItem { generics, .. })
+                | hir::Node::OpaqueTy(hir::OpaqueTy { generics, .. })
                     if param_ty =>
                 {
                     // We skip the 0'th arg (self) because we do not want
@@ -421,10 +421,12 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                         | hir::ItemKind::Fn(_, generics, _)
                         | hir::ItemKind::TyAlias(_, generics)
                         | hir::ItemKind::Const(_, generics, _)
-                        | hir::ItemKind::TraitAlias(generics, _)
-                        | hir::ItemKind::OpaqueTy(hir::OpaqueTy { generics, .. }),
+                        | hir::ItemKind::TraitAlias(generics, _),
                     ..
-                }) if !param_ty => {
+                })
+                | hir::Node::OpaqueTy(hir::OpaqueTy { generics, .. })
+                    if !param_ty =>
+                {
                     // Missing generic type parameter bound.
                     if suggest_arbitrary_trait_bound(
                         self.tcx,
@@ -668,10 +670,10 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                     }
                     // Empty suggestions with empty spans ICE with debug assertions
                     if steps == 0 {
-                        return (
-                            msg.trim_end_matches(" and dereferencing instead"),
-                            vec![(prefix_span, String::new())],
-                        );
+                        return (msg.trim_end_matches(" and dereferencing instead"), vec![(
+                            prefix_span,
+                            String::new(),
+                        )]);
                     }
                     let derefs = "*".repeat(steps);
                     let needs_parens = steps > 0
@@ -3237,16 +3239,13 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 // then the tuple must be the one containing capture types.
                 let is_upvar_tys_infer_tuple = if !matches!(ty.kind(), ty::Tuple(..)) {
                     false
+                } else if let ObligationCauseCode::BuiltinDerived(data) = &*data.parent_code {
+                    let parent_trait_ref = self.resolve_vars_if_possible(data.parent_trait_pred);
+                    let nested_ty = parent_trait_ref.skip_binder().self_ty();
+                    matches!(nested_ty.kind(), ty::Coroutine(..))
+                        || matches!(nested_ty.kind(), ty::Closure(..))
                 } else {
-                    if let ObligationCauseCode::BuiltinDerived(data) = &*data.parent_code {
-                        let parent_trait_ref =
-                            self.resolve_vars_if_possible(data.parent_trait_pred);
-                        let nested_ty = parent_trait_ref.skip_binder().self_ty();
-                        matches!(nested_ty.kind(), ty::Coroutine(..))
-                            || matches!(nested_ty.kind(), ty::Closure(..))
-                    } else {
-                        false
-                    }
+                    false
                 };
 
                 if !is_upvar_tys_infer_tuple {
@@ -3556,11 +3555,10 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             }
             ObligationCauseCode::TrivialBound => {
                 err.help("see issue #48214");
-                tcx.disabled_nightly_features(
-                    err,
-                    Some(tcx.local_def_id_to_hir_id(body_id)),
-                    [(String::new(), sym::trivial_bounds)],
-                );
+                tcx.disabled_nightly_features(err, Some(tcx.local_def_id_to_hir_id(body_id)), [(
+                    String::new(),
+                    sym::trivial_bounds,
+                )]);
             }
             ObligationCauseCode::OpaqueReturnType(expr_info) => {
                 if let Some((expr_ty, hir_id)) = expr_info {
@@ -4546,7 +4544,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
 
         // ... whose signature is `async` (i.e. this is an AFIT)
         let (sig, body) = item.expect_fn();
-        let hir::FnRetTy::Return(hir::Ty { kind: hir::TyKind::OpaqueDef(def, ..), .. }) =
+        let hir::FnRetTy::Return(hir::Ty { kind: hir::TyKind::OpaqueDef(opaq_def, ..), .. }) =
             sig.decl.output
         else {
             // This should never happen, but let's not ICE.
@@ -4555,7 +4553,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
 
         // Check that this is *not* a nested `impl Future` RPIT in an async fn
         // (i.e. `async fn foo() -> impl Future`)
-        if def.owner_id.to_def_id() != opaque_def_id {
+        if opaq_def.def_id.to_def_id() != opaque_def_id {
             return;
         }
 
@@ -4624,7 +4622,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                     format!("&{}{ty}", mutability.prefix_str())
                 }
             }
-            ty::Array(ty, len) if let Some(len) = len.try_eval_target_usize(tcx, param_env) => {
+            ty::Array(ty, len) if let Some(len) = len.try_to_target_usize(tcx) => {
                 if len == 0 {
                     "[]".to_string()
                 } else if self.type_is_copy_modulo_regions(param_env, ty) || len == 1 {
@@ -4663,7 +4661,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         // because this suggest adding both return type in
         // the `FnSig` and a default return value in the body, so it
         // is not suitable for foreign function without a local body,
-        // and neighter for trait method which may be also implemented
+        // and neither for trait method which may be also implemented
         // in other place, so shouldn't change it's FnSig.
         fn choose_suggest_items<'tcx, 'hir>(
             tcx: TyCtxt<'tcx>,
@@ -5023,24 +5021,32 @@ impl<'v> Visitor<'v> for AwaitsVisitor {
     }
 }
 
+/// Suggest a new type parameter name for diagnostic purposes.
+///
+/// `name` is the preferred name you'd like to suggest if it's not in use already.
 pub trait NextTypeParamName {
     fn next_type_param_name(&self, name: Option<&str>) -> String;
 }
 
 impl NextTypeParamName for &[hir::GenericParam<'_>] {
     fn next_type_param_name(&self, name: Option<&str>) -> String {
-        // This is the list of possible parameter names that we might suggest.
+        // Type names are usually single letters in uppercase. So convert the first letter of input string to uppercase.
         let name = name.and_then(|n| n.chars().next()).map(|c| c.to_uppercase().to_string());
         let name = name.as_deref();
+
+        // This is the list of possible parameter names that we might suggest.
         let possible_names = [name.unwrap_or("T"), "T", "U", "V", "X", "Y", "Z", "A", "B", "C"];
-        let used_names = self
+
+        // Filter out used names based on `filter_fn`.
+        let used_names: Vec<Symbol> = self
             .iter()
-            .filter_map(|p| match p.name {
+            .filter_map(|param| match param.name {
                 hir::ParamName::Plain(ident) => Some(ident.name),
                 _ => None,
             })
-            .collect::<Vec<_>>();
+            .collect();
 
+        // Find a name from `possible_names` that is not in `used_names`.
         possible_names
             .iter()
             .find(|n| !used_names.contains(&Symbol::intern(n)))
@@ -5155,7 +5161,7 @@ pub fn suggest_desugaring_async_fn_to_impl_future_in_trait<'tcx>(
     };
     let async_span = tcx.sess.source_map().span_extend_while_whitespace(async_span);
 
-    let future = tcx.hir_node_by_def_id(opaque_def_id).expect_item().expect_opaque_ty();
+    let future = tcx.hir_node_by_def_id(opaque_def_id).expect_opaque_ty();
     let [hir::GenericBound::Trait(trait_ref, _)] = future.bounds else {
         // `async fn` should always lower to a single bound... but don't ICE.
         return None;

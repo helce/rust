@@ -11,16 +11,17 @@ use hir::def::{CtorKind, DefKind};
 use rustc_data_structures::captures::Captures;
 use rustc_errors::{ErrorGuaranteed, MultiSpan};
 use rustc_hir as hir;
-use rustc_hir::def_id::DefId;
 use rustc_hir::LangItem;
-use rustc_macros::{extension, HashStable, TyDecodable, TyEncodable, TypeFoldable};
-use rustc_span::symbol::{sym, Symbol};
-use rustc_span::{Span, DUMMY_SP};
-use rustc_target::abi::{FieldIdx, VariantIdx, FIRST_VARIANT};
+use rustc_hir::def_id::DefId;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, extension};
+use rustc_span::symbol::{Symbol, sym};
+use rustc_span::{DUMMY_SP, Span};
+use rustc_target::abi::{FIRST_VARIANT, FieldIdx, VariantIdx};
 use rustc_target::spec::abi;
-use rustc_type_ir::visit::TypeVisitableExt;
 use rustc_type_ir::TyKind::*;
+use rustc_type_ir::visit::TypeVisitableExt;
 use rustc_type_ir::{self as ir, BoundVar, CollectAndApply, DynKind};
+use tracing::instrument;
 use ty::util::{AsyncDropGlueMorphology, IntTypeExt};
 
 use super::GenericParamDefKind;
@@ -500,6 +501,7 @@ impl<'tcx> Ty<'tcx> {
     }
 
     #[inline]
+    #[instrument(level = "debug", skip(tcx))]
     pub fn new_opaque(tcx: TyCtxt<'tcx>, def_id: DefId, args: GenericArgsRef<'tcx>) -> Ty<'tcx> {
         Ty::new_alias(tcx, ty::Opaque, AliasTy::new_from_args(tcx, def_id, args))
     }
@@ -582,6 +584,16 @@ impl<'tcx> Ty<'tcx> {
     #[inline]
     pub fn new_imm_ref(tcx: TyCtxt<'tcx>, r: Region<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
         Ty::new_ref(tcx, r, ty, hir::Mutability::Not)
+    }
+
+    pub fn new_pinned_ref(
+        tcx: TyCtxt<'tcx>,
+        r: Region<'tcx>,
+        ty: Ty<'tcx>,
+        mutbl: ty::Mutability,
+    ) -> Ty<'tcx> {
+        let pin = tcx.adt_def(tcx.require_lang_item(LangItem::Pin, None));
+        Ty::new_adt(tcx, pin, tcx.mk_args(&[Ty::new_ref(tcx, r, ty, mutbl).into()]))
     }
 
     #[inline]
@@ -1091,29 +1103,21 @@ impl<'tcx> Ty<'tcx> {
     }
 
     pub fn simd_size_and_type(self, tcx: TyCtxt<'tcx>) -> (u64, Ty<'tcx>) {
-        match self.kind() {
-            Adt(def, args) => {
-                assert!(def.repr().simd(), "`simd_size_and_type` called on non-SIMD type");
-                let variant = def.non_enum_variant();
-                let f0_ty = variant.fields[FieldIdx::ZERO].ty(tcx, args);
-
-                match f0_ty.kind() {
-                    // If the first field is an array, we assume it is the only field and its
-                    // elements are the SIMD components.
-                    Array(f0_elem_ty, f0_len) => {
-                        // FIXME(repr_simd): https://github.com/rust-lang/rust/pull/78863#discussion_r522784112
-                        // The way we evaluate the `N` in `[T; N]` here only works since we use
-                        // `simd_size_and_type` post-monomorphization. It will probably start to ICE
-                        // if we use it in generic code. See the `simd-array-trait` ui test.
-                        (f0_len.eval_target_usize(tcx, ParamEnv::empty()), *f0_elem_ty)
-                    }
-                    // Otherwise, the fields of this Adt are the SIMD components (and we assume they
-                    // all have the same type).
-                    _ => (variant.fields.len() as u64, f0_ty),
-                }
-            }
-            _ => bug!("`simd_size_and_type` called on invalid type"),
-        }
+        let Adt(def, args) = self.kind() else {
+            bug!("`simd_size_and_type` called on invalid type")
+        };
+        assert!(def.repr().simd(), "`simd_size_and_type` called on non-SIMD type");
+        let variant = def.non_enum_variant();
+        assert_eq!(variant.fields.len(), 1);
+        let field_ty = variant.fields[FieldIdx::ZERO].ty(tcx, args);
+        let Array(f0_elem_ty, f0_len) = field_ty.kind() else {
+            bug!("Simd type has non-array field type {field_ty:?}")
+        };
+        // FIXME(repr_simd): https://github.com/rust-lang/rust/pull/78863#discussion_r522784112
+        // The way we evaluate the `N` in `[T; N]` here only works since we use
+        // `simd_size_and_type` post-monomorphization. It will probably start to ICE
+        // if we use it in generic code. See the `simd-array-trait` ui test.
+        (f0_len.eval_target_usize(tcx, ParamEnv::empty()), *f0_elem_ty)
     }
 
     #[inline]
@@ -1136,6 +1140,7 @@ impl<'tcx> Ty<'tcx> {
     }
 
     /// Tests if this is any kind of primitive pointer type (reference, raw pointer, fn pointer).
+    /// `Box` is *not* considered a pointer here!
     #[inline]
     pub fn is_any_ptr(self) -> bool {
         self.is_ref() || self.is_unsafe_ptr() || self.is_fn_ptr()
@@ -1170,12 +1175,17 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
-    /// Panics if called on any type other than `Box<T>`.
-    pub fn boxed_ty(self) -> Ty<'tcx> {
+    pub fn boxed_ty(self) -> Option<Ty<'tcx>> {
         match self.kind() {
-            Adt(def, args) if def.is_box() => args.type_at(0),
-            _ => bug!("`boxed_ty` is called on non-box type {:?}", self),
+            Adt(def, args) if def.is_box() => Some(args.type_at(0)),
+            _ => None,
         }
+    }
+
+    /// Panics if called on any type other than `Box<T>`.
+    pub fn expect_boxed_ty(self) -> Ty<'tcx> {
+        self.boxed_ty()
+            .unwrap_or_else(|| bug!("`expect_boxed_ty` is called on non-box type {:?}", self))
     }
 
     /// A scalar type is one that denotes an atomic datum, with no sub-components.
@@ -1323,7 +1333,7 @@ impl<'tcx> Ty<'tcx> {
     /// Some types -- notably unsafe ptrs -- can only be dereferenced explicitly.
     pub fn builtin_deref(self, explicit: bool) -> Option<Ty<'tcx>> {
         match *self.kind() {
-            Adt(def, _) if def.is_box() => Some(self.boxed_ty()),
+            _ if let Some(boxed) = self.boxed_ty() => Some(boxed),
             Ref(_, ty, _) => Some(ty),
             RawPtr(ty, _) if explicit => Some(ty),
             _ => None,
@@ -1591,7 +1601,7 @@ impl<'tcx> Ty<'tcx> {
             .map_bound(|fn_sig| fn_sig.output().no_bound_vars().unwrap())
     }
 
-    /// Returns the type of metadata for (potentially fat) pointers to this type,
+    /// Returns the type of metadata for (potentially wide) pointers to this type,
     /// or the struct tail if the metadata type cannot be determined.
     pub fn ptr_metadata_ty_or_tail(
         self,
@@ -1650,7 +1660,7 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
-    /// Returns the type of metadata for (potentially fat) pointers to this type.
+    /// Returns the type of metadata for (potentially wide) pointers to this type.
     /// Causes an ICE if the metadata type cannot be determined.
     pub fn ptr_metadata_ty(
         self,
@@ -1930,7 +1940,7 @@ impl<'tcx> Ty<'tcx> {
 
     /// Returns `true` when the outermost type cannot be further normalized,
     /// resolved, or instantiated. This includes all primitive types, but also
-    /// things like ADTs and trait objects, sice even if their arguments or
+    /// things like ADTs and trait objects, since even if their arguments or
     /// nested types may be further simplified, the outermost [`TyKind`] or
     /// type constructor remains the same.
     pub fn is_known_rigid(self) -> bool {

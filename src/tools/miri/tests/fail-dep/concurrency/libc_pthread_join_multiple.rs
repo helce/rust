@@ -1,9 +1,8 @@
-//@ignore-target-windows: No pthreads on Windows
+//@ignore-target: windows # No pthreads on Windows
 
 // Joining the same thread from multiple threads is undefined behavior.
 
-use std::thread;
-use std::{mem, ptr};
+use std::{mem, ptr, thread};
 
 extern "C" fn thread_start(_null: *mut libc::c_void) -> *mut libc::c_void {
     // Yield the thread several times so that other threads can join it.

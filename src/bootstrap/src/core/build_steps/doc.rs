@@ -11,14 +11,14 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::{env, fs, mem};
 
+use crate::Mode;
 use crate::core::build_steps::compile;
-use crate::core::build_steps::tool::{self, prepare_tool_cargo, SourceType, Tool};
+use crate::core::build_steps::tool::{self, SourceType, Tool, prepare_tool_cargo};
 use crate::core::builder::{
-    self, crate_description, Alias, Builder, Compiler, Kind, RunConfig, ShouldRun, Step,
+    self, Alias, Builder, Compiler, Kind, RunConfig, ShouldRun, Step, crate_description,
 };
 use crate::core::config::{Config, TargetSelection};
 use crate::utils::helpers::{symlink_dir, t, up_to_date};
-use crate::Mode;
 
 macro_rules! submodule_helper {
     ($path:expr, submodule) => {
@@ -829,7 +829,7 @@ impl Step for Rustc {
         // see https://github.com/rust-lang/rust/pull/122066#issuecomment-1983049222
         // cargo.rustdocflag("--generate-link-to-definition");
 
-        compile::rustc_cargo(builder, &mut cargo, target, &compiler);
+        compile::rustc_cargo(builder, &mut cargo, target, &compiler, &self.crates);
         cargo.arg("-Zskip-rustdoc-fingerprint");
 
         // Only include compiler crates, no dependencies of those, such as `libc`.
@@ -1016,6 +1016,14 @@ macro_rules! tool_doc {
     }
 }
 
+// NOTE: make sure to register these in `Builder::get_step_description`.
+tool_doc!(
+    BuildHelper,
+    "src/tools/build_helper",
+    rustc_tool = false,
+    is_library = true,
+    crates = ["build_helper"]
+);
 tool_doc!(Rustdoc, "src/tools/rustdoc", crates = ["rustdoc", "rustdoc-json-types"]);
 tool_doc!(Rustfmt, "src/tools/rustfmt", crates = ["rustfmt-nightly", "rustfmt-config_proc_macro"]);
 tool_doc!(Clippy, "src/tools/clippy", crates = ["clippy_config", "clippy_utils"]);
@@ -1052,6 +1060,13 @@ tool_doc!(
     rustc_tool = false,
     is_library = true,
     crates = ["run_make_support"]
+);
+tool_doc!(
+    Compiletest,
+    "src/tools/compiletest",
+    rustc_tool = false,
+    is_library = true,
+    crates = ["compiletest"]
 );
 
 #[derive(Ord, PartialOrd, Debug, Clone, Hash, PartialEq, Eq)]
@@ -1189,6 +1204,9 @@ impl Step for RustcBook {
         cmd.arg("--rustc");
         cmd.arg(&rustc);
         cmd.arg("--rustc-target").arg(self.target.rustc_target_arg());
+        if let Some(target_linker) = builder.linker(self.target) {
+            cmd.arg("--rustc-linker").arg(target_linker);
+        }
         if builder.is_verbose() {
             cmd.arg("--verbose");
         }

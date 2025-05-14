@@ -1,8 +1,8 @@
 use either::{Left, Right};
 use rustc_errors::DiagCtxtHandle;
 use rustc_hir::def_id::DefId;
-use rustc_infer::infer::at::ToTrace;
 use rustc_infer::infer::TyCtxtInferExt;
+use rustc_infer::infer::at::ToTrace;
 use rustc_infer::traits::ObligationCause;
 use rustc_middle::mir::interpret::{ErrorHandled, InvalidMetaKind, ReportedErrorInfo};
 use rustc_middle::query::TyCtxtAt;
@@ -16,14 +16,14 @@ use rustc_span::Span;
 use rustc_target::abi::call::FnAbi;
 use rustc_target::abi::{Align, HasDataLayout, Size, TargetDataLayout};
 use rustc_trait_selection::traits::ObligationCtxt;
-use tracing::{debug, trace};
+use tracing::{debug, instrument, trace};
 
 use super::{
-    err_inval, throw_inval, throw_ub, throw_ub_custom, Frame, FrameInfo, GlobalId, InterpErrorInfo,
-    InterpResult, MPlaceTy, Machine, MemPlaceMeta, Memory, OpTy, Place, PlaceTy, PointerArithmetic,
-    Projectable, Provenance,
+    Frame, FrameInfo, GlobalId, InterpError, InterpErrorInfo, InterpResult, MPlaceTy, Machine,
+    MemPlaceMeta, Memory, OpTy, Place, PlaceTy, PointerArithmetic, Projectable, Provenance,
+    err_inval, interp_ok, throw_inval, throw_ub, throw_ub_custom,
 };
-use crate::{fluent_generated as fluent, util, ReportErrorExt};
+use crate::{ReportErrorExt, fluent_generated as fluent, util};
 
 pub struct InterpCx<'tcx, M: Machine<'tcx>> {
     /// Stores the `Machine` instance.
@@ -73,7 +73,7 @@ where
 }
 
 impl<'tcx, M: Machine<'tcx>> LayoutOfHelpers<'tcx> for InterpCx<'tcx, M> {
-    type LayoutOfResult = InterpResult<'tcx, TyAndLayout<'tcx>>;
+    type LayoutOfResult = Result<TyAndLayout<'tcx>, InterpError<'tcx>>;
 
     #[inline]
     fn layout_tcx_at_span(&self) -> Span {
@@ -82,29 +82,24 @@ impl<'tcx, M: Machine<'tcx>> LayoutOfHelpers<'tcx> for InterpCx<'tcx, M> {
     }
 
     #[inline]
-    fn handle_layout_err(
-        &self,
-        err: LayoutError<'tcx>,
-        _: Span,
-        _: Ty<'tcx>,
-    ) -> InterpErrorInfo<'tcx> {
-        err_inval!(Layout(err)).into()
+    fn handle_layout_err(&self, err: LayoutError<'tcx>, _: Span, _: Ty<'tcx>) -> InterpError<'tcx> {
+        err_inval!(Layout(err))
     }
 }
 
 impl<'tcx, M: Machine<'tcx>> FnAbiOfHelpers<'tcx> for InterpCx<'tcx, M> {
-    type FnAbiOfResult = InterpResult<'tcx, &'tcx FnAbi<'tcx, Ty<'tcx>>>;
+    type FnAbiOfResult = Result<&'tcx FnAbi<'tcx, Ty<'tcx>>, InterpError<'tcx>>;
 
     fn handle_fn_abi_err(
         &self,
         err: FnAbiError<'tcx>,
         _span: Span,
         _fn_abi_request: FnAbiRequest<'tcx>,
-    ) -> InterpErrorInfo<'tcx> {
+    ) -> InterpError<'tcx> {
         match err {
-            FnAbiError::Layout(err) => err_inval!(Layout(err)).into(),
+            FnAbiError::Layout(err) => err_inval!(Layout(err)),
             FnAbiError::AdjustForForeignAbi(err) => {
-                err_inval!(FnAbiAdjustForForeignAbi(err)).into()
+                err_inval!(FnAbiAdjustForForeignAbi(err))
             }
         }
     }
@@ -160,7 +155,7 @@ pub(super) fn from_known_layout<'tcx>(
                     );
                 }
             }
-            Ok(known_layout)
+            interp_ok(known_layout)
         }
     }
 }
@@ -262,7 +257,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         if let Some(err) = body.tainted_by_errors {
             throw_inval!(AlreadyReported(ReportedErrorInfo::tainted_by_errors(err)));
         }
-        Ok(body)
+        interp_ok(body)
     }
 
     /// Call this on things you got out of the MIR (so it is as generic as the current
@@ -305,7 +300,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         trace!("param_env: {:#?}", self.param_env);
         trace!("args: {:#?}", args);
         match ty::Instance::try_resolve(*self.tcx, self.param_env, def, args) {
-            Ok(Some(instance)) => Ok(instance),
+            Ok(Some(instance)) => interp_ok(instance),
             Ok(None) => throw_inval!(TooGeneric),
 
             // FIXME(eddyb) this could be a bit more specific than `AlreadyReported`.
@@ -315,6 +310,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
 
     /// Check if the two things are equal in the current param_env, using an infctx to get proper
     /// equality checks.
+    #[instrument(level = "trace", skip(self), ret)]
     pub(super) fn eq_in_param_env<T>(&self, a: T, b: T) -> bool
     where
         T: PartialEq + TypeFoldable<TyCtxt<'tcx>> + ToTrace<'tcx>,
@@ -330,13 +326,20 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         // equate the two trait refs after normalization
         let a = ocx.normalize(&cause, self.param_env, a);
         let b = ocx.normalize(&cause, self.param_env, b);
-        if ocx.eq(&cause, self.param_env, a, b).is_ok() {
-            if ocx.select_all_or_error().is_empty() {
-                // All good.
-                return true;
-            }
+
+        if let Err(terr) = ocx.eq(&cause, self.param_env, a, b) {
+            trace!(?terr);
+            return false;
         }
-        return false;
+
+        let errors = ocx.select_all_or_error();
+        if !errors.is_empty() {
+            trace!(?errors);
+            return false;
+        }
+
+        // All good.
+        true
     }
 
     /// Walks up the callstack from the intrinsic's callsite, searching for the first callsite in a
@@ -393,7 +396,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         layout: &TyAndLayout<'tcx>,
     ) -> InterpResult<'tcx, Option<(Size, Align)>> {
         if layout.is_sized() {
-            return Ok(Some((layout.size, layout.align.abi)));
+            return interp_ok(Some((layout.size, layout.align.abi)));
         }
         match layout.ty.kind() {
             ty::Adt(..) | ty::Tuple(..) => {
@@ -417,7 +420,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 else {
                     // A field with an extern type. We don't know the actual dynamic size
                     // or the alignment.
-                    return Ok(None);
+                    return interp_ok(None);
                 };
 
                 // # First compute the dynamic alignment
@@ -448,12 +451,12 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 if full_size > self.max_size_of_val() {
                     throw_ub!(InvalidMeta(InvalidMetaKind::TooBig));
                 }
-                Ok(Some((full_size, full_align)))
+                interp_ok(Some((full_size, full_align)))
             }
             ty::Dynamic(expected_trait, _, ty::Dyn) => {
                 let vtable = metadata.unwrap_meta().to_pointer(self)?;
                 // Read size and align from vtable (already checks size).
-                Ok(Some(self.get_vtable_size_and_align(vtable, Some(expected_trait))?))
+                interp_ok(Some(self.get_vtable_size_and_align(vtable, Some(expected_trait))?))
             }
 
             ty::Slice(_) | ty::Str => {
@@ -466,10 +469,10 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 if size > self.max_size_of_val() {
                     throw_ub!(InvalidMeta(InvalidMetaKind::SliceTooBig));
                 }
-                Ok(Some((size, elem.align.abi)))
+                interp_ok(Some((size, elem.align.abi)))
             }
 
-            ty::Foreign(_) => Ok(None),
+            ty::Foreign(_) => interp_ok(None),
 
             _ => span_bug!(self.cur_span(), "size_and_align_of::<{}> not supported", layout.ty),
         }
@@ -495,7 +498,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     pub fn return_to_block(&mut self, target: Option<mir::BasicBlock>) -> InterpResult<'tcx> {
         if let Some(target) = target {
             self.go_to_block(target);
-            Ok(())
+            interp_ok(())
         } else {
             throw_ub!(Unreachable)
         }
@@ -522,10 +525,10 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 M::unwind_terminate(self, reason)?;
                 // This might have pushed a new stack frame, or it terminated execution.
                 // Either way, `loc` will not be updated.
-                return Ok(());
+                return interp_ok(());
             }
         };
-        Ok(())
+        interp_ok(())
     }
 
     /// Call a query that can return `ErrorHandled`. Should be used for statics and other globals.
@@ -574,7 +577,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                                 // be computed as the type references non-existing names.
                                 // See <https://github.com/rust-lang/rust/issues/124348>.
                             } else {
-                                // Looks like the const is not captued by `required_consts`, that's bad.
+                                // Looks like the const is not captured by `required_consts`, that's bad.
                                 span_bug!(span, "interpret const eval failure of {val:?} which is not in required_consts");
                             }
                         }

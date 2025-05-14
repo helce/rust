@@ -5,7 +5,7 @@ use crate::spec::{
 const LINKER_SCRIPT: &str = include_str!("./aarch64_nintendo_switch_freestanding_linker_script.ld");
 
 /// A base target for Nintendo Switch devices using a pure LLVM toolchain.
-pub fn target() -> Target {
+pub(crate) fn target() -> Target {
     Target {
         llvm_target: "aarch64-unknown-none".into(),
         metadata: crate::spec::TargetMetadata {
@@ -23,6 +23,7 @@ pub fn target() -> Target {
             linker: Some("rust-lld".into()),
             link_script: Some(LINKER_SCRIPT.into()),
             os: "horizon".into(),
+            vendor: "nintendo".into(),
             max_atomic_width: Some(128),
             stack_probes: StackProbeType::Inline,
             panic_strategy: PanicStrategy::Abort,

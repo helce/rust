@@ -657,16 +657,17 @@ pub(crate) enum TildeConstReason {
 }
 
 #[derive(Diagnostic)]
-#[diag(ast_passes_const_and_async)]
-pub(crate) struct ConstAndAsync {
+#[diag(ast_passes_const_and_coroutine)]
+pub(crate) struct ConstAndCoroutine {
     #[primary_span]
     pub spans: Vec<Span>,
     #[label(ast_passes_const)]
-    pub cspan: Span,
-    #[label(ast_passes_async)]
-    pub aspan: Span,
+    pub const_span: Span,
+    #[label(ast_passes_coroutine)]
+    pub coroutine_span: Span,
     #[label]
     pub span: Span,
+    pub coroutine_kind: &'static str,
 }
 
 #[derive(Diagnostic)]
@@ -811,33 +812,6 @@ pub(crate) struct ConstraintOnNegativeBound {
 pub(crate) struct NegativeBoundWithParentheticalNotation {
     #[primary_span]
     pub span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(ast_passes_invalid_unnamed_field_ty)]
-pub(crate) struct InvalidUnnamedFieldTy {
-    #[primary_span]
-    pub span: Span,
-    #[label]
-    pub ty_span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(ast_passes_invalid_unnamed_field)]
-pub(crate) struct InvalidUnnamedField {
-    #[primary_span]
-    pub span: Span,
-    #[label]
-    pub ident_span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(ast_passes_anon_struct_or_union_not_allowed)]
-pub(crate) struct AnonStructOrUnionNotAllowed {
-    #[primary_span]
-    #[label]
-    pub span: Span,
-    pub struct_or_union: &'static str,
 }
 
 #[derive(Diagnostic)]

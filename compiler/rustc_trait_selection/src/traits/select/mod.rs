@@ -14,6 +14,7 @@ use rustc_errors::{Diag, EmissionGuarantee};
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
 use rustc_hir::LangItem;
+use rustc_infer::infer::at::ToTrace;
 use rustc_infer::infer::relate::TypeRelation;
 use rustc_infer::infer::BoundRegionConversionTime::{self, HigherRankedType};
 use rustc_infer::infer::DefineOpaqueTypes;
@@ -44,7 +45,7 @@ use super::{
     Selection, SelectionError, SelectionResult, TraitQueryMode,
 };
 use crate::error_reporting::InferCtxtErrorExt;
-use crate::infer::{InferCtxt, InferCtxtExt, InferOk, TypeFreshener};
+use crate::infer::{InferCtxt, InferOk, TypeFreshener};
 use crate::solve::InferCtxtSelectExt as _;
 use crate::traits::normalize::{normalize_with_depth, normalize_with_depth_to};
 use crate::traits::project::{ProjectAndUnifyResult, ProjectionCacheKeyExt};
@@ -772,8 +773,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     Ok(EvaluatedToOkModuloRegions)
                 }
 
-                ty::PredicateKind::ObjectSafe(trait_def_id) => {
-                    if self.tcx().is_object_safe(trait_def_id) {
+                ty::PredicateKind::DynCompatible(trait_def_id) => {
+                    if self.tcx().is_dyn_compatible(trait_def_id) {
                         Ok(EvaluatedToOk)
                     } else {
                         Ok(EvaluatedToErr)
@@ -991,7 +992,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     };
 
                     match self.infcx.at(&obligation.cause, obligation.param_env).eq(
-                        // Only really excercised by generic_const_exprs
+                        // Only really exercised by generic_const_exprs
                         DefineOpaqueTypes::Yes,
                         ct_ty,
                         ty,
@@ -1305,7 +1306,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         }
 
         let tcx = self.tcx();
-        if self.can_use_global_caches(param_env) {
+        if self.can_use_global_caches(param_env, trait_pred) {
             if let Some(res) = tcx.evaluation_cache.get(&(param_env, trait_pred), tcx) {
                 return Some(res);
             }
@@ -1334,16 +1335,14 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             return;
         }
 
-        if self.can_use_global_caches(param_env) {
-            if !trait_pred.has_infer() {
-                debug!(?trait_pred, ?result, "insert_evaluation_cache global");
-                // This may overwrite the cache with the same value
-                // FIXME: Due to #50507 this overwrites the different values
-                // This should be changed to use HashMapExt::insert_same
-                // when that is fixed
-                self.tcx().evaluation_cache.insert((param_env, trait_pred), dep_node, result);
-                return;
-            }
+        if self.can_use_global_caches(param_env, trait_pred) && !trait_pred.has_infer() {
+            debug!(?trait_pred, ?result, "insert_evaluation_cache global");
+            // This may overwrite the cache with the same value
+            // FIXME: Due to #50507 this overwrites the different values
+            // This should be changed to use HashMapExt::insert_same
+            // when that is fixed
+            self.tcx().evaluation_cache.insert((param_env, trait_pred), dep_node, result);
+            return;
         }
 
         debug!(?trait_pred, ?result, "insert_evaluation_cache");
@@ -1480,7 +1479,11 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
     }
 
     /// Returns `true` if the global caches can be used.
-    fn can_use_global_caches(&self, param_env: ty::ParamEnv<'tcx>) -> bool {
+    fn can_use_global_caches(
+        &self,
+        param_env: ty::ParamEnv<'tcx>,
+        pred: ty::PolyTraitPredicate<'tcx>,
+    ) -> bool {
         // If there are any inference variables in the `ParamEnv`, then we
         // always use a cache local to this particular scope. Otherwise, we
         // switch to a global cache.
@@ -1501,7 +1504,13 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
         // Avoid using the global cache when we're defining opaque types
         // as their hidden type may impact the result of candidate selection.
-        if !self.infcx.defining_opaque_types().is_empty() {
+        //
+        // HACK: This is still theoretically unsound. Goals can indirectly rely
+        // on opaques in the defining scope, and it's easier to do so with TAIT.
+        // However, if we disqualify *all* goals from being cached, perf suffers.
+        // This is likely fixed by better caching in general in the new solver.
+        // See: <https://github.com/rust-lang/rust/issues/132064>.
+        if !self.infcx.defining_opaque_types().is_empty() && pred.has_opaque_types() {
             return false;
         }
 
@@ -1524,7 +1533,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         let tcx = self.tcx();
         let pred = cache_fresh_trait_pred.skip_binder();
 
-        if self.can_use_global_caches(param_env) {
+        if self.can_use_global_caches(param_env, cache_fresh_trait_pred) {
             if let Some(res) = tcx.selection_cache.get(&(param_env, pred), tcx) {
                 return Some(res);
             }
@@ -1581,16 +1590,14 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             return;
         }
 
-        if self.can_use_global_caches(param_env) {
+        if self.can_use_global_caches(param_env, cache_fresh_trait_pred) {
             if let Err(Overflow(OverflowError::Canonical)) = candidate {
                 // Don't cache overflow globally; we only produce this in certain modes.
-            } else if !pred.has_infer() {
-                if !candidate.has_infer() {
-                    debug!(?pred, ?candidate, "insert_candidate_cache global");
-                    // This may overwrite the cache with the same value.
-                    tcx.selection_cache.insert((param_env, pred), dep_node, candidate);
-                    return;
-                }
+            } else if !pred.has_infer() && !candidate.has_infer() {
+                debug!(?pred, ?candidate, "insert_candidate_cache global");
+                // This may overwrite the cache with the same value.
+                tcx.selection_cache.insert((param_env, pred), dep_node, candidate);
+                return;
             }
         }
 
@@ -1790,7 +1797,11 @@ enum DropVictim {
 
 impl DropVictim {
     fn drop_if(should_drop: bool) -> DropVictim {
-        if should_drop { DropVictim::Yes } else { DropVictim::No }
+        if should_drop {
+            DropVictim::Yes
+        } else {
+            DropVictim::No
+        }
     }
 }
 
@@ -1894,7 +1905,11 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
             (ObjectCandidate(_) | ProjectionCandidate(_), ParamCandidate(victim_cand)) => {
                 // Prefer these to a global where-clause bound
                 // (see issue #50825).
-                if is_global(*victim_cand) { DropVictim::Yes } else { DropVictim::No }
+                if is_global(*victim_cand) {
+                    DropVictim::Yes
+                } else {
+                    DropVictim::No
+                }
             }
             (
                 ImplCandidate(_)
@@ -1980,10 +1995,10 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
                 // impls have to be always applicable, meaning that the only allowed
                 // region constraints may be constraints also present on the default impl.
                 let tcx = self.tcx();
-                if other.evaluation.must_apply_modulo_regions() {
-                    if tcx.specializes((other_def, victim_def)) {
-                        return DropVictim::Yes;
-                    }
+                if other.evaluation.must_apply_modulo_regions()
+                    && tcx.specializes((other_def, victim_def))
+                {
+                    return DropVictim::Yes;
                 }
 
                 match tcx.impls_are_allowed_to_overlap(other_def, victim_def) {
@@ -2585,16 +2600,31 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
                 // Check that a_ty's supertrait (upcast_principal) is compatible
                 // with the target (b_ty).
                 ty::ExistentialPredicate::Trait(target_principal) => {
+                    let hr_source_principal = upcast_principal.map_bound(|trait_ref| {
+                        ty::ExistentialTraitRef::erase_self_ty(tcx, trait_ref)
+                    });
+                    let hr_target_principal = bound.rebind(target_principal);
+
                     nested.extend(
                         self.infcx
-                            .at(&obligation.cause, obligation.param_env)
-                            .eq(
-                                DefineOpaqueTypes::Yes,
-                                upcast_principal.map_bound(|trait_ref| {
-                                    ty::ExistentialTraitRef::erase_self_ty(tcx, trait_ref)
-                                }),
-                                bound.rebind(target_principal),
-                            )
+                            .enter_forall(hr_target_principal, |target_principal| {
+                                let source_principal =
+                                    self.infcx.instantiate_binder_with_fresh_vars(
+                                        obligation.cause.span,
+                                        HigherRankedType,
+                                        hr_source_principal,
+                                    );
+                                self.infcx.at(&obligation.cause, obligation.param_env).eq_trace(
+                                    DefineOpaqueTypes::Yes,
+                                    ToTrace::to_trace(
+                                        &obligation.cause,
+                                        hr_target_principal,
+                                        hr_source_principal,
+                                    ),
+                                    target_principal,
+                                    source_principal,
+                                )
+                            })
                             .map_err(|_| SelectionError::Unimplemented)?
                             .into_obligations(),
                     );
@@ -2605,19 +2635,40 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
                 // return ambiguity. Otherwise, if exactly one matches, equate
                 // it with b_ty's projection.
                 ty::ExistentialPredicate::Projection(target_projection) => {
-                    let target_projection = bound.rebind(target_projection);
+                    let hr_target_projection = bound.rebind(target_projection);
+
                     let mut matching_projections =
-                        a_data.projection_bounds().filter(|source_projection| {
+                        a_data.projection_bounds().filter(|&hr_source_projection| {
                             // Eager normalization means that we can just use can_eq
                             // here instead of equating and processing obligations.
-                            source_projection.item_def_id() == target_projection.item_def_id()
-                                && self.infcx.can_eq(
-                                    obligation.param_env,
-                                    *source_projection,
-                                    target_projection,
-                                )
+                            hr_source_projection.item_def_id() == hr_target_projection.item_def_id()
+                                && self.infcx.probe(|_| {
+                                    self.infcx
+                                        .enter_forall(hr_target_projection, |target_projection| {
+                                            let source_projection =
+                                                self.infcx.instantiate_binder_with_fresh_vars(
+                                                    obligation.cause.span,
+                                                    HigherRankedType,
+                                                    hr_source_projection,
+                                                );
+                                            self.infcx
+                                                .at(&obligation.cause, obligation.param_env)
+                                                .eq_trace(
+                                                    DefineOpaqueTypes::Yes,
+                                                    ToTrace::to_trace(
+                                                        &obligation.cause,
+                                                        hr_target_projection,
+                                                        hr_source_projection,
+                                                    ),
+                                                    target_projection,
+                                                    source_projection,
+                                                )
+                                        })
+                                        .is_ok()
+                                })
                         });
-                    let Some(source_projection) = matching_projections.next() else {
+
+                    let Some(hr_source_projection) = matching_projections.next() else {
                         return Err(SelectionError::Unimplemented);
                     };
                     if matching_projections.next().is_some() {
@@ -2625,8 +2676,24 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
                     }
                     nested.extend(
                         self.infcx
-                            .at(&obligation.cause, obligation.param_env)
-                            .eq(DefineOpaqueTypes::Yes, source_projection, target_projection)
+                            .enter_forall(hr_target_projection, |target_projection| {
+                                let source_projection =
+                                    self.infcx.instantiate_binder_with_fresh_vars(
+                                        obligation.cause.span,
+                                        HigherRankedType,
+                                        hr_source_projection,
+                                    );
+                                self.infcx.at(&obligation.cause, obligation.param_env).eq_trace(
+                                    DefineOpaqueTypes::Yes,
+                                    ToTrace::to_trace(
+                                        &obligation.cause,
+                                        hr_target_projection,
+                                        hr_source_projection,
+                                    ),
+                                    target_projection,
+                                    source_projection,
+                                )
+                            })
                             .map_err(|_| SelectionError::Unimplemented)?
                             .into_obligations(),
                     );
@@ -3107,7 +3174,11 @@ impl<'o, 'tcx> TraitObligationStackList<'o, 'tcx> {
     }
 
     fn depth(&self) -> usize {
-        if let Some(head) = self.head { head.depth } else { 0 }
+        if let Some(head) = self.head {
+            head.depth
+        } else {
+            0
+        }
     }
 }
 
@@ -3127,7 +3198,7 @@ impl<'o, 'tcx> fmt::Debug for TraitObligationStack<'o, 'tcx> {
     }
 }
 
-pub enum ProjectionMatchesProjection {
+pub(crate) enum ProjectionMatchesProjection {
     Yes,
     Ambiguous,
     No,

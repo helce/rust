@@ -699,8 +699,8 @@ pub(crate) struct ReplaceWithName {
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_typeck_cast_thin_pointer_to_fat_pointer, code = E0607)]
-pub(crate) struct CastThinPointerToFatPointer<'tcx> {
+#[diag(hir_typeck_cast_thin_pointer_to_wide_pointer, code = E0607)]
+pub(crate) struct CastThinPointerToWidePointer<'tcx> {
     #[primary_span]
     pub span: Span,
     pub expr_ty: Ty<'tcx>,
@@ -711,7 +711,7 @@ pub(crate) struct CastThinPointerToFatPointer<'tcx> {
 
 #[derive(Diagnostic)]
 #[diag(hir_typeck_pass_to_variadic_function, code = E0617)]
-pub(crate) struct PassToVariadicFunction<'tcx, 'a> {
+pub(crate) struct PassToVariadicFunction<'a, 'tcx> {
     #[primary_span]
     pub span: Span,
     pub ty: Ty<'tcx>,

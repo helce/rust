@@ -30,7 +30,7 @@ use rustc_errors::{
 };
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
-use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LOCAL_CRATE};
+use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE, LocalDefId};
 use rustc_hir::definitions::Definitions;
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::lang_items::LangItem;
@@ -45,18 +45,18 @@ use rustc_session::config::CrateType;
 use rustc_session::cstore::{CrateStoreDyn, Untracked};
 use rustc_session::lint::Lint;
 use rustc_session::{Limit, MetadataKind, Session};
-use rustc_span::def_id::{DefPathHash, StableCrateId, CRATE_DEF_ID};
-use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_span::def_id::{CRATE_DEF_ID, DefPathHash, StableCrateId};
+use rustc_span::symbol::{Ident, Symbol, kw, sym};
+use rustc_span::{DUMMY_SP, Span};
 use rustc_target::abi::{FieldIdx, Layout, LayoutS, TargetDataLayout, VariantIdx};
 use rustc_target::spec::abi;
+use rustc_type_ir::TyKind::*;
 use rustc_type_ir::fold::TypeFoldable;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
 pub use rustc_type_ir::lift::Lift;
 use rustc_type_ir::solve::SolverMode;
-use rustc_type_ir::TyKind::*;
-use rustc_type_ir::{search_graph, CollectAndApply, Interner, TypeFlags, WithCachedTypeInfo};
-use tracing::{debug, instrument};
+use rustc_type_ir::{CollectAndApply, Interner, TypeFlags, WithCachedTypeInfo, search_graph};
+use tracing::{debug, trace};
 
 use crate::arena::Arena;
 use crate::dep_graph::{DepGraph, DepKindStruct};
@@ -179,6 +179,10 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
             SolverMode::Normal => f(&mut *self.new_solver_evaluation_cache.lock()),
             SolverMode::Coherence => f(&mut *self.new_solver_coherence_evaluation_cache.lock()),
         }
+    }
+
+    fn evaluation_is_concurrent(&self) -> bool {
+        self.sess.threads() > 1
     }
 
     fn expand_abstract_consts<T: TypeFoldable<TyCtxt<'tcx>>>(self, t: T) -> T {
@@ -426,7 +430,7 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
                 let simp = ty::fast_reject::simplify_type(
                     tcx,
                     self_ty,
-                    ty::fast_reject::TreatParams::ForLookup,
+                    ty::fast_reject::TreatParams::AsRigid,
                 )
                 .unwrap();
                 consider_impls_for_simplified_type(simp);
@@ -523,8 +527,8 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
         self.trait_is_alias(trait_def_id)
     }
 
-    fn trait_is_object_safe(self, trait_def_id: DefId) -> bool {
-        self.is_object_safe(trait_def_id)
+    fn trait_is_dyn_compatible(self, trait_def_id: DefId) -> bool {
+        self.is_dyn_compatible(trait_def_id)
     }
 
     fn trait_is_fundamental(self, def_id: DefId) -> bool {
@@ -533,6 +537,10 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
 
     fn trait_may_be_implemented_via_object(self, trait_def_id: DefId) -> bool {
         self.trait_def(trait_def_id).implement_via_object
+    }
+
+    fn is_impl_trait_in_trait(self, def_id: DefId) -> bool {
+        self.is_impl_trait_in_trait(def_id)
     }
 
     fn delay_bug(self, msg: impl ToString) -> ErrorGuaranteed {
@@ -618,11 +626,13 @@ bidirectional_lang_item_map! {
     Destruct,
     DiscriminantKind,
     DynMetadata,
+    EffectsCompat,
     EffectsIntersection,
     EffectsIntersectionOutput,
     EffectsMaybe,
     EffectsNoRuntime,
     EffectsRuntime,
+    EffectsTyCompat,
     Fn,
     FnMut,
     FnOnce,
@@ -689,6 +699,12 @@ impl<'tcx> rustc_type_ir::inherent::Features<TyCtxt<'tcx>> for &'tcx rustc_featu
 
     fn associated_const_equality(self) -> bool {
         self.associated_const_equality
+    }
+}
+
+impl<'tcx> rustc_type_ir::inherent::Span<TyCtxt<'tcx>> for Span {
+    fn dummy() -> Self {
+        DUMMY_SP
     }
 }
 
@@ -1011,10 +1027,10 @@ impl<'tcx> CommonLifetimes<'tcx> {
             .map(|i| {
                 (0..NUM_PREINTERNED_RE_LATE_BOUNDS_V)
                     .map(|v| {
-                        mk(ty::ReBound(
-                            ty::DebruijnIndex::from(i),
-                            ty::BoundRegion { var: ty::BoundVar::from(v), kind: ty::BrAnon },
-                        ))
+                        mk(ty::ReBound(ty::DebruijnIndex::from(i), ty::BoundRegion {
+                            var: ty::BoundVar::from(v),
+                            kind: ty::BrAnon,
+                        }))
                     })
                     .collect()
             })
@@ -1413,16 +1429,8 @@ impl<'tcx> TyCtxt<'tcx> {
         kind: AdtKind,
         variants: IndexVec<VariantIdx, ty::VariantDef>,
         repr: ReprOptions,
-        is_anonymous: bool,
     ) -> ty::AdtDef<'tcx> {
-        self.mk_adt_def_from_data(ty::AdtDefData::new(
-            self,
-            did,
-            kind,
-            variants,
-            repr,
-            is_anonymous,
-        ))
+        self.mk_adt_def_from_data(ty::AdtDefData::new(self, did, kind, variants, repr))
     }
 
     /// Allocates a read-only byte or string literal for `mir::interpret`.
@@ -1445,9 +1453,8 @@ impl<'tcx> TyCtxt<'tcx> {
             debug!("layout_scalar_valid_range: attr={:?}", attr);
             if let Some(
                 &[
-                    ast::NestedMetaItem::Lit(ast::MetaItemLit {
-                        kind: ast::LitKind::Int(a, _),
-                        ..
+                    ast::MetaItemInner::Lit(ast::MetaItemLit {
+                        kind: ast::LitKind::Int(a, _), ..
                     }),
                 ],
             ) = attr.meta_item_list().as_deref()
@@ -1475,7 +1482,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// provides a `TyCtxt`.
     ///
     /// By only providing the `TyCtxt` inside of the closure we enforce that the type
-    /// context and any interned alue (types, args, etc.) can only be used while `ty::tls`
+    /// context and any interned value (types, args, etc.) can only be used while `ty::tls`
     /// has a valid reference to the context, to allow formatting values that need it.
     pub fn create_global_ctxt(
         s: &'tcx Session,
@@ -2003,7 +2010,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 ));
             }
         }
-        return None;
+        None
     }
 
     /// Checks if the bound region is in Impl Item.
@@ -2067,9 +2074,11 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     /// Returns the origin of the opaque type `def_id`.
-    #[instrument(skip(self), level = "trace", ret)]
+    #[track_caller]
     pub fn opaque_type_origin(self, def_id: LocalDefId) -> hir::OpaqueTyOrigin {
-        self.hir().expect_item(def_id).expect_opaque_ty().origin
+        let origin = self.hir().expect_opaque_ty(def_id).origin;
+        trace!("opaque_type_origin({def_id:?}) => {origin:?}");
+        origin
     }
 }
 
@@ -2602,33 +2611,31 @@ impl<'tcx> TyCtxt<'tcx> {
     /// With `cfg(debug_assertions)`, assert that args are compatible with their generics,
     /// and print out the args if not.
     pub fn debug_assert_args_compatible(self, def_id: DefId, args: &'tcx [ty::GenericArg<'tcx>]) {
-        if cfg!(debug_assertions) {
-            if !self.check_args_compatible(def_id, args) {
-                if let DefKind::AssocTy = self.def_kind(def_id)
-                    && let DefKind::Impl { of_trait: false } = self.def_kind(self.parent(def_id))
-                {
-                    bug!(
-                        "args not compatible with generics for {}: args={:#?}, generics={:#?}",
-                        self.def_path_str(def_id),
-                        args,
-                        // Make `[Self, GAT_ARGS...]` (this could be simplified)
-                        self.mk_args_from_iter(
-                            [self.types.self_param.into()].into_iter().chain(
-                                self.generics_of(def_id)
-                                    .own_args(ty::GenericArgs::identity_for_item(self, def_id))
-                                    .iter()
-                                    .copied()
-                            )
+        if cfg!(debug_assertions) && !self.check_args_compatible(def_id, args) {
+            if let DefKind::AssocTy = self.def_kind(def_id)
+                && let DefKind::Impl { of_trait: false } = self.def_kind(self.parent(def_id))
+            {
+                bug!(
+                    "args not compatible with generics for {}: args={:#?}, generics={:#?}",
+                    self.def_path_str(def_id),
+                    args,
+                    // Make `[Self, GAT_ARGS...]` (this could be simplified)
+                    self.mk_args_from_iter(
+                        [self.types.self_param.into()].into_iter().chain(
+                            self.generics_of(def_id)
+                                .own_args(ty::GenericArgs::identity_for_item(self, def_id))
+                                .iter()
+                                .copied()
                         )
-                    );
-                } else {
-                    bug!(
-                        "args not compatible with generics for {}: args={:#?}, generics={:#?}",
-                        self.def_path_str(def_id),
-                        args,
-                        ty::GenericArgs::identity_for_item(self, def_id)
-                    );
-                }
+                    )
+                );
+            } else {
+                bug!(
+                    "args not compatible with generics for {}: args={:#?}, generics={:#?}",
+                    self.def_path_str(def_id),
+                    args,
+                    ty::GenericArgs::identity_for_item(self, def_id)
+                );
             }
         }
     }
@@ -2990,7 +2997,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
     pub fn named_bound_var(self, id: HirId) -> Option<resolve_bound_vars::ResolvedArg> {
         debug!(?id, "named_region");
-        self.named_variable_map(id.owner).and_then(|map| map.get(&id.local_id).cloned())
+        self.named_variable_map(id.owner).get(&id.local_id).cloned()
     }
 
     pub fn is_late_bound(self, id: HirId) -> bool {
@@ -2999,12 +3006,9 @@ impl<'tcx> TyCtxt<'tcx> {
 
     pub fn late_bound_vars(self, id: HirId) -> &'tcx List<ty::BoundVariableKind> {
         self.mk_bound_variable_kinds(
-            &self
-                .late_bound_vars_map(id.owner)
-                .and_then(|map| map.get(&id.local_id).cloned())
-                .unwrap_or_else(|| {
-                    bug!("No bound vars found for {}", self.hir().node_to_string(id))
-                }),
+            &self.late_bound_vars_map(id.owner).get(&id.local_id).cloned().unwrap_or_else(|| {
+                bug!("No bound vars found for {}", self.hir().node_to_string(id))
+            }),
         )
     }
 
@@ -3027,8 +3031,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
         loop {
             let parent = self.local_parent(opaque_lifetime_param_def_id);
-            let hir::OpaqueTy { lifetime_mapping, .. } =
-                self.hir_node_by_def_id(parent).expect_item().expect_opaque_ty();
+            let hir::OpaqueTy { lifetime_mapping, .. } = self.hir().expect_opaque_ty(parent);
 
             let Some((lifetime, _)) = lifetime_mapping
                 .iter()
@@ -3050,15 +3053,12 @@ impl<'tcx> TyCtxt<'tcx> {
                     }
 
                     let generics = self.generics_of(new_parent);
-                    return ty::Region::new_early_param(
-                        self,
-                        ty::EarlyParamRegion {
-                            index: generics
-                                .param_def_id_to_index(self, ebv.to_def_id())
-                                .expect("early-bound var should be present in fn generics"),
-                            name: self.item_name(ebv.to_def_id()),
-                        },
-                    );
+                    return ty::Region::new_early_param(self, ty::EarlyParamRegion {
+                        index: generics
+                            .param_def_id_to_index(self, ebv.to_def_id())
+                            .expect("early-bound var should be present in fn generics"),
+                        name: self.item_name(ebv.to_def_id()),
+                    });
                 }
                 Some(resolve_bound_vars::ResolvedArg::LateBound(_, _, lbv)) => {
                     let new_parent = self.local_parent(lbv);
@@ -3169,7 +3169,7 @@ impl<'tcx> TyCtxt<'tcx> {
         self.impl_trait_header(def_id).map_or(ty::ImplPolarity::Positive, |h| h.polarity)
     }
 
-    pub fn needs_coroutine_by_move_body_def_id(self, def_id: LocalDefId) -> bool {
+    pub fn needs_coroutine_by_move_body_def_id(self, def_id: DefId) -> bool {
         if let Some(hir::CoroutineKind::Desugared(_, hir::CoroutineSource::Closure)) =
             self.coroutine_kind(def_id)
             && let ty::Coroutine(_, args) = self.type_of(def_id).instantiate_identity().kind()
@@ -3183,8 +3183,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
     /// Whether this is a trait implementation that has `#[diagnostic::do_not_recommend]`
     pub fn do_not_recommend_impl(self, def_id: DefId) -> bool {
-        matches!(self.def_kind(def_id), DefKind::Impl { of_trait: true })
-            && self.impl_trait_header(def_id).is_some_and(|header| header.do_not_recommend)
+        self.get_diagnostic_attr(def_id, sym::do_not_recommend).is_some()
     }
 }
 

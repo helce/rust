@@ -14,12 +14,13 @@ use crate::*;
 
 impl<'tcx> EvalContextExtPriv<'tcx> for crate::MiriInterpCx<'tcx> {}
 trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
-    fn os_unfair_lock_getid(&mut self, lock_op: &OpTy<'tcx>) -> InterpResult<'tcx, MutexId> {
+    fn os_unfair_lock_getid(&mut self, lock_ptr: &OpTy<'tcx>) -> InterpResult<'tcx, MutexId> {
         let this = self.eval_context_mut();
+        let lock = this.deref_pointer(lock_ptr)?;
         // os_unfair_lock holds a 32-bit value, is initialized with zero and
         // must be assumed to be opaque. Therefore, we can just store our
         // internal mutex ID in the structure without anyone noticing.
-        this.mutex_get_or_create_id(lock_op, this.libc_ty_layout("os_unfair_lock"), 0)
+        this.mutex_get_or_create_id(&lock, 0, |_| interp_ok(None))
     }
 }
 
@@ -42,7 +43,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             this.mutex_lock(id);
         }
 
-        Ok(())
+        interp_ok(())
     }
 
     fn os_unfair_lock_trylock(
@@ -62,7 +63,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             this.write_scalar(Scalar::from_bool(true), dest)?;
         }
 
-        Ok(())
+        interp_ok(())
     }
 
     fn os_unfair_lock_unlock(&mut self, lock_op: &OpTy<'tcx>) -> InterpResult<'tcx> {
@@ -76,7 +77,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             ));
         }
 
-        Ok(())
+        interp_ok(())
     }
 
     fn os_unfair_lock_assert_owner(&mut self, lock_op: &OpTy<'tcx>) -> InterpResult<'tcx> {
@@ -89,7 +90,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             ));
         }
 
-        Ok(())
+        interp_ok(())
     }
 
     fn os_unfair_lock_assert_not_owner(&mut self, lock_op: &OpTy<'tcx>) -> InterpResult<'tcx> {
@@ -102,6 +103,6 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             ));
         }
 
-        Ok(())
+        interp_ok(())
     }
 }

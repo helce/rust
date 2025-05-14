@@ -2,7 +2,7 @@ use std::iter;
 
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_errors::{
-    struct_span_code_err, Applicability, Diag, Subdiagnostic, E0309, E0310, E0311, E0495,
+    Applicability, Diag, E0309, E0310, E0311, E0495, Subdiagnostic, struct_span_code_err,
 };
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
@@ -17,13 +17,13 @@ use rustc_span::{BytePos, ErrorGuaranteed, Span, Symbol};
 use rustc_type_ir::Upcast as _;
 use tracing::{debug, instrument};
 
-use super::nice_region_error::find_anon_type;
 use super::ObligationCauseAsDiagArg;
-use crate::error_reporting::infer::ObligationCauseExt;
+use super::nice_region_error::find_anon_type;
 use crate::error_reporting::TypeErrCtxt;
+use crate::error_reporting::infer::ObligationCauseExt;
 use crate::errors::{
-    self, note_and_explain, FulfillReqLifetime, LfBoundNotSatisfied, OutlivesBound,
-    OutlivesContent, RefLongerThanData, RegionOriginNote, WhereClauseSuggestions,
+    self, FulfillReqLifetime, LfBoundNotSatisfied, OutlivesBound, OutlivesContent,
+    RefLongerThanData, RegionOriginNote, WhereClauseSuggestions, note_and_explain,
 };
 use crate::fluent_generated as fluent;
 use crate::infer::region_constraints::GenericKind;
@@ -625,11 +625,19 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 if let ObligationCauseCode::WhereClause(_, span)
                 | ObligationCauseCode::WhereClauseInExpr(_, span, ..) =
                     &trace.cause.code().peel_derives()
-                    && !span.is_dummy()
                 {
                     let span = *span;
-                    self.report_concrete_failure(generic_param_scope, placeholder_origin, sub, sup)
-                        .with_span_note(span, "the lifetime requirement is introduced here")
+                    let mut err = self.report_concrete_failure(
+                        generic_param_scope,
+                        placeholder_origin,
+                        sub,
+                        sup,
+                    );
+                    if !span.is_dummy() {
+                        err =
+                            err.with_span_note(span, "the lifetime requirement is introduced here");
+                    }
+                    err
                 } else {
                     unreachable!(
                         "control flow ensures we have a `BindingObligation` or `WhereClauseInExpr` here..."
@@ -834,36 +842,23 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         lifetime: Region<'tcx>,
         add_lt_suggs: &mut Vec<(Span, String)>,
     ) -> String {
-        struct LifetimeReplaceVisitor<'tcx, 'a> {
-            tcx: TyCtxt<'tcx>,
+        struct LifetimeReplaceVisitor<'a> {
             needle: hir::LifetimeName,
             new_lt: &'a str,
             add_lt_suggs: &'a mut Vec<(Span, String)>,
         }
 
-        impl<'hir, 'tcx> hir::intravisit::Visitor<'hir> for LifetimeReplaceVisitor<'tcx, '_> {
+        impl<'hir> hir::intravisit::Visitor<'hir> for LifetimeReplaceVisitor<'_> {
             fn visit_lifetime(&mut self, lt: &'hir hir::Lifetime) {
                 if lt.res == self.needle {
-                    let (pos, span) = lt.suggestion_position();
-                    let new_lt = &self.new_lt;
-                    let sugg = match pos {
-                        hir::LifetimeSuggestionPosition::Normal => format!("{new_lt}"),
-                        hir::LifetimeSuggestionPosition::Ampersand => format!("{new_lt} "),
-                        hir::LifetimeSuggestionPosition::ElidedPath => format!("<{new_lt}>"),
-                        hir::LifetimeSuggestionPosition::ElidedPathArgument => {
-                            format!("{new_lt}, ")
-                        }
-                        hir::LifetimeSuggestionPosition::ObjectDefault => format!("+ {new_lt}"),
-                    };
-                    self.add_lt_suggs.push((span, sugg));
+                    self.add_lt_suggs.push(lt.suggestion(self.new_lt));
                 }
             }
 
             fn visit_ty(&mut self, ty: &'hir hir::Ty<'hir>) {
-                let hir::TyKind::OpaqueDef(item_id, _, _) = ty.kind else {
+                let hir::TyKind::OpaqueDef(opaque_ty, _) = ty.kind else {
                     return hir::intravisit::walk_ty(self, ty);
                 };
-                let opaque_ty = self.tcx.hir().item(item_id).expect_opaque_ty();
                 if let Some(&(_, b)) =
                     opaque_ty.lifetime_mapping.iter().find(|&(a, _)| a.res == self.needle)
                 {
@@ -908,7 +903,6 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         };
 
         let mut visitor = LifetimeReplaceVisitor {
-            tcx: self.tcx,
             needle: hir::LifetimeName::Param(lifetime_def_id),
             add_lt_suggs,
             new_lt: &new_lt,
@@ -1018,7 +1012,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         let var_description = match var_origin {
             infer::MiscVariable(_) => String::new(),
             infer::PatternRegion(_) => " for pattern".to_string(),
-            infer::AddrOfRegion(_) => " for borrow expression".to_string(),
+            infer::BorrowRegion(_) => " for borrow expression".to_string(),
             infer::Autoref(_) => " for autoref".to_string(),
             infer::Coercion(_) => " for automatic coercion".to_string(),
             infer::BoundRegion(_, br, infer::FnCall) => {
@@ -1272,9 +1266,9 @@ fn suggest_precise_capturing<'tcx>(
     diag: &mut Diag<'_>,
 ) {
     let hir::OpaqueTy { bounds, origin, .. } =
-        tcx.hir_node_by_def_id(opaque_def_id).expect_item().expect_opaque_ty();
+        tcx.hir_node_by_def_id(opaque_def_id).expect_opaque_ty();
 
-    let hir::OpaqueTyOrigin::FnReturn(fn_def_id) = *origin else {
+    let hir::OpaqueTyOrigin::FnReturn { parent: fn_def_id, .. } = *origin else {
         return;
     };
 

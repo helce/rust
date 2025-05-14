@@ -1,7 +1,8 @@
 //@compile-flags: -Zmiri-disable-isolation
-//@only-target-linux: We only support tokio on Linux
+//@only-target: linux # We only support tokio on Linux
 
 use std::fs::remove_file;
+
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 

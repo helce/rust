@@ -1,11 +1,11 @@
-//@ignore-target-windows: only very limited libc on Windows
-//@ignore-target-apple: `sched_setaffinity` is not supported on macOS
+//@ignore-target: windows # only very limited libc on Windows
+//@ignore-target: apple # `sched_setaffinity` is not supported on macOS
 //@compile-flags: -Zmiri-disable-isolation -Zmiri-num-cpus=4
 
 fn main() {
-    use libc::{cpu_set_t, sched_setaffinity};
-
     use std::mem::size_of;
+
+    use libc::{cpu_set_t, sched_setaffinity};
 
     // If pid is zero, then the calling thread is used.
     const PID: i32 = 0;

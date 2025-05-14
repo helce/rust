@@ -3,14 +3,16 @@ use std::cmp;
 use rustc_ast as ast;
 use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
 use rustc_hir::lang_items::LangItem;
-use rustc_middle::mir::{self, AssertKind, BasicBlock, SwitchTargets, UnwindTerminateReason};
+use rustc_middle::mir::{
+    self, AssertKind, BasicBlock, InlineAsmMacro, SwitchTargets, UnwindTerminateReason,
+};
 use rustc_middle::ty::layout::{HasTyCtxt, LayoutOf, ValidityRequirement};
 use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
 use rustc_middle::ty::{self, Instance, Ty};
 use rustc_middle::{bug, span_bug};
 use rustc_session::config::OptLevel;
 use rustc_span::source_map::Spanned;
-use rustc_span::{sym, Span};
+use rustc_span::{Span, sym};
 use rustc_target::abi::call::{ArgAbi, FnAbi, PassMode, Reg};
 use rustc_target::abi::{self, HasDataLayout, WrappingRange};
 use rustc_target::spec::abi::Abi;
@@ -24,7 +26,7 @@ use crate::base::{self, is_call_from_compiler_builtins_to_upstream_monomorphizat
 use crate::common::{self, IntPredicate};
 use crate::errors::CompilerBuiltinsCannotCall;
 use crate::traits::*;
-use crate::{meth, MemFlags};
+use crate::{MemFlags, meth};
 
 // Indicates if we are in the middle of merging a BB's successor into it. This
 // can happen when BB jumps directly to its successor and the successor has no
@@ -915,32 +917,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     }
                 };
 
-                let args: Vec<_> = args
-                    .iter()
-                    .enumerate()
-                    .map(|(i, arg)| {
-                        // The indices passed to simd_shuffle in the
-                        // third argument must be constant. This is
-                        // checked by the type-checker.
-                        if i == 2 && intrinsic.name == sym::simd_shuffle {
-                            // FIXME: the simd_shuffle argument is actually an array,
-                            // not a vector, so we need this special hack to make sure
-                            // it is passed as an immediate. We should pass the
-                            // shuffle indices as a vector instead to avoid this hack.
-                            if let mir::Operand::Constant(constant) = &arg.node {
-                                let (llval, ty) = self.immediate_const_vector(bx, constant);
-                                return OperandRef {
-                                    val: Immediate(llval),
-                                    layout: bx.layout_of(ty),
-                                };
-                            } else {
-                                span_bug!(span, "shuffle indices must be constant");
-                            }
-                        }
-
-                        self.codegen_operand(bx, &arg.node)
-                    })
-                    .collect();
+                let args: Vec<_> =
+                    args.iter().map(|arg| self.codegen_operand(bx, &arg.node)).collect();
 
                 if matches!(intrinsic, ty::IntrinsicDef { name: sym::caller_location, .. }) {
                     let location = self
@@ -1020,7 +998,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         // To get a `*mut RcBox<Self>`, we just keep unwrapping newtypes until
                         // we get a value of a built-in pointer type.
                         //
-                        // This is also relevant for `Pin<&mut Self>`, where we need to peel the `Pin`.
+                        // This is also relevant for `Pin<&mut Self>`, where we need to peel the
+                        // `Pin`.
                         while !op.layout.ty.is_unsafe_ptr() && !op.layout.ty.is_ref() {
                             let (idx, _) = op.layout.non_1zst_field(bx).expect(
                                 "not exactly one non-1-ZST field in a `DispatchFromDyn` type",
@@ -1028,9 +1007,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                             op = op.extract_field(bx, idx);
                         }
 
-                        // now that we have `*dyn Trait` or `&dyn Trait`, split it up into its
+                        // Now that we have `*dyn Trait` or `&dyn Trait`, split it up into its
                         // data pointer and vtable. Look up the method in the vtable, and pass
-                        // the data pointer as the first argument
+                        // the data pointer as the first argument.
                         llfn = Some(meth::VirtualIndex::from_index(idx).get_fn(
                             bx,
                             meta,
@@ -1156,6 +1135,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         &mut self,
         helper: TerminatorCodegenHelper<'tcx>,
         bx: &mut Bx,
+        asm_macro: InlineAsmMacro,
         terminator: &mir::Terminator<'tcx>,
         template: &[ast::InlineAsmTemplatePiece],
         operands: &[mir::InlineAsmOperand<'tcx>],
@@ -1226,20 +1206,14 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             &operands,
             options,
             line_spans,
-            if options.contains(InlineAsmOptions::NORETURN) {
-                None
-            } else {
-                targets.get(0).copied()
-            },
+            if asm_macro.diverges(options) { None } else { targets.get(0).copied() },
             unwind,
             instance,
             mergeable_succ,
         )
     }
-}
 
-impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
-    pub fn codegen_block(&mut self, mut bb: mir::BasicBlock) {
+    pub(crate) fn codegen_block(&mut self, mut bb: mir::BasicBlock) {
         let llbb = match self.try_llbb(bb) {
             Some(llbb) => llbb,
             None => return,
@@ -1279,7 +1253,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         }
     }
 
-    pub fn codegen_block_as_unreachable(&mut self, bb: mir::BasicBlock) {
+    pub(crate) fn codegen_block_as_unreachable(&mut self, bb: mir::BasicBlock) {
         let llbb = match self.try_llbb(bb) {
             Some(llbb) => llbb,
             None => return,
@@ -1406,6 +1380,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             }
 
             mir::TerminatorKind::InlineAsm {
+                asm_macro,
                 template,
                 ref operands,
                 options,
@@ -1415,6 +1390,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
             } => self.codegen_asm_terminator(
                 helper,
                 bx,
+                asm_macro,
                 terminator,
                 template,
                 operands,
@@ -1464,8 +1440,9 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let (mut llval, align, by_ref) = match op.val {
             Immediate(_) | Pair(..) => match arg.mode {
                 PassMode::Indirect { attrs, .. } => {
-                    // Indirect argument may have higher alignment requirements than the type's alignment.
-                    // This can happen, e.g. when passing types with <4 byte alignment on the stack on x86.
+                    // Indirect argument may have higher alignment requirements than the type's
+                    // alignment. This can happen, e.g. when passing types with <4 byte alignment
+                    // on the stack on x86.
                     let required_align = match attrs.pointee_align {
                         Some(pointee_align) => cmp::max(pointee_align, arg.layout.align.abi),
                         None => arg.layout.align.abi,
@@ -1614,10 +1591,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         if let Some(slot) = self.personality_slot {
             slot
         } else {
-            let layout = cx.layout_of(Ty::new_tup(
-                cx.tcx(),
-                &[Ty::new_mut_ptr(cx.tcx(), cx.tcx().types.u8), cx.tcx().types.i32],
-            ));
+            let layout = cx.layout_of(Ty::new_tup(cx.tcx(), &[
+                Ty::new_mut_ptr(cx.tcx(), cx.tcx().types.u8),
+                cx.tcx().types.i32,
+            ]));
             let slot = PlaceRef::alloca(bx, layout);
             self.personality_slot = Some(slot);
             slot
@@ -1764,7 +1741,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
     }
 
     /// Like `llbb`, but may fail if the basic block should be skipped.
-    pub fn try_llbb(&mut self, bb: mir::BasicBlock) -> Option<Bx::BasicBlock> {
+    pub(crate) fn try_llbb(&mut self, bb: mir::BasicBlock) -> Option<Bx::BasicBlock> {
         match self.cached_llbbs[bb] {
             CachedLlbb::None => {
                 let llbb = Bx::append_block(self.cx, self.llfn, &format!("{bb:?}"));

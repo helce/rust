@@ -46,7 +46,7 @@ envs:
     RUSTC_RETRY_LINKER_ON_SEGFAULT: 1
     MACOSX_DEPLOYMENT_TARGET: 10.12
     MACOSX_STD_DEPLOYMENT_TARGET: 10.12
-    SELECT_XCODE: /Applications/Xcode_14.3.1.app
+    SELECT_XCODE: /Applications/Xcode_15.2.app
     NO_LLVM_ASSERTIONS: 1
     NO_DEBUG_ASSERTIONS: 1
     NO_OVERFLOW_CHECKS: 1
@@ -89,9 +89,11 @@ pr:
   - image: mingw-check-tidy
     continue_on_error: true
     <<: *job-linux-4c
-  - image: x86_64-gnu-llvm-17
+  - image: x86_64-gnu-llvm-18
     env:
       ENABLE_GCC_CODEGEN: "1"
+      # We are adding (temporarily) a dummy commit on the compiler
+      READ_ONLY_SRC: "0"
     <<: *job-linux-16c
   - image: x86_64-gnu-tools
     <<: *job-linux-16c
@@ -251,14 +253,15 @@ auto:
   - image: x86_64-gnu-distcheck
     <<: *job-linux-8c
 
-  - image: x86_64-gnu-llvm-18
+  - image: x86_64-gnu-llvm-19
     env:
       RUST_BACKTRACE: 1
     <<: *job-linux-8c
 
-  - image: x86_64-gnu-llvm-17
+  - image: x86_64-gnu-llvm-18
     env:
       RUST_BACKTRACE: 1
+      READ_ONLY_SRC: "0"
     <<: *job-linux-8c
 
   - image: x86_64-gnu-nopt
@@ -279,7 +282,7 @@ auto:
       RUST_CONFIGURE_ARGS: --enable-full-tools --enable-sanitizers --enable-profiler --set rust.jemalloc --set rust.lto=thin --set rust.codegen-units=1
       RUSTC_RETRY_LINKER_ON_SEGFAULT: 1
       MACOSX_DEPLOYMENT_TARGET: 10.12
-      SELECT_XCODE: /Applications/Xcode_14.3.1.app
+      SELECT_XCODE: /Applications/Xcode_15.2.app
       NO_LLVM_ASSERTIONS: 1
       NO_DEBUG_ASSERTIONS: 1
       NO_OVERFLOW_CHECKS: 1
@@ -295,7 +298,7 @@ auto:
       RUST_CONFIGURE_ARGS: --enable-sanitizers --enable-profiler --set rust.jemalloc --set target.aarch64-apple-ios-macabi.sanitizers=false --set target.x86_64-apple-ios-macabi.sanitizers=false
       RUSTC_RETRY_LINKER_ON_SEGFAULT: 1
       MACOSX_DEPLOYMENT_TARGET: 10.12
-      SELECT_XCODE: /Applications/Xcode_14.3.1.app
+      SELECT_XCODE: /Applications/Xcode_15.2.app
       NO_LLVM_ASSERTIONS: 1
       NO_DEBUG_ASSERTIONS: 1
       NO_OVERFLOW_CHECKS: 1
@@ -324,7 +327,7 @@ auto:
         --set llvm.ninja=false
         --set rust.lto=thin
       RUSTC_RETRY_LINKER_ON_SEGFAULT: 1
-      SELECT_XCODE: /Applications/Xcode_14.3.1.app
+      SELECT_XCODE: /Applications/Xcode_15.4.app
       USE_XCODE_CLANG: 1
       MACOSX_DEPLOYMENT_TARGET: 11.0
       MACOSX_STD_DEPLOYMENT_TARGET: 11.0
@@ -344,7 +347,7 @@ auto:
         --enable-profiler
         --set rust.jemalloc
       RUSTC_RETRY_LINKER_ON_SEGFAULT: 1
-      SELECT_XCODE: /Applications/Xcode_14.3.1.app
+      SELECT_XCODE: /Applications/Xcode_15.4.app
       USE_XCODE_CLANG: 1
       MACOSX_DEPLOYMENT_TARGET: 11.0
       MACOSX_STD_DEPLOYMENT_TARGET: 11.0
@@ -434,6 +437,7 @@ auto:
         --set rust.codegen-units=1
       SCRIPT: python x.py build --set rust.debug=true opt-dist && PGO_HOST=x86_64-pc-windows-msvc ./build/x86_64-pc-windows-msvc/stage0-tools-bin/opt-dist windows-ci -- python x.py dist bootstrap --include-default-paths
       DIST_REQUIRE_ALL_TOOLS: 1
+      CODEGEN_BACKENDS: llvm,cranelift
     <<: *job-windows-8c
 
   - image: dist-i686-msvc
@@ -446,6 +450,7 @@ auto:
         --enable-profiler
       SCRIPT: python x.py dist bootstrap --include-default-paths
       DIST_REQUIRE_ALL_TOOLS: 1
+      CODEGEN_BACKENDS: llvm,cranelift
     <<: *job-windows-8c
 
   - image: dist-aarch64-msvc
@@ -470,6 +475,7 @@ auto:
       NO_DOWNLOAD_CI_LLVM: 1
       SCRIPT: python x.py dist bootstrap --include-default-paths
       DIST_REQUIRE_ALL_TOOLS: 1
+      CODEGEN_BACKENDS: llvm,cranelift
     <<: *job-windows-8c
 
   - image: dist-x86_64-mingw
@@ -482,6 +488,7 @@ auto:
       # incompatible with LLVM downloads today).
       NO_DOWNLOAD_CI_LLVM: 1
       DIST_REQUIRE_ALL_TOOLS: 1
+      CODEGEN_BACKENDS: llvm,cranelift
     <<: *job-windows-8c
 
   - image: dist-x86_64-msvc-alt

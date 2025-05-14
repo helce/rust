@@ -1,4 +1,4 @@
-use std::any::{type_name, Any};
+use std::any::{Any, type_name};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
@@ -12,21 +12,21 @@ use std::{env, fs};
 
 use clap::ValueEnum;
 
+pub use crate::Compiler;
 use crate::core::build_steps::tool::{self, SourceType};
 use crate::core::build_steps::{
-    check, clean, clippy, compile, dist, doc, install, llvm, run, setup, test, vendor,
+    check, clean, clippy, compile, dist, doc, gcc, install, llvm, run, setup, test, vendor,
 };
 use crate::core::config::flags::{Color, Subcommand};
 use crate::core::config::{DryRun, SplitDebuginfo, TargetSelection};
 use crate::utils::cache::Cache;
-use crate::utils::exec::{command, BootstrapCommand};
+use crate::utils::exec::{BootstrapCommand, command};
 use crate::utils::helpers::{
-    self, add_dylib_path, add_link_lib_path, check_cfg_arg, exe, libdir, linker_args, linker_flags,
-    t, LldThreads,
+    self, LldThreads, add_dylib_path, add_link_lib_path, check_cfg_arg, exe, libdir, linker_args,
+    linker_flags, t,
 };
-pub use crate::Compiler;
 use crate::{
-    prepare_behaviour_dump_dir, Build, CLang, Crate, DocTests, GitRepo, Mode, EXTRA_CHECK_CFGS,
+    Build, CLang, Crate, DocTests, EXTRA_CHECK_CFGS, GitRepo, Mode, prepare_behaviour_dump_dir,
 };
 
 #[cfg(test)]
@@ -72,36 +72,40 @@ impl<'a> Deref for Builder<'a> {
 }
 
 pub trait Step: 'static + Clone + Debug + PartialEq + Eq + Hash {
-    /// `PathBuf` when directories are created or to return a `Compiler` once
-    /// it's been assembled.
+    /// Result type of `Step::run`.
     type Output: Clone;
 
-    /// Whether this step is run by default as part of its respective phase.
-    /// `true` here can still be overwritten by `should_run` calling `default_condition`.
+    /// Whether this step is run by default as part of its respective phase, as defined by the `describe`
+    /// macro in [`Builder::get_step_descriptions`].
+    ///
+    /// Note: Even if set to `true`, it can still be overridden with [`ShouldRun::default_condition`]
+    /// by `Step::should_run`.
     const DEFAULT: bool = false;
 
     /// If true, then this rule should be skipped if --target was specified, but --host was not
     const ONLY_HOSTS: bool = false;
 
-    /// Primary function to execute this rule. Can call `builder.ensure()`
-    /// with other steps to run those.
+    /// Primary function to implement `Step` logic.
     ///
-    /// This gets called twice during a normal `./x.py` execution: first
-    /// with `dry_run() == true`, and then for real.
+    /// This function can be triggered in two ways:
+    ///     1. Directly from [`Builder::execute_cli`].
+    ///     2. Indirectly by being called from other `Step`s using [`Builder::ensure`].
+    ///
+    /// When called with [`Builder::execute_cli`] (as done by `Build::build`), this function executed twice:
+    ///     - First in "dry-run" mode to validate certain things (like cyclic Step invocations,
+    ///         directory creation, etc) super quickly.
+    ///     - Then it's called again to run the actual, very expensive process.
+    ///
+    /// When triggered indirectly from other `Step`s, it may still run twice (as dry-run and real mode)
+    /// depending on the `Step::run` implementation of the caller.
     fn run(self, builder: &Builder<'_>) -> Self::Output;
 
-    /// When bootstrap is passed a set of paths, this controls whether this rule
-    /// will execute. However, it does not get called in a "default" context
-    /// when we are not passed any paths; in that case, `make_run` is called
-    /// directly.
+    /// Determines if this `Step` should be run when given specific paths (e.g., `x build $path`).
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_>;
 
-    /// Builds up a "root" rule, either as a default rule or from a path passed
-    /// to us.
-    ///
-    /// When path is `None`, we are executing in a context where no paths were
-    /// passed. When `./x.py build` is run, for example, this rule could get
-    /// called if it is in the correct list below with a path of `None`.
+    /// Called directly by the bootstrap `Step` handler when not triggered indirectly by other `Step`s using [`Builder::ensure`].
+    /// For example, `./x.py test bootstrap` runs this for `test::Bootstrap`. Similarly, `./x.py test` runs it for every step
+    /// that is listed by the `describe` macro in [`Builder::get_step_descriptions`].
     fn make_run(_run: RunConfig<'_>) {
         // It is reasonable to not have an implementation of make_run for rules
         // who do not want to get called from the root context. This means that
@@ -314,33 +318,29 @@ const PATH_REMAP: &[(&str, &[&str])] = &[
     // actual path is `proc-macro-srv-cli`
     ("rust-analyzer-proc-macro-srv", &["src/tools/rust-analyzer/crates/proc-macro-srv-cli"]),
     // Make `x test tests` function the same as `x t tests/*`
-    (
-        "tests",
-        &[
-            // tidy-alphabetical-start
-            "tests/assembly",
-            "tests/codegen",
-            "tests/codegen-units",
-            "tests/coverage",
-            "tests/coverage-run-rustdoc",
-            "tests/crashes",
-            "tests/debuginfo",
-            "tests/incremental",
-            "tests/mir-opt",
-            "tests/pretty",
-            "tests/run-make",
-            "tests/run-pass-valgrind",
-            "tests/rustdoc",
-            "tests/rustdoc-gui",
-            "tests/rustdoc-js",
-            "tests/rustdoc-js-std",
-            "tests/rustdoc-json",
-            "tests/rustdoc-ui",
-            "tests/ui",
-            "tests/ui-fulldeps",
-            // tidy-alphabetical-end
-        ],
-    ),
+    ("tests", &[
+        // tidy-alphabetical-start
+        "tests/assembly",
+        "tests/codegen",
+        "tests/codegen-units",
+        "tests/coverage",
+        "tests/coverage-run-rustdoc",
+        "tests/crashes",
+        "tests/debuginfo",
+        "tests/incremental",
+        "tests/mir-opt",
+        "tests/pretty",
+        "tests/run-make",
+        "tests/rustdoc",
+        "tests/rustdoc-gui",
+        "tests/rustdoc-js",
+        "tests/rustdoc-js-std",
+        "tests/rustdoc-json",
+        "tests/rustdoc-ui",
+        "tests/ui",
+        "tests/ui-fulldeps",
+        // tidy-alphabetical-end
+    ]),
 ];
 
 fn remap_paths(paths: &mut Vec<PathBuf>) {
@@ -417,6 +417,15 @@ impl StepDescription {
             .iter()
             .map(|desc| (desc.should_run)(ShouldRun::new(builder, desc.kind)))
             .collect::<Vec<_>>();
+
+        if builder.download_rustc() && (builder.kind == Kind::Dist || builder.kind == Kind::Install)
+        {
+            eprintln!(
+                "ERROR: '{}' subcommand is incompatible with `rust.download-rustc`.",
+                builder.kind.as_str()
+            );
+            crate::exit!(1);
+        }
 
         // sanity checks on rules
         for (desc, should_run) in v.iter().zip(&should_runs) {
@@ -793,11 +802,13 @@ impl<'a> Builder<'a> {
                 tool::Clippy,
                 tool::CargoClippy,
                 llvm::Llvm,
+                gcc::Gcc,
                 llvm::Sanitizers,
                 tool::Rustfmt,
                 tool::Miri,
                 tool::CargoMiri,
                 llvm::Lld,
+                llvm::Enzyme,
                 llvm::CrtBeginEnd,
                 tool::RustdocGUITest,
                 tool::OptimizedDist,
@@ -853,7 +864,6 @@ impl<'a> Builder<'a> {
                 test::Tidy,
                 test::Ui,
                 test::Crashes,
-                test::RunPassValgrind,
                 test::Coverage,
                 test::CoverageMap,
                 test::CoverageRun,
@@ -942,6 +952,8 @@ impl<'a> Builder<'a> {
                 doc::Bootstrap,
                 doc::Releases,
                 doc::RunMakeSupport,
+                doc::BuildHelper,
+                doc::Compiletest,
             ),
             Kind::Dist => describe!(
                 dist::Docs,
@@ -999,7 +1011,9 @@ impl<'a> Builder<'a> {
                 run::GenerateWindowsSys,
                 run::GenerateCompletions,
             ),
-            Kind::Setup => describe!(setup::Profile, setup::Hook, setup::Link, setup::Vscode),
+            Kind::Setup => {
+                describe!(setup::Profile, setup::Hook, setup::Link, setup::Editor)
+            }
             Kind::Clean => describe!(clean::CleanAll, clean::Rustc, clean::Std),
             Kind::Vendor => describe!(vendor::Vendor),
             // special-cased in Build::build()
@@ -1298,8 +1312,12 @@ impl<'a> Builder<'a> {
 
     pub fn cargo_clippy_cmd(&self, run_compiler: Compiler) -> BootstrapCommand {
         if run_compiler.stage == 0 {
-            // `ensure(Clippy { stage: 0 })` *builds* clippy with stage0, it doesn't use the beta clippy.
-            let cargo_clippy = self.build.config.download_clippy();
+            let cargo_clippy = self
+                .config
+                .initial_cargo_clippy
+                .clone()
+                .unwrap_or_else(|| self.build.config.download_clippy());
+
             let mut cmd = command(cargo_clippy);
             cmd.env("CARGO", &self.initial_cargo);
             return cmd;
@@ -1532,7 +1550,9 @@ impl<'a> Builder<'a> {
             // rustc_llvm. But if LLVM is stale, that'll be a tiny amount
             // of work comparatively, and we'd likely need to rebuild it anyway,
             // so that's okay.
-            if crate::core::build_steps::llvm::prebuilt_llvm_config(self, target).should_build() {
+            if crate::core::build_steps::llvm::prebuilt_llvm_config(self, target, false)
+                .should_build()
+            {
                 cargo.env("RUST_CHECK", "1");
             }
         }
@@ -1557,8 +1577,8 @@ impl<'a> Builder<'a> {
         let libdir = self.rustc_libdir(compiler);
 
         let sysroot_str = sysroot.as_os_str().to_str().expect("sysroot should be UTF-8");
-        if !matches!(self.config.dry_run, DryRun::SelfCheck) {
-            self.verbose_than(0, || println!("using sysroot {sysroot_str}"));
+        if self.is_verbose() && !matches!(self.config.dry_run, DryRun::SelfCheck) {
+            println!("using sysroot {sysroot_str}");
         }
 
         let mut rustflags = Rustflags::new(target);
@@ -1612,6 +1632,15 @@ impl<'a> Builder<'a> {
             rustflags.arg("-Csymbol-mangling-version=v0");
         } else {
             rustflags.arg("-Csymbol-mangling-version=legacy");
+        }
+
+        // FIXME: the following components don't build with `-Zrandomize-layout` yet:
+        // - wasm-component-ld, due to the `wast`crate
+        // - rust-analyzer, due to the rowan crate
+        // so we exclude entire categories of steps here due to lack of fine-grained control over
+        // rustflags.
+        if self.config.rust_randomize_layout && mode != Mode::ToolStd && mode != Mode::ToolRustc {
+            rustflags.arg("-Zrandomize-layout");
         }
 
         // Enable compile-time checking of `cfg` names, values and Cargo `features`.
@@ -1669,10 +1698,24 @@ impl<'a> Builder<'a> {
         match mode {
             Mode::Std | Mode::ToolBootstrap | Mode::ToolStd => {}
             Mode::Rustc | Mode::Codegen | Mode::ToolRustc => {
-                // Build proc macros both for the host and the target
+                // Build proc macros both for the host and the target unless proc-macros are not
+                // supported by the target.
                 if target != compiler.host && cmd_kind != Kind::Check {
-                    cargo.arg("-Zdual-proc-macros");
-                    rustflags.arg("-Zdual-proc-macros");
+                    let error = command(self.rustc(compiler))
+                        .arg("--target")
+                        .arg(target.rustc_target_arg())
+                        .arg("--print=file-names")
+                        .arg("--crate-type=proc-macro")
+                        .arg("-")
+                        .run_capture(self)
+                        .stderr();
+                    let not_supported = error
+                        .lines()
+                        .any(|line| line.contains("unsupported crate type `proc-macro`"));
+                    if !not_supported {
+                        cargo.arg("-Zdual-proc-macros");
+                        rustflags.arg("-Zdual-proc-macros");
+                    }
                 }
             }
         }
@@ -1998,6 +2041,11 @@ impl<'a> Builder<'a> {
             cargo.env("RUSTC_BACKTRACE_ON_ICE", "1");
         }
 
+        if self.is_verbose() {
+            // This provides very useful logs especially when debugging build cache-related stuff.
+            cargo.env("CARGO_LOG", "cargo::core::compiler::fingerprint=info");
+        }
+
         cargo.env("RUSTC_VERBOSE", self.verbosity.to_string());
 
         // Downstream forks of the Rust compiler might want to use a custom libc to add support for
@@ -2188,6 +2236,9 @@ impl<'a> Builder<'a> {
             if let Some(mir_opt_level) = self.config.rust_validate_mir_opts {
                 rustflags.arg("-Zvalidate-mir");
                 rustflags.arg(&format!("-Zmir-opt-level={mir_opt_level}"));
+            }
+            if self.config.rust_randomize_layout {
+                rustflags.arg("--cfg=randomized_layouts");
             }
             // Always enable inlining MIR when building the standard library.
             // Without this flag, MIR inlining is disabled when incremental compilation is enabled.
@@ -2440,7 +2491,16 @@ impl Cargo {
         cmd_kind: Kind,
     ) -> Cargo {
         let mut cargo = builder.cargo(compiler, mode, source_type, target, cmd_kind);
-        cargo.configure_linker(builder);
+
+        match cmd_kind {
+            // No need to configure the target linker for these command types,
+            // as they don't invoke rustc at all.
+            Kind::Clean | Kind::Suggest | Kind::Format | Kind::Setup => {}
+            _ => {
+                cargo.configure_linker(builder);
+            }
+        }
+
         cargo
     }
 

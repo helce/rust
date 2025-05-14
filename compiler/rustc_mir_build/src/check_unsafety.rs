@@ -12,11 +12,11 @@ use rustc_middle::thir::visit::Visitor;
 use rustc_middle::thir::*;
 use rustc_middle::ty::print::with_no_trimmed_paths;
 use rustc_middle::ty::{self, ParamEnv, Ty, TyCtxt};
-use rustc_session::lint::builtin::{DEPRECATED_SAFE_2024, UNSAFE_OP_IN_UNSAFE_FN, UNUSED_UNSAFE};
 use rustc_session::lint::Level;
+use rustc_session::lint::builtin::{DEPRECATED_SAFE_2024, UNSAFE_OP_IN_UNSAFE_FN, UNUSED_UNSAFE};
 use rustc_span::def_id::{DefId, LocalDefId};
 use rustc_span::symbol::Symbol;
-use rustc_span::{sym, Span};
+use rustc_span::{Span, sym};
 
 use crate::build::ExprCategory;
 use crate::errors::*;
@@ -322,14 +322,15 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                 | PatKind::DerefPattern { .. }
                 | PatKind::Range { .. }
                 | PatKind::Slice { .. }
-                | PatKind::Array { .. } => {
+                | PatKind::Array { .. }
+                // Never constitutes a witness of uninhabitedness.
+                | PatKind::Never => {
                     self.requires_unsafe(pat.span, AccessToUnionField);
                     return; // we can return here since this already requires unsafe
                 }
-                // wildcard/never don't take anything
+                // wildcard doesn't read anything.
                 PatKind::Wild |
-                PatKind::Never |
-                // these just wrap other patterns
+                // these just wrap other patterns, which we recurse on below.
                 PatKind::Or { .. } |
                 PatKind::InlineConstant { .. } |
                 PatKind::AscribeUserType { .. } |
@@ -468,18 +469,14 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                     };
                     self.requires_unsafe(expr.span, CallToUnsafeFunction(func_id));
                 } else if let &ty::FnDef(func_did, _) = self.thir[fun].ty.kind() {
-                    // If the called function has explicit target features the calling function hasn't,
+                    // If the called function has target features the calling function hasn't,
                     // the call requires `unsafe`. Don't check this on wasm
                     // targets, though. For more information on wasm see the
                     // is_like_wasm check in hir_analysis/src/collect.rs
-                    // Implicit target features are OK because they are either a consequence of some
-                    // explicit target feature (which is checked to be present in the caller) or
-                    // come from a witness argument.
                     let callee_features = &self.tcx.codegen_fn_attrs(func_did).target_features;
                     if !self.tcx.sess.target.options.is_like_wasm
                         && !callee_features.iter().all(|feature| {
-                            feature.implied
-                                || self.body_target_features.iter().any(|f| f.name == feature.name)
+                            self.body_target_features.iter().any(|f| f.name == feature.name)
                         })
                     {
                         let missing: Vec<_> = callee_features
@@ -502,10 +499,11 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                             .copied()
                             .filter(|feature| missing.contains(feature))
                             .collect();
-                        self.requires_unsafe(
-                            expr.span,
-                            CallToFunctionWith { function: func_did, missing, build_enabled },
-                        );
+                        self.requires_unsafe(expr.span, CallToFunctionWith {
+                            function: func_did,
+                            missing,
+                            build_enabled,
+                        });
                     }
                 }
             }
@@ -553,16 +551,10 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                 user_ty: _,
                 fields: _,
                 base: _,
-            }) => {
-                match self.tcx.layout_scalar_valid_range(adt_def.did()) {
-                    (Bound::Unbounded, Bound::Unbounded) => {}
-                    _ => self.requires_unsafe(expr.span, InitializingTypeWith),
-                }
-                if !self.tcx.struct_target_features(adt_def.did()).is_empty() {
-                    self.requires_unsafe(expr.span, ConstructingTargetFeaturesType)
-                }
-            }
-
+            }) => match self.tcx.layout_scalar_valid_range(adt_def.did()) {
+                (Bound::Unbounded, Bound::Unbounded) => {}
+                _ => self.requires_unsafe(expr.span, InitializingTypeWith),
+            },
             ExprKind::Closure(box ClosureExpr {
                 closure_id,
                 args: _,
@@ -664,7 +656,6 @@ enum UnsafeOpKind {
     CallToUnsafeFunction(Option<DefId>),
     UseOfInlineAssembly,
     InitializingTypeWith,
-    ConstructingTargetFeaturesType,
     UseOfMutableStatic,
     UseOfExternStatic,
     DerefOfRawPointer,
@@ -742,15 +733,6 @@ impl UnsafeOpKind {
                 hir_id,
                 span,
                 UnsafeOpInUnsafeFnInitializingTypeWithRequiresUnsafe {
-                    span,
-                    unsafe_not_inherited_note,
-                },
-            ),
-            ConstructingTargetFeaturesType => tcx.emit_node_span_lint(
-                UNSAFE_OP_IN_UNSAFE_FN,
-                hir_id,
-                span,
-                UnsafeOpInUnsafeFnInitializingTypeWithTargetFeatureRequiresUnsafe {
                     span,
                     unsafe_not_inherited_note,
                 },
@@ -908,20 +890,6 @@ impl UnsafeOpKind {
             }
             InitializingTypeWith => {
                 dcx.emit_err(InitializingTypeWithRequiresUnsafe {
-                    span,
-                    unsafe_not_inherited_note,
-                });
-            }
-            ConstructingTargetFeaturesType if unsafe_op_in_unsafe_fn_allowed => {
-                dcx.emit_err(
-                    InitializingTypeWithTargetFeatureRequiresUnsafeUnsafeOpInUnsafeFnAllowed {
-                        span,
-                        unsafe_not_inherited_note,
-                    },
-                );
-            }
-            ConstructingTargetFeaturesType => {
-                dcx.emit_err(InitializingTypeWithTargetFeatureRequiresUnsafe {
                     span,
                     unsafe_not_inherited_note,
                 });
@@ -1085,11 +1053,9 @@ pub(crate) fn check_unsafety(tcx: TyCtxt<'_>, def: LocalDefId) {
     warnings.sort_by_key(|w| w.block_span);
     for UnusedUnsafeWarning { hir_id, block_span, enclosing_unsafe } in warnings {
         let block_span = tcx.sess.source_map().guess_head_span(block_span);
-        tcx.emit_node_span_lint(
-            UNUSED_UNSAFE,
-            hir_id,
-            block_span,
-            UnusedUnsafe { span: block_span, enclosing: enclosing_unsafe },
-        );
+        tcx.emit_node_span_lint(UNUSED_UNSAFE, hir_id, block_span, UnusedUnsafe {
+            span: block_span,
+            enclosing: enclosing_unsafe,
+        });
     }
 }

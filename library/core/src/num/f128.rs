@@ -288,7 +288,7 @@ impl f128 {
     // concerns about portability, so this implementation is for
     // private use internally.
     #[inline]
-    #[rustc_const_unstable(feature = "const_float_classify", issue = "72505")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     pub(crate) const fn abs_private(self) -> f128 {
         // SAFETY: This transmutation is fine just like in `to_bits`/`from_bits`.
         unsafe {
@@ -319,7 +319,7 @@ impl f128 {
     #[inline]
     #[must_use]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_classify", issue = "72505")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     pub const fn is_infinite(self) -> bool {
         (self == f128::INFINITY) | (self == f128::NEG_INFINITY)
     }
@@ -346,7 +346,7 @@ impl f128 {
     #[inline]
     #[must_use]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_classify", issue = "72505")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     pub const fn is_finite(self) -> bool {
         // There's no need to handle NaN separately: if self is NaN,
         // the comparison is not true, exactly as desired.
@@ -380,7 +380,7 @@ impl f128 {
     #[inline]
     #[must_use]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_classify", issue = "72505")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     pub const fn is_subnormal(self) -> bool {
         matches!(self.classify(), FpCategory::Subnormal)
     }
@@ -412,7 +412,7 @@ impl f128 {
     #[inline]
     #[must_use]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_classify", issue = "72505")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     pub const fn is_normal(self) -> bool {
         matches!(self.classify(), FpCategory::Normal)
     }
@@ -437,12 +437,8 @@ impl f128 {
     /// ```
     #[inline]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_classify", issue = "72505")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     pub const fn classify(self) -> FpCategory {
-        // Other float types suffer from various platform bugs that violate the usual IEEE semantics
-        // and also make bitwise classification not always work reliably. However, `f128` cannot fit
-        // into any other float types so this is not a concern, and we can rely on bit patterns.
-
         let bits = self.to_bits();
         match (bits & Self::MAN_MASK, bits & Self::EXP_MASK) {
             (0, Self::EXP_MASK) => FpCategory::Infinite,
@@ -914,7 +910,7 @@ impl f128 {
     /// ```
     #[inline]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_bits_conv", issue = "72447")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     #[must_use = "this returns the result of the operation, without modifying the original"]
     pub const fn to_bits(self) -> u128 {
         // SAFETY: `u128` is a plain old datatype so we can always transmute to it.
@@ -963,7 +959,7 @@ impl f128 {
     #[inline]
     #[must_use]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_bits_conv", issue = "72447")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     pub const fn from_bits(v: u128) -> Self {
         // It turns out the safety issues with sNaN were overblown! Hooray!
         // SAFETY: `u128` is a plain old datatype so we can always transmute from it.
@@ -990,7 +986,7 @@ impl f128 {
     /// ```
     #[inline]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_bits_conv", issue = "72447")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     #[must_use = "this returns the result of the operation, without modifying the original"]
     pub const fn to_be_bytes(self) -> [u8; 16] {
         self.to_bits().to_be_bytes()
@@ -1016,7 +1012,7 @@ impl f128 {
     /// ```
     #[inline]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_bits_conv", issue = "72447")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     #[must_use = "this returns the result of the operation, without modifying the original"]
     pub const fn to_le_bytes(self) -> [u8; 16] {
         self.to_bits().to_le_bytes()
@@ -1053,7 +1049,7 @@ impl f128 {
     /// ```
     #[inline]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_bits_conv", issue = "72447")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     #[must_use = "this returns the result of the operation, without modifying the original"]
     pub const fn to_ne_bytes(self) -> [u8; 16] {
         self.to_bits().to_ne_bytes()
@@ -1081,7 +1077,7 @@ impl f128 {
     #[inline]
     #[must_use]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_bits_conv", issue = "72447")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     pub const fn from_be_bytes(bytes: [u8; 16]) -> Self {
         Self::from_bits(u128::from_be_bytes(bytes))
     }
@@ -1108,7 +1104,7 @@ impl f128 {
     #[inline]
     #[must_use]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_bits_conv", issue = "72447")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     pub const fn from_le_bytes(bytes: [u8; 16]) -> Self {
         Self::from_bits(u128::from_le_bytes(bytes))
     }
@@ -1145,7 +1141,7 @@ impl f128 {
     #[inline]
     #[must_use]
     #[unstable(feature = "f128", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_bits_conv", issue = "72447")]
+    #[rustc_const_unstable(feature = "f128", issue = "116909")]
     pub const fn from_ne_bytes(bytes: [u8; 16]) -> Self {
         Self::from_bits(u128::from_ne_bytes(bytes))
     }

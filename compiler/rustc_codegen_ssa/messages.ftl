@@ -82,7 +82,7 @@ codegen_ssa_invalid_monomorphization_basic_integer_type = invalid monomorphizati
 
 codegen_ssa_invalid_monomorphization_cannot_return = invalid monomorphization of `{$name}` intrinsic: cannot return `{$ret_ty}`, expected `u{$expected_int_bits}` or `[u8; {$expected_bytes}]`
 
-codegen_ssa_invalid_monomorphization_cast_fat_pointer = invalid monomorphization of `{$name}` intrinsic: cannot cast fat pointer `{$ty}`
+codegen_ssa_invalid_monomorphization_cast_wide_pointer = invalid monomorphization of `{$name}` intrinsic: cannot cast wide pointer `{$ty}`
 
 codegen_ssa_invalid_monomorphization_expected_element_type = invalid monomorphization of `{$name}` intrinsic: expected element type `{$expected_element}` of second argument `{$second_arg}` to be a pointer to the element type `{$in_elem}` of the first argument `{$in_ty}`, found `{$expected_element}` != `{$mutability} {$in_elem}`
 
@@ -132,7 +132,7 @@ codegen_ssa_invalid_monomorphization_simd_return = invalid monomorphization of `
 
 codegen_ssa_invalid_monomorphization_simd_second = invalid monomorphization of `{$name}` intrinsic: expected SIMD second type, found non-SIMD `{$ty}`
 
-codegen_ssa_invalid_monomorphization_simd_shuffle = invalid monomorphization of `{$name}` intrinsic: simd_shuffle index must be an array of `u32`, got `{$ty}`
+codegen_ssa_invalid_monomorphization_simd_shuffle = invalid monomorphization of `{$name}` intrinsic: simd_shuffle index must be a SIMD vector of `u32`, got `{$ty}`
 
 codegen_ssa_invalid_monomorphization_simd_third = invalid monomorphization of `{$name}` intrinsic: expected SIMD third type, found non-SIMD `{$ty}`
 
@@ -182,6 +182,8 @@ codegen_ssa_malformed_cgu_name =
 codegen_ssa_metadata_object_file_write = error writing metadata object file: {$error}
 
 codegen_ssa_missing_cpp_build_tool_component = or a necessary component may be missing from the "C++ build tools" workload
+
+codegen_ssa_missing_features = add the missing features in a `target_feature` attribute
 
 codegen_ssa_missing_memory_ordering = Atomic intrinsic missing memory ordering
 
@@ -237,6 +239,9 @@ codegen_ssa_stripping_debug_info_failed = stripping debug info with `{$util}` fa
     .note = {$output}
 
 codegen_ssa_symbol_file_write_failure = failed to write symbols file: {$error}
+
+codegen_ssa_target_feature_disable_or_enable =
+    the target features {$features} must all be either enabled or disabled together
 
 codegen_ssa_target_feature_safe_trait = `#[target_feature(..)]` cannot be applied to safe trait method
     .label = cannot be applied to safe trait method
