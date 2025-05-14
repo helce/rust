@@ -11,7 +11,6 @@
 // wasm and nvptx targets don't produce rlib files that object can parse.
 //@ ignore-wasm
 //@ ignore-nvptx64
-//@ only-nightly
 
 #![deny(warnings)]
 

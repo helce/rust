@@ -13,7 +13,6 @@
 //! - thumbv7m-none-eabi (Bare Cortex-M3)
 
 //@ only-thumb
-//@ only-nightly
 
 use run_make_support::{cargo, cmd, env, env_var, target};
 
