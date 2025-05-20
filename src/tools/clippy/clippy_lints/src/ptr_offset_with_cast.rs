@@ -91,12 +91,12 @@ fn expr_as_ptr_offset_call<'tcx>(
     cx: &LateContext<'tcx>,
     expr: &'tcx Expr<'_>,
 ) -> Option<(&'tcx Expr<'tcx>, &'tcx Expr<'tcx>, Method)> {
-    if let ExprKind::MethodCall(path_segment, arg_0, [arg_1, ..], _) = &expr.kind {
+    if let ExprKind::MethodCall(path_segment, arg_0, [arg_1], _) = &expr.kind {
         if is_expr_ty_raw_ptr(cx, arg_0) {
             if path_segment.ident.name == sym::offset {
                 return Some((arg_0, arg_1, Method::Offset));
             }
-            if path_segment.ident.name == sym!(wrapping_offset) {
+            if path_segment.ident.name.as_str() == "wrapping_offset" {
                 return Some((arg_0, arg_1, Method::WrappingOffset));
             }
         }

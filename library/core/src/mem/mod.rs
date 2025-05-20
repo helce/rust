@@ -857,7 +857,6 @@ pub fn take<T: Default>(dest: &mut T) -> T {
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[must_use = "if you don't need the old value, you can just assign the new value directly"]
-#[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
 #[rustc_const_stable(feature = "const_replace", since = "1.83.0")]
 #[cfg_attr(not(test), rustc_diagnostic_item = "mem_replace")]
 pub const fn replace<T>(dest: &mut T, src: T) -> T {
@@ -1255,11 +1254,9 @@ impl<T> SizedTypeProperties for T {}
 ///
 /// Nested field accesses may be used, but not array indexes.
 ///
-/// Enum variants may be traversed as if they were fields. Variants themselves do
-/// not have an offset.
-///
-/// However, on stable only a single field name is supported, which blocks the use of
-/// enum support.
+/// If the nightly-only feature `offset_of_enum` is enabled,
+/// variants may be traversed as if they were fields.
+/// Variants themselves do not have an offset.
 ///
 /// Visibility is respected - all types and fields must be visible to the call site:
 ///

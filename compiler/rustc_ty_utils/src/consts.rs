@@ -1,5 +1,6 @@
 use std::iter;
 
+use rustc_abi::{FIRST_VARIANT, VariantIdx};
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalDefId;
@@ -11,7 +12,6 @@ use rustc_middle::ty::abstract_const::CastKind;
 use rustc_middle::ty::{self, Expr, TyCtxt, TypeVisitableExt};
 use rustc_middle::{bug, mir, thir};
 use rustc_span::Span;
-use rustc_target::abi::{FIRST_VARIANT, VariantIdx};
 use tracing::{debug, instrument};
 
 use crate::errors::{GenericConstantTooComplex, GenericConstantTooComplexSub};
@@ -406,7 +406,7 @@ fn thir_abstract_const<'tcx>(
     tcx: TyCtxt<'tcx>,
     def: LocalDefId,
 ) -> Result<Option<ty::EarlyBinder<'tcx, ty::Const<'tcx>>>, ErrorGuaranteed> {
-    if !tcx.features().generic_const_exprs {
+    if !tcx.features().generic_const_exprs() {
         return Ok(None);
     }
 

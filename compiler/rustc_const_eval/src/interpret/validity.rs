@@ -11,34 +11,35 @@ use std::num::NonZero;
 
 use either::{Left, Right};
 use hir::def::DefKind;
+use rustc_abi::{
+    BackendRepr, FieldIdx, FieldsShape, Scalar as ScalarAbi, Size, VariantIdx, Variants,
+    WrappingRange,
+};
 use rustc_ast::Mutability;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir as hir;
 use rustc_middle::bug;
 use rustc_middle::mir::interpret::ValidationErrorKind::{self, *};
 use rustc_middle::mir::interpret::{
-    ExpectedKind, InterpError, InterpErrorInfo, InvalidMetaKind, Misalignment, PointerKind,
-    Provenance, UnsupportedOpInfo, ValidationErrorInfo, alloc_range, interp_ok,
+    ExpectedKind, InterpErrorKind, InvalidMetaKind, Misalignment, PointerKind, Provenance,
+    UnsupportedOpInfo, ValidationErrorInfo, alloc_range, interp_ok,
 };
 use rustc_middle::ty::layout::{LayoutCx, LayoutOf, TyAndLayout};
 use rustc_middle::ty::{self, Ty};
 use rustc_span::symbol::{Symbol, sym};
-use rustc_target::abi::{
-    Abi, FieldIdx, FieldsShape, Scalar as ScalarAbi, Size, VariantIdx, Variants, WrappingRange,
-};
 use tracing::trace;
 
 use super::machine::AllocMap;
 use super::{
-    AllocId, AllocKind, CheckInAllocMsg, GlobalAlloc, ImmTy, Immediate, InterpCx, InterpResult,
-    MPlaceTy, Machine, MemPlaceMeta, PlaceTy, Pointer, Projectable, Scalar, ValueVisitor, err_ub,
+    AllocId, CheckInAllocMsg, GlobalAlloc, ImmTy, Immediate, InterpCx, InterpResult, MPlaceTy,
+    Machine, MemPlaceMeta, PlaceTy, Pointer, Projectable, Scalar, ValueVisitor, err_ub,
     format_interp_error,
 };
 
 // for the validation errors
 #[rustfmt::skip]
-use super::InterpError::UndefinedBehavior as Ub;
-use super::InterpError::Unsupported as Unsup;
+use super::InterpErrorKind::UndefinedBehavior as Ub;
+use super::InterpErrorKind::Unsupported as Unsup;
 use super::UndefinedBehaviorInfo::*;
 use super::UnsupportedOpInfo::*;
 
@@ -97,20 +98,19 @@ macro_rules! try_validation {
     ($e:expr, $where:expr,
     $( $( $p:pat_param )|+ => $kind: expr ),+ $(,)?
     ) => {{
-        $e.map_err(|e| {
+        $e.map_err_kind(|e| {
             // We catch the error and turn it into a validation failure. We are okay with
             // allocation here as this can only slow down builds that fail anyway.
-            let (kind, backtrace) = e.into_parts();
-            match kind {
+            match e {
                 $(
                     $($p)|+ => {
                         err_validation_failure!(
                             $where,
                             $kind
-                        ).into()
+                        )
                     }
                 ),+,
-                _ => InterpErrorInfo::from_parts(kind, backtrace),
+                e => e,
             }
         })?
     }};
@@ -423,7 +423,7 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
         // Reset provenance: ensure slice tail metadata does not preserve provenance,
         // and ensure all pointers do not preserve partial provenance.
         if self.reset_provenance_and_padding {
-            if matches!(imm.layout.abi, Abi::Scalar(..)) {
+            if matches!(imm.layout.backend_repr, BackendRepr::Scalar(..)) {
                 // A thin pointer. If it has provenance, we don't have to do anything.
                 // If it does not, ensure we clear the provenance in memory.
                 if matches!(imm.to_scalar(), Scalar::Int(..)) {
@@ -448,7 +448,7 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
         meta: MemPlaceMeta<M::Provenance>,
         pointee: TyAndLayout<'tcx>,
     ) -> InterpResult<'tcx> {
-        let tail = self.ecx.tcx.struct_tail_for_codegen(pointee.ty, self.ecx.param_env);
+        let tail = self.ecx.tcx.struct_tail_for_codegen(pointee.ty, self.ecx.typing_env);
         match tail.kind() {
             ty::Dynamic(data, _, ty::Dyn) => {
                 let vtable = meta.unwrap_meta().to_pointer(self.ecx)?;
@@ -543,7 +543,7 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
             throw_validation_failure!(self.path, NullPtr { ptr_kind })
         }
         // Do not allow references to uninhabited types.
-        if place.layout.abi.is_uninhabited() {
+        if place.layout.is_uninhabited() {
             let ty = place.layout.ty;
             throw_validation_failure!(self.path, PtrToUninhabited { ptr_kind, ty })
         }
@@ -557,9 +557,20 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
                 if let Ok((alloc_id, _offset, _prov)) =
                     self.ecx.ptr_try_get_alloc_id(place.ptr(), 0)
                 {
-                    if let Some(GlobalAlloc::Static(did)) =
-                        self.ecx.tcx.try_get_global_alloc(alloc_id)
-                    {
+                    // Everything should be already interned.
+                    let Some(global_alloc) = self.ecx.tcx.try_get_global_alloc(alloc_id) else {
+                        assert!(self.ecx.memory.alloc_map.get(alloc_id).is_none());
+                        // We can't have *any* references to non-existing allocations in const-eval
+                        // as the rest of rustc isn't happy with them... so we throw an error, even
+                        // though for zero-sized references this isn't really UB.
+                        // A potential future alternative would be to resurrect this as a zero-sized allocation
+                        // (which codegen will then compile to an aligned dummy pointer anyway).
+                        throw_validation_failure!(self.path, DanglingPtrUseAfterFree { ptr_kind });
+                    };
+                    let (size, _align) =
+                        global_alloc.size_and_align(*self.ecx.tcx, self.ecx.typing_env);
+
+                    if let GlobalAlloc::Static(did) = global_alloc {
                         let DefKind::Static { nested, .. } = self.ecx.tcx.def_kind(did) else {
                             bug!()
                         };
@@ -593,17 +604,6 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
                         }
                     }
 
-                    // Dangling and Mutability check.
-                    let (size, _align, alloc_kind) = self.ecx.get_alloc_info(alloc_id);
-                    if alloc_kind == AllocKind::Dead {
-                        // This can happen for zero-sized references. We can't have *any* references to
-                        // non-existing allocations in const-eval though, interning rejects them all as
-                        // the rest of rustc isn't happy with them... so we throw an error, even though
-                        // this isn't really UB.
-                        // A potential future alternative would be to resurrect this as a zero-sized allocation
-                        // (which codegen will then compile to an aligned dummy pointer anyway).
-                        throw_validation_failure!(self.path, DanglingPtrUseAfterFree { ptr_kind });
-                    }
                     // If this allocation has size zero, there is no actual mutability here.
                     if size != Size::ZERO {
                         // Determine whether this pointer expects to be pointing to something mutable.
@@ -618,7 +618,8 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
                             }
                         };
                         // Determine what it actually points to.
-                        let alloc_actual_mutbl = mutability(self.ecx, alloc_id);
+                        let alloc_actual_mutbl =
+                            global_alloc.mutability(*self.ecx.tcx, self.ecx.typing_env);
                         // Mutable pointer to immutable memory is no good.
                         if ptr_expected_mutbl == Mutability::Mut
                             && alloc_actual_mutbl == Mutability::Not
@@ -842,9 +843,16 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
     }
 
     fn in_mutable_memory(&self, val: &PlaceTy<'tcx, M::Provenance>) -> bool {
+        debug_assert!(self.ctfe_mode.is_some());
         if let Some(mplace) = val.as_mplace_or_local().left() {
             if let Some(alloc_id) = mplace.ptr().provenance.and_then(|p| p.get_alloc_id()) {
-                mutability(self.ecx, alloc_id).is_mut()
+                let tcx = *self.ecx.tcx;
+                // Everything must be already interned.
+                let mutbl = tcx.global_alloc(alloc_id).mutability(tcx, self.ecx.typing_env);
+                if let Some((_, alloc)) = self.ecx.memory.alloc_map.get(alloc_id) {
+                    assert_eq!(alloc.mutability, mutbl);
+                }
+                mutbl.is_mut()
             } else {
                 // No memory at all.
                 false
@@ -868,7 +876,7 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
     /// Add the entire given place to the "data" range of this visit.
     fn add_data_range_place(&mut self, place: &PlaceTy<'tcx, M::Provenance>) {
         // Only sized places can be added this way.
-        debug_assert!(place.layout.abi.is_sized());
+        debug_assert!(place.layout.is_sized());
         if let Some(data_bytes) = self.data_bytes.as_mut() {
             let offset = Self::data_range_offset(self.ecx, place);
             data_bytes.add_range(offset, place.layout.size);
@@ -946,8 +954,8 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
         layout: TyAndLayout<'tcx>,
     ) -> Cow<'e, RangeSet> {
         assert!(layout.ty.is_union());
-        assert!(layout.abi.is_sized(), "there are no unsized unions");
-        let layout_cx = LayoutCx::new(*ecx.tcx, ecx.param_env);
+        assert!(layout.is_sized(), "there are no unsized unions");
+        let layout_cx = LayoutCx::new(*ecx.tcx, ecx.typing_env);
         return M::cached_union_data_range(ecx, layout.ty, || {
             let mut out = RangeSet(Vec::new());
             union_data_range_uncached(&layout_cx, layout, Size::ZERO, &mut out);
@@ -982,7 +990,7 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
                     let elem = layout.field(cx, 0);
 
                     // Fast-path for large arrays of simple types that do not contain any padding.
-                    if elem.abi.is_scalar() {
+                    if elem.backend_repr.is_scalar() {
                         out.add_range(base_offset, elem.size * count);
                     } else {
                         for idx in 0..count {
@@ -1012,53 +1020,6 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
                     }
                 }
             }
-        }
-    }
-}
-
-/// Returns whether the allocation is mutable, and whether it's actually a static.
-/// For "root" statics we look at the type to account for interior
-/// mutability; for nested statics we have no type and directly use the annotated mutability.
-fn mutability<'tcx>(ecx: &InterpCx<'tcx, impl Machine<'tcx>>, alloc_id: AllocId) -> Mutability {
-    // Let's see what kind of memory this points to.
-    // We're not using `try_global_alloc` since dangling pointers have already been handled.
-    match ecx.tcx.global_alloc(alloc_id) {
-        GlobalAlloc::Static(did) => {
-            let DefKind::Static { safety: _, mutability, nested } = ecx.tcx.def_kind(did) else {
-                bug!()
-            };
-            if nested {
-                assert!(
-                    ecx.memory.alloc_map.get(alloc_id).is_none(),
-                    "allocations of nested statics are already interned: {alloc_id:?}, {did:?}"
-                );
-                // Nested statics in a `static` are never interior mutable,
-                // so just use the declared mutability.
-                mutability
-            } else {
-                let mutability = match mutability {
-                    Mutability::Not
-                        if !ecx
-                            .tcx
-                            .type_of(did)
-                            .no_bound_vars()
-                            .expect("statics should not have generic parameters")
-                            .is_freeze(*ecx.tcx, ty::ParamEnv::reveal_all()) =>
-                    {
-                        Mutability::Mut
-                    }
-                    _ => mutability,
-                };
-                if let Some((_, alloc)) = ecx.memory.alloc_map.get(alloc_id) {
-                    assert_eq!(alloc.mutability, mutability);
-                }
-                mutability
-            }
-        }
-        GlobalAlloc::Memory(alloc) => alloc.inner().mutability,
-        GlobalAlloc::Function { .. } | GlobalAlloc::VTable(..) => {
-            // These are immutable, we better don't allow mutable pointers here.
-            Mutability::Not
         }
     }
 }
@@ -1124,7 +1085,8 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValueVisitor<'tcx, M> for ValidityVisitor<'rt,
     ) -> InterpResult<'tcx> {
         // Special check for CTFE validation, preventing `UnsafeCell` inside unions in immutable memory.
         if self.ctfe_mode.is_some_and(|c| !c.allow_immutable_unsafe_cell()) {
-            if !val.layout.is_zst() && !val.layout.ty.is_freeze(*self.ecx.tcx, self.ecx.param_env) {
+            if !val.layout.is_zst() && !val.layout.ty.is_freeze(*self.ecx.tcx, self.ecx.typing_env)
+            {
                 if !self.in_mutable_memory(val) {
                     throw_validation_failure!(self.path, UnsafeCellInImmutable);
                 }
@@ -1230,11 +1192,10 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValueVisitor<'tcx, M> for ValidityVisitor<'rt,
                 // No need for an alignment check here, this is not an actual memory access.
                 let alloc = self.ecx.get_ptr_alloc(mplace.ptr(), size)?.expect("we already excluded size 0");
 
-                alloc.get_bytes_strip_provenance().map_err(|err| {
+                alloc.get_bytes_strip_provenance().map_err_kind(|kind| {
                     // Some error happened, try to provide a more detailed description.
                     // For some errors we might be able to provide extra information.
                     // (This custom logic does not fit the `try_validation!` macro.)
-                    let (kind, backtrace) = err.into_parts();
                     match kind {
                         Ub(InvalidUninitBytes(Some((_alloc_id, access)))) | Unsup(ReadPointerAsInt(Some((_alloc_id, access)))) => {
                             // Some byte was uninitialized, determine which
@@ -1247,14 +1208,14 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValueVisitor<'tcx, M> for ValidityVisitor<'rt,
                             self.path.push(PathElem::ArrayElem(i));
 
                             if matches!(kind, Ub(InvalidUninitBytes(_))) {
-                                err_validation_failure!(self.path, Uninit { expected }).into()
+                                err_validation_failure!(self.path, Uninit { expected })
                             } else {
-                                err_validation_failure!(self.path, PointerAsInt { expected }).into()
+                                err_validation_failure!(self.path, PointerAsInt { expected })
                             }
                         }
 
                         // Propagate upwards (that will also check for unexpected errors).
-                        _ => return InterpErrorInfo::from_parts(kind, backtrace),
+                        err => err,
                     }
                 })?;
 
@@ -1301,19 +1262,19 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValueVisitor<'tcx, M> for ValidityVisitor<'rt,
         // FIXME: We could avoid some redundant checks here. For newtypes wrapping
         // scalars, we do the same check on every "level" (e.g., first we check
         // MyNewtype and then the scalar in there).
-        match val.layout.abi {
-            Abi::Uninhabited => {
+        match val.layout.backend_repr {
+            BackendRepr::Uninhabited => {
                 let ty = val.layout.ty;
                 throw_validation_failure!(self.path, UninhabitedVal { ty });
             }
-            Abi::Scalar(scalar_layout) => {
+            BackendRepr::Scalar(scalar_layout) => {
                 if !scalar_layout.is_uninit_valid() {
                     // There is something to check here.
                     let scalar = self.read_scalar(val, ExpectedKind::InitScalar)?;
                     self.visit_scalar(scalar, scalar_layout)?;
                 }
             }
-            Abi::ScalarPair(a_layout, b_layout) => {
+            BackendRepr::ScalarPair(a_layout, b_layout) => {
                 // We can only proceed if *both* scalars need to be initialized.
                 // FIXME: find a way to also check ScalarPair when one side can be uninit but
                 // the other must be init.
@@ -1324,12 +1285,12 @@ impl<'rt, 'tcx, M: Machine<'tcx>> ValueVisitor<'tcx, M> for ValidityVisitor<'rt,
                     self.visit_scalar(b, b_layout)?;
                 }
             }
-            Abi::Vector { .. } => {
+            BackendRepr::Vector { .. } => {
                 // No checks here, we assume layout computation gets this right.
                 // (This is harder to check since Miri does not represent these as `Immediate`. We
                 // also cannot use field projections since this might be a newtype around a vector.)
             }
-            Abi::Aggregate { .. } => {
+            BackendRepr::Memory { .. } => {
                 // Nothing to do.
             }
         }
@@ -1368,12 +1329,12 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             v.reset_padding(val)?;
             interp_ok(())
         })
-        .map_err(|err| {
+        .map_err_info(|err| {
             if !matches!(
                 err.kind(),
                 err_ub!(ValidationError { .. })
-                    | InterpError::InvalidProgram(_)
-                    | InterpError::Unsupported(UnsupportedOpInfo::ExternTypeField)
+                    | InterpErrorKind::InvalidProgram(_)
+                    | InterpErrorKind::Unsupported(UnsupportedOpInfo::ExternTypeField)
             ) {
                 bug!(
                     "Unexpected error during validation: {}",

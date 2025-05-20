@@ -20,33 +20,22 @@ trait DisplayInt:
 
 macro_rules! impl_int {
     ($($t:ident)*) => (
-      $(impl DisplayInt for $t {
-          fn zero() -> Self { 0 }
-          fn from_u8(u: u8) -> Self { u as Self }
-          fn to_u8(&self) -> u8 { *self as u8 }
-          #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32")))]
-          fn to_u32(&self) -> u32 { *self as u32 }
-          fn to_u64(&self) -> u64 { *self as u64 }
-          fn to_u128(&self) -> u128 { *self as u128 }
-      })*
-    )
-}
-macro_rules! impl_uint {
-    ($($t:ident)*) => (
-      $(impl DisplayInt for $t {
-          fn zero() -> Self { 0 }
-          fn from_u8(u: u8) -> Self { u as Self }
-          fn to_u8(&self) -> u8 { *self as u8 }
-          #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32")))]
-          fn to_u32(&self) -> u32 { *self as u32 }
-          fn to_u64(&self) -> u64 { *self as u64 }
-          fn to_u128(&self) -> u128 { *self as u128 }
-      })*
+        $(impl DisplayInt for $t {
+            fn zero() -> Self { 0 }
+            fn from_u8(u: u8) -> Self { u as Self }
+            fn to_u8(&self) -> u8 { *self as u8 }
+            #[cfg(not(any(target_pointer_width = "64", target_arch = "wasm32")))]
+            fn to_u32(&self) -> u32 { *self as u32 }
+            fn to_u64(&self) -> u64 { *self as u64 }
+            fn to_u128(&self) -> u128 { *self as u128 }
+        })*
     )
 }
 
-impl_int! { i8 i16 i32 i64 i128 isize }
-impl_uint! { u8 u16 u32 u64 u128 usize }
+impl_int! {
+    i8 i16 i32 i64 i128 isize
+    u8 u16 u32 u64 u128 usize
+}
 
 /// A type that represents a specific radix
 ///
@@ -76,11 +65,11 @@ unsafe trait GenericRadix: Sized {
         if is_nonnegative {
             // Accumulate each digit of the number from the least significant
             // to the most significant figure.
-            for byte in buf.iter_mut().rev() {
+            loop {
                 let n = x % base; // Get the current place value.
                 x = x / base; // Deaccumulate the number.
-                byte.write(Self::digit(n.to_u8())); // Store the digit in the buffer.
                 curr -= 1;
+                buf[curr].write(Self::digit(n.to_u8())); // Store the digit in the buffer.
                 if x == zero {
                     // No more digits left to accumulate.
                     break;
@@ -88,18 +77,21 @@ unsafe trait GenericRadix: Sized {
             }
         } else {
             // Do the same as above, but accounting for two's complement.
-            for byte in buf.iter_mut().rev() {
+            loop {
                 let n = zero - (x % base); // Get the current place value.
                 x = x / base; // Deaccumulate the number.
-                byte.write(Self::digit(n.to_u8())); // Store the digit in the buffer.
                 curr -= 1;
+                buf[curr].write(Self::digit(n.to_u8())); // Store the digit in the buffer.
                 if x == zero {
                     // No more digits left to accumulate.
                     break;
                 };
             }
         }
-        let buf = &buf[curr..];
+        // SAFETY: `curr` is initialized to `buf.len()` and is only decremented, so it can't overflow. It is
+        // decremented exactly once for each digit. Since u128 is the widest fixed width integer format supported,
+        // the maximum number of digits (bits) is 128 for base-2, so `curr` won't underflow as well.
+        let buf = unsafe { buf.get_unchecked(curr..) };
         // SAFETY: The only chars in `buf` are created by `Self::digit` which are assumed to be
         // valid UTF-8
         let buf = unsafe {
@@ -178,26 +170,25 @@ integer! { i16, u16 }
 integer! { i32, u32 }
 integer! { i64, u64 }
 integer! { i128, u128 }
-macro_rules! debug {
-    ($($T:ident)*) => {$(
-        #[stable(feature = "rust1", since = "1.0.0")]
-        impl fmt::Debug for $T {
-            #[inline]
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                if f.debug_lower_hex() {
-                    fmt::LowerHex::fmt(self, f)
-                } else if f.debug_upper_hex() {
-                    fmt::UpperHex::fmt(self, f)
-                } else {
-                    fmt::Display::fmt(self, f)
+
+macro_rules! impl_Debug {
+    ($($T:ident)*) => {
+        $(
+            #[stable(feature = "rust1", since = "1.0.0")]
+            impl fmt::Debug for $T {
+                #[inline]
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    if f.debug_lower_hex() {
+                        fmt::LowerHex::fmt(self, f)
+                    } else if f.debug_upper_hex() {
+                        fmt::UpperHex::fmt(self, f)
+                    } else {
+                        fmt::Display::fmt(self, f)
+                    }
                 }
             }
-        }
-    )*};
-}
-debug! {
-  i8 i16 i32 i64 i128 isize
-  u8 u16 u32 u64 u128 usize
+        )*
+    };
 }
 
 // 2 digit decimal look up table
@@ -519,6 +510,11 @@ macro_rules! impl_Exp {
                 }
             })*
     };
+}
+
+impl_Debug! {
+    i8 i16 i32 i64 i128 isize
+    u8 u16 u32 u64 u128 usize
 }
 
 // Include wasm32 in here since it doesn't reflect the native pointer size, and

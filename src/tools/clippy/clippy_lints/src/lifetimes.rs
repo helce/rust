@@ -6,8 +6,8 @@ use rustc_errors::Applicability;
 use rustc_hir::FnRetTy::Return;
 use rustc_hir::intravisit::nested_filter::{self as hir_nested_filter, NestedFilter};
 use rustc_hir::intravisit::{
-    Visitor, walk_fn_decl, walk_generic_args, walk_generics, walk_impl_item_ref, walk_param_bound,
-    walk_poly_trait_ref, walk_trait_ref, walk_ty, walk_where_predicate,
+    Visitor, walk_fn_decl, walk_generic_args, walk_generics, walk_impl_item_ref, walk_param_bound, walk_poly_trait_ref,
+    walk_trait_ref, walk_ty, walk_where_predicate,
 };
 use rustc_hir::{
     BareFnTy, BodyId, FnDecl, FnSig, GenericArg, GenericArgs, GenericBound, GenericParam, GenericParamKind, Generics,
@@ -163,7 +163,7 @@ fn check_fn_inner<'tcx>(
                 if visitor.lts.iter().any(|lt| matches!(lt.res, LifetimeName::Param(_))) {
                     return;
                 }
-                if let GenericBound::Trait(ref trait_ref, _) = *bound {
+                if let GenericBound::Trait(ref trait_ref) = *bound {
                     let params = &trait_ref
                         .trait_ref
                         .path
@@ -420,15 +420,6 @@ impl<'tcx> Visitor<'tcx> for RefVisitor<'_, 'tcx> {
 
     fn visit_ty(&mut self, ty: &'tcx Ty<'_>) {
         match ty.kind {
-            TyKind::OpaqueDef(opaque, bounds) => {
-                let len = self.lts.len();
-                self.visit_opaque_ty(opaque);
-                self.lts.truncate(len);
-                self.lts.extend(bounds.iter().filter_map(|bound| match bound {
-                    GenericArg::Lifetime(&l) => Some(l),
-                    _ => None,
-                }));
-            },
             TyKind::BareFn(&BareFnTy { decl, .. }) => {
                 let mut sub_visitor = RefVisitor::new(self.cx);
                 sub_visitor.visit_fn_decl(decl);
@@ -438,7 +429,7 @@ impl<'tcx> Visitor<'tcx> for RefVisitor<'_, 'tcx> {
                 if !lt.is_elided() {
                     self.unelided_trait_object_lifetime = true;
                 }
-                for (bound, _) in bounds {
+                for bound in bounds {
                     self.visit_poly_trait_ref(bound);
                 }
             },
@@ -746,7 +737,7 @@ fn elision_suggestions(
     suggestions.extend(
         usages
             .iter()
-            .filter(|usage| named_lifetime(usage).map_or(false, |id| elidable_lts.contains(&id)))
+            .filter(|usage| named_lifetime(usage).is_some_and(|id| elidable_lts.contains(&id)))
             .map(|usage| {
                 match cx.tcx.parent_hir_node(usage.hir_id) {
                     Node::Ty(Ty {

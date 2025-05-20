@@ -6,13 +6,13 @@ use std::path::PathBuf;
 use std::task::Poll;
 use std::{iter, thread};
 
+use rustc_abi::ExternAbi;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir::def::Namespace;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::layout::{LayoutCx, LayoutOf};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_session::config::EntryFnType;
-use rustc_target::spec::abi::Abi;
 
 use crate::concurrency::thread::TlsAllocAction;
 use crate::diagnostics::report_leaks;
@@ -129,8 +129,6 @@ pub struct MiriConfig {
     /// If `Some`, enable the `measureme` profiler, writing results to a file
     /// with the specified prefix.
     pub measureme_out: Option<String>,
-    /// Panic when unsupported functionality is encountered.
-    pub panic_on_unsupported: bool,
     /// Which style to use for printing backtraces.
     pub backtrace_style: BacktraceStyle,
     /// Which provenance to use for int2ptr casts
@@ -183,7 +181,6 @@ impl Default for MiriConfig {
             track_outdated_loads: false,
             cmpxchg_weak_failure_rate: 0.8, // 80%
             measureme_out: None,
-            panic_on_unsupported: false,
             backtrace_style: BacktraceStyle::Short,
             provenance_mode: ProvenanceMode::Default,
             mute_stdout_stderr: false,
@@ -271,10 +268,14 @@ pub fn create_ecx<'tcx>(
     entry_type: EntryFnType,
     config: &MiriConfig,
 ) -> InterpResult<'tcx, InterpCx<'tcx, MiriMachine<'tcx>>> {
-    let param_env = ty::ParamEnv::reveal_all();
-    let layout_cx = LayoutCx::new(tcx, param_env);
-    let mut ecx =
-        InterpCx::new(tcx, rustc_span::DUMMY_SP, param_env, MiriMachine::new(config, layout_cx));
+    let typing_env = ty::TypingEnv::fully_monomorphized();
+    let layout_cx = LayoutCx::new(tcx, typing_env);
+    let mut ecx = InterpCx::new(
+        tcx,
+        rustc_span::DUMMY_SP,
+        typing_env,
+        MiriMachine::new(config, layout_cx)
+    );
 
     // Some parts of initialization require a full `InterpCx`.
     MiriMachine::late_init(&mut ecx, config, {
@@ -379,7 +380,7 @@ pub fn create_ecx<'tcx>(
             let main_ret_ty = main_ret_ty.no_bound_vars().unwrap();
             let start_instance = ty::Instance::try_resolve(
                 tcx,
-                ty::ParamEnv::reveal_all(),
+                typing_env,
                 start_id,
                 tcx.mk_args(&[ty::GenericArg::from(main_ret_ty)]),
             )
@@ -394,7 +395,7 @@ pub fn create_ecx<'tcx>(
 
             ecx.call_function(
                 start_instance,
-                Abi::Rust,
+                ExternAbi::Rust,
                 &[
                     ImmTy::from_scalar(
                         Scalar::from_pointer(main_ptr, &ecx),
@@ -412,7 +413,7 @@ pub fn create_ecx<'tcx>(
         EntryFnType::Start => {
             ecx.call_function(
                 entry_instance,
-                Abi::Rust,
+                ExternAbi::Rust,
                 &[argc, argv],
                 Some(&ret_place),
                 StackPopCleanup::Root { cleanup: true },
@@ -426,7 +427,7 @@ pub fn create_ecx<'tcx>(
 /// Evaluates the entry function specified by `entry_id`.
 /// Returns `Some(return_code)` if program executed completed.
 /// Returns `None` if an evaluation error occurred.
-#[allow(clippy::needless_lifetimes)]
+#[expect(clippy::needless_lifetimes)]
 pub fn eval_entry<'tcx>(
     tcx: TyCtxt<'tcx>,
     entry_id: DefId,
@@ -476,7 +477,7 @@ pub fn eval_entry<'tcx>(
         }
         // Check for memory leaks.
         info!("Additional static roots: {:?}", ecx.machine.static_roots);
-        let leaks = ecx.find_leaked_allocations(&ecx.machine.static_roots);
+        let leaks = ecx.take_leaked_allocations(|ecx| &ecx.machine.static_roots);
         if !leaks.is_empty() {
             report_leaks(&ecx, leaks);
             tcx.dcx().note("set `MIRIFLAGS=-Zmiri-ignore-leaks` to disable this check");

@@ -12,6 +12,7 @@ use rustc_index::{Idx, IndexVec};
 use rustc_macros::{Decodable, Encodable};
 use rustc_middle::dep_graph::{DepNodeIndex, SerializedDepNodeIndex};
 use rustc_middle::mir::interpret::{AllocDecodingSession, AllocDecodingState};
+use rustc_middle::mir::mono::MonoItem;
 use rustc_middle::mir::{self, interpret};
 use rustc_middle::ty::codec::{RefDecodable, TyDecoder, TyEncoder};
 use rustc_middle::ty::{self, Ty, TyCtxt};
@@ -22,7 +23,7 @@ use rustc_session::Session;
 use rustc_span::hygiene::{
     ExpnId, HygieneDecodeContext, HygieneEncodeContext, SyntaxContext, SyntaxContextData,
 };
-use rustc_span::source_map::SourceMap;
+use rustc_span::source_map::{SourceMap, Spanned};
 use rustc_span::{
     BytePos, CachingSourceMapView, ExpnData, ExpnHash, Pos, RelativeBytePos, SourceFile, Span,
     SpanDecoder, SpanEncoder, StableSourceFileId, Symbol,
@@ -472,32 +473,27 @@ impl<'a, 'tcx> CacheDecoder<'a, 'tcx> {
         let CacheDecoder { tcx, file_index_to_file, file_index_to_stable_id, source_map, .. } =
             *self;
 
-        file_index_to_file
-            .borrow_mut()
-            .entry(index)
-            .or_insert_with(|| {
-                let source_file_id = &file_index_to_stable_id[&index];
-                let source_file_cnum =
-                    tcx.stable_crate_id_to_crate_num(source_file_id.stable_crate_id);
+        Lrc::clone(file_index_to_file.borrow_mut().entry(index).or_insert_with(|| {
+            let source_file_id = &file_index_to_stable_id[&index];
+            let source_file_cnum = tcx.stable_crate_id_to_crate_num(source_file_id.stable_crate_id);
 
-                // If this `SourceFile` is from a foreign crate, then make sure
-                // that we've imported all of the source files from that crate.
-                // This has usually already been done during macro invocation.
-                // However, when encoding query results like `TypeckResults`,
-                // we might encode an `AdtDef` for a foreign type (because it
-                // was referenced in the body of the function). There is no guarantee
-                // that we will load the source files from that crate during macro
-                // expansion, so we use `import_source_files` to ensure that the foreign
-                // source files are actually imported before we call `source_file_by_stable_id`.
-                if source_file_cnum != LOCAL_CRATE {
-                    self.tcx.import_source_files(source_file_cnum);
-                }
+            // If this `SourceFile` is from a foreign crate, then make sure
+            // that we've imported all of the source files from that crate.
+            // This has usually already been done during macro invocation.
+            // However, when encoding query results like `TypeckResults`,
+            // we might encode an `AdtDef` for a foreign type (because it
+            // was referenced in the body of the function). There is no guarantee
+            // that we will load the source files from that crate during macro
+            // expansion, so we use `import_source_files` to ensure that the foreign
+            // source files are actually imported before we call `source_file_by_stable_id`.
+            if source_file_cnum != LOCAL_CRATE {
+                self.tcx.import_source_files(source_file_cnum);
+            }
 
-                source_map
-                    .source_file_by_stable_id(source_file_id.stable_source_file_id)
-                    .expect("failed to lookup `SourceFile` in new context")
-            })
-            .clone()
+            source_map
+                .source_file_by_stable_id(source_file_id.stable_source_file_id)
+                .expect("failed to lookup `SourceFile` in new context")
+        }))
     }
 }
 
@@ -772,6 +768,13 @@ impl<'a, 'tcx> Decodable<CacheDecoder<'a, 'tcx>> for &'tcx [(ty::Clause<'tcx>, S
 }
 
 impl<'a, 'tcx> Decodable<CacheDecoder<'a, 'tcx>> for &'tcx [rustc_ast::InlineAsmTemplatePiece] {
+    #[inline]
+    fn decode(d: &mut CacheDecoder<'a, 'tcx>) -> Self {
+        RefDecodable::decode(d)
+    }
+}
+
+impl<'a, 'tcx> Decodable<CacheDecoder<'a, 'tcx>> for &'tcx [Spanned<MonoItem<'tcx>>] {
     #[inline]
     fn decode(d: &mut CacheDecoder<'a, 'tcx>) -> Self {
         RefDecodable::decode(d)

@@ -53,7 +53,7 @@ use core::ops::AddAssign;
 #[cfg(not(no_global_oom_handling))]
 use core::ops::Bound::{Excluded, Included, Unbounded};
 use core::ops::{self, Range, RangeBounds};
-use core::str::pattern::Pattern;
+use core::str::pattern::{Pattern, Utf8Pattern};
 use core::{fmt, hash, ptr, slice};
 
 #[cfg(not(no_global_oom_handling))]
@@ -116,7 +116,7 @@ use crate::vec::Vec;
 /// `String`s are always valid UTF-8. If you need a non-UTF-8 string, consider
 /// [`OsString`]. It is similar, but without the UTF-8 constraint. Because UTF-8
 /// is a variable width encoding, `String`s are typically smaller than an array of
-/// the same `chars`:
+/// the same `char`s:
 ///
 /// ```
 /// use std::mem;
@@ -2435,6 +2435,11 @@ impl<'b> Pattern for &'b String {
         Self::Searcher<'a>: core::str::pattern::ReverseSearcher<'a>,
     {
         self[..].strip_suffix_of(haystack)
+    }
+
+    #[inline]
+    fn as_utf8_pattern(&self) -> Option<Utf8Pattern<'_>> {
+        Some(Utf8Pattern::StringPattern(self.as_bytes()))
     }
 }
 

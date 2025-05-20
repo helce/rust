@@ -151,6 +151,10 @@ impl<'tcx> Stable<'tcx> for mir::StatementKind<'tcx> {
             mir::StatementKind::ConstEvalCounter => {
                 stable_mir::mir::StatementKind::ConstEvalCounter
             }
+            // BackwardIncompatibleDropHint has no semantics, so it is translated to Nop.
+            mir::StatementKind::BackwardIncompatibleDropHint { .. } => {
+                stable_mir::mir::StatementKind::Nop
+            }
             mir::StatementKind::Nop => stable_mir::mir::StatementKind::Nop,
         }
     }
@@ -691,11 +695,7 @@ impl<'tcx> Stable<'tcx> for mir::interpret::Allocation {
     type T = stable_mir::ty::Allocation;
 
     fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
-        alloc::allocation_filter(
-            self,
-            alloc_range(rustc_target::abi::Size::ZERO, self.size()),
-            tables,
-        )
+        alloc::allocation_filter(self, alloc_range(rustc_abi::Size::ZERO, self.size()), tables)
     }
 }
 

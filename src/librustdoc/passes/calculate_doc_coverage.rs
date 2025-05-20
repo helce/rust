@@ -20,7 +20,7 @@ use crate::visit::DocVisitor;
 
 pub(crate) const CALCULATE_DOC_COVERAGE: Pass = Pass {
     name: "calculate-doc-coverage",
-    run: calculate_doc_coverage,
+    run: Some(calculate_doc_coverage),
     description: "counts the number of items with and without documentation",
 };
 
@@ -132,6 +132,7 @@ impl<'a, 'b> CoverageCalculator<'a, 'b> {
 
     fn print_results(&self) {
         let output_format = self.ctx.output_format;
+        // In this case we want to ensure that the `OutputFormat` is JSON and NOT the `DocContext`.
         if output_format.is_json() {
             println!("{}", self.to_json());
             return;

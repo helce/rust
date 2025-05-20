@@ -32,8 +32,8 @@ use rustc_middle::middle::privacy::{EffectiveVisibilities, EffectiveVisibility, 
 use rustc_middle::query::Providers;
 use rustc_middle::ty::print::PrintTraitRefExt as _;
 use rustc_middle::ty::{
-    self, Const, GenericArgs, GenericParamDefKind, TraitRef, Ty, TyCtxt, TypeSuperVisitable,
-    TypeVisitable, TypeVisitor,
+    self, Const, GenericParamDefKind, TraitRef, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable,
+    TypeVisitor,
 };
 use rustc_middle::{bug, span_bug};
 use rustc_session::lint;
@@ -136,6 +136,10 @@ where
         match clause.kind().skip_binder() {
             ty::ClauseKind::Trait(ty::TraitPredicate { trait_ref, polarity: _ }) => {
                 self.visit_trait(trait_ref)
+            }
+            ty::ClauseKind::HostEffect(pred) => {
+                try_visit!(self.visit_trait(pred.trait_ref));
+                pred.constness.visit_with(self)
             }
             ty::ClauseKind::Projection(ty::ProjectionPredicate {
                 projection_term: projection_ty,
@@ -246,10 +250,10 @@ where
                         ty::ExistentialPredicate::Trait(trait_ref) => trait_ref,
                         ty::ExistentialPredicate::Projection(proj) => proj.trait_ref(tcx),
                         ty::ExistentialPredicate::AutoTrait(def_id) => {
-                            ty::ExistentialTraitRef { def_id, args: GenericArgs::empty() }
+                            ty::ExistentialTraitRef::new(tcx, def_id, ty::GenericArgs::empty())
                         }
                     };
-                    let ty::ExistentialTraitRef { def_id, args: _ } = trait_ref;
+                    let ty::ExistentialTraitRef { def_id, .. } = trait_ref;
                     try_visit!(self.def_id_visitor.visit_def_id(def_id, "trait", &trait_ref));
                 }
             }
@@ -778,21 +782,11 @@ impl<'tcx> Visitor<'tcx> for EmbargoVisitor<'tcx> {
 impl ReachEverythingInTheInterfaceVisitor<'_, '_> {
     fn generics(&mut self) -> &mut Self {
         for param in &self.ev.tcx.generics_of(self.item_def_id).own_params {
-            match param.kind {
-                GenericParamDefKind::Lifetime => {}
-                GenericParamDefKind::Type { has_default, .. } => {
-                    if has_default {
-                        self.visit(self.ev.tcx.type_of(param.def_id).instantiate_identity());
-                    }
-                }
-                GenericParamDefKind::Const { has_default, .. } => {
-                    self.visit(self.ev.tcx.type_of(param.def_id).instantiate_identity());
-                    if has_default {
-                        self.visit(
-                            self.ev.tcx.const_param_default(param.def_id).instantiate_identity(),
-                        );
-                    }
-                }
+            if let GenericParamDefKind::Const { .. } = param.kind {
+                self.visit(self.ev.tcx.type_of(param.def_id).instantiate_identity());
+            }
+            if let Some(default) = param.default_value(self.ev.tcx) {
+                self.visit(default.instantiate_identity());
             }
         }
         self

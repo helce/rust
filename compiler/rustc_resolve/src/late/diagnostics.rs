@@ -459,7 +459,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
             return (err, Vec::new());
         }
 
-        let (found, mut candidates) = self.try_lookup_name_relaxed(
+        let (found, suggested_candidates, mut candidates) = self.try_lookup_name_relaxed(
             &mut err,
             source,
             path,
@@ -478,7 +478,15 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
         }
 
         let mut fallback = self.suggest_trait_and_bounds(&mut err, source, res, span, &base_error);
-        fallback |= self.suggest_typo(&mut err, source, path, following_seg, span, &base_error);
+        fallback |= self.suggest_typo(
+            &mut err,
+            source,
+            path,
+            following_seg,
+            span,
+            &base_error,
+            suggested_candidates,
+        );
 
         if fallback {
             // Fallback label.
@@ -519,11 +527,12 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                     continue;
                 };
                 for bound in bounds {
-                    let ast::GenericBound::Trait(trait_ref, ast::TraitBoundModifiers::NONE) = bound
-                    else {
+                    let ast::GenericBound::Trait(trait_ref) = bound else {
                         continue;
                     };
-                    if base_error.span == trait_ref.span {
+                    if trait_ref.modifiers == ast::TraitBoundModifiers::NONE
+                        && base_error.span == trait_ref.span
+                    {
                         err.span_suggestion_verbose(
                             constraint.ident.span.between(trait_ref.span),
                             "you might have meant to write a path instead of an associated type bound",
@@ -588,7 +597,16 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
         span: Span,
         res: Option<Res>,
         base_error: &BaseError,
-    ) -> (bool, Vec<ImportSuggestion>) {
+    ) -> (bool, FxHashSet<String>, Vec<ImportSuggestion>) {
+        let span = match following_seg {
+            Some(_) if path[0].ident.span.eq_ctxt(path[path.len() - 1].ident.span) => {
+                // The path `span` that comes in includes any following segments, which we don't
+                // want to replace in the suggestions.
+                path[0].ident.span.to(path[path.len() - 1].ident.span)
+            }
+            _ => span,
+        };
+        let mut suggested_candidates = FxHashSet::default();
         // Try to lookup name in more relaxed fashion for better error reporting.
         let ident = path.last().unwrap().ident;
         let is_expected = &|res| source.is_expected(res);
@@ -645,6 +663,11 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                 };
                 let msg = format!("{preamble}try using the variant's enum");
 
+                suggested_candidates.extend(
+                    enum_candidates
+                        .iter()
+                        .map(|(_variant_path, enum_ty_path)| enum_ty_path.clone()),
+                );
                 err.span_suggestions(
                     span,
                     msg,
@@ -657,7 +680,8 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
         // Try finding a suitable replacement.
         let typo_sugg = self
             .lookup_typo_candidate(path, following_seg, source.namespace(), is_expected)
-            .to_opt_suggestion();
+            .to_opt_suggestion()
+            .filter(|sugg| !suggested_candidates.contains(sugg.candidate.as_str()));
         if let [segment] = path
             && !matches!(source, PathSource::Delegation)
             && self.self_type_is_available()
@@ -718,7 +742,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                     }
                 }
                 self.r.add_typo_suggestion(err, typo_sugg, ident_span);
-                return (true, candidates);
+                return (true, suggested_candidates, candidates);
             }
 
             // If the first argument in call is `self` suggest calling a method.
@@ -736,7 +760,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                     format!("self.{path_str}({args_snippet})"),
                     Applicability::MachineApplicable,
                 );
-                return (true, candidates);
+                return (true, suggested_candidates, candidates);
             }
         }
 
@@ -753,7 +777,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
             ) {
                 // We do this to avoid losing a secondary span when we override the main error span.
                 self.r.add_typo_suggestion(err, typo_sugg, ident_span);
-                return (true, candidates);
+                return (true, suggested_candidates, candidates);
             }
         }
 
@@ -771,7 +795,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                         ident.span,
                         format!("the binding `{path_str}` is available in a different scope in the same function"),
                     );
-                    return (true, candidates);
+                    return (true, suggested_candidates, candidates);
                 }
             }
         }
@@ -780,7 +804,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
             candidates = self.smart_resolve_partial_mod_path_errors(path, following_seg);
         }
 
-        (false, candidates)
+        (false, suggested_candidates, candidates)
     }
 
     fn suggest_trait_and_bounds(
@@ -837,7 +861,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                 );
                 if bounds.iter().all(|bound| match bound {
                     ast::GenericBound::Outlives(_) | ast::GenericBound::Use(..) => true,
-                    ast::GenericBound::Trait(tr, _) => tr.span == base_error.span,
+                    ast::GenericBound::Trait(tr) => tr.span == base_error.span,
                 }) {
                     let mut sugg = vec![];
                     if base_error.span != start_span {
@@ -868,13 +892,16 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
         following_seg: Option<&Segment>,
         span: Span,
         base_error: &BaseError,
+        suggested_candidates: FxHashSet<String>,
     ) -> bool {
         let is_expected = &|res| source.is_expected(res);
         let ident_span = path.last().map_or(span, |ident| ident.ident.span);
         let typo_sugg =
             self.lookup_typo_candidate(path, following_seg, source.namespace(), is_expected);
         let mut fallback = false;
-        let typo_sugg = typo_sugg.to_opt_suggestion();
+        let typo_sugg = typo_sugg
+            .to_opt_suggestion()
+            .filter(|sugg| !suggested_candidates.contains(sugg.candidate.as_str()));
         if !self.r.add_typo_suggestion(err, typo_sugg, ident_span) {
             fallback = true;
             match self.diag_metadata.current_let_binding {
@@ -893,10 +920,13 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
 
             // If the trait has a single item (which wasn't matched by the algorithm), suggest it
             let suggestion = self.get_single_associated_item(path, &source, is_expected);
-            if !self.r.add_typo_suggestion(err, suggestion, ident_span) {
-                fallback = !self.let_binding_suggestion(err, ident_span);
-            }
+            self.r.add_typo_suggestion(err, suggestion, ident_span);
         }
+
+        if self.let_binding_suggestion(err, ident_span) {
+            fallback = false;
+        }
+
         fallback
     }
 
@@ -1197,7 +1227,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
             // const generics. Of course, `Struct` and `Enum` may contain ty params, too, but the
             // benefits of including them here outweighs the small number of false positives.
             Some(Res::Def(DefKind::Struct | DefKind::Enum, _))
-                if self.r.tcx.features().adt_const_params =>
+                if self.r.tcx.features().adt_const_params() =>
             {
                 Applicability::MaybeIncorrect
             }
@@ -1210,7 +1240,8 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
         let param = generics.params.iter().find_map(|param| {
             // Only consider type params with exactly one trait bound.
             if let [bound] = &*param.bounds
-                && let ast::GenericBound::Trait(tref, ast::TraitBoundModifiers::NONE) = bound
+                && let ast::GenericBound::Trait(tref) = bound
+                && tref.modifiers == ast::TraitBoundModifiers::NONE
                 && tref.span == span
                 && param.ident.span.eq_ctxt(span)
             {
@@ -1333,8 +1364,9 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
             }
             if let (
                 [ast::PathSegment { args: None, .. }],
-                [ast::GenericBound::Trait(poly_trait_ref, ast::TraitBoundModifiers::NONE)],
+                [ast::GenericBound::Trait(poly_trait_ref)],
             ) = (&type_param_path.segments[..], &bounds[..])
+                && poly_trait_ref.modifiers == ast::TraitBoundModifiers::NONE
             {
                 if let [ast::PathSegment { ident, args: None, .. }] =
                     &poly_trait_ref.trait_ref.path.segments[..]
@@ -1440,7 +1472,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
             };
 
             if lhs_span.eq_ctxt(rhs_span) {
-                err.span_suggestion(
+                err.span_suggestion_verbose(
                     lhs_span.between(rhs_span),
                     MESSAGE,
                     "::",
@@ -2770,7 +2802,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                     // Avoid suggesting placing lifetime parameters on constant items unless the relevant
                     // feature is enabled. Suggest the parent item as a possible location if applicable.
                     if let LifetimeBinderKind::ConstItem = kind
-                        && !self.r.tcx().features().generic_const_items
+                        && !self.r.tcx().features().generic_const_items()
                     {
                         continue;
                     }
@@ -2814,7 +2846,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                             && bounded_ty.id == binder
                         {
                             for bound in bounds {
-                                if let ast::GenericBound::Trait(poly_trait_ref, _) = bound
+                                if let ast::GenericBound::Trait(poly_trait_ref) = bound
                                     && let span = poly_trait_ref
                                         .span
                                         .with_hi(poly_trait_ref.trait_ref.path.span.lo())
@@ -2931,7 +2963,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                     .emit();
             }
             NoConstantGenericsReason::NonTrivialConstArg => {
-                assert!(!self.r.tcx.features().generic_const_exprs);
+                assert!(!self.r.tcx.features().generic_const_exprs());
                 self.r
                     .dcx()
                     .create_err(errors::ParamInNonTrivialAnonConst {
@@ -3233,7 +3265,7 @@ impl<'ast, 'ra: 'ast, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                             let mut lt_finder =
                                 LifetimeFinder { lifetime: lt.span, found: None, seen: vec![] };
                             for bound in arg_refs {
-                                if let ast::GenericBound::Trait(trait_ref, _) = bound {
+                                if let ast::GenericBound::Trait(trait_ref) = bound {
                                     lt_finder.visit_trait_ref(&trait_ref.trait_ref);
                                 }
                             }
@@ -3444,17 +3476,15 @@ fn mk_where_bound_predicate(
         span: DUMMY_SP,
         bound_generic_params: ThinVec::new(),
         bounded_ty: ast::ptr::P(ty.clone()),
-        bounds: vec![ast::GenericBound::Trait(
-            ast::PolyTraitRef {
-                bound_generic_params: ThinVec::new(),
-                trait_ref: ast::TraitRef {
-                    path: ast::Path { segments: modified_segments, span: DUMMY_SP, tokens: None },
-                    ref_id: DUMMY_NODE_ID,
-                },
-                span: DUMMY_SP,
+        bounds: vec![ast::GenericBound::Trait(ast::PolyTraitRef {
+            bound_generic_params: ThinVec::new(),
+            modifiers: ast::TraitBoundModifiers::NONE,
+            trait_ref: ast::TraitRef {
+                path: ast::Path { segments: modified_segments, span: DUMMY_SP, tokens: None },
+                ref_id: DUMMY_NODE_ID,
             },
-            ast::TraitBoundModifiers::NONE,
-        )],
+            span: DUMMY_SP,
+        })],
     };
 
     Some(new_where_bound_predicate)
@@ -3482,7 +3512,7 @@ struct LifetimeFinder<'ast> {
 
 impl<'ast> Visitor<'ast> for LifetimeFinder<'ast> {
     fn visit_ty(&mut self, t: &'ast Ty) {
-        if let TyKind::Ref(_, mut_ty) = &t.kind {
+        if let TyKind::Ref(_, mut_ty) | TyKind::PinnedRef(_, mut_ty) = &t.kind {
             self.seen.push(t);
             if t.span.lo() == self.lifetime.lo() {
                 self.found = Some(&mut_ty.ty);

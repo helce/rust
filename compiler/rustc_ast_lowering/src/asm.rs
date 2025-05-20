@@ -45,12 +45,14 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     | asm::InlineAsmArch::X86_64
                     | asm::InlineAsmArch::Arm
                     | asm::InlineAsmArch::AArch64
+                    | asm::InlineAsmArch::Arm64EC
                     | asm::InlineAsmArch::RiscV32
                     | asm::InlineAsmArch::RiscV64
                     | asm::InlineAsmArch::E2k
                     | asm::InlineAsmArch::LoongArch64
+                    | asm::InlineAsmArch::S390x
             );
-            if !is_stable && !self.tcx.features().asm_experimental_arch {
+            if !is_stable && !self.tcx.features().asm_experimental_arch() {
                 feature_err(
                     &self.tcx.sess,
                     sym::asm_experimental_arch,
@@ -66,7 +68,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         {
             self.dcx().emit_err(AttSyntaxOnlyX86 { span: sp });
         }
-        if asm.options.contains(InlineAsmOptions::MAY_UNWIND) && !self.tcx.features().asm_unwind {
+        if asm.options.contains(InlineAsmOptions::MAY_UNWIND) && !self.tcx.features().asm_unwind() {
             feature_err(
                 &self.tcx.sess,
                 sym::asm_unwind,
@@ -238,7 +240,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                         }
                     }
                     InlineAsmOperand::Label { block } => {
-                        if !self.tcx.features().asm_goto {
+                        if !self.tcx.features().asm_goto() {
                             feature_err(
                                 sess,
                                 sym::asm_goto,

@@ -81,8 +81,11 @@
 # Indicates whether the LLVM plugin is enabled or not
 #plugins = false
 
-# Wheter to build Enzyme as AutoDiff backend.
+# Whether to build Enzyme as AutoDiff backend.
 #enzyme = false
+
+# Whether to build LLVM with support for it's gpu offload runtime.
+#offload = false
 
 # Indicates whether ccache is used when building LLVM. Set to `true` to use the first `ccache` in
 # PATH, or set an absolute path to use a specific version.
@@ -414,6 +417,14 @@
 # Specify the location of the Android NDK. Used when targeting Android.
 #android-ndk = "/path/to/android-ndk-r26d"
 
+# Number of parallel jobs to be used for building and testing. If set to `0` or
+# omitted, it will be automatically determined. This is the `-j`/`--jobs` flag
+# passed to cargo invocations.
+#jobs = 0
+
+# What custom diff tool to use for displaying compiletest tests.
+#compiletest-diff-tool = <none>
+
 # =============================================================================
 # General install configuration options
 # =============================================================================
@@ -486,12 +497,14 @@
 #debug = false
 
 # Whether to download the stage 1 and 2 compilers from CI.
-# This is mostly useful for tools; if you have changes to `compiler/` or `library/` they will be ignored.
+# This is useful if you are working on tools, doc-comments, or library (you will be able to build
+# the standard library without needing to build the compiler).
 #
-# Set this to "if-unchanged" to only download if the compiler and standard library have not been modified.
-# Set this to `true` to download unconditionally. This is useful if you are working on tools, doc-comments,
-# or library (you will be able to build the standard library without needing to build the compiler).
-#download-rustc = false
+# Set this to "if-unchanged" if you are working on `src/tools`, `tests` or `library` (on CI, `library`
+# changes triggers in-tree compiler build) to speed up the build process.
+#
+# Set this to `true` to always download or `false` to always use the in-tree compiler.
+#download-rustc = "if-unchanged"
 
 # Number of codegen units to use for each compiler invocation. A value of 0
 # means "the number of cores on this machine", and 1+ is passed through to the
@@ -582,8 +595,7 @@
 
 # Build a multi-threaded rustc. This allows users to use parallel rustc
 # via the unstable option `-Z threads=n`.
-# Since stable/beta channels only allow using stable features,
-# `parallel-compiler = false` should be set for these channels.
+# This option is deprecated and always true.
 #parallel-compiler = true
 
 # The default linker that will be hard-coded into the generated
@@ -656,8 +668,6 @@
 
 # Flag indicating whether git info will be retrieved from .git automatically.
 # Having the git information can cause a lot of rebuilds during development.
-#
-# FIXME(#76720): this can causes bugs if different compilers reuse the same metadata cache.
 #omit-git-hash = if rust.channel == "dev" { true } else { false }
 
 # Whether to create a source tarball by default when running `x dist`.

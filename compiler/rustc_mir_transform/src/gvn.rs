@@ -85,6 +85,7 @@
 use std::borrow::Cow;
 
 use either::Either;
+use rustc_abi::{self as abi, BackendRepr, FIRST_VARIANT, FieldIdx, Primitive, Size, VariantIdx};
 use rustc_const_eval::const_eval::DummyMachine;
 use rustc_const_eval::interpret::{
     ImmTy, Immediate, InterpCx, MemPlaceMeta, MemoryKind, OpTy, Projectable, Scalar,
@@ -99,11 +100,10 @@ use rustc_middle::bug;
 use rustc_middle::mir::interpret::GlobalAlloc;
 use rustc_middle::mir::visit::*;
 use rustc_middle::mir::*;
-use rustc_middle::ty::layout::{HasParamEnv, LayoutOf};
+use rustc_middle::ty::layout::{HasTypingEnv, LayoutOf};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::DUMMY_SP;
 use rustc_span::def_id::DefId;
-use rustc_target::abi::{self, Abi, FIRST_VARIANT, FieldIdx, Primitive, Size, VariantIdx};
 use smallvec::SmallVec;
 use tracing::{debug, instrument, trace};
 
@@ -120,12 +120,12 @@ impl<'tcx> crate::MirPass<'tcx> for GVN {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         debug!(def_id = ?body.source.def_id());
 
-        let param_env = tcx.param_env_reveal_all_normalized(body.source.def_id());
-        let ssa = SsaLocals::new(tcx, body, param_env);
+        let typing_env = body.typing_env(tcx);
+        let ssa = SsaLocals::new(tcx, body, typing_env);
         // Clone dominators because we need them while mutating the body.
         let dominators = body.basic_blocks.dominators().clone();
 
-        let mut state = VnState::new(tcx, body, param_env, &ssa, dominators, &body.local_decls);
+        let mut state = VnState::new(tcx, body, typing_env, &ssa, dominators, &body.local_decls);
         ssa.for_each_assignment_mut(
             body.basic_blocks.as_mut_preserves_cfg(),
             |local, value, location| {
@@ -241,7 +241,6 @@ enum Value<'tcx> {
 struct VnState<'body, 'tcx> {
     tcx: TyCtxt<'tcx>,
     ecx: InterpCx<'tcx, DummyMachine>,
-    param_env: ty::ParamEnv<'tcx>,
     local_decls: &'body LocalDecls<'tcx>,
     /// Value stored in each local.
     locals: IndexVec<Local, Option<VnIndex>>,
@@ -266,7 +265,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
     fn new(
         tcx: TyCtxt<'tcx>,
         body: &Body<'tcx>,
-        param_env: ty::ParamEnv<'tcx>,
+        typing_env: ty::TypingEnv<'tcx>,
         ssa: &'body SsaLocals,
         dominators: Dominators<BasicBlock>,
         local_decls: &'body LocalDecls<'tcx>,
@@ -280,19 +279,22 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 + 4 * body.basic_blocks.len();
         VnState {
             tcx,
-            ecx: InterpCx::new(tcx, DUMMY_SP, param_env, DummyMachine),
-            param_env,
+            ecx: InterpCx::new(tcx, DUMMY_SP, typing_env, DummyMachine),
             local_decls,
             locals: IndexVec::from_elem(None, local_decls),
             rev_locals: IndexVec::with_capacity(num_values),
             values: FxIndexSet::with_capacity_and_hasher(num_values, Default::default()),
             evaluated: IndexVec::with_capacity(num_values),
             next_opaque: Some(1),
-            feature_unsized_locals: tcx.features().unsized_locals,
+            feature_unsized_locals: tcx.features().unsized_locals(),
             ssa,
             dominators,
             reused_locals: BitSet::new_empty(local_decls.len()),
         }
+    }
+
+    fn typing_env(&self) -> ty::TypingEnv<'tcx> {
+        self.ecx.typing_env()
     }
 
     #[instrument(level = "trace", skip(self), ret)]
@@ -343,7 +345,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
 
         // Only register the value if its type is `Sized`, as we will emit copies of it.
         let is_sized = !self.feature_unsized_locals
-            || self.local_decls[local].ty.is_sized(self.tcx, self.param_env);
+            || self.local_decls[local].ty.is_sized(self.tcx, self.typing_env());
         if is_sized {
             self.rev_locals[value].push(local);
         }
@@ -427,7 +429,10 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                     };
                     let ptr_imm = Immediate::new_pointer_with_meta(data, meta, &self.ecx);
                     ImmTy::from_immediate(ptr_imm, ty).into()
-                } else if matches!(ty.abi, Abi::Scalar(..) | Abi::ScalarPair(..)) {
+                } else if matches!(
+                    ty.backend_repr,
+                    BackendRepr::Scalar(..) | BackendRepr::ScalarPair(..)
+                ) {
                     let dest = self.ecx.allocate(ty, MemoryKind::Stack).discard_err()?;
                     let variant_dest = if let Some(variant) = variant {
                         self.ecx.project_downcast(&dest, variant).discard_err()?
@@ -528,7 +533,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                     NullOp::OffsetOf(fields) => self
                         .ecx
                         .tcx
-                        .offset_of_subfield(self.ecx.param_env(), layout, fields.iter())
+                        .offset_of_subfield(self.typing_env(), layout, fields.iter())
                         .bytes(),
                     NullOp::UbChecks => return None,
                 };
@@ -573,12 +578,12 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                     // limited transmutes: it only works between types with the same layout, and
                     // cannot transmute pointers to integers.
                     if value.as_mplace_or_imm().is_right() {
-                        let can_transmute = match (value.layout.abi, to.abi) {
-                            (Abi::Scalar(s1), Abi::Scalar(s2)) => {
+                        let can_transmute = match (value.layout.backend_repr, to.backend_repr) {
+                            (BackendRepr::Scalar(s1), BackendRepr::Scalar(s2)) => {
                                 s1.size(&self.ecx) == s2.size(&self.ecx)
                                     && !matches!(s1.primitive(), Primitive::Pointer(..))
                             }
-                            (Abi::ScalarPair(a1, b1), Abi::ScalarPair(a2, b2)) => {
+                            (BackendRepr::ScalarPair(a1, b1), BackendRepr::ScalarPair(a2, b2)) => {
                                 a1.size(&self.ecx) == a2.size(&self.ecx) &&
                                 b1.size(&self.ecx) == b2.size(&self.ecx) &&
                                 // The alignment of the second component determines its offset, so that also needs to match.
@@ -635,7 +640,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 let ty = place.ty(self.local_decls, self.tcx).ty;
                 if let Some(Mutability::Not) = ty.ref_mutability()
                     && let Some(pointee_ty) = ty.builtin_deref(true)
-                    && pointee_ty.is_freeze(self.tcx, self.param_env)
+                    && pointee_ty.is_freeze(self.tcx, self.typing_env())
                 {
                     // An immutable borrow `_x` always points to the same value for the
                     // lifetime of the borrow, so we can merge all instances of `*_x`.
@@ -1054,7 +1059,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 && let ty::RawPtr(from_pointee_ty, from_mtbl) = cast_from.kind()
                 && let ty::RawPtr(_, output_mtbl) = output_pointer_ty.kind()
                 && from_mtbl == output_mtbl
-                && from_pointee_ty.is_sized(self.tcx, self.param_env)
+                && from_pointee_ty.is_sized(self.tcx, self.typing_env())
             {
                 fields[0] = *cast_value;
                 *data_pointer_ty = *cast_from;
@@ -1243,7 +1248,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
 
         let as_bits = |value| {
             let constant = self.evaluated[value].as_ref()?;
-            if layout.abi.is_scalar() {
+            if layout.backend_repr.is_scalar() {
                 let scalar = self.ecx.read_scalar(constant).discard_err()?;
                 scalar.to_bits(constant.layout.size).discard_err()
             } else {
@@ -1376,7 +1381,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             && let Value::Aggregate(AggregateTy::RawPtr { data_pointer_ty, .. }, _, fields) =
                 self.get(value)
             && let ty::RawPtr(to_pointee, _) = to.kind()
-            && to_pointee.is_sized(self.tcx, self.param_env)
+            && to_pointee.is_sized(self.tcx, self.typing_env())
         {
             from = *data_pointer_ty;
             value = fields[0];
@@ -1473,8 +1478,9 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
         if left_meta_ty == right_meta_ty {
             true
         } else if let Ok(left) =
-            self.tcx.try_normalize_erasing_regions(self.param_env, left_meta_ty)
-            && let Ok(right) = self.tcx.try_normalize_erasing_regions(self.param_env, right_meta_ty)
+            self.tcx.try_normalize_erasing_regions(self.typing_env(), left_meta_ty)
+            && let Ok(right) =
+                self.tcx.try_normalize_erasing_regions(self.typing_env(), right_meta_ty)
         {
             left == right
         } else {
@@ -1499,12 +1505,12 @@ fn op_to_prop_const<'tcx>(
 
     // Do not synthetize too large constants. Codegen will just memcpy them, which we'd like to
     // avoid.
-    if !matches!(op.layout.abi, Abi::Scalar(..) | Abi::ScalarPair(..)) {
+    if !matches!(op.layout.backend_repr, BackendRepr::Scalar(..) | BackendRepr::ScalarPair(..)) {
         return None;
     }
 
     // If this constant has scalar ABI, return it as a `ConstValue::Scalar`.
-    if let Abi::Scalar(abi::Scalar::Initialized { .. }) = op.layout.abi
+    if let BackendRepr::Scalar(abi::Scalar::Initialized { .. }) = op.layout.backend_repr
         && let Some(scalar) = ecx.read_scalar(op).discard_err()
     {
         if !scalar.try_to_scalar_int().is_ok() {

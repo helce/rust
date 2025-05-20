@@ -7,6 +7,7 @@
 use std::iter;
 use std::ops::ControlFlow;
 
+use rustc_abi::BackendRepr;
 use rustc_errors::FatalError;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
@@ -14,11 +15,10 @@ use rustc_middle::query::Providers;
 use rustc_middle::ty::{
     self, EarlyBinder, ExistentialPredicateStableCmpExt as _, GenericArgs, Ty, TyCtxt,
     TypeFoldable, TypeFolder, TypeSuperFoldable, TypeSuperVisitable, TypeVisitable,
-    TypeVisitableExt, TypeVisitor, Upcast,
+    TypeVisitableExt, TypeVisitor, TypingMode, Upcast,
 };
 use rustc_span::Span;
 use rustc_span::symbol::Symbol;
-use rustc_target::abi::Abi;
 use smallvec::SmallVec;
 use tracing::{debug, instrument};
 
@@ -125,7 +125,7 @@ fn sized_trait_bound_spans<'tcx>(
     bounds: hir::GenericBounds<'tcx>,
 ) -> impl 'tcx + Iterator<Item = Span> {
     bounds.iter().filter_map(move |b| match b {
-        hir::GenericBound::Trait(trait_ref, hir::TraitBoundModifier::None)
+        hir::GenericBound::Trait(trait_ref)
             if trait_has_sized_self(
                 tcx,
                 trait_ref.trait_ref.trait_def_id().unwrap_or_else(|| FatalError.raise()),
@@ -245,6 +245,7 @@ fn predicate_references_self<'tcx>(
         | ty::ClauseKind::RegionOutlives(..)
         // FIXME(generic_const_exprs): this can mention `Self`
         | ty::ClauseKind::ConstEvaluatable(..)
+        | ty::ClauseKind::HostEffect(..)
          => None,
     }
 }
@@ -254,7 +255,7 @@ fn super_predicates_have_non_lifetime_binders(
     trait_def_id: DefId,
 ) -> SmallVec<[Span; 1]> {
     // If non_lifetime_binders is disabled, then exit early
-    if !tcx.features().non_lifetime_binders {
+    if !tcx.features().non_lifetime_binders() {
         return SmallVec::new();
     }
     tcx.explicit_super_predicates_of(trait_def_id)
@@ -284,7 +285,8 @@ fn generics_require_sized_self(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
         | ty::ClauseKind::Projection(_)
         | ty::ClauseKind::ConstArgHasType(_, _)
         | ty::ClauseKind::WellFormed(_)
-        | ty::ClauseKind::ConstEvaluatable(_) => false,
+        | ty::ClauseKind::ConstEvaluatable(_)
+        | ty::ClauseKind::HostEffect(..) => false,
     })
 }
 
@@ -327,7 +329,7 @@ pub fn dyn_compatibility_violations_for_assoc_item(
             .collect(),
         // Associated types can only be dyn-compatible if they have `Self: Sized` bounds.
         ty::AssocKind::Type => {
-            if !tcx.features().generic_associated_types_extended
+            if !tcx.features().generic_associated_types_extended()
                 && !tcx.generics_of(item.def_id).is_own_empty()
                 && !item.is_impl_trait_in_trait()
             {
@@ -511,7 +513,7 @@ fn check_receiver_correct<'tcx>(tcx: TyCtxt<'tcx>, trait_def_id: DefId, method: 
 
     let method_def_id = method.def_id;
     let sig = tcx.fn_sig(method_def_id).instantiate_identity();
-    let param_env = tcx.param_env(method_def_id);
+    let typing_env = ty::TypingEnv::non_body_analysis(tcx, method_def_id);
     let receiver_ty = tcx.liberate_late_bound_regions(method_def_id, sig.input(0));
 
     if receiver_ty == tcx.types.self_param {
@@ -521,8 +523,8 @@ fn check_receiver_correct<'tcx>(tcx: TyCtxt<'tcx>, trait_def_id: DefId, method: 
 
     // e.g., `Rc<()>`
     let unit_receiver_ty = receiver_for_self_ty(tcx, receiver_ty, tcx.types.unit, method_def_id);
-    match tcx.layout_of(param_env.and(unit_receiver_ty)).map(|l| l.abi) {
-        Ok(Abi::Scalar(..)) => (),
+    match tcx.layout_of(typing_env.as_query_input(unit_receiver_ty)).map(|l| l.backend_repr) {
+        Ok(BackendRepr::Scalar(..)) => (),
         abi => {
             tcx.dcx().span_delayed_bug(
                 tcx.def_span(method_def_id),
@@ -536,8 +538,8 @@ fn check_receiver_correct<'tcx>(tcx: TyCtxt<'tcx>, trait_def_id: DefId, method: 
     // e.g., `Rc<dyn Trait>`
     let trait_object_receiver =
         receiver_for_self_ty(tcx, receiver_ty, trait_object_ty, method_def_id);
-    match tcx.layout_of(param_env.and(trait_object_receiver)).map(|l| l.abi) {
-        Ok(Abi::ScalarPair(..)) => (),
+    match tcx.layout_of(typing_env.as_query_input(trait_object_receiver)).map(|l| l.backend_repr) {
+        Ok(BackendRepr::ScalarPair(..)) => (),
         abi => {
             tcx.dcx().span_delayed_bug(
                 tcx.def_span(method_def_id),
@@ -716,7 +718,7 @@ fn receiver_is_dispatchable<'tcx>(
         Obligation::new(tcx, ObligationCause::dummy(), param_env, predicate)
     };
 
-    let infcx = tcx.infer_ctxt().build();
+    let infcx = tcx.infer_ctxt().build(TypingMode::non_body_analysis());
     // the receiver is dispatchable iff the obligation holds
     infcx.predicate_must_hold_modulo_regions(&obligation)
 }

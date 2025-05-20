@@ -91,32 +91,39 @@ mod impl_wf_check;
 mod outlives;
 mod variance;
 
+use rustc_abi::ExternAbi;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_middle::middle;
 use rustc_middle::mir::interpret::GlobalId;
 use rustc_middle::query::Providers;
-use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::ty::{self, Const, Ty, TyCtxt};
 use rustc_session::parse::feature_err;
 use rustc_span::Span;
 use rustc_span::symbol::sym;
-use rustc_target::spec::abi::Abi;
 use rustc_trait_selection::traits;
+
+use self::hir_ty_lowering::{FeedConstTy, HirTyLowerer};
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
-fn require_c_abi_if_c_variadic(tcx: TyCtxt<'_>, decl: &hir::FnDecl<'_>, abi: Abi, span: Span) {
+fn require_c_abi_if_c_variadic(
+    tcx: TyCtxt<'_>,
+    decl: &hir::FnDecl<'_>,
+    abi: ExternAbi,
+    span: Span,
+) {
     const CONVENTIONS_UNSTABLE: &str =
         "`C`, `cdecl`, `system`, `aapcs`, `win64`, `sysv64` or `efiapi`";
     const CONVENTIONS_STABLE: &str = "`C` or `cdecl`";
     const UNSTABLE_EXPLAIN: &str =
         "using calling conventions other than `C` or `cdecl` for varargs functions is unstable";
 
-    if !decl.c_variadic || matches!(abi, Abi::C { .. } | Abi::Cdecl { .. }) {
+    if !decl.c_variadic || matches!(abi, ExternAbi::C { .. } | ExternAbi::Cdecl { .. }) {
         return;
     }
 
-    let extended_abi_support = tcx.features().extended_varargs_abi_support;
+    let extended_abi_support = tcx.features().extended_varargs_abi_support();
     let conventions = match (extended_abi_support, abi.supports_varargs()) {
         // User enabled additional ABI support for varargs and function ABI matches those ones.
         (true, true) => return,
@@ -153,12 +160,6 @@ pub fn provide(providers: &mut Providers) {
 pub fn check_crate(tcx: TyCtxt<'_>) {
     let _prof_timer = tcx.sess.timer("type_check_crate");
 
-    // FIXME(effects): remove once effects is implemented in old trait solver
-    // or if the next solver is stabilized.
-    if tcx.features().effects && !tcx.next_trait_solver_globally() {
-        tcx.dcx().emit_err(errors::EffectsWithoutNextSolver);
-    }
-
     tcx.sess.time("coherence_checking", || {
         tcx.hir().par_for_each_module(|module| {
             let _ = tcx.ensure().check_mod_type_wf(module);
@@ -172,7 +173,7 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
         let _ = tcx.ensure().crate_inherent_impls_overlap_check(());
     });
 
-    if tcx.features().rustc_attrs {
+    if tcx.features().rustc_attrs() {
         tcx.sess.time("outlives_dumping", || outlives::dump::inferred_outlives(tcx));
         tcx.sess.time("variance_dumping", || variance::dump::variances(tcx));
         collect::dump::opaque_hidden_types(tcx);
@@ -189,8 +190,8 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
             DefKind::Const if tcx.generics_of(item_def_id).is_empty() => {
                 let instance = ty::Instance::new(item_def_id.into(), ty::GenericArgs::empty());
                 let cid = GlobalId { instance, promoted: None };
-                let param_env = ty::ParamEnv::reveal_all();
-                tcx.ensure().eval_to_const_value_raw(param_env.and(cid));
+                let typing_env = ty::TypingEnv::fully_monomorphized();
+                tcx.ensure().eval_to_const_value_raw(typing_env.as_query_input(cid));
             }
             _ => (),
         }
@@ -226,4 +227,15 @@ pub fn lower_ty<'tcx>(tcx: TyCtxt<'tcx>, hir_ty: &hir::Ty<'tcx>) -> Ty<'tcx> {
     // scope. This is derived from the enclosing item-like thing.
     let env_def_id = tcx.hir().get_parent_item(hir_ty.hir_id);
     collect::ItemCtxt::new(tcx, env_def_id.def_id).lower_ty(hir_ty)
+}
+
+/// This is for rustdoc.
+// FIXME(const_generics): having special methods for rustdoc in `rustc_hir_analysis` is cursed
+pub fn lower_const_arg_for_rustdoc<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    hir_ct: &hir::ConstArg<'tcx>,
+    feed: FeedConstTy,
+) -> Const<'tcx> {
+    let env_def_id = tcx.hir().get_parent_item(hir_ct.hir_id);
+    collect::ItemCtxt::new(tcx, env_def_id.def_id).lowerer().lower_const_arg(hir_ct, feed)
 }

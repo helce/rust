@@ -4,6 +4,7 @@
 use core::ops::ControlFlow;
 
 use hir::{ExprKind, Param};
+use rustc_abi::FieldIdx;
 use rustc_errors::{Applicability, Diag};
 use rustc_hir::intravisit::Visitor;
 use rustc_hir::{self as hir, BindingMode, ByRef, Node};
@@ -16,7 +17,6 @@ use rustc_middle::mir::{
 use rustc_middle::ty::{self, InstanceKind, Ty, TyCtxt, Upcast};
 use rustc_span::symbol::{Symbol, kw};
 use rustc_span::{BytePos, DesugaringKind, Span, sym};
-use rustc_target::abi::FieldIdx;
 use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
 use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::traits;
@@ -793,7 +793,8 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             let reason = if let PlaceBase::Upvar(upvar_id) = closure_kind_origin.base {
                 let upvar = ty::place_to_string_for_capture(tcx, closure_kind_origin);
                 let root_hir_id = upvar_id.var_path.hir_id;
-                // we have an origin for this closure kind starting at this root variable so it's safe to unwrap here
+                // We have an origin for this closure kind starting at this root variable so it's
+                // safe to unwrap here.
                 let captured_places =
                     tables.closure_min_captures[&closure_local_def_id].get(&root_hir_id).unwrap();
 
@@ -816,7 +817,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     ) {
                         match captured_place.info.capture_kind {
                             ty::UpvarCapture::ByRef(
-                                ty::BorrowKind::MutBorrow | ty::BorrowKind::UniqueImmBorrow,
+                                ty::BorrowKind::Mutable | ty::BorrowKind::UniqueImmutable,
                             ) => {
                                 capture_reason = format!("mutable borrow of `{upvar}`");
                             }
@@ -959,19 +960,15 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                         None
                     }
                 }
-                hir::ExprKind::MethodCall(_, _, args, span) => {
-                    if let Some(def_id) = typeck_results.type_dependent_def_id(*hir_id) {
-                        Some((def_id, *span, *args))
-                    } else {
-                        None
-                    }
-                }
+                hir::ExprKind::MethodCall(_, _, args, span) => typeck_results
+                    .type_dependent_def_id(*hir_id)
+                    .map(|def_id| (def_id, *span, *args)),
                 _ => None,
             }
         };
 
-        // If we can detect the expression to be an function or method call where the closure was an argument,
-        // we point at the function or method definition argument...
+        // If we can detect the expression to be an function or method call where the closure was
+        // an argument, we point at the function or method definition argument...
         if let Some((callee_def_id, call_span, call_args)) = get_call_details() {
             let arg_pos = call_args
                 .iter()
@@ -1146,6 +1143,12 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     }
                     // don't create labels for compiler-generated spans
                     Some(_) => None,
+                    // don't create labels for the span not from user's code
+                    None if opt_assignment_rhs_span
+                        .is_some_and(|span| self.infcx.tcx.sess.source_map().is_imported(span)) =>
+                    {
+                        None
+                    }
                     None => {
                         let (has_sugg, decl_span, sugg) = if name != kw::SelfLower {
                             suggest_ampmut(
@@ -1198,18 +1201,21 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     sugg.push(s);
                 }
 
-                err.multipart_suggestion_verbose(
-                    format!(
-                        "consider changing this to be a mutable {pointer_desc}{}",
-                        if is_trait_sig {
-                            " in the `impl` method and the `trait` definition"
-                        } else {
-                            ""
-                        }
-                    ),
-                    sugg,
-                    Applicability::MachineApplicable,
-                );
+                if sugg.iter().all(|(span, _)| !self.infcx.tcx.sess.source_map().is_imported(*span))
+                {
+                    err.multipart_suggestion_verbose(
+                        format!(
+                            "consider changing this to be a mutable {pointer_desc}{}",
+                            if is_trait_sig {
+                                " in the `impl` method and the `trait` definition"
+                            } else {
+                                ""
+                            }
+                        ),
+                        sugg,
+                        Applicability::MachineApplicable,
+                    );
+                }
             }
             Some((false, err_label_span, message, _)) => {
                 let def_id = self.body.source.def_id();
@@ -1236,7 +1242,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                             .type_implements_trait_shallow(
                                 clone_trait,
                                 ty.peel_refs(),
-                                self.param_env,
+                                self.infcx.param_env,
                             )
                             .as_deref()
                         {
@@ -1273,7 +1279,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                                 let obligation = traits::Obligation::new(
                                     self.infcx.tcx,
                                     traits::ObligationCause::dummy(),
-                                    self.param_env,
+                                    self.infcx.param_env,
                                     trait_ref,
                                 );
                                 self.infcx.err_ctxt().suggest_derive(

@@ -520,6 +520,7 @@ use crate::{convert, fmt, hint};
 /// `Result` is a type that represents either success ([`Ok`]) or failure ([`Err`]).
 ///
 /// See the [module documentation](self) for details.
+#[cfg_attr(not(bootstrap), doc(search_unbox))]
 #[derive(Copy, PartialEq, PartialOrd, Eq, Ord, Debug, Hash)]
 #[must_use = "this `Result` may be an `Err` variant, which should be handled"]
 #[rustc_diagnostic_item = "Result"]
@@ -735,7 +736,6 @@ impl<T, E> Result<T, E> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_result", since = "1.83.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     pub const fn as_mut(&mut self) -> Result<&mut T, &mut E> {
         match *self {
             Ok(ref mut x) => Ok(x),
@@ -1589,7 +1589,6 @@ impl<T, E> Result<&mut T, E> {
     #[inline]
     #[stable(feature = "result_copied", since = "1.59.0")]
     #[rustc_const_stable(feature = "const_result", since = "1.83.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     #[rustc_allow_const_fn_unstable(const_precise_live_drops)]
     pub const fn copied(self) -> Result<T, E>
     where

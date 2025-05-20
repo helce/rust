@@ -16,14 +16,14 @@ use crate::passes::{ImplStripper, Pass};
 
 pub(crate) const STRIP_HIDDEN: Pass = Pass {
     name: "strip-hidden",
-    run: strip_hidden,
+    run: Some(strip_hidden),
     description: "strips all `#[doc(hidden)]` items from the output",
 };
 
 /// Strip items marked `#[doc(hidden)]`
 pub(crate) fn strip_hidden(krate: clean::Crate, cx: &mut DocContext<'_>) -> clean::Crate {
     let mut retained = ItemIdSet::default();
-    let is_json_output = cx.output_format.is_json() && !cx.show_coverage;
+    let is_json_output = cx.is_json_output();
 
     // strip all #[doc(hidden)] items
     let krate = {

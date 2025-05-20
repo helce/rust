@@ -271,6 +271,14 @@ impl Span {
     pub fn get_lines(&self) -> LineInfo {
         with(|c| c.get_lines(self))
     }
+
+    /// Return the span location to be printed in diagnostic messages.
+    ///
+    /// This may leak local file paths and should not be used to build artifacts that may be
+    /// distributed.
+    pub fn diagnostic(&self) -> String {
+        with(|c| c.span_to_string(*self))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -1393,7 +1401,6 @@ pub struct Generics {
     pub param_def_id_to_index: Vec<(GenericDef, u32)>,
     pub has_self: bool,
     pub has_late_bound_regions: Option<Span>,
-    pub host_effect_index: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

@@ -24,6 +24,7 @@ pub use assoc::*;
 pub use generic_args::{GenericArgKind, TermKind, *};
 pub use generics::*;
 pub use intrinsic::IntrinsicDef;
+use rustc_abi::{Align, FieldIdx, Integer, IntegerType, ReprFlags, ReprOptions, VariantIdx};
 use rustc_ast::expand::StrippedCfgItem;
 use rustc_ast::node_id::NodeMap;
 pub use rustc_ast_ir::{Movability, Mutability, try_visit};
@@ -48,21 +49,12 @@ pub use rustc_session::lint::RegisteredTools;
 use rustc_span::hygiene::MacroKind;
 use rustc_span::symbol::{Ident, Symbol, kw, sym};
 use rustc_span::{ExpnId, ExpnKind, Span};
-use rustc_target::abi::{Align, FieldIdx, Integer, IntegerType, VariantIdx};
-pub use rustc_target::abi::{ReprFlags, ReprOptions};
-pub use rustc_type_ir::ConstKind::{
-    Bound as BoundCt, Error as ErrorCt, Expr as ExprCt, Infer as InferCt, Param as ParamCt,
-    Placeholder as PlaceholderCt, Unevaluated, Value,
-};
 pub use rustc_type_ir::relate::VarianceDiagInfo;
 pub use rustc_type_ir::*;
 use tracing::{debug, instrument};
 pub use vtable::*;
 use {rustc_ast as ast, rustc_attr as attr, rustc_hir as hir};
 
-pub use self::AssocItemContainer::*;
-pub use self::BorrowKind::*;
-pub use self::IntVarValue::*;
 pub use self::closure::{
     BorrowKind, CAPTURE_STRUCT_LOCAL, CaptureInfo, CapturedPlace, ClosureTypeInfo,
     MinCaptureInformationMap, MinCaptureList, RootVariableMinCaptureList, UpvarCapture, UpvarId,
@@ -70,7 +62,7 @@ pub use self::closure::{
     place_to_string_for_capture,
 };
 pub use self::consts::{
-    Const, ConstInt, ConstKind, Expr, ExprKind, FeedConstTy, ScalarInt, UnevaluatedConst, ValTree,
+    Const, ConstInt, ConstKind, Expr, ExprKind, ScalarInt, UnevaluatedConst, ValTree,
 };
 pub use self::context::{
     CtxtInterners, CurrentGcx, DeducedParamAttrs, Feed, FreeRegionInfo, GlobalCtxt, Lift, TyCtxt,
@@ -84,14 +76,14 @@ pub use self::parameterized::ParameterizedOverTcx;
 pub use self::pattern::{Pattern, PatternKind};
 pub use self::predicate::{
     AliasTerm, Clause, ClauseKind, CoercePredicate, ExistentialPredicate,
-    ExistentialPredicateStableCmpExt, ExistentialProjection, ExistentialTraitRef, NormalizesTo,
-    OutlivesPredicate, PolyCoercePredicate, PolyExistentialPredicate, PolyExistentialProjection,
-    PolyExistentialTraitRef, PolyProjectionPredicate, PolyRegionOutlivesPredicate,
-    PolySubtypePredicate, PolyTraitPredicate, PolyTraitRef, PolyTypeOutlivesPredicate, Predicate,
-    PredicateKind, ProjectionPredicate, RegionOutlivesPredicate, SubtypePredicate, ToPolyTraitRef,
-    TraitPredicate, TraitRef, TypeOutlivesPredicate,
+    ExistentialPredicateStableCmpExt, ExistentialProjection, ExistentialTraitRef,
+    HostEffectPredicate, NormalizesTo, OutlivesPredicate, PolyCoercePredicate,
+    PolyExistentialPredicate, PolyExistentialProjection, PolyExistentialTraitRef,
+    PolyProjectionPredicate, PolyRegionOutlivesPredicate, PolySubtypePredicate, PolyTraitPredicate,
+    PolyTraitRef, PolyTypeOutlivesPredicate, Predicate, PredicateKind, ProjectionPredicate,
+    RegionOutlivesPredicate, SubtypePredicate, ToPolyTraitRef, TraitPredicate, TraitRef,
+    TypeOutlivesPredicate,
 };
-pub use self::region::BoundRegionKind::*;
 pub use self::region::{
     BoundRegion, BoundRegionKind, EarlyParamRegion, LateParamRegion, Region, RegionKind, RegionVid,
 };
@@ -99,7 +91,7 @@ pub use self::rvalue_scopes::RvalueScopes;
 pub use self::sty::{
     AliasTy, Article, Binder, BoundTy, BoundTyKind, BoundVariableKind, CanonicalPolyFnSig,
     CoroutineArgsExt, EarlyBinder, FnSig, InlineConstArgs, InlineConstArgsParts, ParamConst,
-    ParamTy, PolyFnSig, TyKind, TypeAndMut, UpvarArgs,
+    ParamTy, PolyFnSig, TyKind, TypeAndMut, TypingMode, UpvarArgs,
 };
 pub use self::trait_def::TraitDef;
 pub use self::typeck_results::{
@@ -111,7 +103,7 @@ use crate::error::{OpaqueHiddenTypeMismatch, TypeMismatchReason};
 use crate::metadata::ModChild;
 use crate::middle::privacy::EffectiveVisibilities;
 use crate::mir::{Body, CoroutineLayout};
-use crate::query::Providers;
+use crate::query::{IntoQueryParam, Providers};
 use crate::traits::{self, Reveal};
 use crate::ty;
 pub use crate::ty::diagnostics::*;
@@ -495,12 +487,10 @@ impl<'tcx> rustc_type_ir::inherent::IntoKind for Term<'tcx> {
     }
 }
 
-#[cfg(parallel_compiler)]
 unsafe impl<'tcx> rustc_data_structures::sync::DynSend for Term<'tcx> where
     &'tcx (Ty<'tcx>, Const<'tcx>): rustc_data_structures::sync::DynSend
 {
 }
-#[cfg(parallel_compiler)]
 unsafe impl<'tcx> rustc_data_structures::sync::DynSync for Term<'tcx> where
     &'tcx (Ty<'tcx>, Const<'tcx>): rustc_data_structures::sync::DynSync
 {
@@ -902,7 +892,7 @@ impl rustc_type_ir::inherent::PlaceholderLike for PlaceholderRegion {
     }
 
     fn new(ui: UniverseIndex, var: BoundVar) -> Self {
-        Placeholder { universe: ui, bound: BoundRegion { var, kind: BoundRegionKind::BrAnon } }
+        Placeholder { universe: ui, bound: BoundRegion { var, kind: BoundRegionKind::Anon } }
     }
 }
 
@@ -1084,11 +1074,6 @@ impl<'tcx> ParamEnv<'tcx> {
         ty::ParamEnv { packed: CopyTaggedPtr::new(caller_bounds, ParamTag { reveal }) }
     }
 
-    pub fn with_user_facing(mut self) -> Self {
-        self.packed.set_tag(ParamTag { reveal: Reveal::UserFacing, ..self.packed.tag() });
-        self
-    }
-
     /// Returns a new parameter environment with the same clauses, but
     /// which "reveals" the true results of projections in all cases
     /// (even for associated types that are specializable). This is
@@ -1101,6 +1086,12 @@ impl<'tcx> ParamEnv<'tcx> {
     pub fn with_reveal_all_normalized(self, tcx: TyCtxt<'tcx>) -> Self {
         if self.packed.tag().reveal == traits::Reveal::All {
             return self;
+        }
+
+        // No need to reveal opaques with the new solver enabled,
+        // since we have lazy norm.
+        if tcx.next_trait_solver_globally() {
+            return ParamEnv::new(self.caller_bounds(), Reveal::All);
         }
 
         ParamEnv::new(tcx.reveal_opaque_types_in_bounds(self.caller_bounds()), Reveal::All)
@@ -1129,6 +1120,98 @@ impl<'tcx, T> ParamEnvAnd<'tcx, T> {
     pub fn into_parts(self) -> (ParamEnv<'tcx>, T) {
         (self.param_env, self.value)
     }
+}
+
+/// The environment in which to do trait solving.
+///
+/// Most of the time you only need to care about the `ParamEnv`
+/// as the `TypingMode` is simply stored in the `InferCtxt`.
+///
+/// However, there are some places which rely on trait solving
+/// without using an `InferCtxt` themselves. For these to be
+/// able to use the trait system they have to be able to initialize
+/// such an `InferCtxt` with the right `typing_mode`, so they need
+/// to track both.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, HashStable)]
+#[derive(TypeVisitable, TypeFoldable)]
+pub struct TypingEnv<'tcx> {
+    pub typing_mode: TypingMode<'tcx>,
+    pub param_env: ParamEnv<'tcx>,
+}
+
+impl<'tcx> TypingEnv<'tcx> {
+    /// Create a typing environment with no where-clauses in scope
+    /// where all opaque types and default associated items are revealed.
+    ///
+    /// This is only suitable for monomorphized, post-typeck environments.
+    /// Do not use this for MIR optimizations, as even though they also
+    /// use `TypingMode::PostAnalysis`, they may still have where-clauses
+    /// in scope.
+    pub fn fully_monomorphized() -> TypingEnv<'tcx> {
+        TypingEnv { typing_mode: TypingMode::PostAnalysis, param_env: ParamEnv::reveal_all() }
+    }
+
+    /// Create a typing environment for use during analysis outside of a body.
+    ///
+    /// Using a typing environment inside of bodies is not supported as the body
+    /// may define opaque types. In this case the used functions have to be
+    /// converted to use proper canonical inputs instead.
+    pub fn non_body_analysis(
+        tcx: TyCtxt<'tcx>,
+        def_id: impl IntoQueryParam<DefId>,
+    ) -> TypingEnv<'tcx> {
+        TypingEnv { typing_mode: TypingMode::non_body_analysis(), param_env: tcx.param_env(def_id) }
+    }
+
+    pub fn post_analysis(tcx: TyCtxt<'tcx>, def_id: impl IntoQueryParam<DefId>) -> TypingEnv<'tcx> {
+        TypingEnv {
+            typing_mode: TypingMode::PostAnalysis,
+            param_env: tcx.param_env_reveal_all_normalized(def_id),
+        }
+    }
+
+    /// Modify the `typing_mode` to `PostAnalysis` and eagerly reveal all
+    /// opaque types in the `param_env`.
+    pub fn with_reveal_all_normalized(self, tcx: TyCtxt<'tcx>) -> TypingEnv<'tcx> {
+        let TypingEnv { typing_mode: _, param_env } = self;
+        let param_env = param_env.with_reveal_all_normalized(tcx);
+        TypingEnv { typing_mode: TypingMode::PostAnalysis, param_env }
+    }
+
+    /// Combine this typing environment with the given `value` to be used by
+    /// not (yet) canonicalized queries. This only works if the value does not
+    /// contain anything local to some `InferCtxt`, i.e. inference variables or
+    /// placeholders.
+    pub fn as_query_input<T>(self, value: T) -> PseudoCanonicalInput<'tcx, T>
+    where
+        T: TypeVisitable<TyCtxt<'tcx>>,
+    {
+        // FIXME(#132279): We should assert that the value does not contain any placeholders
+        // as these placeholders are also local to the current inference context. However, we
+        // currently use pseudo-canonical queries in the trait solver which replaces params with
+        // placeholders. We should also simply not use pseudo-canonical queries in the trait
+        // solver, at which point we can readd this assert. As of writing this comment, this is
+        // only used by `fn layout_is_pointer_like` when calling `layout_of`.
+        //
+        // debug_assert!(!value.has_placeholders());
+        PseudoCanonicalInput { typing_env: self, value }
+    }
+}
+
+/// Similar to `CanonicalInput`, this carries the `typing_mode` and the environment
+/// necessary to do any kind of trait solving inside of nested queries.
+///
+/// Unlike proper canonicalization, this requires the `param_env` and the `value` to not
+/// contain anything local to the `infcx` of the caller, so we don't actually canonicalize
+/// anything.
+///
+/// This should be created by using `infcx.pseudo_canonicalize_query(param_env, value)`
+/// or by using `typing_env.as_query_input(value)`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(HashStable, TypeVisitable, TypeFoldable)]
+pub struct PseudoCanonicalInput<'tcx, T> {
+    pub typing_env: TypingEnv<'tcx>,
+    pub value: T,
 }
 
 #[derive(Copy, Clone, Debug, HashStable, Encodable, Decodable)]
@@ -1624,16 +1707,6 @@ impl<'tcx> TyCtxt<'tcx> {
         }
     }
 
-    /// Whether the `def_id` is an associated type that was desugared from a
-    /// `#[const_trait]` or `impl_const`.
-    pub fn is_effects_desugared_assoc_ty(self, def_id: DefId) -> bool {
-        if let DefKind::AssocTy = self.def_kind(def_id) {
-            self.associated_item(def_id).is_effects_desugaring
-        } else {
-            false
-        }
-    }
-
     pub fn find_field_index(self, ident: Ident, variant: &VariantDef) -> Option<FieldIdx> {
         variant.fields.iter_enumerated().find_map(|(i, field)| {
             self.hygienic_eq(ident, field.ident(self), variant.def_id).then_some(i)
@@ -1994,12 +2067,86 @@ impl<'tcx> TyCtxt<'tcx> {
         (ident, scope)
     }
 
+    /// Checks whether this is a `const fn`. Returns `false` for non-functions.
+    ///
+    /// Even if this returns `true`, constness may still be unstable!
     #[inline]
-    pub fn is_const_fn_raw(self, def_id: DefId) -> bool {
+    pub fn is_const_fn(self, def_id: DefId) -> bool {
         matches!(
             self.def_kind(def_id),
-            DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(..) | DefKind::Closure
+            DefKind::Fn | DefKind::AssocFn | DefKind::Ctor(_, CtorKind::Fn) | DefKind::Closure
         ) && self.constness(def_id) == hir::Constness::Const
+    }
+
+    /// Whether this item is conditionally constant for the purposes of the
+    /// effects implementation.
+    ///
+    /// This roughly corresponds to all const functions and other callable
+    /// items, along with const impls and traits, and associated types within
+    /// those impls and traits.
+    pub fn is_conditionally_const(self, def_id: impl Into<DefId>) -> bool {
+        let def_id: DefId = def_id.into();
+        match self.def_kind(def_id) {
+            DefKind::Impl { of_trait: true } => {
+                self.constness(def_id) == hir::Constness::Const
+                    && self.is_const_trait(
+                        self.trait_id_of_impl(def_id)
+                            .expect("expected trait for trait implementation"),
+                    )
+            }
+            DefKind::Fn | DefKind::Ctor(_, CtorKind::Fn) => {
+                self.constness(def_id) == hir::Constness::Const
+            }
+            DefKind::Trait => self.is_const_trait(def_id),
+            DefKind::AssocTy | DefKind::AssocFn => {
+                let parent_def_id = self.parent(def_id);
+                match self.def_kind(parent_def_id) {
+                    DefKind::Impl { of_trait: false } => {
+                        self.constness(def_id) == hir::Constness::Const
+                    }
+                    DefKind::Impl { of_trait: true } | DefKind::Trait => {
+                        self.is_conditionally_const(parent_def_id)
+                    }
+                    _ => bug!("unexpected parent item of associated item: {parent_def_id:?}"),
+                }
+            }
+            DefKind::OpaqueTy => match self.opaque_ty_origin(def_id) {
+                hir::OpaqueTyOrigin::FnReturn { parent, .. } => self.is_conditionally_const(parent),
+                hir::OpaqueTyOrigin::AsyncFn { .. } => false,
+                // FIXME(const_trait_impl): ATPITs could be conditionally const?
+                hir::OpaqueTyOrigin::TyAlias { .. } => false,
+            },
+            DefKind::Closure => {
+                // Closures and RPITs will eventually have const conditions
+                // for `~const` bounds.
+                false
+            }
+            DefKind::Ctor(_, CtorKind::Const)
+            | DefKind::Impl { of_trait: false }
+            | DefKind::Mod
+            | DefKind::Struct
+            | DefKind::Union
+            | DefKind::Enum
+            | DefKind::Variant
+            | DefKind::TyAlias
+            | DefKind::ForeignTy
+            | DefKind::TraitAlias
+            | DefKind::TyParam
+            | DefKind::Const
+            | DefKind::ConstParam
+            | DefKind::Static { .. }
+            | DefKind::AssocConst
+            | DefKind::Macro(_)
+            | DefKind::ExternCrate
+            | DefKind::Use
+            | DefKind::ForeignMod
+            | DefKind::AnonConst
+            | DefKind::InlineConst
+            | DefKind::Field
+            | DefKind::LifetimeParam
+            | DefKind::GlobalAsm
+            | DefKind::SyntheticCoroutineBody => false,
+        }
     }
 
     #[inline]
@@ -2020,7 +2167,7 @@ impl<'tcx> TyCtxt<'tcx> {
         let Some(item) = self.opt_associated_item(def_id) else {
             return false;
         };
-        if item.container != ty::AssocItemContainer::ImplContainer {
+        if item.container != ty::AssocItemContainer::Impl {
             return false;
         }
 
@@ -2101,7 +2248,6 @@ pub fn provide(providers: &mut Providers) {
         incoherent_impls: trait_def::incoherent_impls_provider,
         trait_impls_in_crate: trait_def::trait_impls_in_crate_provider,
         traits: trait_def::traits_provider,
-        const_param_default: consts::const_param_default,
         vtable_allocation: vtable::vtable_allocation_provider,
         ..*providers
     };

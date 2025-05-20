@@ -325,11 +325,11 @@ impl<'tcx> Validator<'_, 'tcx> {
                 if let TempState::Defined { location: loc, .. } = self.temps[local]
                     && let Left(statement) =  self.body.stmt_at(loc)
                     && let Some((_, Rvalue::Use(Operand::Constant(c)))) = statement.kind.as_assign()
-                    && let Some(idx) = c.const_.try_eval_target_usize(self.tcx, self.param_env)
+                    && let Some(idx) = c.const_.try_eval_target_usize(self.tcx, self.typing_env)
                     // Determine the type of the thing we are indexing.
                     && let ty::Array(_, len) = place_base.ty(self.body, self.tcx).ty.kind()
                     // It's an array; determine its length.
-                    && let Some(len) = len.try_eval_target_usize(self.tcx, self.param_env)
+                    && let Some(len) = len.try_to_target_usize(self.tcx)
                     // If the index is in-bounds, go ahead.
                     && idx < len
                 {
@@ -407,7 +407,7 @@ impl<'tcx> Validator<'_, 'tcx> {
                 // mutably without consequences. However, only &mut []
                 // is allowed right now.
                 if let ty::Array(_, len) = ty.kind() {
-                    match len.try_eval_target_usize(self.tcx, self.param_env) {
+                    match len.try_to_target_usize(self.tcx) {
                         Some(0) => {}
                         _ => return Err(Unpromotable),
                     }
@@ -490,7 +490,7 @@ impl<'tcx> Validator<'_, 'tcx> {
                             // Integer division: the RHS must be a non-zero const.
                             let rhs_val = match rhs {
                                 Operand::Constant(c) => {
-                                    c.const_.try_eval_scalar_int(self.tcx, self.param_env)
+                                    c.const_.try_eval_scalar_int(self.tcx, self.typing_env)
                                 }
                                 _ => None,
                             };
@@ -509,7 +509,7 @@ impl<'tcx> Validator<'_, 'tcx> {
                                         let lhs_val = match lhs {
                                             Operand::Constant(c) => c
                                                 .const_
-                                                .try_eval_scalar_int(self.tcx, self.param_env),
+                                                .try_eval_scalar_int(self.tcx, self.typing_env),
                                             _ => None,
                                         };
                                         let lhs_min = sz.signed_int_min();
@@ -673,7 +673,7 @@ impl<'tcx> Validator<'_, 'tcx> {
         }
         // Make sure the callee is a `const fn`.
         let is_const_fn = match *fn_ty.kind() {
-            ty::FnDef(def_id, _) => self.tcx.is_const_fn_raw(def_id),
+            ty::FnDef(def_id, _) => self.tcx.is_const_fn(def_id),
             _ => false,
         };
         if !is_const_fn {

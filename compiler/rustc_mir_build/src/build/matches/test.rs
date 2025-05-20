@@ -149,7 +149,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 if let ty::Adt(def, _) = ty.kind()
                     && tcx.is_lang_item(def.did(), LangItem::String)
                 {
-                    if !tcx.features().string_deref_patterns {
+                    if !tcx.features().string_deref_patterns() {
                         span_bug!(
                             test.span,
                             "matching on `String` went through without enabling string_deref_patterns"
@@ -454,12 +454,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         };
 
         let eq_def_id = self.tcx.require_lang_item(LangItem::PartialEq, Some(source_info.span));
-        let method = trait_method(
-            self.tcx,
-            eq_def_id,
-            sym::eq,
-            self.tcx.with_opt_host_effect_param(self.def_id, eq_def_id, [compare_ty, compare_ty]),
-        );
+        let method = trait_method(self.tcx, eq_def_id, sym::eq, [compare_ty, compare_ty]);
 
         let bool_ty = self.tcx.types.bool;
         let eq_result = self.temp(bool_ty, source_info.span);
@@ -572,7 +567,10 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 // not to add such values here.
                 let is_covering_range = |test_case: &TestCase<'_, 'tcx>| {
                     test_case.as_range().is_some_and(|range| {
-                        matches!(range.contains(value, self.tcx, self.param_env), None | Some(true))
+                        matches!(
+                            range.contains(value, self.tcx, self.typing_env()),
+                            None | Some(true)
+                        )
                     })
                 };
                 let is_conflicting_candidate = |candidate: &&mut Candidate<'_, 'tcx>| {
@@ -589,7 +587,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     None
                 } else {
                     fully_matched = true;
-                    let bits = value.eval_bits(self.tcx, self.param_env);
+                    let bits = value.eval_bits(self.tcx, self.typing_env());
                     Some(TestBranch::Constant(value, bits))
                 }
             }
@@ -601,7 +599,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 fully_matched = false;
                 let not_contained =
                     sorted_candidates.keys().filter_map(|br| br.as_constant()).copied().all(
-                        |val| matches!(range.contains(val, self.tcx, self.param_env), Some(false)),
+                        |val| {
+                            matches!(range.contains(val, self.tcx, self.typing_env()), Some(false))
+                        },
                     );
 
                 not_contained.then(|| {
@@ -613,7 +613,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
 
             (TestKind::If, TestCase::Constant { value }) => {
                 fully_matched = true;
-                let value = value.try_eval_bool(self.tcx, self.param_env).unwrap_or_else(|| {
+                let value = value.try_eval_bool(self.tcx, self.typing_env()).unwrap_or_else(|| {
                     span_bug!(test.span, "expected boolean value but got {value:?}")
                 });
                 Some(if value { TestBranch::Success } else { TestBranch::Failure })
@@ -693,7 +693,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     fully_matched = false;
                     // If the testing range does not overlap with pattern range,
                     // the pattern can be matched only if this test fails.
-                    if !test.overlaps(pat, self.tcx, self.param_env)? {
+                    if !test.overlaps(pat, self.tcx, self.typing_env())? {
                         Some(TestBranch::Failure)
                     } else {
                         None
@@ -702,7 +702,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             }
             (TestKind::Range(range), &TestCase::Constant { value }) => {
                 fully_matched = false;
-                if !range.contains(value, self.tcx, self.param_env)? {
+                if !range.contains(value, self.tcx, self.typing_env())? {
                     // `value` is not contained in the testing range,
                     // so `value` can be matched only if this test fails.
                     Some(TestBranch::Failure)

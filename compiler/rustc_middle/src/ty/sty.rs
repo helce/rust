@@ -8,6 +8,7 @@ use std::iter;
 use std::ops::{ControlFlow, Range};
 
 use hir::def::{CtorKind, DefKind};
+use rustc_abi::{ExternAbi, FIRST_VARIANT, FieldIdx, VariantIdx};
 use rustc_data_structures::captures::Captures;
 use rustc_errors::{ErrorGuaranteed, MultiSpan};
 use rustc_hir as hir;
@@ -16,8 +17,6 @@ use rustc_hir::def_id::DefId;
 use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, extension};
 use rustc_span::symbol::{Symbol, sym};
 use rustc_span::{DUMMY_SP, Span};
-use rustc_target::abi::{FIRST_VARIANT, FieldIdx, VariantIdx};
-use rustc_target::spec::abi;
 use rustc_type_ir::TyKind::*;
 use rustc_type_ir::visit::TypeVisitableExt;
 use rustc_type_ir::{self as ir, BoundVar, CollectAndApply, DynKind};
@@ -40,6 +39,7 @@ pub type AliasTy<'tcx> = ir::AliasTy<TyCtxt<'tcx>>;
 pub type FnSig<'tcx> = ir::FnSig<TyCtxt<'tcx>>;
 pub type Binder<'tcx, T> = ir::Binder<TyCtxt<'tcx>, T>;
 pub type EarlyBinder<'tcx, T> = ir::EarlyBinder<TyCtxt<'tcx>, T>;
+pub type TypingMode<'tcx> = ir::TypingMode<TyCtxt<'tcx>>;
 
 pub trait Article {
     fn article(&self) -> &'static str;
@@ -750,7 +750,7 @@ impl<'tcx> Ty<'tcx> {
 
     #[inline]
     pub fn new_diverging_default(tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
-        if tcx.features().never_type_fallback { tcx.types.never } else { tcx.types.unit }
+        if tcx.features().never_type_fallback() { tcx.types.never } else { tcx.types.unit }
     }
 
     // lang and diagnostic tys
@@ -1117,7 +1117,12 @@ impl<'tcx> Ty<'tcx> {
         // The way we evaluate the `N` in `[T; N]` here only works since we use
         // `simd_size_and_type` post-monomorphization. It will probably start to ICE
         // if we use it in generic code. See the `simd-array-trait` ui test.
-        (f0_len.eval_target_usize(tcx, ParamEnv::empty()), *f0_elem_ty)
+        (
+            f0_len
+                .try_to_target_usize(tcx)
+                .expect("expected SIMD field to have definite array size"),
+            *f0_elem_ty,
+        )
     }
 
     #[inline]
@@ -1348,6 +1353,7 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip(tcx))]
     pub fn fn_sig(self, tcx: TyCtxt<'tcx>) -> PolyFnSig<'tcx> {
         match self.kind() {
             FnDef(def_id, args) => tcx.fn_sig(*def_id).instantiate(tcx, args),
@@ -1358,7 +1364,7 @@ impl<'tcx> Ty<'tcx> {
                     inputs_and_output: ty::List::empty(),
                     c_variadic: false,
                     safety: hir::Safety::Safe,
-                    abi: abi::Abi::Rust,
+                    abi: ExternAbi::Rust,
                 })
             }
             Closure(..) => bug!(
@@ -1927,6 +1933,7 @@ impl<'tcx> Ty<'tcx> {
                 ty::UintTy::U64 => Some(sym::u64),
                 ty::UintTy::U128 => Some(sym::u128),
             },
+            ty::Str => Some(sym::str),
             _ => None,
         }
     }

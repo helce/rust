@@ -1,6 +1,7 @@
 use std::assert_matches::assert_matches;
 
 use libc::{c_char, c_uint};
+use rustc_abi::{BackendRepr, Float, Integer, Primitive, Scalar};
 use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
 use rustc_codegen_ssa::mir::operand::OperandValue;
 use rustc_codegen_ssa::traits::*;
@@ -9,13 +10,12 @@ use rustc_middle::ty::Instance;
 use rustc_middle::ty::layout::TyAndLayout;
 use rustc_middle::{bug, span_bug};
 use rustc_span::{Pos, Span, Symbol, sym};
-use rustc_target::abi::*;
 use rustc_target::asm::*;
 use smallvec::SmallVec;
 use tracing::debug;
 
 use crate::builder::Builder;
-use crate::common::Funclet;
+use crate::common::{AsCCharPtr, Funclet};
 use crate::context::CodegenCx;
 use crate::type_::Type;
 use crate::type_of::LayoutLlvmExt;
@@ -270,6 +270,15 @@ impl<'ll, 'tcx> AsmBuilderMethods<'tcx> for Builder<'_, 'll, 'tcx> {
                 InlineAsmArch::S390x => {
                     constraints.push("~{cc}".to_string());
                 }
+                InlineAsmArch::Sparc | InlineAsmArch::Sparc64 => {
+                    // In LLVM, ~{icc} represents icc and xcc in 64-bit code.
+                    // https://github.com/llvm/llvm-project/blob/llvmorg-19.1.0/llvm/lib/Target/Sparc/SparcRegisterInfo.td#L64
+                    constraints.push("~{icc}".to_string());
+                    constraints.push("~{fcc0}".to_string());
+                    constraints.push("~{fcc1}".to_string());
+                    constraints.push("~{fcc2}".to_string());
+                    constraints.push("~{fcc3}".to_string());
+                }
                 InlineAsmArch::SpirV => {}
                 InlineAsmArch::Wasm32 | InlineAsmArch::Wasm64 => {}
                 InlineAsmArch::Bpf => {}
@@ -423,7 +432,7 @@ impl<'tcx> AsmCodegenMethods<'tcx> for CodegenCx<'_, 'tcx> {
         unsafe {
             llvm::LLVMAppendModuleInlineAsm(
                 self.llmod,
-                template_str.as_ptr().cast(),
+                template_str.as_c_char_ptr(),
                 template_str.len(),
             );
         }
@@ -461,14 +470,14 @@ pub(crate) fn inline_asm_call<'ll>(
     let fty = bx.cx.type_func(&argtys, output);
     unsafe {
         // Ask LLVM to verify that the constraints are well-formed.
-        let constraints_ok = llvm::LLVMRustInlineAsmVerify(fty, cons.as_ptr().cast(), cons.len());
+        let constraints_ok = llvm::LLVMRustInlineAsmVerify(fty, cons.as_c_char_ptr(), cons.len());
         debug!("constraint verification result: {:?}", constraints_ok);
         if constraints_ok {
             let v = llvm::LLVMRustInlineAsm(
                 fty,
-                asm.as_ptr().cast(),
+                asm.as_c_char_ptr(),
                 asm.len(),
-                cons.as_ptr().cast(),
+                cons.as_c_char_ptr(),
                 cons.len(),
                 volatile,
                 alignstack,
@@ -545,57 +554,16 @@ fn xmm_reg_index(reg: InlineAsmReg) -> Option<u32> {
 
 /// If the register is an AArch64 integer register then return its index.
 fn a64_reg_index(reg: InlineAsmReg) -> Option<u32> {
-    use AArch64InlineAsmReg::*;
-    // Unlike `a64_vreg_index`, we can't subtract `x0` to get the u32 because
-    // `x19` and `x29` are missing and the integer constants for the
-    // `x0`..`x30` enum variants don't all match the register number. E.g. the
-    // integer constant for `x18` is 18, but the constant for `x20` is 19.
-    Some(match reg {
-        InlineAsmReg::AArch64(r) => match r {
-            x0 => 0,
-            x1 => 1,
-            x2 => 2,
-            x3 => 3,
-            x4 => 4,
-            x5 => 5,
-            x6 => 6,
-            x7 => 7,
-            x8 => 8,
-            x9 => 9,
-            x10 => 10,
-            x11 => 11,
-            x12 => 12,
-            x13 => 13,
-            x14 => 14,
-            x15 => 15,
-            x16 => 16,
-            x17 => 17,
-            x18 => 18,
-            // x19 is reserved
-            x20 => 20,
-            x21 => 21,
-            x22 => 22,
-            x23 => 23,
-            x24 => 24,
-            x25 => 25,
-            x26 => 26,
-            x27 => 27,
-            x28 => 28,
-            // x29 is reserved
-            x30 => 30,
-            _ => return None,
-        },
-        _ => return None,
-    })
+    match reg {
+        InlineAsmReg::AArch64(r) => r.reg_index(),
+        _ => None,
+    }
 }
 
 /// If the register is an AArch64 vector register then return its index.
 fn a64_vreg_index(reg: InlineAsmReg) -> Option<u32> {
-    use AArch64InlineAsmReg::*;
     match reg {
-        InlineAsmReg::AArch64(reg) if reg as u32 >= v0 as u32 && reg as u32 <= v31 as u32 => {
-            Some(reg as u32 - v0 as u32)
-        }
+        InlineAsmReg::AArch64(reg) => reg.vreg_index(),
         _ => None,
     }
 }
@@ -682,7 +650,9 @@ fn reg_to_llvm(reg: InlineAsmRegOrRegClass, layout: Option<&TyAndLayout<'_>>) ->
             PowerPC(PowerPCInlineAsmRegClass::reg) => "r",
             PowerPC(PowerPCInlineAsmRegClass::reg_nonzero) => "b",
             PowerPC(PowerPCInlineAsmRegClass::freg) => "f",
-            PowerPC(PowerPCInlineAsmRegClass::cr) | PowerPC(PowerPCInlineAsmRegClass::xer) => {
+            PowerPC(PowerPCInlineAsmRegClass::cr)
+            | PowerPC(PowerPCInlineAsmRegClass::xer)
+            | PowerPC(PowerPCInlineAsmRegClass::vreg) => {
                 unreachable!("clobber-only")
             }
             RiscV(RiscVInlineAsmRegClass::reg) => "r",
@@ -715,6 +685,8 @@ fn reg_to_llvm(reg: InlineAsmRegOrRegClass, layout: Option<&TyAndLayout<'_>>) ->
             S390x(S390xInlineAsmRegClass::vreg | S390xInlineAsmRegClass::areg) => {
                 unreachable!("clobber-only")
             }
+            Sparc(SparcInlineAsmRegClass::reg) => "r",
+            Sparc(SparcInlineAsmRegClass::yreg) => unreachable!("clobber-only"),
             Msp430(Msp430InlineAsmRegClass::reg) => "r",
             M68k(M68kInlineAsmRegClass::reg) => "r",
             M68k(M68kInlineAsmRegClass::reg_addr) => "a",
@@ -809,6 +781,7 @@ fn modifier_to_llvm(
         },
         Avr(_) => None,
         S390x(_) => None,
+        Sparc(_) => None,
         Msp430(_) => None,
         SpirV(SpirVInlineAsmRegClass::reg) => bug!("LLVM backend does not support SPIR-V"),
         M68k(_) => None,
@@ -846,7 +819,9 @@ fn dummy_output_type<'ll>(cx: &CodegenCx<'ll, '_>, reg: InlineAsmRegClass) -> &'
         PowerPC(PowerPCInlineAsmRegClass::reg) => cx.type_i32(),
         PowerPC(PowerPCInlineAsmRegClass::reg_nonzero) => cx.type_i32(),
         PowerPC(PowerPCInlineAsmRegClass::freg) => cx.type_f64(),
-        PowerPC(PowerPCInlineAsmRegClass::cr) | PowerPC(PowerPCInlineAsmRegClass::xer) => {
+        PowerPC(PowerPCInlineAsmRegClass::cr)
+        | PowerPC(PowerPCInlineAsmRegClass::xer)
+        | PowerPC(PowerPCInlineAsmRegClass::vreg) => {
             unreachable!("clobber-only")
         }
         RiscV(RiscVInlineAsmRegClass::reg) => cx.type_i32(),
@@ -878,6 +853,8 @@ fn dummy_output_type<'ll>(cx: &CodegenCx<'ll, '_>, reg: InlineAsmRegClass) -> &'
         S390x(S390xInlineAsmRegClass::vreg | S390xInlineAsmRegClass::areg) => {
             unreachable!("clobber-only")
         }
+        Sparc(SparcInlineAsmRegClass::reg) => cx.type_i32(),
+        Sparc(SparcInlineAsmRegClass::yreg) => unreachable!("clobber-only"),
         Msp430(Msp430InlineAsmRegClass::reg) => cx.type_i16(),
         M68k(M68kInlineAsmRegClass::reg) => cx.type_i32(),
         M68k(M68kInlineAsmRegClass::reg_addr) => cx.type_i32(),
@@ -927,8 +904,8 @@ fn llvm_fixup_input<'ll, 'tcx>(
 ) -> &'ll Value {
     use InlineAsmRegClass::*;
     let dl = &bx.tcx.data_layout;
-    match (reg, layout.abi) {
-        (AArch64(AArch64InlineAsmRegClass::vreg), Abi::Scalar(s)) => {
+    match (reg, layout.backend_repr) {
+        (AArch64(AArch64InlineAsmRegClass::vreg), BackendRepr::Scalar(s)) => {
             if let Primitive::Int(Integer::I8, _) = s.primitive() {
                 let vec_ty = bx.cx.type_vector(bx.cx.type_i8(), 8);
                 bx.insert_element(bx.const_undef(vec_ty), value, bx.const_i32(0))
@@ -936,7 +913,7 @@ fn llvm_fixup_input<'ll, 'tcx>(
                 value
             }
         }
-        (AArch64(AArch64InlineAsmRegClass::vreg_low16), Abi::Scalar(s))
+        (AArch64(AArch64InlineAsmRegClass::vreg_low16), BackendRepr::Scalar(s))
             if s.primitive() != Primitive::Float(Float::F128) =>
         {
             let elem_ty = llvm_asm_scalar_type(bx.cx, s);
@@ -949,7 +926,7 @@ fn llvm_fixup_input<'ll, 'tcx>(
             }
             bx.insert_element(bx.const_undef(vec_ty), value, bx.const_i32(0))
         }
-        (AArch64(AArch64InlineAsmRegClass::vreg_low16), Abi::Vector { element, count })
+        (AArch64(AArch64InlineAsmRegClass::vreg_low16), BackendRepr::Vector { element, count })
             if layout.size.bytes() == 8 =>
         {
             let elem_ty = llvm_asm_scalar_type(bx.cx, element);
@@ -957,14 +934,14 @@ fn llvm_fixup_input<'ll, 'tcx>(
             let indices: Vec<_> = (0..count * 2).map(|x| bx.const_i32(x as i32)).collect();
             bx.shuffle_vector(value, bx.const_undef(vec_ty), bx.const_vector(&indices))
         }
-        (X86(X86InlineAsmRegClass::reg_abcd), Abi::Scalar(s))
+        (X86(X86InlineAsmRegClass::reg_abcd), BackendRepr::Scalar(s))
             if s.primitive() == Primitive::Float(Float::F64) =>
         {
             bx.bitcast(value, bx.cx.type_i64())
         }
         (
             X86(X86InlineAsmRegClass::xmm_reg | X86InlineAsmRegClass::zmm_reg),
-            Abi::Vector { .. },
+            BackendRepr::Vector { .. },
         ) if layout.size.bytes() == 64 => bx.bitcast(value, bx.cx.type_vector(bx.cx.type_f64(), 8)),
         (
             X86(
@@ -972,7 +949,7 @@ fn llvm_fixup_input<'ll, 'tcx>(
                 | X86InlineAsmRegClass::ymm_reg
                 | X86InlineAsmRegClass::zmm_reg,
             ),
-            Abi::Scalar(s),
+            BackendRepr::Scalar(s),
         ) if bx.sess().asm_arch == Some(InlineAsmArch::X86)
             && s.primitive() == Primitive::Float(Float::F128) =>
         {
@@ -984,7 +961,7 @@ fn llvm_fixup_input<'ll, 'tcx>(
                 | X86InlineAsmRegClass::ymm_reg
                 | X86InlineAsmRegClass::zmm_reg,
             ),
-            Abi::Scalar(s),
+            BackendRepr::Scalar(s),
         ) if s.primitive() == Primitive::Float(Float::F16) => {
             let value = bx.insert_element(
                 bx.const_undef(bx.type_vector(bx.type_f16(), 8)),
@@ -999,11 +976,14 @@ fn llvm_fixup_input<'ll, 'tcx>(
                 | X86InlineAsmRegClass::ymm_reg
                 | X86InlineAsmRegClass::zmm_reg,
             ),
-            Abi::Vector { element, count: count @ (8 | 16) },
+            BackendRepr::Vector { element, count: count @ (8 | 16) },
         ) if element.primitive() == Primitive::Float(Float::F16) => {
             bx.bitcast(value, bx.type_vector(bx.type_i16(), count))
         }
-        (Arm(ArmInlineAsmRegClass::sreg | ArmInlineAsmRegClass::sreg_low16), Abi::Scalar(s)) => {
+        (
+            Arm(ArmInlineAsmRegClass::sreg | ArmInlineAsmRegClass::sreg_low16),
+            BackendRepr::Scalar(s),
+        ) => {
             if let Primitive::Int(Integer::I32, _) = s.primitive() {
                 bx.bitcast(value, bx.cx.type_f32())
             } else {
@@ -1016,7 +996,7 @@ fn llvm_fixup_input<'ll, 'tcx>(
                 | ArmInlineAsmRegClass::dreg_low8
                 | ArmInlineAsmRegClass::dreg_low16,
             ),
-            Abi::Scalar(s),
+            BackendRepr::Scalar(s),
         ) => {
             if let Primitive::Int(Integer::I64, _) = s.primitive() {
                 bx.bitcast(value, bx.cx.type_f64())
@@ -1033,11 +1013,11 @@ fn llvm_fixup_input<'ll, 'tcx>(
                 | ArmInlineAsmRegClass::qreg_low4
                 | ArmInlineAsmRegClass::qreg_low8,
             ),
-            Abi::Vector { element, count: count @ (4 | 8) },
+            BackendRepr::Vector { element, count: count @ (4 | 8) },
         ) if element.primitive() == Primitive::Float(Float::F16) => {
             bx.bitcast(value, bx.type_vector(bx.type_i16(), count))
         }
-        (Mips(MipsInlineAsmRegClass::reg), Abi::Scalar(s)) => {
+        (Mips(MipsInlineAsmRegClass::reg), BackendRepr::Scalar(s)) => {
             match s.primitive() {
                 // MIPS only supports register-length arithmetics.
                 Primitive::Int(Integer::I8 | Integer::I16, _) => bx.zext(value, bx.cx.type_i32()),
@@ -1046,7 +1026,7 @@ fn llvm_fixup_input<'ll, 'tcx>(
                 _ => value,
             }
         }
-        (RiscV(RiscVInlineAsmRegClass::freg), Abi::Scalar(s))
+        (RiscV(RiscVInlineAsmRegClass::freg), BackendRepr::Scalar(s))
             if s.primitive() == Primitive::Float(Float::F16)
                 && !any_target_feature_enabled(bx, instance, &[sym::zfhmin, sym::zfh]) =>
         {
@@ -1069,15 +1049,15 @@ fn llvm_fixup_output<'ll, 'tcx>(
     instance: Instance<'_>,
 ) -> &'ll Value {
     use InlineAsmRegClass::*;
-    match (reg, layout.abi) {
-        (AArch64(AArch64InlineAsmRegClass::vreg), Abi::Scalar(s)) => {
+    match (reg, layout.backend_repr) {
+        (AArch64(AArch64InlineAsmRegClass::vreg), BackendRepr::Scalar(s)) => {
             if let Primitive::Int(Integer::I8, _) = s.primitive() {
                 bx.extract_element(value, bx.const_i32(0))
             } else {
                 value
             }
         }
-        (AArch64(AArch64InlineAsmRegClass::vreg_low16), Abi::Scalar(s))
+        (AArch64(AArch64InlineAsmRegClass::vreg_low16), BackendRepr::Scalar(s))
             if s.primitive() != Primitive::Float(Float::F128) =>
         {
             value = bx.extract_element(value, bx.const_i32(0));
@@ -1086,7 +1066,7 @@ fn llvm_fixup_output<'ll, 'tcx>(
             }
             value
         }
-        (AArch64(AArch64InlineAsmRegClass::vreg_low16), Abi::Vector { element, count })
+        (AArch64(AArch64InlineAsmRegClass::vreg_low16), BackendRepr::Vector { element, count })
             if layout.size.bytes() == 8 =>
         {
             let elem_ty = llvm_asm_scalar_type(bx.cx, element);
@@ -1094,14 +1074,14 @@ fn llvm_fixup_output<'ll, 'tcx>(
             let indices: Vec<_> = (0..count).map(|x| bx.const_i32(x as i32)).collect();
             bx.shuffle_vector(value, bx.const_undef(vec_ty), bx.const_vector(&indices))
         }
-        (X86(X86InlineAsmRegClass::reg_abcd), Abi::Scalar(s))
+        (X86(X86InlineAsmRegClass::reg_abcd), BackendRepr::Scalar(s))
             if s.primitive() == Primitive::Float(Float::F64) =>
         {
             bx.bitcast(value, bx.cx.type_f64())
         }
         (
             X86(X86InlineAsmRegClass::xmm_reg | X86InlineAsmRegClass::zmm_reg),
-            Abi::Vector { .. },
+            BackendRepr::Vector { .. },
         ) if layout.size.bytes() == 64 => bx.bitcast(value, layout.llvm_type(bx.cx)),
         (
             X86(
@@ -1109,7 +1089,7 @@ fn llvm_fixup_output<'ll, 'tcx>(
                 | X86InlineAsmRegClass::ymm_reg
                 | X86InlineAsmRegClass::zmm_reg,
             ),
-            Abi::Scalar(s),
+            BackendRepr::Scalar(s),
         ) if bx.sess().asm_arch == Some(InlineAsmArch::X86)
             && s.primitive() == Primitive::Float(Float::F128) =>
         {
@@ -1121,7 +1101,7 @@ fn llvm_fixup_output<'ll, 'tcx>(
                 | X86InlineAsmRegClass::ymm_reg
                 | X86InlineAsmRegClass::zmm_reg,
             ),
-            Abi::Scalar(s),
+            BackendRepr::Scalar(s),
         ) if s.primitive() == Primitive::Float(Float::F16) => {
             let value = bx.bitcast(value, bx.type_vector(bx.type_f16(), 8));
             bx.extract_element(value, bx.const_usize(0))
@@ -1132,11 +1112,14 @@ fn llvm_fixup_output<'ll, 'tcx>(
                 | X86InlineAsmRegClass::ymm_reg
                 | X86InlineAsmRegClass::zmm_reg,
             ),
-            Abi::Vector { element, count: count @ (8 | 16) },
+            BackendRepr::Vector { element, count: count @ (8 | 16) },
         ) if element.primitive() == Primitive::Float(Float::F16) => {
             bx.bitcast(value, bx.type_vector(bx.type_f16(), count))
         }
-        (Arm(ArmInlineAsmRegClass::sreg | ArmInlineAsmRegClass::sreg_low16), Abi::Scalar(s)) => {
+        (
+            Arm(ArmInlineAsmRegClass::sreg | ArmInlineAsmRegClass::sreg_low16),
+            BackendRepr::Scalar(s),
+        ) => {
             if let Primitive::Int(Integer::I32, _) = s.primitive() {
                 bx.bitcast(value, bx.cx.type_i32())
             } else {
@@ -1149,7 +1132,7 @@ fn llvm_fixup_output<'ll, 'tcx>(
                 | ArmInlineAsmRegClass::dreg_low8
                 | ArmInlineAsmRegClass::dreg_low16,
             ),
-            Abi::Scalar(s),
+            BackendRepr::Scalar(s),
         ) => {
             if let Primitive::Int(Integer::I64, _) = s.primitive() {
                 bx.bitcast(value, bx.cx.type_i64())
@@ -1166,11 +1149,11 @@ fn llvm_fixup_output<'ll, 'tcx>(
                 | ArmInlineAsmRegClass::qreg_low4
                 | ArmInlineAsmRegClass::qreg_low8,
             ),
-            Abi::Vector { element, count: count @ (4 | 8) },
+            BackendRepr::Vector { element, count: count @ (4 | 8) },
         ) if element.primitive() == Primitive::Float(Float::F16) => {
             bx.bitcast(value, bx.type_vector(bx.type_f16(), count))
         }
-        (Mips(MipsInlineAsmRegClass::reg), Abi::Scalar(s)) => {
+        (Mips(MipsInlineAsmRegClass::reg), BackendRepr::Scalar(s)) => {
             match s.primitive() {
                 // MIPS only supports register-length arithmetics.
                 Primitive::Int(Integer::I8, _) => bx.trunc(value, bx.cx.type_i8()),
@@ -1180,7 +1163,7 @@ fn llvm_fixup_output<'ll, 'tcx>(
                 _ => value,
             }
         }
-        (RiscV(RiscVInlineAsmRegClass::freg), Abi::Scalar(s))
+        (RiscV(RiscVInlineAsmRegClass::freg), BackendRepr::Scalar(s))
             if s.primitive() == Primitive::Float(Float::F16)
                 && !any_target_feature_enabled(bx, instance, &[sym::zfhmin, sym::zfh]) =>
         {
@@ -1200,35 +1183,35 @@ fn llvm_fixup_output_type<'ll, 'tcx>(
     instance: Instance<'_>,
 ) -> &'ll Type {
     use InlineAsmRegClass::*;
-    match (reg, layout.abi) {
-        (AArch64(AArch64InlineAsmRegClass::vreg), Abi::Scalar(s)) => {
+    match (reg, layout.backend_repr) {
+        (AArch64(AArch64InlineAsmRegClass::vreg), BackendRepr::Scalar(s)) => {
             if let Primitive::Int(Integer::I8, _) = s.primitive() {
                 cx.type_vector(cx.type_i8(), 8)
             } else {
                 layout.llvm_type(cx)
             }
         }
-        (AArch64(AArch64InlineAsmRegClass::vreg_low16), Abi::Scalar(s))
+        (AArch64(AArch64InlineAsmRegClass::vreg_low16), BackendRepr::Scalar(s))
             if s.primitive() != Primitive::Float(Float::F128) =>
         {
             let elem_ty = llvm_asm_scalar_type(cx, s);
             let count = 16 / layout.size.bytes();
             cx.type_vector(elem_ty, count)
         }
-        (AArch64(AArch64InlineAsmRegClass::vreg_low16), Abi::Vector { element, count })
+        (AArch64(AArch64InlineAsmRegClass::vreg_low16), BackendRepr::Vector { element, count })
             if layout.size.bytes() == 8 =>
         {
             let elem_ty = llvm_asm_scalar_type(cx, element);
             cx.type_vector(elem_ty, count * 2)
         }
-        (X86(X86InlineAsmRegClass::reg_abcd), Abi::Scalar(s))
+        (X86(X86InlineAsmRegClass::reg_abcd), BackendRepr::Scalar(s))
             if s.primitive() == Primitive::Float(Float::F64) =>
         {
             cx.type_i64()
         }
         (
             X86(X86InlineAsmRegClass::xmm_reg | X86InlineAsmRegClass::zmm_reg),
-            Abi::Vector { .. },
+            BackendRepr::Vector { .. },
         ) if layout.size.bytes() == 64 => cx.type_vector(cx.type_f64(), 8),
         (
             X86(
@@ -1236,7 +1219,7 @@ fn llvm_fixup_output_type<'ll, 'tcx>(
                 | X86InlineAsmRegClass::ymm_reg
                 | X86InlineAsmRegClass::zmm_reg,
             ),
-            Abi::Scalar(s),
+            BackendRepr::Scalar(s),
         ) if cx.sess().asm_arch == Some(InlineAsmArch::X86)
             && s.primitive() == Primitive::Float(Float::F128) =>
         {
@@ -1248,7 +1231,7 @@ fn llvm_fixup_output_type<'ll, 'tcx>(
                 | X86InlineAsmRegClass::ymm_reg
                 | X86InlineAsmRegClass::zmm_reg,
             ),
-            Abi::Scalar(s),
+            BackendRepr::Scalar(s),
         ) if s.primitive() == Primitive::Float(Float::F16) => cx.type_vector(cx.type_i16(), 8),
         (
             X86(
@@ -1256,11 +1239,14 @@ fn llvm_fixup_output_type<'ll, 'tcx>(
                 | X86InlineAsmRegClass::ymm_reg
                 | X86InlineAsmRegClass::zmm_reg,
             ),
-            Abi::Vector { element, count: count @ (8 | 16) },
+            BackendRepr::Vector { element, count: count @ (8 | 16) },
         ) if element.primitive() == Primitive::Float(Float::F16) => {
             cx.type_vector(cx.type_i16(), count)
         }
-        (Arm(ArmInlineAsmRegClass::sreg | ArmInlineAsmRegClass::sreg_low16), Abi::Scalar(s)) => {
+        (
+            Arm(ArmInlineAsmRegClass::sreg | ArmInlineAsmRegClass::sreg_low16),
+            BackendRepr::Scalar(s),
+        ) => {
             if let Primitive::Int(Integer::I32, _) = s.primitive() {
                 cx.type_f32()
             } else {
@@ -1273,7 +1259,7 @@ fn llvm_fixup_output_type<'ll, 'tcx>(
                 | ArmInlineAsmRegClass::dreg_low8
                 | ArmInlineAsmRegClass::dreg_low16,
             ),
-            Abi::Scalar(s),
+            BackendRepr::Scalar(s),
         ) => {
             if let Primitive::Int(Integer::I64, _) = s.primitive() {
                 cx.type_f64()
@@ -1290,11 +1276,11 @@ fn llvm_fixup_output_type<'ll, 'tcx>(
                 | ArmInlineAsmRegClass::qreg_low4
                 | ArmInlineAsmRegClass::qreg_low8,
             ),
-            Abi::Vector { element, count: count @ (4 | 8) },
+            BackendRepr::Vector { element, count: count @ (4 | 8) },
         ) if element.primitive() == Primitive::Float(Float::F16) => {
             cx.type_vector(cx.type_i16(), count)
         }
-        (Mips(MipsInlineAsmRegClass::reg), Abi::Scalar(s)) => {
+        (Mips(MipsInlineAsmRegClass::reg), BackendRepr::Scalar(s)) => {
             match s.primitive() {
                 // MIPS only supports register-length arithmetics.
                 Primitive::Int(Integer::I8 | Integer::I16, _) => cx.type_i32(),
@@ -1303,7 +1289,7 @@ fn llvm_fixup_output_type<'ll, 'tcx>(
                 _ => layout.llvm_type(cx),
             }
         }
-        (RiscV(RiscVInlineAsmRegClass::freg), Abi::Scalar(s))
+        (RiscV(RiscVInlineAsmRegClass::freg), BackendRepr::Scalar(s))
             if s.primitive() == Primitive::Float(Float::F16)
                 && !any_target_feature_enabled(cx, instance, &[sym::zfhmin, sym::zfh]) =>
         {

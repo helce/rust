@@ -103,7 +103,8 @@ declare_lint_pass!(QueryStability => [POTENTIAL_QUERY_INSTABILITY, UNTRACKED_QUE
 impl LateLintPass<'_> for QueryStability {
     fn check_expr(&mut self, cx: &LateContext<'_>, expr: &Expr<'_>) {
         let Some((span, def_id, args)) = typeck_results_of_method_fn(cx, expr) else { return };
-        if let Ok(Some(instance)) = ty::Instance::try_resolve(cx.tcx, cx.param_env, def_id, args) {
+        if let Ok(Some(instance)) = ty::Instance::try_resolve(cx.tcx, cx.typing_env(), def_id, args)
+        {
             let def_id = instance.def_id();
             if cx.tcx.has_attr(def_id, sym::rustc_lint_query_instability) {
                 cx.emit_span_lint(POTENTIAL_QUERY_INSTABILITY, span, QueryInstability {
@@ -427,9 +428,10 @@ declare_tool_lint! {
     /// More details on translatable diagnostics can be found
     /// [here](https://rustc-dev-guide.rust-lang.org/diagnostics/translation.html).
     pub rustc::UNTRANSLATABLE_DIAGNOSTIC,
-    Deny,
+    Allow,
     "prevent creation of diagnostics which cannot be translated",
-    report_in_external_macro: true
+    report_in_external_macro: true,
+    @eval_always = true
 }
 
 declare_tool_lint! {
@@ -440,9 +442,10 @@ declare_tool_lint! {
     /// More details on diagnostics implementations can be found
     /// [here](https://rustc-dev-guide.rust-lang.org/diagnostics/diagnostic-structs.html).
     pub rustc::DIAGNOSTIC_OUTSIDE_OF_IMPL,
-    Deny,
+    Allow,
     "prevent diagnostic creation outside of `Diagnostic`/`Subdiagnostic`/`LintDiagnostic` impls",
-    report_in_external_macro: true
+    report_in_external_macro: true,
+    @eval_always = true
 }
 
 declare_lint_pass!(Diagnostics => [UNTRANSLATABLE_DIAGNOSTIC, DIAGNOSTIC_OUTSIDE_OF_IMPL]);
@@ -542,7 +545,7 @@ impl Diagnostics {
     ) {
         // Is the callee marked with `#[rustc_lint_diagnostics]`?
         let Some(inst) =
-            ty::Instance::try_resolve(cx.tcx, cx.param_env, def_id, fn_gen_args).ok().flatten()
+            ty::Instance::try_resolve(cx.tcx, cx.typing_env(), def_id, fn_gen_args).ok().flatten()
         else {
             return;
         };

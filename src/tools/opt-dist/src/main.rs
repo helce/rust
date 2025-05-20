@@ -127,7 +127,7 @@ fn create_environment(args: Args) -> anyhow::Result<(Environment, Vec<String>)> 
             shared,
         } => {
             let env = EnvironmentBuilder::default()
-                .host_triple(target_triple)
+                .host_tuple(target_triple)
                 .python_binary(python)
                 .checkout_dir(checkout_dir.clone())
                 .host_llvm_dir(llvm_dir)
@@ -148,7 +148,7 @@ fn create_environment(args: Args) -> anyhow::Result<(Environment, Vec<String>)> 
 
             let checkout_dir = Utf8PathBuf::from("/checkout");
             let env = EnvironmentBuilder::default()
-                .host_triple(target_triple)
+                .host_tuple(target_triple)
                 .python_binary("python3".to_string())
                 .checkout_dir(checkout_dir.clone())
                 .host_llvm_dir(Utf8PathBuf::from("/rustroot"))
@@ -159,6 +159,9 @@ fn create_environment(args: Args) -> anyhow::Result<(Environment, Vec<String>)> 
                 .skipped_tests(vec![
                     // Fails because of linker errors, as of June 2023.
                     "tests/ui/process/nofile-limit.rs".to_string(),
+                    // FIXME(#133503): the rustc under test here during beta bump seems to be beta
+                    // but `//@ only-nightly` was active.
+                    "tests/ui/bootstrap/rustc_bootstap.rs".to_string(),
                 ])
                 .build()?;
 
@@ -170,7 +173,7 @@ fn create_environment(args: Args) -> anyhow::Result<(Environment, Vec<String>)> 
 
             let checkout_dir: Utf8PathBuf = std::env::current_dir()?.try_into()?;
             let env = EnvironmentBuilder::default()
-                .host_triple(target_triple)
+                .host_tuple(target_triple)
                 .python_binary("python".to_string())
                 .checkout_dir(checkout_dir.clone())
                 .host_llvm_dir(checkout_dir.join("citools").join("clang-rust"))
@@ -181,6 +184,9 @@ fn create_environment(args: Args) -> anyhow::Result<(Environment, Vec<String>)> 
                 .skipped_tests(vec![
                     // Fails as of June 2023.
                     "tests\\codegen\\vec-shrink-panik.rs".to_string(),
+                    // FIXME(#133503): the rustc under test here during beta bump seems to be beta
+                    // but `//@ only-nightly` was active.
+                    "tests\\ui\\bootstrap\\rustc_bootstap.rs".to_string(),
                 ])
                 .build()?;
 

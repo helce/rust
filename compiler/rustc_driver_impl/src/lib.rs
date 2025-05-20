@@ -15,6 +15,7 @@
 #![feature(panic_update_hook)]
 #![feature(result_flattening)]
 #![feature(rustdoc_internals)]
+#![feature(try_blocks)]
 #![warn(unreachable_pub)]
 // tidy-alphabetical-end
 
@@ -33,6 +34,7 @@ use std::time::{Instant, SystemTime};
 use std::{env, str};
 
 use rustc_ast as ast;
+use rustc_codegen_ssa::back::apple;
 use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::{CodegenErrors, CodegenResults};
 use rustc_data_structures::profiling::{
@@ -49,6 +51,7 @@ use rustc_interface::{Linker, Queries, interface, passes};
 use rustc_lint::unerased_lint_store;
 use rustc_metadata::creader::MetadataLoader;
 use rustc_metadata::locator;
+use rustc_middle::ty::TyCtxt;
 use rustc_parse::{new_parser_from_file, new_parser_from_source_str, unwrap_or_emit_fatal};
 use rustc_session::config::{
     CG_OPTIONS, ErrorOutputType, Input, OutFileName, OutputType, UnstableOptions, Z_OPTIONS,
@@ -61,8 +64,9 @@ use rustc_session::{EarlyDiagCtxt, Session, config, filesearch};
 use rustc_span::FileName;
 use rustc_span::source_map::FileLoader;
 use rustc_target::json::ToJson;
-use rustc_target::spec::{Target, TargetTriple};
+use rustc_target::spec::{Target, TargetTuple};
 use time::OffsetDateTime;
+use time::macros::format_description;
 use tracing::trace;
 
 #[allow(unused_macros)]
@@ -100,7 +104,7 @@ mod signal_handler {
 
 use crate::session_diagnostics::{
     RLinkEmptyVersionNumber, RLinkEncodingVersionMismatch, RLinkRustcVersionMismatch,
-    RLinkWrongFileType, RlinkCorruptFile, RlinkNotAFile, RlinkUnableToRead,
+    RLinkWrongFileType, RlinkCorruptFile, RlinkNotAFile, RlinkUnableToRead, UnstableFeatureUsage,
 };
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
@@ -428,6 +432,10 @@ fn run_compiler(
             // Make sure name resolution and macro expansion is run.
             queries.global_ctxt()?.enter(|tcx| tcx.resolver_for_lowering());
 
+            if let Some(metrics_dir) = &sess.opts.unstable_opts.metrics_dir {
+                queries.global_ctxt()?.enter(|tcxt| dump_feature_usage_metrics(tcxt, metrics_dir));
+            }
+
             if callbacks.after_expansion(compiler, queries) == Compilation::Stop {
                 return early_exit();
             }
@@ -470,6 +478,23 @@ fn run_compiler(
 
         Ok(())
     })
+}
+
+fn dump_feature_usage_metrics(tcxt: TyCtxt<'_>, metrics_dir: &PathBuf) {
+    let output_filenames = tcxt.output_filenames(());
+    let mut metrics_file_name = std::ffi::OsString::from("unstable_feature_usage_metrics-");
+    let mut metrics_path = output_filenames.with_directory_and_extension(metrics_dir, "json");
+    let metrics_file_stem =
+        metrics_path.file_name().expect("there should be a valid default output filename");
+    metrics_file_name.push(metrics_file_stem);
+    metrics_path.pop();
+    metrics_path.push(metrics_file_name);
+    if let Err(error) = tcxt.features().dump_feature_usage_metrics(metrics_path) {
+        // FIXME(yaahc): once metrics can be enabled by default we will want "failure to emit
+        // default metrics" to only produce a warning when metrics are enabled by default and emit
+        // an error only when the user manually enables metrics
+        tcxt.dcx().emit_err(UnstableFeatureUsage { error });
+    }
 }
 
 // Extract output directory and file from matches.
@@ -562,71 +587,63 @@ fn handle_explain(early_dcx: &EarlyDiagCtxt, registry: Registry, code: &str, col
     }
 }
 
-/// If color is always or auto, print formatted & colorized markdown. If color is never or
-/// if formatted printing fails, print the raw text.
+/// If `color` is `always` or `auto`, try to print pretty (formatted & colorized) markdown. If
+/// that fails or `color` is `never`, print the raw markdown.
 ///
-/// Prefers a pager, falls back standard print
+/// Uses a pager if possible, falls back to stdout.
 fn show_md_content_with_pager(content: &str, color: ColorConfig) {
-    let mut fallback_to_println = false;
     let pager_name = env::var_os("PAGER").unwrap_or_else(|| {
         if cfg!(windows) { OsString::from("more.com") } else { OsString::from("less") }
     });
 
     let mut cmd = Command::new(&pager_name);
-    // FIXME: find if other pagers accept color options
-    let mut print_formatted = if pager_name == "less" {
-        cmd.arg("-r");
-        true
-    } else {
-        ["bat", "catbat", "delta"].iter().any(|v| *v == pager_name)
+    if pager_name == "less" {
+        cmd.arg("-R"); // allows color escape sequences
+    }
+
+    let pretty_on_pager = match color {
+        ColorConfig::Auto => {
+            // Add other pagers that accept color escape sequences here.
+            ["less", "bat", "batcat", "delta"].iter().any(|v| *v == pager_name)
+        }
+        ColorConfig::Always => true,
+        ColorConfig::Never => false,
     };
 
-    if color == ColorConfig::Never {
-        print_formatted = false;
-    } else if color == ColorConfig::Always {
-        print_formatted = true;
-    }
+    // Try to prettify the raw markdown text. The result can be used by the pager or on stdout.
+    let pretty_data = {
+        let mdstream = markdown::MdStream::parse_str(content);
+        let bufwtr = markdown::create_stdout_bufwtr();
+        let mut mdbuf = bufwtr.buffer();
+        if mdstream.write_termcolor_buf(&mut mdbuf).is_ok() { Some((bufwtr, mdbuf)) } else { None }
+    };
 
-    let mdstream = markdown::MdStream::parse_str(content);
-    let bufwtr = markdown::create_stdout_bufwtr();
-    let mut mdbuf = bufwtr.buffer();
-    if mdstream.write_termcolor_buf(&mut mdbuf).is_err() {
-        print_formatted = false;
-    }
+    // Try to print via the pager, pretty output if possible.
+    let pager_res: Option<()> = try {
+        let mut pager = cmd.stdin(Stdio::piped()).spawn().ok()?;
 
-    if let Ok(mut pager) = cmd.stdin(Stdio::piped()).spawn() {
-        if let Some(pipe) = pager.stdin.as_mut() {
-            let res = if print_formatted {
-                pipe.write_all(mdbuf.as_slice())
-            } else {
-                pipe.write_all(content.as_bytes())
-            };
-
-            if res.is_err() {
-                fallback_to_println = true;
-            }
-        }
-
-        if pager.wait().is_err() {
-            fallback_to_println = true;
-        }
-    } else {
-        fallback_to_println = true;
-    }
-
-    // If pager fails for whatever reason, we should still print the content
-    // to standard output
-    if fallback_to_println {
-        let fmt_success = match color {
-            ColorConfig::Auto => io::stdout().is_terminal() && bufwtr.print(&mdbuf).is_ok(),
-            ColorConfig::Always => bufwtr.print(&mdbuf).is_ok(),
-            ColorConfig::Never => false,
+        let pager_stdin = pager.stdin.as_mut()?;
+        if pretty_on_pager && let Some((_, mdbuf)) = &pretty_data {
+            pager_stdin.write_all(mdbuf.as_slice()).ok()?;
+        } else {
+            pager_stdin.write_all(content.as_bytes()).ok()?;
         };
 
-        if !fmt_success {
-            safe_print!("{content}");
-        }
+        pager.wait().ok()?;
+    };
+    if pager_res.is_some() {
+        return;
     }
+
+    // The pager failed. Try to print pretty output to stdout.
+    if let Some((bufwtr, mdbuf)) = &pretty_data
+        && bufwtr.print(&mdbuf).is_ok()
+    {
+        return;
+    }
+
+    // Everything failed. Print the raw markdown text.
+    safe_print!("{content}");
 }
 
 fn process_rlink(sess: &Session, compiler: &interface::Compiler) {
@@ -730,6 +747,7 @@ fn print_crate_info(
                 targets.sort_unstable();
                 println_info!("{}", targets.join("\n"));
             }
+            HostTuple => println_info!("{}", rustc_session::config::host_tuple()),
             Sysroot => println_info!("{}", sess.sysroot.display()),
             TargetLibdir => println_info!("{}", sess.target_tlib_path.dir.display()),
             TargetSpec => {
@@ -738,7 +756,7 @@ fn print_crate_info(
             AllTargetSpecs => {
                 let mut targets = BTreeMap::new();
                 for name in rustc_target::spec::TARGETS {
-                    let triple = TargetTriple::from_triple(name);
+                    let triple = TargetTuple::from_tuple(name);
                     let target = Target::expect_builtin(&triple);
                     targets.insert(name, target.to_json());
                 }
@@ -855,12 +873,11 @@ fn print_crate_info(
                 }
             }
             DeploymentTarget => {
-                use rustc_target::spec::current_apple_deployment_target;
-
                 if sess.target.is_like_osx {
-                    let (major, minor, patch) = current_apple_deployment_target(&sess.target);
-                    let patch = if patch != 0 { format!(".{patch}") } else { String::new() };
-                    println_info!("deployment_target={major}.{minor}{patch}")
+                    println_info!(
+                        "deployment_target={}",
+                        apple::pretty_version(apple::deployment_target(sess))
+                    )
                 } else {
                     #[allow(rustc::diagnostic_outside_of_impl)]
                     sess.dcx().fatal("only Apple targets currently support deployment version info")
@@ -918,7 +935,7 @@ pub fn version_at_macro_invocation(
         safe_println!("binary: {binary}");
         safe_println!("commit-hash: {commit_hash}");
         safe_println!("commit-date: {commit_date}");
-        safe_println!("host: {}", config::host_triple());
+        safe_println!("host: {}", config::host_tuple());
         safe_println!("release: {release}");
 
         let debug_flags = matches.opt_strs("Z");
@@ -932,10 +949,13 @@ pub fn version_at_macro_invocation(
 }
 
 fn usage(verbose: bool, include_unstable_options: bool, nightly_build: bool) {
-    let groups = if verbose { config::rustc_optgroups() } else { config::rustc_short_optgroups() };
     let mut options = getopts::Options::new();
-    for option in groups.iter().filter(|x| include_unstable_options || x.is_stable()) {
-        (option.apply)(&mut options);
+    for option in config::rustc_optgroups()
+        .iter()
+        .filter(|x| verbose || !x.is_verbose_help_only)
+        .filter(|x| include_unstable_options || x.is_stable())
+    {
+        option.apply(&mut options);
     }
     let message = "Usage: rustc [OPTIONS] INPUT";
     let nightly_help = if nightly_build {
@@ -1217,7 +1237,7 @@ pub fn handle_options(early_dcx: &EarlyDiagCtxt, args: &[String]) -> Option<geto
     let mut options = getopts::Options::new();
     let optgroups = config::rustc_optgroups();
     for option in &optgroups {
-        (option.apply)(&mut options);
+        option.apply(&mut options);
     }
     let matches = options.parse(args).unwrap_or_else(|e| {
         let msg: Option<String> = match e {
@@ -1231,7 +1251,7 @@ pub fn handle_options(early_dcx: &EarlyDiagCtxt, args: &[String]) -> Option<geto
                 optgroups.iter().find(|option| option.name == opt).map(|option| {
                     // Print the help just for the option in question.
                     let mut options = getopts::Options::new();
-                    (option.apply)(&mut options);
+                    option.apply(&mut options);
                     // getopt requires us to pass a function for joining an iterator of
                     // strings, even though in this case we expect exactly one string.
                     options.usage_with_format(|it| {
@@ -1355,8 +1375,7 @@ fn ice_path_with_config(config: Option<&UnstableOptions>) -> &'static Option<Pat
         let file_now = now
             .format(
                 // Don't use a standard datetime format because Windows doesn't support `:` in paths
-                &time::format_description::parse("[year]-[month]-[day]T[hour]_[minute]_[second]")
-                    .unwrap(),
+                &format_description!("[year]-[month]-[day]T[hour]_[minute]_[second]"),
             )
             .unwrap_or_default();
         let pid = std::process::id();
@@ -1395,7 +1414,7 @@ pub fn install_ice_hook(
     }
 
     let using_internal_features = Arc::new(std::sync::atomic::AtomicBool::default());
-    let using_internal_features_hook = using_internal_features.clone();
+    let using_internal_features_hook = Arc::clone(&using_internal_features);
     panic::update_hook(Box::new(
         move |default_hook: &(dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static),
               info: &PanicHookInfo<'_>| {
@@ -1495,7 +1514,7 @@ fn report_ice(
     }
 
     let version = util::version_str!().unwrap_or("unknown_version");
-    let triple = config::host_triple();
+    let tuple = config::host_tuple();
 
     static FIRST_PANIC: AtomicBool = AtomicBool::new(true);
 
@@ -1505,7 +1524,7 @@ fn report_ice(
             Ok(mut file) => {
                 dcx.emit_note(session_diagnostics::IcePath { path: path.clone() });
                 if FIRST_PANIC.swap(false, Ordering::SeqCst) {
-                    let _ = write!(file, "\n\nrustc version: {version}\nplatform: {triple}");
+                    let _ = write!(file, "\n\nrustc version: {version}\nplatform: {tuple}");
                 }
                 Some(file)
             }
@@ -1518,12 +1537,12 @@ fn report_ice(
                         .map(PathBuf::from)
                         .map(|env_var| session_diagnostics::IcePathErrorEnv { env_var }),
                 });
-                dcx.emit_note(session_diagnostics::IceVersion { version, triple });
+                dcx.emit_note(session_diagnostics::IceVersion { version, triple: tuple });
                 None
             }
         }
     } else {
-        dcx.emit_note(session_diagnostics::IceVersion { version, triple });
+        dcx.emit_note(session_diagnostics::IceVersion { version, triple: tuple });
         None
     };
 

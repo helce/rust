@@ -7,6 +7,7 @@ use crate::*;
 #[derive(Debug)]
 pub enum IoError {
     LibcError(&'static str),
+    WindowsError(&'static str),
     HostError(io::Error),
     Raw(Scalar),
 }
@@ -113,6 +114,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         let errno = match err.into() {
             HostError(err) => this.io_error_to_errnum(err)?,
             LibcError(name) => this.eval_libc(name),
+            WindowsError(name) => this.eval_windows("c", name),
             Raw(val) => val,
         };
         let errno_place = this.last_error_place()?;
@@ -139,6 +141,16 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         let this = self.eval_context_mut();
         this.set_last_error(err)?;
         interp_ok(Scalar::from_i32(-1))
+    }
+
+    /// Sets the last OS error and return `-1` as a `i64`-typed Scalar
+    fn set_last_error_and_return_i64(
+        &mut self,
+        err: impl Into<IoError>,
+    ) -> InterpResult<'tcx, Scalar> {
+        let this = self.eval_context_mut();
+        this.set_last_error(err)?;
+        interp_ok(Scalar::from_i64(-1))
     }
 
     /// Gets the last error variable.
@@ -176,7 +188,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     }
 
     /// The inverse of `io_error_to_errnum`.
-    #[allow(clippy::needless_return)]
+    #[expect(clippy::needless_return)]
     fn try_errnum_to_io_error(
         &self,
         errnum: Scalar,

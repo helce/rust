@@ -333,7 +333,10 @@ pub struct Arguments<'a> {
 #[unstable(feature = "fmt_internals", issue = "none")]
 impl<'a> Arguments<'a> {
     #[inline]
-    #[rustc_const_unstable(feature = "const_fmt_arguments_new", issue = "none")]
+    #[cfg_attr(
+        bootstrap,
+        rustc_const_unstable(feature = "const_fmt_arguments_new", issue = "none")
+    )]
     pub const fn new_const<const N: usize>(pieces: &'a [&'static str; N]) -> Self {
         const { assert!(N <= 1) };
         Arguments { pieces, fmt: None, args: &[] }
@@ -435,7 +438,7 @@ impl<'a> Arguments<'a> {
     /// assert_eq!(format_args!("{:?}", std::env::current_dir()).as_str(), None);
     /// ```
     #[stable(feature = "fmt_as_str", since = "1.52.0")]
-    #[rustc_const_unstable(feature = "const_arguments_as_str", issue = "103900")]
+    #[rustc_const_stable(feature = "const_arguments_as_str", since = "1.84.0")]
     #[must_use]
     #[inline]
     pub const fn as_str(&self) -> Option<&'static str> {

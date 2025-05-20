@@ -15,7 +15,7 @@ use crate::check_consts::rustc_allow_const_fn_unstable;
 /// elaboration.
 pub fn checking_enabled(ccx: &ConstCx<'_, '_>) -> bool {
     // Const-stable functions must always use the stable live drop checker...
-    if ccx.is_const_stable_const_fn() {
+    if ccx.enforce_recursive_const_stability() {
         // ...except if they have the feature flag set via `rustc_allow_const_fn_unstable`.
         return rustc_allow_const_fn_unstable(
             ccx.tcx,
@@ -24,7 +24,7 @@ pub fn checking_enabled(ccx: &ConstCx<'_, '_>) -> bool {
         );
     }
 
-    ccx.tcx.features().const_precise_live_drops
+    ccx.tcx.features().const_precise_live_drops()
 }
 
 /// Look for live drops in a const context.
@@ -32,17 +32,15 @@ pub fn checking_enabled(ccx: &ConstCx<'_, '_>) -> bool {
 /// This is separate from the rest of the const checking logic because it must run after drop
 /// elaboration.
 pub fn check_live_drops<'tcx>(tcx: TyCtxt<'tcx>, body: &mir::Body<'tcx>) {
-    let def_id = body.source.def_id().expect_local();
-    let const_kind = tcx.hir().body_const_context(def_id);
-    if const_kind.is_none() {
+    let ccx = ConstCx::new(tcx, body);
+    if ccx.const_kind.is_none() {
         return;
     }
 
-    if tcx.has_attr(def_id, sym::rustc_do_not_const_check) {
+    if tcx.has_attr(body.source.def_id(), sym::rustc_do_not_const_check) {
         return;
     }
 
-    let ccx = ConstCx { body, tcx, const_kind, param_env: tcx.param_env(def_id) };
     if !checking_enabled(&ccx) {
         return;
     }

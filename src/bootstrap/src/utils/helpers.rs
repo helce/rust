@@ -11,6 +11,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs, io, str};
 
 use build_helper::util::fail;
+use object::read::archive::ArchiveFile;
 
 use crate::LldMode;
 use crate::core::builder::Builder;
@@ -53,8 +54,27 @@ pub fn exe(name: &str, target: TargetSelection) -> String {
 }
 
 /// Returns `true` if the file name given looks like a dynamic library.
-pub fn is_dylib(name: &str) -> bool {
-    name.ends_with(".dylib") || name.ends_with(".so") || name.ends_with(".dll")
+pub fn is_dylib(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()).map_or(false, |ext| {
+        ext == "dylib" || ext == "so" || ext == "dll" || (ext == "a" && is_aix_shared_archive(path))
+    })
+}
+
+fn is_aix_shared_archive(path: &Path) -> bool {
+    // FIXME(#133268): reading the entire file as &[u8] into memory seems excessive
+    // look into either mmap it or use the ReadCache
+    let data = match fs::read(path) {
+        Ok(data) => data,
+        Err(_) => return false,
+    };
+    let file = match ArchiveFile::parse(&*data) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+
+    file.members()
+        .filter_map(Result::ok)
+        .any(|entry| String::from_utf8_lossy(entry.name()).contains(".so"))
 }
 
 /// Returns `true` if the file name given looks like a debug info file
@@ -145,7 +165,7 @@ pub fn symlink_dir(config: &Config, original: &Path, link: &Path) -> io::Result<
 
     #[cfg(windows)]
     fn symlink_dir_inner(target: &Path, junction: &Path) -> io::Result<()> {
-        junction::create(&target, &junction)
+        junction::create(target, junction)
     }
 }
 
@@ -286,6 +306,33 @@ pub fn output(cmd: &mut Command) -> String {
         );
     }
     String::from_utf8(output.stdout).unwrap()
+}
+
+/// Spawn a process and return a closure that will wait for the process
+/// to finish and then return its output. This allows the spawned process
+/// to do work without immediately blocking bootstrap.
+#[track_caller]
+pub fn start_process(cmd: &mut Command) -> impl FnOnce() -> String {
+    let child = match cmd.stderr(Stdio::inherit()).stdout(Stdio::piped()).spawn() {
+        Ok(child) => child,
+        Err(e) => fail(&format!("failed to execute command: {cmd:?}\nERROR: {e}")),
+    };
+
+    let command = format!("{:?}", cmd);
+
+    move || {
+        let output = child.wait_with_output().unwrap();
+
+        if !output.status.success() {
+            panic!(
+                "command did not execute successfully: {}\n\
+                 expected success, got: {}",
+                command, output.status
+            );
+        }
+
+        String::from_utf8(output.stdout).unwrap()
+    }
 }
 
 /// Returns the last-modified time for `path`, or zero if it doesn't exist.

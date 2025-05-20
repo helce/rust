@@ -6,15 +6,16 @@ use derive_where::derive_where;
 use rustc_type_ir::fold::TypeFoldable;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
+use rustc_type_ir::solve::inspect;
 use rustc_type_ir::visit::TypeVisitableExt as _;
-use rustc_type_ir::{self as ty, Interner, Upcast as _, elaborate};
+use rustc_type_ir::{self as ty, Interner, TypingMode, Upcast as _, elaborate};
 use tracing::{debug, instrument};
 
 use crate::delegate::SolverDelegate;
 use crate::solve::inspect::ProbeKind;
 use crate::solve::{
     BuiltinImplSource, CandidateSource, CanonicalResponse, Certainty, EvalCtxt, Goal, GoalSource,
-    MaybeCause, NoSolution, QueryResult, SolverMode,
+    MaybeCause, NoSolution, QueryResult,
 };
 
 /// A candidate is a possible way to prove a goal.
@@ -99,6 +100,15 @@ where
         })
     }
 
+    /// Assemble additional assumptions for an alias that are not included
+    /// in the item bounds of the alias. For now, this is limited to the
+    /// `explicit_implied_const_bounds` for an associated type.
+    fn consider_additional_alias_assumptions(
+        ecx: &mut EvalCtxt<'_, D>,
+        goal: Goal<I, Self>,
+        alias_ty: ty::AliasTy<I>,
+    ) -> Vec<Candidate<I>>;
+
     fn consider_impl_candidate(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
@@ -145,13 +155,6 @@ where
     /// These components are given by built-in rules from
     /// [`structural_traits::instantiate_constituent_tys_for_copy_clone_trait`].
     fn consider_builtin_copy_clone_candidate(
-        ecx: &mut EvalCtxt<'_, D>,
-        goal: Goal<I, Self>,
-    ) -> Result<Candidate<I>, NoSolution>;
-
-    /// A type is `PointerLike` if we can compute its layout, and that layout
-    /// matches the layout of `usize`.
-    fn consider_builtin_pointer_like_candidate(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
     ) -> Result<Candidate<I>, NoSolution>;
@@ -269,11 +272,6 @@ where
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
     ) -> Vec<Candidate<I>>;
-
-    fn consider_builtin_effects_intersection_candidate(
-        ecx: &mut EvalCtxt<'_, D>,
-        goal: Goal<I, Self>,
-    ) -> Result<Candidate<I>, NoSolution>;
 }
 
 impl<D, I> EvalCtxt<'_, D>
@@ -288,6 +286,25 @@ where
         let Ok(normalized_self_ty) =
             self.structurally_normalize_ty(goal.param_env, goal.predicate.self_ty())
         else {
+            // FIXME: We register a fake candidate when normalization fails so that
+            // we can point at the reason for *why*. I'm tempted to say that this
+            // is the wrong way to do this, though.
+            let result =
+                self.probe(|&result| inspect::ProbeKind::RigidAlias { result }).enter(|this| {
+                    let normalized_ty = this.next_ty_infer();
+                    let alias_relate_goal = Goal::new(
+                        this.cx(),
+                        goal.param_env,
+                        ty::PredicateKind::AliasRelate(
+                            goal.predicate.self_ty().into(),
+                            normalized_ty.into(),
+                            ty::AliasRelationDirection::Equate,
+                        ),
+                    );
+                    this.add_goal(GoalSource::AliasWellFormed, alias_relate_goal);
+                    this.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
+                });
+            assert_eq!(result, Err(NoSolution));
             return vec![];
         };
 
@@ -304,11 +321,12 @@ where
 
         let mut candidates = vec![];
 
-        if self.solver_mode() == SolverMode::Coherence {
+        if let TypingMode::Coherence = self.typing_mode(goal.param_env) {
             if let Ok(candidate) = self.consider_coherence_unknowable_candidate(goal) {
                 return vec![candidate];
             }
         }
+
         self.assemble_impl_candidates(goal, &mut candidates);
 
         self.assemble_builtin_impl_candidates(goal, &mut candidates);
@@ -319,8 +337,11 @@ where
 
         self.assemble_param_env_candidates(goal, &mut candidates);
 
-        if self.solver_mode() == SolverMode::Normal {
-            self.discard_impls_shadowed_by_env(goal, &mut candidates);
+        match self.typing_mode(goal.param_env) {
+            TypingMode::Coherence => {}
+            TypingMode::Analysis { .. } | TypingMode::PostAnalysis => {
+                self.discard_impls_shadowed_by_env(goal, &mut candidates);
+            }
         }
 
         candidates
@@ -421,9 +442,6 @@ where
                         ty::ClosureKind::FnOnce,
                     )
                 }
-                Some(TraitSolverLangItem::PointerLike) => {
-                    G::consider_builtin_pointer_like_candidate(self, goal)
-                }
                 Some(TraitSolverLangItem::FnPtrTrait) => {
                     G::consider_builtin_fn_ptr_trait_candidate(self, goal)
                 }
@@ -460,9 +478,6 @@ where
                 }
                 Some(TraitSolverLangItem::TransmuteTrait) => {
                     G::consider_builtin_transmute_candidate(self, goal)
-                }
-                Some(TraitSolverLangItem::EffectsIntersection) => {
-                    G::consider_builtin_effects_intersection_candidate(self, goal)
                 }
                 _ => Err(NoSolution),
             }
@@ -581,6 +596,8 @@ where
                 [],
             ));
         }
+
+        candidates.extend(G::consider_additional_alias_assumptions(self, goal, alias_ty));
 
         if kind != ty::Projection {
             return;

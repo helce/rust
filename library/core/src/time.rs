@@ -213,11 +213,9 @@ impl Duration {
             // SAFETY: nanos < NANOS_PER_SEC, therefore nanos is within the valid range
             Duration { secs, nanos: unsafe { Nanoseconds(nanos) } }
         } else {
-            // FIXME(const-hack): use `.expect` once that is possible.
-            let secs = match secs.checked_add((nanos / NANOS_PER_SEC) as u64) {
-                Some(secs) => secs,
-                None => panic!("overflow in Duration::new"),
-            };
+            let secs = secs
+                .checked_add((nanos / NANOS_PER_SEC) as u64)
+                .expect("overflow in Duration::new");
             let nanos = nanos % NANOS_PER_SEC;
             // SAFETY: nanos % NANOS_PER_SEC < NANOS_PER_SEC, therefore nanos is within the valid range
             Duration { secs, nanos: unsafe { Nanoseconds(nanos) } }
@@ -885,7 +883,6 @@ impl Duration {
     #[unstable(feature = "duration_millis_float", issue = "122451")]
     #[must_use]
     #[inline]
-    #[rustc_const_unstable(feature = "duration_millis_float", issue = "122451")]
     pub const fn as_millis_f64(&self) -> f64 {
         (self.secs as f64) * (MILLIS_PER_SEC as f64)
             + (self.nanos.0 as f64) / (NANOS_PER_MILLI as f64)
@@ -906,7 +903,6 @@ impl Duration {
     #[unstable(feature = "duration_millis_float", issue = "122451")]
     #[must_use]
     #[inline]
-    #[rustc_const_unstable(feature = "duration_millis_float", issue = "122451")]
     pub const fn as_millis_f32(&self) -> f32 {
         (self.secs as f32) * (MILLIS_PER_SEC as f32)
             + (self.nanos.0 as f32) / (NANOS_PER_MILLI as f32)

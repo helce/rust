@@ -1,5 +1,6 @@
 use std::assert_matches::assert_matches;
 
+use rustc_abi::Integer;
 use rustc_apfloat::ieee::{Double, Half, Quad, Single};
 use rustc_apfloat::{Float, FloatConvert};
 use rustc_middle::mir::CastKind;
@@ -8,7 +9,6 @@ use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::layout::{IntegerExt, LayoutOf, TyAndLayout};
 use rustc_middle::ty::{self, FloatTy, Ty};
 use rustc_middle::{bug, span_bug};
-use rustc_target::abi::Integer;
 use rustc_type_ir::TyKind::*;
 use tracing::trace;
 
@@ -83,7 +83,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                     ty::FnDef(def_id, args) => {
                         let instance = ty::Instance::resolve_for_fn_ptr(
                             *self.tcx,
-                            self.param_env,
+                            self.typing_env,
                             def_id,
                             args,
                         )
@@ -274,7 +274,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         cast_ty: Ty<'tcx>,
     ) -> InterpResult<'tcx, Scalar<M::Provenance>> {
         // Let's make sure v is sign-extended *if* it has a signed type.
-        let signed = src_layout.abi.is_signed(); // Also asserts that abi is `Scalar`.
+        let signed = src_layout.backend_repr.is_signed(); // Also asserts that abi is `Scalar`.
 
         let v = match src_layout.ty.kind() {
             Uint(_) | RawPtr(..) | FnPtr(..) => scalar.to_uint(src_layout.size)?,
@@ -334,19 +334,6 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     {
         use rustc_type_ir::TyKind::*;
 
-        fn adjust_nan<
-            'tcx,
-            M: Machine<'tcx>,
-            F1: rustc_apfloat::Float + FloatConvert<F2>,
-            F2: rustc_apfloat::Float,
-        >(
-            ecx: &InterpCx<'tcx, M>,
-            f1: F1,
-            f2: F2,
-        ) -> F2 {
-            if f2.is_nan() { M::generate_nan(ecx, &[f1]) } else { f2 }
-        }
-
         match *dest_ty.kind() {
             // float -> uint
             Uint(t) => {
@@ -367,11 +354,17 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             }
             // float -> float
             Float(fty) => match fty {
-                FloatTy::F16 => Scalar::from_f16(adjust_nan(self, f, f.convert(&mut false).value)),
-                FloatTy::F32 => Scalar::from_f32(adjust_nan(self, f, f.convert(&mut false).value)),
-                FloatTy::F64 => Scalar::from_f64(adjust_nan(self, f, f.convert(&mut false).value)),
+                FloatTy::F16 => {
+                    Scalar::from_f16(self.adjust_nan(f.convert(&mut false).value, &[f]))
+                }
+                FloatTy::F32 => {
+                    Scalar::from_f32(self.adjust_nan(f.convert(&mut false).value, &[f]))
+                }
+                FloatTy::F64 => {
+                    Scalar::from_f64(self.adjust_nan(f.convert(&mut false).value, &[f]))
+                }
                 FloatTy::F128 => {
-                    Scalar::from_f128(adjust_nan(self, f, f.convert(&mut false).value))
+                    Scalar::from_f128(self.adjust_nan(f.convert(&mut false).value, &[f]))
                 }
             },
             // That's it.
@@ -391,14 +384,16 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     ) -> InterpResult<'tcx> {
         // A<Struct> -> A<Trait> conversion
         let (src_pointee_ty, dest_pointee_ty) =
-            self.tcx.struct_lockstep_tails_for_codegen(source_ty, cast_ty, self.param_env);
+            self.tcx.struct_lockstep_tails_for_codegen(source_ty, cast_ty, self.typing_env);
 
         match (src_pointee_ty.kind(), dest_pointee_ty.kind()) {
             (&ty::Array(_, length), &ty::Slice(_)) => {
                 let ptr = self.read_pointer(src)?;
                 let val = Immediate::new_slice(
                     ptr,
-                    length.eval_target_usize(*self.tcx, self.param_env),
+                    length
+                        .try_to_target_usize(*self.tcx)
+                        .expect("expected monomorphic const in const eval"),
                     self,
                 );
                 self.write_immediate(val, dest)

@@ -32,14 +32,12 @@
 //!
 //! Once you are familiar with the contents of the standard library you may
 //! begin to find the verbosity of the prose distracting. At this stage in your
-//! development you may want to press the <code>
-//! <svg style="width:0.75rem;height:0.75rem" viewBox="0 0 12 12"
-//! stroke="currentColor" fill="none">
-//! <path d="M2,2l4,4l4,-4M2,6l4,4l4,-4"/></svg> Summary</code> button near the
-//! top of the page to collapse it into a more skimmable view.
+//! development you may want to press the
+//! "<svg style="width:0.75rem;height:0.75rem" viewBox="0 0 12 12" stroke="currentColor" fill="none"><path d="M2,2l4,4l4,-4M2,6l4,4l4,-4"/></svg>&nbsp;Summary"
+//! button near the top of the page to collapse it into a more skimmable view.
 //!
 //! While you are looking at the top of the page, also notice the
-//! <code>source</code> link. Rust's API documentation comes with the source
+//! "Source" link. Rust's API documentation comes with the source
 //! code and you are encouraged to read it. The standard library source is
 //! generally high quality and a peek behind the curtains is
 //! often enlightening.
@@ -267,6 +265,7 @@
 #![allow(unused_features)]
 //
 // Features:
+#![cfg_attr(not(bootstrap), feature(autodiff))]
 #![cfg_attr(test, feature(internal_output_capture, print_internals, update_panic_count, rt))]
 #![cfg_attr(
     all(target_vendor = "fortanix", target_env = "sgx"),
@@ -278,7 +277,8 @@
 //
 // Language features:
 // tidy-alphabetical-start
-#![cfg_attr(bootstrap, feature(const_mut_refs))]
+#![cfg_attr(bootstrap, feature(strict_provenance))]
+#![cfg_attr(not(bootstrap), feature(strict_provenance_lints))]
 #![feature(alloc_error_handler)]
 #![feature(allocator_internals)]
 #![feature(allow_internal_unsafe)]
@@ -288,6 +288,7 @@
 #![feature(cfg_target_thread_local)]
 #![feature(cfi_encoding)]
 #![feature(concat_idents)]
+#![feature(const_float_methods)]
 #![feature(decl_macro)]
 #![feature(deprecated_suggestion)]
 #![feature(doc_cfg)]
@@ -325,6 +326,7 @@
 // Library features (core):
 // tidy-alphabetical-start
 #![feature(array_chunks)]
+#![feature(build_hasher_default_const_new)]
 #![feature(c_str_module)]
 #![feature(char_internals)]
 #![feature(clone_to_uninit)]
@@ -335,7 +337,6 @@
 #![feature(error_iter)]
 #![feature(exact_size_is_empty)]
 #![feature(exclusive_wrapper)]
-#![feature(exposed_provenance)]
 #![feature(extend_one)]
 #![feature(float_gamma)]
 #![feature(float_minimum_maximum)]
@@ -361,8 +362,8 @@
 #![feature(slice_range)]
 #![feature(std_internals)]
 #![feature(str_internals)]
-#![feature(strict_provenance)]
 #![feature(strict_provenance_atomic_ptr)]
+#![feature(sync_unsafe_cell)]
 #![feature(ub_checks)]
 // tidy-alphabetical-end
 //
@@ -413,10 +414,6 @@
 // Only for const-ness:
 // tidy-alphabetical-start
 #![feature(const_collections_with_hasher)]
-#![feature(const_hash)]
-#![feature(const_ip)]
-#![feature(const_ipv4)]
-#![feature(const_ipv6)]
 #![feature(thread_local_internals)]
 // tidy-alphabetical-end
 //
@@ -482,7 +479,7 @@ pub mod prelude;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::any;
-#[stable(feature = "core_array", since = "1.36.0")]
+#[stable(feature = "core_array", since = "1.35.0")]
 pub use core::array;
 #[unstable(feature = "async_iterator", issue = "79024")]
 pub use core::async_iter;
@@ -627,7 +624,13 @@ pub mod simd {
     #[doc(inline)]
     pub use crate::std_float::StdFloat;
 }
-
+#[cfg(not(bootstrap))]
+#[unstable(feature = "autodiff", issue = "124509")]
+/// This module provides support for automatic differentiation.
+pub mod autodiff {
+    /// This macro handles automatic differentiation.
+    pub use core::autodiff::autodiff;
+}
 #[stable(feature = "futures_api", since = "1.36.0")]
 pub mod task {
     //! Types and Traits for working with asynchronous tasks.

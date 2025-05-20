@@ -135,7 +135,7 @@ fn param_env(tcx: TyCtxt<'_>, def_id: DefId) -> ty::ParamEnv<'_> {
 
     if tcx.def_kind(def_id) == DefKind::AssocFn
         && let assoc_item = tcx.associated_item(def_id)
-        && assoc_item.container == ty::AssocItemContainer::TraitContainer
+        && assoc_item.container == ty::AssocItemContainer::Trait
         && assoc_item.defaultness(tcx).has_value()
     {
         let sig = tcx.fn_sig(def_id).instantiate_identity();
@@ -148,6 +148,16 @@ fn param_env(tcx: TyCtxt<'_>, def_id: DefId) -> ty::ParamEnv<'_> {
             seen: FxHashSet::default(),
             depth: ty::INNERMOST,
         });
+    }
+
+    // We extend the param-env of our item with the const conditions of the item,
+    // since we're allowed to assume `~const` bounds hold within the item itself.
+    if tcx.is_conditionally_const(def_id) {
+        predicates.extend(
+            tcx.const_conditions(def_id).instantiate_identity(tcx).into_iter().map(
+                |(trait_ref, _)| trait_ref.to_host_effect_clause(tcx, ty::BoundConstness::Maybe),
+            ),
+        );
     }
 
     let local_did = def_id.as_local();

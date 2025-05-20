@@ -7,7 +7,7 @@ use core::borrow::Borrow;
 use core::ffi::{CStr, c_char};
 use core::num::NonZero;
 use core::slice::memchr;
-use core::str::{self, Utf8Error};
+use core::str::{self, FromStr, Utf8Error};
 use core::{fmt, mem, ops, ptr, slice};
 
 use crate::borrow::{Cow, ToOwned};
@@ -772,6 +772,16 @@ impl From<&CStr> for Box<CStr> {
     }
 }
 
+#[cfg(not(test))]
+#[stable(feature = "box_from_mut_slice", since = "1.84.0")]
+impl From<&mut CStr> for Box<CStr> {
+    /// Converts a `&mut CStr` into a `Box<CStr>`,
+    /// by copying the contents into a newly allocated [`Box`].
+    fn from(s: &mut CStr) -> Box<CStr> {
+        Self::from(&*s)
+    }
+}
+
 #[stable(feature = "box_from_cow", since = "1.45.0")]
 impl From<Cow<'_, CStr>> for Box<CStr> {
     /// Converts a `Cow<'a, CStr>` into a `Box<CStr>`,
@@ -814,6 +824,30 @@ impl From<Vec<NonZero<u8>>> for CString {
             // invariant of `NonZero<u8>`.
             Self::_from_vec_unchecked(v)
         }
+    }
+}
+
+impl FromStr for CString {
+    type Err = NulError;
+
+    /// Converts a string `s` into a [`CString`].
+    ///
+    /// This method is equivalent to [`CString::new`].
+    #[inline]
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
+
+impl TryFrom<CString> for String {
+    type Error = IntoStringError;
+
+    /// Converts a [`CString`] into a [`String`] if it contains valid UTF-8 data.
+    ///
+    /// This method is equivalent to [`CString::into_string`].
+    #[inline]
+    fn try_from(value: CString) -> Result<Self, Self::Error> {
+        value.into_string()
     }
 }
 
@@ -886,6 +920,17 @@ impl From<&CStr> for Arc<CStr> {
     }
 }
 
+#[cfg(target_has_atomic = "ptr")]
+#[stable(feature = "shared_from_mut_slice", since = "1.84.0")]
+impl From<&mut CStr> for Arc<CStr> {
+    /// Converts a `&mut CStr` into a `Arc<CStr>`,
+    /// by copying the contents into a newly allocated [`Arc`].
+    #[inline]
+    fn from(s: &mut CStr) -> Arc<CStr> {
+        Arc::from(&*s)
+    }
+}
+
 #[stable(feature = "shared_from_slice2", since = "1.24.0")]
 impl From<CString> for Rc<CStr> {
     /// Converts a [`CString`] into an <code>[Rc]<[CStr]></code> by moving the [`CString`]
@@ -905,6 +950,16 @@ impl From<&CStr> for Rc<CStr> {
     fn from(s: &CStr) -> Rc<CStr> {
         let rc: Rc<[u8]> = Rc::from(s.to_bytes_with_nul());
         unsafe { Rc::from_raw(Rc::into_raw(rc) as *const CStr) }
+    }
+}
+
+#[stable(feature = "shared_from_mut_slice", since = "1.84.0")]
+impl From<&mut CStr> for Rc<CStr> {
+    /// Converts a `&mut CStr` into a `Rc<CStr>`,
+    /// by copying the contents into a newly allocated [`Rc`].
+    #[inline]
+    fn from(s: &mut CStr) -> Rc<CStr> {
+        Rc::from(&*s)
     }
 }
 

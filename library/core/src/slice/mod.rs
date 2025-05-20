@@ -171,7 +171,6 @@ impl<T> [T] {
     /// assert_eq!(None, y.first_mut());
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     #[rustc_const_stable(feature = "const_slice_first_last", since = "1.83.0")]
     #[inline]
     #[must_use]
@@ -214,7 +213,6 @@ impl<T> [T] {
     /// assert_eq!(x, &[3, 4, 5]);
     /// ```
     #[stable(feature = "slice_splits", since = "1.5.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     #[rustc_const_stable(feature = "const_slice_first_last", since = "1.83.0")]
     #[inline]
     #[must_use]
@@ -257,7 +255,6 @@ impl<T> [T] {
     /// assert_eq!(x, &[4, 5, 3]);
     /// ```
     #[stable(feature = "slice_splits", since = "1.5.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     #[rustc_const_stable(feature = "const_slice_first_last", since = "1.83.0")]
     #[inline]
     #[must_use]
@@ -300,7 +297,6 @@ impl<T> [T] {
     /// assert_eq!(None, y.last_mut());
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     #[rustc_const_stable(feature = "const_slice_first_last", since = "1.83.0")]
     #[inline]
     #[must_use]
@@ -357,7 +353,6 @@ impl<T> [T] {
     #[inline]
     #[stable(feature = "slice_first_last_chunk", since = "1.77.0")]
     #[rustc_const_stable(feature = "const_slice_first_last_chunk", since = "1.83.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     pub const fn first_chunk_mut<const N: usize>(&mut self) -> Option<&mut [T; N]> {
         if self.len() < N {
             None
@@ -423,7 +418,6 @@ impl<T> [T] {
     #[inline]
     #[stable(feature = "slice_first_last_chunk", since = "1.77.0")]
     #[rustc_const_stable(feature = "const_slice_first_last_chunk", since = "1.83.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     pub const fn split_first_chunk_mut<const N: usize>(
         &mut self,
     ) -> Option<(&mut [T; N], &mut [T])> {
@@ -494,7 +488,6 @@ impl<T> [T] {
     #[inline]
     #[stable(feature = "slice_first_last_chunk", since = "1.77.0")]
     #[rustc_const_stable(feature = "const_slice_first_last_chunk", since = "1.83.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     pub const fn split_last_chunk_mut<const N: usize>(
         &mut self,
     ) -> Option<(&mut [T], &mut [T; N])> {
@@ -564,7 +557,6 @@ impl<T> [T] {
     #[inline]
     #[stable(feature = "slice_first_last_chunk", since = "1.77.0")]
     #[rustc_const_stable(feature = "const_slice_first_last_chunk", since = "1.83.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     pub const fn last_chunk_mut<const N: usize>(&mut self) -> Option<&mut [T; N]> {
         if self.len() < N {
             None
@@ -743,6 +735,7 @@ impl<T> [T] {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_slice_as_ptr", since = "1.32.0")]
     #[rustc_never_returns_null_ptr]
+    #[cfg_attr(not(bootstrap), rustc_as_ptr)]
     #[inline(always)]
     #[must_use]
     pub const fn as_ptr(&self) -> *const T {
@@ -772,8 +765,8 @@ impl<T> [T] {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_ptr_offset", since = "1.61.0")]
-    #[rustc_allow_const_fn_unstable(const_mut_refs)]
     #[rustc_never_returns_null_ptr]
+    #[cfg_attr(not(bootstrap), rustc_as_ptr)]
     #[inline(always)]
     #[must_use]
     pub const fn as_mut_ptr(&mut self) -> *mut T {
@@ -853,7 +846,6 @@ impl<T> [T] {
     /// [`as_mut_ptr`]: slice::as_mut_ptr
     #[stable(feature = "slice_ptr_range", since = "1.48.0")]
     #[rustc_const_stable(feature = "const_ptr_offset", since = "1.61.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs, const_refs_to_cell))]
     #[inline]
     #[must_use]
     pub const fn as_mut_ptr_range(&mut self) -> Range<*mut T> {
@@ -1274,6 +1266,7 @@ impl<T> [T] {
     /// // let chunks: &[[_; 0]] = slice.as_chunks_unchecked() // Zero-length chunks are never allowed
     /// ```
     #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[rustc_const_unstable(feature = "slice_as_chunks", issue = "74985")]
     #[inline]
     #[must_use]
     pub const unsafe fn as_chunks_unchecked<const N: usize>(&self) -> &[[T; N]] {
@@ -1319,6 +1312,7 @@ impl<T> [T] {
     /// assert_eq!(chunks, &[['R', 'u'], ['s', 't']]);
     /// ```
     #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[rustc_const_unstable(feature = "slice_as_chunks", issue = "74985")]
     #[inline]
     #[track_caller]
     #[must_use]
@@ -1353,6 +1347,7 @@ impl<T> [T] {
     /// assert_eq!(chunks, &[['o', 'r'], ['e', 'm']]);
     /// ```
     #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[rustc_const_unstable(feature = "slice_as_chunks", issue = "74985")]
     #[inline]
     #[track_caller]
     #[must_use]
@@ -1431,6 +1426,7 @@ impl<T> [T] {
     /// // let chunks: &[[_; 0]] = slice.as_chunks_unchecked_mut() // Zero-length chunks are never allowed
     /// ```
     #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[rustc_const_unstable(feature = "slice_as_chunks", issue = "74985")]
     #[inline]
     #[must_use]
     pub const unsafe fn as_chunks_unchecked_mut<const N: usize>(&mut self) -> &mut [[T; N]] {
@@ -1471,6 +1467,7 @@ impl<T> [T] {
     /// assert_eq!(v, &[1, 1, 2, 2, 9]);
     /// ```
     #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[rustc_const_unstable(feature = "slice_as_chunks", issue = "74985")]
     #[inline]
     #[track_caller]
     #[must_use]
@@ -1511,6 +1508,7 @@ impl<T> [T] {
     /// assert_eq!(v, &[9, 1, 1, 2, 2]);
     /// ```
     #[unstable(feature = "slice_as_chunks", issue = "74985")]
+    #[rustc_const_unstable(feature = "slice_as_chunks", issue = "74985")]
     #[inline]
     #[track_caller]
     #[must_use]
@@ -1870,7 +1868,6 @@ impl<T> [T] {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_slice_split_at_not_mut", since = "1.71.0")]
-    #[rustc_allow_const_fn_unstable(split_at_checked)]
     #[inline]
     #[track_caller]
     #[must_use]
@@ -1908,7 +1905,6 @@ impl<T> [T] {
     #[track_caller]
     #[must_use]
     #[rustc_const_stable(feature = "const_slice_split_at_mut", since = "1.83.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     pub const fn split_at_mut(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
         match self.split_at_mut_checked(mid) {
             Some(pair) => pair,
@@ -2011,7 +2007,6 @@ impl<T> [T] {
     /// ```
     #[stable(feature = "slice_split_at_unchecked", since = "1.79.0")]
     #[rustc_const_stable(feature = "const_slice_split_at_mut", since = "1.83.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     #[inline]
     #[must_use]
     pub const unsafe fn split_at_mut_unchecked(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
@@ -2112,7 +2107,6 @@ impl<T> [T] {
     /// ```
     #[stable(feature = "split_at_checked", since = "1.80.0")]
     #[rustc_const_stable(feature = "const_slice_split_at_mut", since = "1.83.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(const_mut_refs))]
     #[inline]
     #[must_use]
     pub const fn split_at_mut_checked(&mut self, mid: usize) -> Option<(&mut [T], &mut [T])> {
@@ -4105,7 +4099,23 @@ impl<T> [T] {
     where
         T: PartialOrd,
     {
-        self.is_sorted_by(|a, b| a <= b)
+        // This odd number works the best. 32 + 1 extra due to overlapping chunk boundaries.
+        const CHUNK_SIZE: usize = 33;
+        if self.len() < CHUNK_SIZE {
+            return self.windows(2).all(|w| w[0] <= w[1]);
+        }
+        let mut i = 0;
+        // Check in chunks for autovectorization.
+        while i < self.len() - CHUNK_SIZE {
+            let chunk = &self[i..i + CHUNK_SIZE];
+            if !chunk.windows(2).fold(true, |acc, w| acc & (w[0] <= w[1])) {
+                return false;
+            }
+            // We need to ensure that chunk boundaries are also sorted.
+            // Overlap the next chunk with the last element of our last chunk.
+            i += CHUNK_SIZE - 1;
+        }
+        self[i..].windows(2).all(|w| w[0] <= w[1])
     }
 
     /// Checks if the elements of this slice are sorted using the given comparator function.
@@ -4586,8 +4596,8 @@ impl<T> [T] {
             panic!("elements are zero-sized");
         }
 
-        let self_start = self.as_ptr() as usize;
-        let elem_start = element as *const T as usize;
+        let self_start = self.as_ptr().addr();
+        let elem_start = ptr::from_ref(element).addr();
 
         let byte_offset = elem_start.wrapping_sub(self_start);
 
@@ -4639,8 +4649,8 @@ impl<T> [T] {
             panic!("elements are zero-sized");
         }
 
-        let self_start = self.as_ptr() as usize;
-        let subslice_start = subslice.as_ptr() as usize;
+        let self_start = self.as_ptr().addr();
+        let subslice_start = subslice.as_ptr().addr();
 
         let byte_start = subslice_start.wrapping_sub(self_start);
 

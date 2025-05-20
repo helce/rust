@@ -134,7 +134,7 @@ impl<D: Deps> DepGraph<D> {
             encoder,
             record_graph,
             record_stats,
-            prev_graph.clone(),
+            Arc::clone(&prev_graph),
         );
 
         let colors = DepNodeColorMap::new(prev_graph_node_count);
@@ -302,7 +302,11 @@ impl<D: Deps> DepGraph<D> {
         OP: FnOnce() -> R,
     {
         match self.data() {
-            Some(data) => data.with_anon_task(cx, dep_kind, op),
+            Some(data) => {
+                let (result, index) = data.with_anon_task_inner(cx, dep_kind, op);
+                self.read_index(index);
+                (result, index)
+            }
             None => (op(), self.next_virtual_depnode_index()),
         }
     }
@@ -397,7 +401,16 @@ impl<D: Deps> DepGraphData<D> {
 
     /// Executes something within an "anonymous" task, that is, a task the
     /// `DepNode` of which is determined by the list of inputs it read from.
-    pub(crate) fn with_anon_task<Tcx: DepContext<Deps = D>, OP, R>(
+    ///
+    /// NOTE: this does not actually count as a read of the DepNode here.
+    /// Using the result of this task without reading the DepNode will result
+    /// in untracked dependencies which may lead to ICEs as nodes are
+    /// incorrectly marked green.
+    ///
+    /// FIXME: This could perhaps return a `WithDepNode` to ensure that the
+    /// user of this function actually performs the read; we'll have to see
+    /// how to make that work with `anon` in `execute_job_incr`, though.
+    pub(crate) fn with_anon_task_inner<Tcx: DepContext<Deps = D>, OP, R>(
         &self,
         cx: Tcx,
         dep_kind: DepKind,
@@ -837,12 +850,6 @@ impl<D: Deps> DepGraphData<D> {
     ) -> Option<DepNodeIndex> {
         let frame = MarkFrame { index: prev_dep_node_index, parent: frame };
 
-        #[cfg(not(parallel_compiler))]
-        {
-            debug_assert!(!self.dep_node_exists(dep_node));
-            debug_assert!(self.colors.get(prev_dep_node_index).is_none());
-        }
-
         // We never try to mark eval_always nodes as green
         debug_assert!(!qcx.dep_context().is_eval_always(dep_node.kind));
 
@@ -870,13 +877,6 @@ impl<D: Deps> DepGraphData<D> {
         // FIXME: Store the fact that a node has diagnostics in a bit in the dep graph somewhere
         // Maybe store a list on disk and encode this fact in the DepNodeState
         let side_effects = qcx.load_side_effects(prev_dep_node_index);
-
-        #[cfg(not(parallel_compiler))]
-        debug_assert!(
-            self.colors.get(prev_dep_node_index).is_none(),
-            "DepGraph::try_mark_previous_green() - Duplicate DepNodeColor \
-                      insertion for {dep_node:?}"
-        );
 
         if side_effects.maybe_any() {
             qcx.dep_context().dep_graph().with_query_deserialization(|| {
@@ -1098,7 +1098,7 @@ impl<D: Deps> CurrentDepGraph<D> {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let nanos = duration.as_secs() * 1_000_000_000 + duration.subsec_nanos() as u64;
+        let nanos = duration.as_nanos();
         let mut stable_hasher = StableHasher::new();
         nanos.hash(&mut stable_hasher);
         let anon_id_seed = stable_hasher.finish();

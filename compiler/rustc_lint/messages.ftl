@@ -203,13 +203,13 @@ lint_confusable_identifier_pair = found both `{$existing_sym}` and `{$sym}` as i
     .current_use = this identifier can be confused with `{$existing_sym}`
     .other_use = other identifier used here
 
-lint_cstring_ptr = getting the inner pointer of a temporary `CString`
-    .as_ptr_label = this pointer will be invalid
-    .unwrap_label = this `CString` is deallocated at the end of the statement, bind it to a variable to extend its lifetime
-    .note = pointers do not have a lifetime; when calling `as_ptr` the `CString` will be deallocated at the end of the statement because nothing is referencing it as far as the type system is concerned
-    .help = for more information, see https://doc.rust-lang.org/reference/destructors.html
-
 lint_custom_inner_attribute_unstable = custom inner attributes are unstable
+
+lint_dangling_pointers_from_temporaries = a dangling pointer will be produced because the temporary `{$ty}` will be dropped
+    .label_ptr = this pointer will immediately be invalid
+    .label_temporary = this `{$ty}` is deallocated at the end of the statement, bind it to a variable to extend its lifetime
+    .note = pointers do not have a lifetime; when calling `{$callee}` the `{$ty}` will be deallocated at the end of the statement because nothing is referencing it as far as the type system is concerned
+    .help = for more information, see <https://doc.rust-lang.org/reference/destructors.html>
 
 lint_default_hash_types = prefer `{$preferred}` over `{$used}`, it has better performance
     .note = a `use rustc_data_structures::fx::{$preferred}` may be necessary
@@ -268,7 +268,7 @@ lint_extern_crate_not_idiomatic = `extern crate` is not idiomatic in the new edi
 
 lint_extern_without_abi = extern declarations without an explicit ABI are deprecated
     .label = ABI should be specified here
-    .help = the default ABI is {$default_abi}
+    .suggestion = explicitly specify the {$default_abi} ABI
 
 lint_for_loops_over_fallibles =
     for loop over {$article} `{$ref_prefix}{$ty}`. This is more readably written as an `if let` statement
@@ -346,7 +346,6 @@ lint_impl_trait_overcaptures = `{$self_ty}` will capture more lifetimes than pos
         *[other] these lifetimes are
      } in scope but not mentioned in the type's bounds
     .note2 = all lifetimes in scope will be captured by `impl Trait`s in edition 2024
-    .suggestion = use the precise capturing `use<...>` syntax to make the captures explicit
 
 lint_impl_trait_redundant_captures = all possible in-scope parameters are already captured, so `use<...>` syntax is redundant
     .suggestion = remove the `use<...>` syntax
@@ -772,9 +771,6 @@ lint_suspicious_double_ref_clone =
 
 lint_suspicious_double_ref_deref =
     using `.deref()` on a double reference, which returns `{$ty}` instead of dereferencing the inner type
-
-lint_tail_expr_drop_order = these values and local bindings have significant drop implementation that will have a different drop order from that of Edition 2021
-    .label = these values have significant drop implementation and will observe changes in drop order under Edition 2024
 
 lint_trailing_semi_macro = trailing semicolon in macro used in expression position
     .note1 = macro invocations at the end of a block are treated as expressions

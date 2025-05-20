@@ -38,14 +38,14 @@ pub use type_certainty::expr_type_is_certain;
 
 /// Checks if the given type implements copy.
 pub fn is_copy<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
-    ty.is_copy_modulo_regions(cx.tcx, cx.param_env)
+    ty.is_copy_modulo_regions(cx.tcx, cx.typing_env())
 }
 
 /// This checks whether a given type is known to implement Debug.
 pub fn has_debug_impl<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     cx.tcx
         .get_diagnostic_item(sym::Debug)
-        .map_or(false, |debug| implements_trait(cx, ty, debug, &[]))
+        .is_some_and(|debug| implements_trait(cx, ty, debug, &[]))
 }
 
 /// Checks whether a type can be partially moved.
@@ -226,7 +226,7 @@ pub fn implements_trait<'tcx>(
     trait_id: DefId,
     args: &[GenericArg<'tcx>],
 ) -> bool {
-    implements_trait_with_env_from_iter(cx.tcx, cx.param_env, ty, trait_id, None, args.iter().map(|&x| Some(x)))
+    implements_trait_with_env_from_iter(cx.tcx, cx.typing_env(), ty, trait_id, None, args.iter().map(|&x| Some(x)))
 }
 
 /// Same as `implements_trait` but allows using a `ParamEnv` different from the lint context.
@@ -235,19 +235,19 @@ pub fn implements_trait<'tcx>(
 /// environment, used for checking const traits.
 pub fn implements_trait_with_env<'tcx>(
     tcx: TyCtxt<'tcx>,
-    param_env: ParamEnv<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
     ty: Ty<'tcx>,
     trait_id: DefId,
     callee_id: Option<DefId>,
     args: &[GenericArg<'tcx>],
 ) -> bool {
-    implements_trait_with_env_from_iter(tcx, param_env, ty, trait_id, callee_id, args.iter().map(|&x| Some(x)))
+    implements_trait_with_env_from_iter(tcx, typing_env, ty, trait_id, callee_id, args.iter().map(|&x| Some(x)))
 }
 
 /// Same as `implements_trait_from_env` but takes the arguments as an iterator.
 pub fn implements_trait_with_env_from_iter<'tcx>(
     tcx: TyCtxt<'tcx>,
-    param_env: ParamEnv<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
     ty: Ty<'tcx>,
     trait_id: DefId,
     callee_id: Option<DefId>,
@@ -268,30 +268,13 @@ pub fn implements_trait_with_env_from_iter<'tcx>(
         return false;
     }
 
-    let infcx = tcx.infer_ctxt().build();
+    let (infcx, param_env) = tcx.infer_ctxt().build_with_typing_env(typing_env);
     let args = args
         .into_iter()
         .map(|arg| arg.into().unwrap_or_else(|| infcx.next_ty_var(DUMMY_SP).into()))
         .collect::<Vec<_>>();
 
-    // If an effect arg was not specified, we need to specify it.
-    let effect_arg = if tcx
-        .generics_of(trait_id)
-        .host_effect_index
-        .is_some_and(|x| args.get(x - 1).is_none())
-    {
-        Some(GenericArg::from(callee_id.map_or(tcx.consts.true_, |def_id| {
-            tcx.expected_host_effect_param_for_body(def_id)
-        })))
-    } else {
-        None
-    };
-
-    let trait_ref = TraitRef::new(
-        tcx,
-        trait_id,
-        [GenericArg::from(ty)].into_iter().chain(args).chain(effect_arg),
-    );
+    let trait_ref = TraitRef::new(tcx, trait_id, [GenericArg::from(ty)].into_iter().chain(args));
 
     debug_assert_matches!(
         tcx.def_kind(trait_id),
@@ -375,7 +358,7 @@ fn is_normalizable_helper<'tcx>(
     }
     // prevent recursive loops, false-negative is better than endless loop leading to stack overflow
     cache.insert(ty, false);
-    let infcx = cx.tcx.infer_ctxt().build();
+    let infcx = cx.tcx.infer_ctxt().build(cx.typing_mode());
     let cause = ObligationCause::dummy();
     let result = if infcx.at(&cause, param_env).query_normalize(ty).is_ok() {
         match ty.kind() {
@@ -484,7 +467,7 @@ pub fn needs_ordered_drop<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
         if !seen.insert(ty) {
             return false;
         }
-        if !ty.has_significant_drop(cx.tcx, cx.param_env) {
+        if !ty.has_significant_drop(cx.tcx, cx.typing_env()) {
             false
         }
         // Check for std types which implement drop, but only for memory allocation.
@@ -504,7 +487,7 @@ pub fn needs_ordered_drop<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
             .tcx
             .lang_items()
             .drop_trait()
-            .map_or(false, |id| implements_trait(cx, ty, id, &[]))
+            .is_some_and(|id| implements_trait(cx, ty, id, &[]))
         {
             // This type doesn't implement drop, so no side effects here.
             // Check if any component type has any.
@@ -592,8 +575,9 @@ pub fn same_type_and_consts<'tcx>(a: Ty<'tcx>, b: Ty<'tcx>) -> bool {
 
 /// Checks if a given type looks safe to be uninitialized.
 pub fn is_uninit_value_valid_for_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
+    let typing_env = cx.typing_env().with_reveal_all_normalized(cx.tcx);
     cx.tcx
-        .check_validity_requirement((ValidityRequirement::Uninit, cx.param_env.and(ty)))
+        .check_validity_requirement((ValidityRequirement::Uninit, typing_env.as_query_input(ty)))
         .unwrap_or_else(|_| is_uninit_value_valid_for_ty_fallback(cx, ty))
 }
 
@@ -735,14 +719,14 @@ pub fn ty_sig<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<ExprFnSig<'t
                 {
                     let output = bounds
                         .projection_bounds()
-                        .find(|p| lang_items.fn_once_output().map_or(false, |id| id == p.item_def_id()))
+                        .find(|p| lang_items.fn_once_output().is_some_and(|id| id == p.item_def_id()))
                         .map(|p| p.map_bound(|p| p.term.expect_type()));
                     Some(ExprFnSig::Trait(bound.map_bound(|b| b.args.type_at(0)), output, None))
                 },
                 _ => None,
             }
         },
-        ty::Alias(ty::Projection, proj) => match cx.tcx.try_normalize_erasing_regions(cx.param_env, ty) {
+        ty::Alias(ty::Projection, proj) => match cx.tcx.try_normalize_erasing_regions(cx.typing_env(), ty) {
             Ok(normalized_ty) if normalized_ty != ty => ty_sig(cx, normalized_ty),
             _ => sig_for_projection(cx, proj).or_else(|| sig_from_bounds(cx, ty, cx.param_env.caller_bounds(), None)),
         },
@@ -770,7 +754,7 @@ fn sig_from_bounds<'tcx>(
                     && p.self_ty() == ty =>
             {
                 let i = pred.kind().rebind(p.trait_ref.args.type_at(1));
-                if inputs.map_or(false, |inputs| i != inputs) {
+                if inputs.is_some_and(|inputs| i != inputs) {
                     // Multiple different fn trait impls. Is this even allowed?
                     return None;
                 }
@@ -811,7 +795,7 @@ fn sig_for_projection<'tcx>(cx: &LateContext<'tcx>, ty: AliasTy<'tcx>) -> Option
             {
                 let i = pred.kind().rebind(p.trait_ref.args.type_at(1));
 
-                if inputs.map_or(false, |inputs| inputs != i) {
+                if inputs.is_some_and(|inputs| inputs != i) {
                     // Multiple different fn trait impls. Is this even allowed?
                     return None;
                 }
@@ -988,9 +972,7 @@ pub fn approx_ty_size<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> u64 {
     match (cx.layout_of(ty).map(|layout| layout.size.bytes()), ty.kind()) {
         (Ok(size), _) => size,
         (Err(_), ty::Tuple(list)) => list.iter().map(|t| approx_ty_size(cx, t)).sum(),
-        (Err(_), ty::Array(t, n)) => {
-            n.try_eval_target_usize(cx.tcx, cx.param_env).unwrap_or_default() * approx_ty_size(cx, *t)
-        },
+        (Err(_), ty::Array(t, n)) => n.try_to_target_usize(cx.tcx).unwrap_or_default() * approx_ty_size(cx, *t),
         (Err(_), ty::Adt(def, subst)) if def.is_struct() => def
             .variants()
             .iter()
@@ -1130,12 +1112,12 @@ pub fn make_projection<'tcx>(
 /// succeeds as well as everything checked by `make_projection`.
 pub fn make_normalized_projection<'tcx>(
     tcx: TyCtxt<'tcx>,
-    param_env: ParamEnv<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
     container_id: DefId,
     assoc_ty: Symbol,
     args: impl IntoIterator<Item = impl Into<GenericArg<'tcx>>>,
 ) -> Option<Ty<'tcx>> {
-    fn helper<'tcx>(tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>, ty: AliasTy<'tcx>) -> Option<Ty<'tcx>> {
+    fn helper<'tcx>(tcx: TyCtxt<'tcx>, typing_env: ty::TypingEnv<'tcx>, ty: AliasTy<'tcx>) -> Option<Ty<'tcx>> {
         #[cfg(debug_assertions)]
         if let Some((i, arg)) = ty
             .args
@@ -1151,7 +1133,7 @@ pub fn make_normalized_projection<'tcx>(
             );
             return None;
         }
-        match tcx.try_normalize_erasing_regions(param_env, Ty::new_projection_from_args(tcx, ty.def_id, ty.args)) {
+        match tcx.try_normalize_erasing_regions(typing_env, Ty::new_projection_from_args(tcx, ty.def_id, ty.args)) {
             Ok(ty) => Some(ty),
             Err(e) => {
                 debug_assert!(false, "failed to normalize type `{ty}`: {e:#?}");
@@ -1159,7 +1141,7 @@ pub fn make_normalized_projection<'tcx>(
             },
         }
     }
-    helper(tcx, param_env, make_projection(tcx, container_id, assoc_ty, args)?)
+    helper(tcx, typing_env, make_projection(tcx, container_id, assoc_ty, args)?)
 }
 
 /// Helper to check if given type has inner mutability such as [`std::cell::Cell`] or
@@ -1168,7 +1150,7 @@ pub fn make_normalized_projection<'tcx>(
 pub struct InteriorMut<'tcx> {
     ignored_def_ids: FxHashSet<DefId>,
     ignore_pointers: bool,
-    tys: FxHashMap<Ty<'tcx>, Option<bool>>,
+    tys: FxHashMap<Ty<'tcx>, Option<&'tcx ty::List<Ty<'tcx>>>>,
 }
 
 impl<'tcx> InteriorMut<'tcx> {
@@ -1194,25 +1176,24 @@ impl<'tcx> InteriorMut<'tcx> {
         }
     }
 
-    /// Check if given type has inner mutability such as [`std::cell::Cell`] or
-    /// [`std::cell::RefCell`] etc.
-    pub fn is_interior_mut_ty(&mut self, cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
+    /// Check if given type has interior mutability such as [`std::cell::Cell`] or
+    /// [`std::cell::RefCell`] etc. and if it does, returns a chain of types that causes
+    /// this type to be interior mutable
+    pub fn interior_mut_ty_chain(&mut self, cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<&'tcx ty::List<Ty<'tcx>>> {
         match self.tys.entry(ty) {
-            Entry::Occupied(o) => return *o.get() == Some(true),
+            Entry::Occupied(o) => return *o.get(),
             // Temporarily insert a `None` to break cycles
             Entry::Vacant(v) => v.insert(None),
         };
 
-        let interior_mut = match *ty.kind() {
-            ty::RawPtr(inner_ty, _) if !self.ignore_pointers => self.is_interior_mut_ty(cx, inner_ty),
-            ty::Ref(_, inner_ty, _) | ty::Slice(inner_ty) => self.is_interior_mut_ty(cx, inner_ty),
-            ty::Array(inner_ty, size) => {
-                size.try_eval_target_usize(cx.tcx, cx.param_env)
-                    .map_or(true, |u| u != 0)
-                    && self.is_interior_mut_ty(cx, inner_ty)
+        let chain = match *ty.kind() {
+            ty::RawPtr(inner_ty, _) if !self.ignore_pointers => self.interior_mut_ty_chain(cx, inner_ty),
+            ty::Ref(_, inner_ty, _) | ty::Slice(inner_ty) => self.interior_mut_ty_chain(cx, inner_ty),
+            ty::Array(inner_ty, size) if size.try_to_target_usize(cx.tcx) != Some(0) => {
+                self.interior_mut_ty_chain(cx, inner_ty)
             },
-            ty::Tuple(fields) => fields.iter().any(|ty| self.is_interior_mut_ty(cx, ty)),
-            ty::Adt(def, _) if def.is_unsafe_cell() => true,
+            ty::Tuple(fields) => fields.iter().find_map(|ty| self.interior_mut_ty_chain(cx, ty)),
+            ty::Adt(def, _) if def.is_unsafe_cell() => Some(ty::List::empty()),
             ty::Adt(def, args) => {
                 let is_std_collection = matches!(
                     cx.tcx.get_diagnostic_name(def.did()),
@@ -1231,30 +1212,39 @@ impl<'tcx> InteriorMut<'tcx> {
 
                 if is_std_collection || def.is_box() {
                     // Include the types from std collections that are behind pointers internally
-                    args.types().any(|ty| self.is_interior_mut_ty(cx, ty))
+                    args.types().find_map(|ty| self.interior_mut_ty_chain(cx, ty))
                 } else if self.ignored_def_ids.contains(&def.did()) || def.is_phantom_data() {
-                    false
+                    None
                 } else {
                     def.all_fields()
-                        .any(|f| self.is_interior_mut_ty(cx, f.ty(cx.tcx, args)))
+                        .find_map(|f| self.interior_mut_ty_chain(cx, f.ty(cx.tcx, args)))
                 }
             },
-            _ => false,
+            _ => None,
         };
 
-        self.tys.insert(ty, Some(interior_mut));
-        interior_mut
+        chain.map(|chain| {
+            let list = cx.tcx.mk_type_list_from_iter(chain.iter().chain([ty]));
+            self.tys.insert(ty, Some(list));
+            list
+        })
+    }
+
+    /// Check if given type has interior mutability such as [`std::cell::Cell`] or
+    /// [`std::cell::RefCell`] etc.
+    pub fn is_interior_mut_ty(&mut self, cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
+        self.interior_mut_ty_chain(cx, ty).is_some()
     }
 }
 
 pub fn make_normalized_projection_with_regions<'tcx>(
     tcx: TyCtxt<'tcx>,
-    param_env: ParamEnv<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
     container_id: DefId,
     assoc_ty: Symbol,
     args: impl IntoIterator<Item = impl Into<GenericArg<'tcx>>>,
 ) -> Option<Ty<'tcx>> {
-    fn helper<'tcx>(tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>, ty: AliasTy<'tcx>) -> Option<Ty<'tcx>> {
+    fn helper<'tcx>(tcx: TyCtxt<'tcx>, typing_env: ty::TypingEnv<'tcx>, ty: AliasTy<'tcx>) -> Option<Ty<'tcx>> {
         #[cfg(debug_assertions)]
         if let Some((i, arg)) = ty
             .args
@@ -1271,10 +1261,8 @@ pub fn make_normalized_projection_with_regions<'tcx>(
             return None;
         }
         let cause = ObligationCause::dummy();
-        match tcx
-            .infer_ctxt()
-            .build()
-            .at(&cause, param_env)
+        let (infcx, param_env) = tcx.infer_ctxt().build_with_typing_env(typing_env);
+        match infcx.at(&cause, param_env)
             .query_normalize(Ty::new_projection_from_args(tcx, ty.def_id, ty.args))
         {
             Ok(ty) => Some(ty.value),
@@ -1284,20 +1272,18 @@ pub fn make_normalized_projection_with_regions<'tcx>(
             },
         }
     }
-    helper(tcx, param_env, make_projection(tcx, container_id, assoc_ty, args)?)
+    helper(tcx, typing_env, make_projection(tcx, container_id, assoc_ty, args)?)
 }
 
-pub fn normalize_with_regions<'tcx>(tcx: TyCtxt<'tcx>, param_env: ParamEnv<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
+pub fn normalize_with_regions<'tcx>(tcx: TyCtxt<'tcx>, typing_env: ty::TypingEnv<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
     let cause = ObligationCause::dummy();
-    match tcx.infer_ctxt().build().at(&cause, param_env).query_normalize(ty) {
-        Ok(ty) => ty.value,
-        Err(_) => ty,
-    }
+    let (infcx, param_env) = tcx.infer_ctxt().build_with_typing_env(typing_env);
+    infcx.at(&cause, param_env).query_normalize(ty).map_or(ty, |ty| ty.value)
 }
 
 /// Checks if the type is `core::mem::ManuallyDrop<_>`
 pub fn is_manually_drop(ty: Ty<'_>) -> bool {
-    ty.ty_adt_def().map_or(false, AdtDef::is_manually_drop)
+    ty.ty_adt_def().is_some_and(AdtDef::is_manually_drop)
 }
 
 /// Returns the deref chain of a type, starting with the type itself.
@@ -1306,7 +1292,7 @@ pub fn deref_chain<'cx, 'tcx>(cx: &'cx LateContext<'tcx>, ty: Ty<'tcx>) -> impl 
         if let Some(deref_did) = cx.tcx.lang_items().deref_trait()
             && implements_trait(cx, ty, deref_did, &[])
         {
-            make_normalized_projection(cx.tcx, cx.param_env, deref_did, sym::Target, [ty])
+            make_normalized_projection(cx.tcx, cx.typing_env(), deref_did, sym::Target, [ty])
         } else {
             None
         }

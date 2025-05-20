@@ -1,21 +1,17 @@
-use std::any::Any;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::collections::hash_map::Entry;
 use std::ops::Not;
+use std::rc::Rc;
 use std::time::Duration;
 
+use rustc_abi::Size;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_index::{Idx, IndexVec};
-use rustc_target::abi::Size;
 
 use super::init_once::InitOnce;
 use super::vector_clock::VClock;
 use crate::*;
-
-pub trait SyncId {
-    fn from_u32(id: u32) -> Self;
-    fn to_u32(&self) -> u32;
-}
 
 /// We cannot use the `newtype_index!` macro because we have to use 0 as a
 /// sentinel value meaning that the identifier is not assigned. This is because
@@ -27,16 +23,6 @@ macro_rules! declare_id {
         /// therefore, is not a valid identifier.
         #[derive(Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]
         pub struct $name(std::num::NonZero<u32>);
-
-        impl $crate::concurrency::sync::SyncId for $name {
-            // Panics if `id == 0`.
-            fn from_u32(id: u32) -> Self {
-                Self(std::num::NonZero::new(id).unwrap())
-            }
-            fn to_u32(&self) -> u32 {
-                self.0.get()
-            }
-        }
 
         impl $crate::VisitProvenance for $name {
             fn visit_provenance(&self, _visit: &mut VisitWith<'_>) {}
@@ -56,12 +42,6 @@ macro_rules! declare_id {
                 usize::try_from(self.0.get() - 1).unwrap()
             }
         }
-
-        impl $name {
-            pub fn to_u32_scalar(&self) -> Scalar {
-                Scalar::from_u32(self.0.get())
-            }
-        }
     };
 }
 pub(super) use declare_id;
@@ -79,9 +59,6 @@ struct Mutex {
     queue: VecDeque<ThreadId>,
     /// Mutex clock. This tracks the moment of the last unlock.
     clock: VClock,
-
-    /// Additional data that can be set by shim implementations.
-    data: Option<Box<dyn Any>>,
 }
 
 declare_id!(RwLockId);
@@ -118,9 +95,6 @@ struct RwLock {
     /// locks.
     /// This is only relevant when there is an active reader.
     clock_current_readers: VClock,
-
-    /// Additional data that can be set by shim implementations.
-    data: Option<Box<dyn Any>>,
 }
 
 declare_id!(CondvarId);
@@ -135,9 +109,6 @@ struct Condvar {
     /// Contains the clock of the last thread to
     /// perform a condvar-signal.
     clock: VClock,
-
-    /// Additional data that can be set by shim implementations.
-    data: Option<Box<dyn Any>>,
 }
 
 /// The futex state.
@@ -150,6 +121,15 @@ struct Futex {
     /// Contains the clock of the last thread to
     /// perform a futex-wake.
     clock: VClock,
+}
+
+#[derive(Default, Clone)]
+pub struct FutexRef(Rc<RefCell<Futex>>);
+
+impl VisitProvenance for FutexRef {
+    fn visit_provenance(&self, _visit: &mut VisitWith<'_>) {
+        // No provenance in `Futex`.
+    }
 }
 
 /// A thread waiting on a futex.
@@ -167,89 +147,12 @@ pub struct SynchronizationObjects {
     mutexes: IndexVec<MutexId, Mutex>,
     rwlocks: IndexVec<RwLockId, RwLock>,
     condvars: IndexVec<CondvarId, Condvar>,
-    futexes: FxHashMap<u64, Futex>,
     pub(super) init_onces: IndexVec<InitOnceId, InitOnce>,
 }
 
 // Private extension trait for local helper methods
 impl<'tcx> EvalContextExtPriv<'tcx> for crate::MiriInterpCx<'tcx> {}
 pub(super) trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
-    /// Lazily initialize the ID of this Miri sync structure.
-    /// If memory stores '0', that indicates uninit and we generate a new instance.
-    /// Returns `None` if memory stores a non-zero invalid ID.
-    ///
-    /// `get_objs` must return the `IndexVec` that stores all the objects of this type.
-    /// `create_obj` must create the new object if initialization is needed.
-    #[inline]
-    fn get_or_create_id<Id: SyncId + Idx, T>(
-        &mut self,
-        lock: &MPlaceTy<'tcx>,
-        offset: u64,
-        get_objs: impl for<'a> Fn(&'a mut MiriInterpCx<'tcx>) -> &'a mut IndexVec<Id, T>,
-        create_obj: impl for<'a> FnOnce(&'a mut MiriInterpCx<'tcx>) -> InterpResult<'tcx, T>,
-    ) -> InterpResult<'tcx, Option<Id>> {
-        let this = self.eval_context_mut();
-        let offset = Size::from_bytes(offset);
-        assert!(lock.layout.size >= offset + this.machine.layouts.u32.size);
-        let id_place = lock.offset(offset, this.machine.layouts.u32, this)?;
-        let next_index = get_objs(this).next_index();
-
-        // Since we are lazy, this update has to be atomic.
-        let (old, success) = this
-            .atomic_compare_exchange_scalar(
-                &id_place,
-                &ImmTy::from_uint(0u32, this.machine.layouts.u32),
-                Scalar::from_u32(next_index.to_u32()),
-                AtomicRwOrd::Relaxed, // deliberately *no* synchronization
-                AtomicReadOrd::Relaxed,
-                false,
-            )?
-            .to_scalar_pair();
-
-        interp_ok(if success.to_bool().expect("compare_exchange's second return value is a bool") {
-            // We set the in-memory ID to `next_index`, now also create this object in the machine
-            // state.
-            let obj = create_obj(this)?;
-            let new_index = get_objs(this).push(obj);
-            assert_eq!(next_index, new_index);
-            Some(new_index)
-        } else {
-            let id = Id::from_u32(old.to_u32().expect("layout is u32"));
-            if get_objs(this).get(id).is_none() {
-                // The in-memory ID is invalid.
-                None
-            } else {
-                Some(id)
-            }
-        })
-    }
-
-    /// Eagerly creates a Miri sync structure.
-    ///
-    /// `create_id` will store the index of the sync_structure in the memory pointed to by
-    /// `lock_op`, so that future calls to `get_or_create_id` will see it as initialized.
-    /// - `lock_op` must hold a pointer to the sync structure.
-    /// - `lock_layout` must be the memory layout of the sync structure.
-    /// - `offset` must be the offset inside the sync structure where its miri id will be stored.
-    /// - `get_objs` is described in `get_or_create_id`.
-    /// - `obj` must be the new sync object.
-    fn create_id<Id: SyncId + Idx, T>(
-        &mut self,
-        lock: &MPlaceTy<'tcx>,
-        offset: u64,
-        get_objs: impl for<'a> Fn(&'a mut MiriInterpCx<'tcx>) -> &'a mut IndexVec<Id, T>,
-        obj: T,
-    ) -> InterpResult<'tcx, Id> {
-        let this = self.eval_context_mut();
-        let offset = Size::from_bytes(offset);
-        assert!(lock.layout.size >= offset + this.machine.layouts.u32.size);
-        let id_place = lock.offset(offset, this.machine.layouts.u32, this)?;
-
-        let new_index = get_objs(this).push(obj);
-        this.write_scalar(Scalar::from_u32(new_index.to_u32()), &id_place)?;
-        interp_ok(new_index)
-    }
-
     fn condvar_reacquire_mutex(
         &mut self,
         mutex: MutexId,
@@ -270,124 +173,140 @@ pub(super) trait EvalContextExtPriv<'tcx>: crate::MiriInterpCxExt<'tcx> {
     }
 }
 
+impl SynchronizationObjects {
+    pub fn mutex_create(&mut self) -> MutexId {
+        self.mutexes.push(Default::default())
+    }
+
+    pub fn rwlock_create(&mut self) -> RwLockId {
+        self.rwlocks.push(Default::default())
+    }
+
+    pub fn condvar_create(&mut self) -> CondvarId {
+        self.condvars.push(Default::default())
+    }
+
+    pub fn init_once_create(&mut self) -> InitOnceId {
+        self.init_onces.push(Default::default())
+    }
+}
+
+impl<'tcx> AllocExtra<'tcx> {
+    fn get_sync<T: 'static>(&self, offset: Size) -> Option<&T> {
+        self.sync.get(&offset).and_then(|s| s.downcast_ref::<T>())
+    }
+}
+
+/// We designate an `init`` field in all primitives.
+/// If `init` is set to this, we consider the primitive initialized.
+pub const LAZY_INIT_COOKIE: u32 = 0xcafe_affe;
+
 // Public interface to synchronization primitives. Please note that in most
 // cases, the function calls are infallible and it is the client's (shim
 // implementation's) responsibility to detect and deal with erroneous
 // situations.
 impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
 pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
-    /// Eagerly create and initialize a new mutex.
-    fn mutex_create(
+    /// Helper for lazily initialized `alloc_extra.sync` data:
+    /// this forces an immediate init.
+    fn lazy_sync_init<T: 'static + Copy>(
         &mut self,
-        lock: &MPlaceTy<'tcx>,
-        offset: u64,
-        data: Option<Box<dyn Any>>,
-    ) -> InterpResult<'tcx, MutexId> {
+        primitive: &MPlaceTy<'tcx>,
+        init_offset: Size,
+        data: T,
+    ) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
-        this.create_id(lock, offset, |ecx| &mut ecx.machine.sync.mutexes, Mutex {
-            data,
-            ..Default::default()
-        })
+
+        let (alloc, offset, _) = this.ptr_get_alloc_id(primitive.ptr(), 0)?;
+        let (alloc_extra, _machine) = this.get_alloc_extra_mut(alloc)?;
+        alloc_extra.sync.insert(offset, Box::new(data));
+        // Mark this as "initialized".
+        let init_field = primitive.offset(init_offset, this.machine.layouts.u32, this)?;
+        this.write_scalar_atomic(
+            Scalar::from_u32(LAZY_INIT_COOKIE),
+            &init_field,
+            AtomicWriteOrd::Relaxed,
+        )?;
+        interp_ok(())
     }
 
-    /// Lazily create a new mutex.
-    /// `initialize_data` must return any additional data that a user wants to associate with the mutex.
-    fn mutex_get_or_create_id(
+    /// Helper for lazily initialized `alloc_extra.sync` data:
+    /// Checks if the primitive is initialized:
+    /// - If yes, fetches the data from `alloc_extra.sync`, or calls `missing_data` if that fails
+    ///   and stores that in `alloc_extra.sync`.
+    /// - Otherwise, calls `new_data` to initialize the primitive.
+    fn lazy_sync_get_data<T: 'static + Copy>(
         &mut self,
-        lock: &MPlaceTy<'tcx>,
-        offset: u64,
-        initialize_data: impl for<'a> FnOnce(
-            &'a mut MiriInterpCx<'tcx>,
-        ) -> InterpResult<'tcx, Option<Box<dyn Any>>>,
-    ) -> InterpResult<'tcx, MutexId> {
+        primitive: &MPlaceTy<'tcx>,
+        init_offset: Size,
+        missing_data: impl FnOnce() -> InterpResult<'tcx, T>,
+        new_data: impl FnOnce(&mut MiriInterpCx<'tcx>) -> InterpResult<'tcx, T>,
+    ) -> InterpResult<'tcx, T> {
         let this = self.eval_context_mut();
-        this.get_or_create_id(
-            lock,
-            offset,
-            |ecx| &mut ecx.machine.sync.mutexes,
-            |ecx| initialize_data(ecx).map(|data| Mutex { data, ..Default::default() }),
-        )?
-        .ok_or_else(|| err_ub_format!("mutex has invalid ID"))
-        .into()
+
+        // Check if this is already initialized. Needs to be atomic because we can race with another
+        // thread initializing. Needs to be an RMW operation to ensure we read the *latest* value.
+        // So we just try to replace MUTEX_INIT_COOKIE with itself.
+        let init_cookie = Scalar::from_u32(LAZY_INIT_COOKIE);
+        let init_field = primitive.offset(init_offset, this.machine.layouts.u32, this)?;
+        let (_init, success) = this
+            .atomic_compare_exchange_scalar(
+                &init_field,
+                &ImmTy::from_scalar(init_cookie, this.machine.layouts.u32),
+                init_cookie,
+                AtomicRwOrd::Relaxed,
+                AtomicReadOrd::Relaxed,
+                /* can_fail_spuriously */ false,
+            )?
+            .to_scalar_pair();
+
+        if success.to_bool()? {
+            // If it is initialized, it must be found in the "sync primitive" table,
+            // or else it has been moved illegally.
+            let (alloc, offset, _) = this.ptr_get_alloc_id(primitive.ptr(), 0)?;
+            let (alloc_extra, _machine) = this.get_alloc_extra_mut(alloc)?;
+            if let Some(data) = alloc_extra.get_sync::<T>(offset) {
+                interp_ok(*data)
+            } else {
+                let data = missing_data()?;
+                alloc_extra.sync.insert(offset, Box::new(data));
+                interp_ok(data)
+            }
+        } else {
+            let data = new_data(this)?;
+            this.lazy_sync_init(primitive, init_offset, data)?;
+            interp_ok(data)
+        }
     }
 
-    /// Retrieve the additional data stored for a mutex.
-    fn mutex_get_data<'a, T: 'static>(&'a mut self, id: MutexId) -> Option<&'a T>
+    /// Get the synchronization primitive associated with the given pointer,
+    /// or initialize a new one.
+    ///
+    /// Return `None` if this pointer does not point to at least 1 byte of mutable memory.
+    fn get_sync_or_init<'a, T: 'static>(
+        &'a mut self,
+        ptr: Pointer,
+        new: impl FnOnce(&'a mut MiriMachine<'tcx>) -> T,
+    ) -> Option<&'a T>
     where
         'tcx: 'a,
     {
-        let this = self.eval_context_ref();
-        this.machine.sync.mutexes[id].data.as_deref().and_then(|p| p.downcast_ref::<T>())
-    }
-
-    fn rwlock_get_or_create_id(
-        &mut self,
-        lock: &MPlaceTy<'tcx>,
-        offset: u64,
-        initialize_data: impl for<'a> FnOnce(
-            &'a mut MiriInterpCx<'tcx>,
-        ) -> InterpResult<'tcx, Option<Box<dyn Any>>>,
-    ) -> InterpResult<'tcx, RwLockId> {
         let this = self.eval_context_mut();
-        this.get_or_create_id(
-            lock,
-            offset,
-            |ecx| &mut ecx.machine.sync.rwlocks,
-            |ecx| initialize_data(ecx).map(|data| RwLock { data, ..Default::default() }),
-        )?
-        .ok_or_else(|| err_ub_format!("rwlock has invalid ID"))
-        .into()
-    }
-
-    /// Retrieve the additional data stored for a rwlock.
-    fn rwlock_get_data<'a, T: 'static>(&'a mut self, id: RwLockId) -> Option<&'a T>
-    where
-        'tcx: 'a,
-    {
-        let this = self.eval_context_ref();
-        this.machine.sync.rwlocks[id].data.as_deref().and_then(|p| p.downcast_ref::<T>())
-    }
-
-    /// Eagerly create and initialize a new condvar.
-    fn condvar_create(
-        &mut self,
-        condvar: &MPlaceTy<'tcx>,
-        offset: u64,
-        data: Option<Box<dyn Any>>,
-    ) -> InterpResult<'tcx, CondvarId> {
-        let this = self.eval_context_mut();
-        this.create_id(condvar, offset, |ecx| &mut ecx.machine.sync.condvars, Condvar {
-            data,
-            ..Default::default()
-        })
-    }
-
-    fn condvar_get_or_create_id(
-        &mut self,
-        lock: &MPlaceTy<'tcx>,
-        offset: u64,
-        initialize_data: impl for<'a> FnOnce(
-            &'a mut MiriInterpCx<'tcx>,
-        ) -> InterpResult<'tcx, Option<Box<dyn Any>>>,
-    ) -> InterpResult<'tcx, CondvarId> {
-        let this = self.eval_context_mut();
-        this.get_or_create_id(
-            lock,
-            offset,
-            |ecx| &mut ecx.machine.sync.condvars,
-            |ecx| initialize_data(ecx).map(|data| Condvar { data, ..Default::default() }),
-        )?
-        .ok_or_else(|| err_ub_format!("condvar has invalid ID"))
-        .into()
-    }
-
-    /// Retrieve the additional data stored for a condvar.
-    fn condvar_get_data<'a, T: 'static>(&'a mut self, id: CondvarId) -> Option<&'a T>
-    where
-        'tcx: 'a,
-    {
-        let this = self.eval_context_ref();
-        this.machine.sync.condvars[id].data.as_deref().and_then(|p| p.downcast_ref::<T>())
+        if !this.ptr_try_get_alloc_id(ptr, 0).ok().is_some_and(|(alloc_id, offset, ..)| {
+            let info = this.get_alloc_info(alloc_id);
+            info.kind == AllocKind::LiveData && info.mutbl.is_mut() && offset < info.size
+        }) {
+            return None;
+        }
+        // This cannot fail now.
+        let (alloc, offset, _) = this.ptr_get_alloc_id(ptr, 0).unwrap();
+        let (alloc_extra, machine) = this.get_alloc_extra_mut(alloc).unwrap();
+        // Due to borrow checker reasons, we have to do the lookup twice.
+        if alloc_extra.get_sync::<T>(offset).is_none() {
+            let new = new(machine);
+            alloc_extra.sync.insert(offset, Box::new(new));
+        }
+        Some(alloc_extra.get_sync::<T>(offset).unwrap())
     }
 
     #[inline]
@@ -444,7 +363,9 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 // The mutex is completely unlocked. Try transferring ownership
                 // to another thread.
                 if let Some(data_race) = &this.machine.data_race {
-                    mutex.clock.clone_from(&data_race.release_clock(&this.machine.threads));
+                    data_race.release_clock(&this.machine.threads, |clock| {
+                        mutex.clock.clone_from(clock)
+                    });
                 }
                 if let Some(thread) = this.machine.sync.mutexes[id].queue.pop_front() {
                     this.unblock_thread(thread, BlockReason::Mutex(id))?;
@@ -553,7 +474,9 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         }
         if let Some(data_race) = &this.machine.data_race {
             // Add this to the shared-release clock of all concurrent readers.
-            rwlock.clock_current_readers.join(&data_race.release_clock(&this.machine.threads));
+            data_race.release_clock(&this.machine.threads, |clock| {
+                rwlock.clock_current_readers.join(clock)
+            });
         }
 
         // The thread was a reader. If the lock is not held any more, give it to a writer.
@@ -632,7 +555,9 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             trace!("rwlock_writer_unlock: {:?} unlocked by {:?}", id, thread);
             // Record release clock for next lock holder.
             if let Some(data_race) = &this.machine.data_race {
-                rwlock.clock_unlocked.clone_from(&*data_race.release_clock(&this.machine.threads));
+                data_race.release_clock(&this.machine.threads, |clock| {
+                    rwlock.clock_unlocked.clone_from(clock)
+                });
             }
             // The thread was a writer.
             //
@@ -764,7 +689,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
 
         // Each condvar signal happens-before the end of the condvar wake
         if let Some(data_race) = data_race {
-            condvar.clock.clone_from(&*data_race.release_clock(&this.machine.threads));
+            data_race.release_clock(&this.machine.threads, |clock| condvar.clock.clone_from(clock));
         }
         let Some(waiter) = condvar.waiters.pop_front() else {
             return interp_ok(false);
@@ -778,33 +703,35 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     /// On a timeout, `retval_timeout` is written to `dest` and `errno_timeout` is set as the last error.
     fn futex_wait(
         &mut self,
-        addr: u64,
+        futex_ref: FutexRef,
         bitset: u32,
         timeout: Option<(TimeoutClock, TimeoutAnchor, Duration)>,
         retval_succ: Scalar,
         retval_timeout: Scalar,
         dest: MPlaceTy<'tcx>,
-        errno_timeout: Scalar,
+        errno_timeout: IoError,
     ) {
         let this = self.eval_context_mut();
         let thread = this.active_thread();
-        let futex = &mut this.machine.sync.futexes.entry(addr).or_default();
+        let mut futex = futex_ref.0.borrow_mut();
         let waiters = &mut futex.waiters;
         assert!(waiters.iter().all(|waiter| waiter.thread != thread), "thread is already waiting");
         waiters.push_back(FutexWaiter { thread, bitset });
+        drop(futex);
+
         this.block_thread(
-            BlockReason::Futex { addr },
+            BlockReason::Futex,
             timeout,
             callback!(
                 @capture<'tcx> {
-                    addr: u64,
+                    futex_ref: FutexRef,
                     retval_succ: Scalar,
                     retval_timeout: Scalar,
                     dest: MPlaceTy<'tcx>,
-                    errno_timeout: Scalar,
+                    errno_timeout: IoError,
                 }
                 @unblock = |this| {
-                    let futex = this.machine.sync.futexes.get(&addr).unwrap();
+                    let futex = futex_ref.0.borrow();
                     // Acquire the clock of the futex.
                     if let Some(data_race) = &this.machine.data_race {
                         data_race.acquire_clock(&futex.clock, &this.machine.threads);
@@ -816,7 +743,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                 @timeout = |this| {
                     // Remove the waiter from the futex.
                     let thread = this.active_thread();
-                    let futex = this.machine.sync.futexes.get_mut(&addr).unwrap();
+                    let mut futex = futex_ref.0.borrow_mut();
                     futex.waiters.retain(|waiter| waiter.thread != thread);
                     // Set errno and write return value.
                     this.set_last_error(errno_timeout)?;
@@ -827,17 +754,16 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
         );
     }
 
+    /// Wake up the first thread in the queue that matches any of the bits in the bitset.
     /// Returns whether anything was woken.
-    fn futex_wake(&mut self, addr: u64, bitset: u32) -> InterpResult<'tcx, bool> {
+    fn futex_wake(&mut self, futex_ref: &FutexRef, bitset: u32) -> InterpResult<'tcx, bool> {
         let this = self.eval_context_mut();
-        let Some(futex) = this.machine.sync.futexes.get_mut(&addr) else {
-            return interp_ok(false);
-        };
+        let mut futex = futex_ref.0.borrow_mut();
         let data_race = &this.machine.data_race;
 
         // Each futex-wake happens-before the end of the futex wait
         if let Some(data_race) = data_race {
-            futex.clock.clone_from(&*data_race.release_clock(&this.machine.threads));
+            data_race.release_clock(&this.machine.threads, |clock| futex.clock.clone_from(clock));
         }
 
         // Wake up the first thread in the queue that matches any of the bits in the bitset.
@@ -845,7 +771,8 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             return interp_ok(false);
         };
         let waiter = futex.waiters.remove(i).unwrap();
-        this.unblock_thread(waiter.thread, BlockReason::Futex { addr })?;
+        drop(futex);
+        this.unblock_thread(waiter.thread, BlockReason::Futex)?;
         interp_ok(true)
     }
 }

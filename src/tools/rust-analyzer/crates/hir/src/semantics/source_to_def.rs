@@ -87,7 +87,6 @@
 
 use either::Either;
 use hir_def::{
-    child_by_source::ChildBySource,
     dyn_map::{
         keys::{self, Key},
         DynMap,
@@ -104,23 +103,44 @@ use hir_expand::{
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use span::{FileId, MacroFileId};
+use span::{EditionedFileId, FileId, MacroFileId};
 use stdx::impl_from;
 use syntax::{
     ast::{self, HasName},
     AstNode, AstPtr, SyntaxNode,
 };
 
-use crate::{db::HirDatabase, InFile, InlineAsmOperand, SemanticsImpl};
+use crate::{
+    db::HirDatabase, semantics::child_by_source::ChildBySource, InFile, InlineAsmOperand,
+    SemanticsImpl,
+};
 
 #[derive(Default)]
 pub(super) struct SourceToDefCache {
     pub(super) dynmap_cache: FxHashMap<(ChildContainer, HirFileId), DynMap>,
     expansion_info_cache: FxHashMap<MacroFileId, ExpansionInfo>,
     pub(super) file_to_def_cache: FxHashMap<FileId, SmallVec<[ModuleId; 1]>>,
+    pub(super) included_file_cache: FxHashMap<EditionedFileId, Option<MacroFileId>>,
 }
 
 impl SourceToDefCache {
+    pub(super) fn get_or_insert_include_for(
+        &mut self,
+        db: &dyn HirDatabase,
+        file: EditionedFileId,
+    ) -> Option<MacroFileId> {
+        if let Some(&m) = self.included_file_cache.get(&file) {
+            return m;
+        }
+        self.included_file_cache.insert(file, None);
+        for &crate_id in db.relevant_crates(file.into()).iter() {
+            db.include_macro_invoc(crate_id).iter().for_each(|&(macro_call_id, file_id)| {
+                self.included_file_cache.insert(file_id, Some(MacroFileId { macro_call_id }));
+            });
+        }
+        self.included_file_cache.get(&file).copied().flatten()
+    }
+
     pub(super) fn get_or_insert_expansion(
         &mut self,
         sema: &SemanticsImpl<'_>,
@@ -163,9 +183,13 @@ impl SourceToDefCtx<'_, '_> {
                             .include_macro_invoc(crate_id)
                             .iter()
                             .filter(|&&(_, file_id)| file_id == file)
-                            .flat_map(|(call, _)| {
+                            .flat_map(|&(macro_call_id, file_id)| {
+                                self.cache
+                                    .included_file_cache
+                                    .insert(file_id, Some(MacroFileId { macro_call_id }));
                                 modules(
-                                    call.lookup(self.db.upcast())
+                                    macro_call_id
+                                        .lookup(self.db.upcast())
                                         .kind
                                         .file_id()
                                         .original_file(self.db.upcast())
@@ -306,7 +330,7 @@ impl SourceToDefCtx<'_, '_> {
             .position(|it| it == *src.value)?;
         let container = self.find_pat_or_label_container(src.syntax_ref())?;
         let (_, source_map) = self.db.body_with_source_map(container);
-        let expr = source_map.node_expr(src.with_value(&ast::Expr::AsmExpr(asm)))?;
+        let expr = source_map.node_expr(src.with_value(&ast::Expr::AsmExpr(asm)))?.as_expr()?;
         Some(InlineAsmOperand { owner: container, expr, index })
     }
 
@@ -350,7 +374,8 @@ impl SourceToDefCtx<'_, '_> {
         let break_or_continue = ast::Expr::cast(src.value.syntax().parent()?)?;
         let container = self.find_pat_or_label_container(src.syntax_ref())?;
         let (body, source_map) = self.db.body_with_source_map(container);
-        let break_or_continue = source_map.node_expr(src.with_value(&break_or_continue))?;
+        let break_or_continue =
+            source_map.node_expr(src.with_value(&break_or_continue))?.as_expr()?;
         let (Expr::Break { label, .. } | Expr::Continue { label }) = body[break_or_continue] else {
             return None;
         };

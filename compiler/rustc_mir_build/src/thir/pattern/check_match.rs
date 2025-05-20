@@ -7,6 +7,7 @@ use rustc_errors::{Applicability, ErrorGuaranteed, MultiSpan, struct_span_code_e
 use rustc_hir::def::*;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::{self as hir, BindingMode, ByRef, HirId};
+use rustc_infer::traits::Reveal;
 use rustc_middle::bug;
 use rustc_middle::middle::limits::get_limit_size;
 use rustc_middle::thir::visit::Visitor;
@@ -79,6 +80,8 @@ enum LetSource {
     IfLetGuard,
     LetElse,
     WhileLet,
+    Else,
+    ElseIfLet,
 }
 
 struct MatchVisitor<'p, 'tcx> {
@@ -129,15 +132,20 @@ impl<'p, 'tcx> Visitor<'p, 'tcx> for MatchVisitor<'p, 'tcx> {
                 // Give a specific `let_source` for the condition.
                 let let_source = match ex.span.desugaring_kind() {
                     Some(DesugaringKind::WhileLoop) => LetSource::WhileLet,
-                    _ => LetSource::IfLet,
+                    _ => match self.let_source {
+                        LetSource::Else => LetSource::ElseIfLet,
+                        _ => LetSource::IfLet,
+                    },
                 };
                 self.with_let_source(let_source, |this| this.visit_expr(&self.thir[cond]));
                 self.with_let_source(LetSource::None, |this| {
                     this.visit_expr(&this.thir[then]);
-                    if let Some(else_) = else_opt {
-                        this.visit_expr(&this.thir[else_]);
-                    }
                 });
+                if let Some(else_) = else_opt {
+                    self.with_let_source(LetSource::Else, |this| {
+                        this.visit_expr(&this.thir[else_])
+                    });
+                }
                 return;
             }
             ExprKind::Match { scrutinee, scrutinee_hir_id: _, box ref arms, match_source } => {
@@ -184,6 +192,15 @@ impl<'p, 'tcx> Visitor<'p, 'tcx> for MatchVisitor<'p, 'tcx> {
 }
 
 impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
+    fn typing_env(&self) -> ty::TypingEnv<'tcx> {
+        // FIXME(#132279): We're in a body, should handle opaques.
+        debug_assert_eq!(self.param_env.reveal(), Reveal::UserFacing);
+        ty::TypingEnv {
+            typing_mode: ty::TypingMode::non_body_analysis(),
+            param_env: self.param_env,
+        }
+    }
+
     #[instrument(level = "trace", skip(self, f))]
     fn with_let_source(&mut self, let_source: LetSource, f: impl FnOnce(&mut Self)) {
         let old_let_source = self.let_source;
@@ -573,9 +590,13 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             // and we shouldn't lint.
             // For let guards inside a match, prefixes might use bindings of the match pattern,
             // so can't always be moved out.
+            // For `else if let`, an extra indentation level would be required to move the bindings.
             // FIXME: Add checking whether the bindings are actually used in the prefix,
             // and lint if they are not.
-            if !matches!(self.let_source, LetSource::WhileLet | LetSource::IfLetGuard) {
+            if !matches!(
+                self.let_source,
+                LetSource::WhileLet | LetSource::IfLetGuard | LetSource::ElseIfLet
+            ) {
                 // Emit the lint
                 let prefix = &chain_refutabilities[..until];
                 let span_start = prefix[0].unwrap().0;
@@ -657,8 +678,25 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
         let mut let_suggestion = None;
         let mut misc_suggestion = None;
         let mut interpreted_as_const = None;
+        let mut interpreted_as_const_sugg = None;
 
-        if let PatKind::Constant { .. }
+        if let PatKind::ExpandedConstant { def_id, is_inline: false, .. }
+        | PatKind::AscribeUserType {
+            subpattern:
+                box Pat { kind: PatKind::ExpandedConstant { def_id, is_inline: false, .. }, .. },
+            ..
+        } = pat.kind
+            && let DefKind::Const = self.tcx.def_kind(def_id)
+            && let Ok(snippet) = self.tcx.sess.source_map().span_to_snippet(pat.span)
+            // We filter out paths with multiple path::segments.
+            && snippet.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            let span = self.tcx.def_span(def_id);
+            let variable = self.tcx.item_name(def_id).to_string();
+            // When we encounter a constant as the binding name, point at the `const` definition.
+            interpreted_as_const = Some(span);
+            interpreted_as_const_sugg = Some(InterpretedAsConst { span: pat.span, variable });
+        } else if let PatKind::Constant { .. }
         | PatKind::AscribeUserType {
             subpattern: box Pat { kind: PatKind::Constant { .. }, .. },
             ..
@@ -671,9 +709,6 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
                 misc_suggestion = Some(MiscPatternSuggestion::AttemptedIntegerLiteral {
                     start_span: pat.span.shrink_to_lo(),
                 });
-            } else if snippet.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                interpreted_as_const =
-                    Some(InterpretedAsConst { span: pat.span, variable: snippet });
             }
         }
 
@@ -710,8 +745,8 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
                 .variant(*variant_index)
                 .inhabited_predicate(self.tcx, *adt)
                 .instantiate(self.tcx, args);
-            variant_inhabited.apply(self.tcx, cx.param_env, cx.module)
-                && !variant_inhabited.apply_ignore_module(self.tcx, cx.param_env)
+            variant_inhabited.apply(self.tcx, cx.typing_env(), cx.module)
+                && !variant_inhabited.apply_ignore_module(self.tcx, cx.typing_env())
         } else {
             false
         };
@@ -722,6 +757,7 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             uncovered: Uncovered::new(pat.span, &cx, witnesses),
             inform,
             interpreted_as_const,
+            interpreted_as_const_sugg,
             witness_1_is_privately_uninhabited,
             _p: (),
             pattern_ty,
@@ -749,7 +785,7 @@ fn check_borrow_conflicts_in_at_patterns<'tcx>(cx: &MatchVisitor<'_, 'tcx>, pat:
         return;
     };
 
-    let is_binding_by_move = |ty: Ty<'tcx>| !ty.is_copy_modulo_regions(cx.tcx, cx.param_env);
+    let is_binding_by_move = |ty: Ty<'tcx>| !ty.is_copy_modulo_regions(cx.tcx, cx.typing_env());
 
     let sess = cx.tcx.sess;
 
@@ -906,8 +942,8 @@ fn report_irrefutable_let_patterns(
     }
 
     match source {
-        LetSource::None | LetSource::PlainLet => bug!(),
-        LetSource::IfLet => emit_diag!(IrrefutableLetPatternsIfLet),
+        LetSource::None | LetSource::PlainLet | LetSource::Else => bug!(),
+        LetSource::IfLet | LetSource::ElseIfLet => emit_diag!(IrrefutableLetPatternsIfLet),
         LetSource::IfLetGuard => emit_diag!(IrrefutableLetPatternsIfLetGuard),
         LetSource::LetElse => emit_diag!(IrrefutableLetPatternsLetElse),
         LetSource::WhileLet => emit_diag!(IrrefutableLetPatternsWhileLet),
@@ -1091,13 +1127,13 @@ fn report_non_exhaustive_match<'p, 'tcx>(
             if ty.is_ptr_sized_integral() {
                 if ty.inner() == cx.tcx.types.usize {
                     err.note(format!(
-                        "`{ty}` does not have a fixed maximum value, so half-open ranges are necessary to match \
-                             exhaustively",
+                        "`{ty}` does not have a fixed maximum value, so half-open ranges are \
+                         necessary to match exhaustively",
                     ));
                 } else if ty.inner() == cx.tcx.types.isize {
                     err.note(format!(
-                        "`{ty}` does not have fixed minimum and maximum values, so half-open ranges are necessary to match \
-                             exhaustively",
+                        "`{ty}` does not have fixed minimum and maximum values, so half-open \
+                         ranges are necessary to match exhaustively",
                     ));
                 }
             } else if ty.inner() == cx.tcx.types.str_ {
@@ -1113,8 +1149,33 @@ fn report_non_exhaustive_match<'p, 'tcx>(
     }
 
     if let ty::Ref(_, sub_ty, _) = scrut_ty.kind() {
-        if !sub_ty.is_inhabited_from(cx.tcx, cx.module, cx.param_env) {
+        if !sub_ty.is_inhabited_from(cx.tcx, cx.module, cx.typing_env()) {
             err.note("references are always considered inhabited");
+        }
+    }
+
+    for &arm in arms {
+        let arm = &thir.arms[arm];
+        if let PatKind::ExpandedConstant { def_id, is_inline: false, .. } = arm.pattern.kind
+            && let Ok(snippet) = cx.tcx.sess.source_map().span_to_snippet(arm.pattern.span)
+            // We filter out paths with multiple path::segments.
+            && snippet.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
+            let const_name = cx.tcx.item_name(def_id);
+            err.span_label(
+                arm.pattern.span,
+                format!(
+                    "this pattern doesn't introduce a new catch-all binding, but rather pattern \
+                     matches against the value of constant `{const_name}`",
+                ),
+            );
+            err.span_note(cx.tcx.def_span(def_id), format!("constant `{const_name}` defined here"));
+            err.span_suggestion_verbose(
+                arm.pattern.span.shrink_to_hi(),
+                "if you meant to introduce a binding, use a different name",
+                "_var".to_string(),
+                Applicability::MaybeIncorrect,
+            );
         }
     }
 
@@ -1126,7 +1187,7 @@ fn report_non_exhaustive_match<'p, 'tcx>(
             .map(|witness| cx.print_witness_pat(witness))
             .collect::<Vec<String>>()
             .join(" | ");
-        if witnesses.iter().all(|p| p.is_never_pattern()) && cx.tcx.features().never_patterns {
+        if witnesses.iter().all(|p| p.is_never_pattern()) && cx.tcx.features().never_patterns() {
             // Arms with a never pattern don't take a body.
             pattern
         } else {

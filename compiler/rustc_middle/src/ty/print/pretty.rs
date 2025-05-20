@@ -3,6 +3,7 @@ use std::fmt::{self, Write as _};
 use std::iter;
 use std::ops::{Deref, DerefMut};
 
+use rustc_abi::{ExternAbi, Size};
 use rustc_apfloat::Float;
 use rustc_apfloat::ieee::{Double, Half, Quad, Single};
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
@@ -17,8 +18,6 @@ use rustc_session::Limit;
 use rustc_session::cstore::{ExternCrate, ExternCrateSource};
 use rustc_span::FileNameDisplayPreference;
 use rustc_span::symbol::{Ident, Symbol, kw};
-use rustc_target::abi::Size;
-use rustc_target::spec::abi::Abi;
 use rustc_type_ir::{Upcast as _, elaborate};
 use smallvec::SmallVec;
 
@@ -1208,7 +1207,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             }
         }
 
-        if self.tcx().features().return_type_notation
+        if self.tcx().features().return_type_notation()
             && let Some(ty::ImplTraitInTraitData::Trait { fn_def_id, .. }) =
                 self.tcx().opt_rpitit_info(def_id)
             && let ty::Alias(_, alias_ty) =
@@ -1956,11 +1955,10 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
         define_scoped_cx!(self);
 
         match constness {
-            ty::BoundConstness::NotConst => {}
             ty::BoundConstness::Const => {
                 p!("const ");
             }
-            ty::BoundConstness::ConstIfConst => {
+            ty::BoundConstness::Maybe => {
                 p!("~const ");
             }
         }
@@ -2485,7 +2483,7 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
             | ty::RePlaceholder(ty::Placeholder {
                 bound: ty::BoundRegion { kind: br, .. }, ..
             }) => {
-                if let ty::BrNamed(_, name) = br
+                if let ty::BoundRegionKind::Named(_, name) = br
                     && br.is_named()
                 {
                     p!(write("{}", name));
@@ -2571,7 +2569,7 @@ impl<'a, 'tcx> ty::TypeFolder<TyCtxt<'tcx>> for RegionFolder<'a, 'tcx> {
                 // If this is an anonymous placeholder, don't rename. Otherwise, in some
                 // async fns, we get a `for<'r> Send` bound
                 match kind {
-                    ty::BrAnon | ty::BrEnv => r,
+                    ty::BoundRegionKind::Anon | ty::BoundRegionKind::ClosureEnv => r,
                     _ => {
                         // Index doesn't matter, since this is just for naming and these never get bound
                         let br = ty::BoundRegion { var: ty::BoundVar::ZERO, kind };
@@ -2690,12 +2688,13 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
                             binder_level_idx: ty::DebruijnIndex,
                             br: ty::BoundRegion| {
                 let (name, kind) = match br.kind {
-                    ty::BrAnon | ty::BrEnv => {
+                    ty::BoundRegionKind::Anon | ty::BoundRegionKind::ClosureEnv => {
                         let name = next_name(self);
 
                         if let Some(lt_idx) = lifetime_idx {
                             if lt_idx > binder_level_idx {
-                                let kind = ty::BrNamed(CRATE_DEF_ID.to_def_id(), name);
+                                let kind =
+                                    ty::BoundRegionKind::Named(CRATE_DEF_ID.to_def_id(), name);
                                 return ty::Region::new_bound(
                                     tcx,
                                     ty::INNERMOST,
@@ -2704,14 +2703,14 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
                             }
                         }
 
-                        (name, ty::BrNamed(CRATE_DEF_ID.to_def_id(), name))
+                        (name, ty::BoundRegionKind::Named(CRATE_DEF_ID.to_def_id(), name))
                     }
-                    ty::BrNamed(def_id, kw::UnderscoreLifetime | kw::Empty) => {
+                    ty::BoundRegionKind::Named(def_id, kw::UnderscoreLifetime | kw::Empty) => {
                         let name = next_name(self);
 
                         if let Some(lt_idx) = lifetime_idx {
                             if lt_idx > binder_level_idx {
-                                let kind = ty::BrNamed(def_id, name);
+                                let kind = ty::BoundRegionKind::Named(def_id, name);
                                 return ty::Region::new_bound(
                                     tcx,
                                     ty::INNERMOST,
@@ -2720,9 +2719,9 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
                             }
                         }
 
-                        (name, ty::BrNamed(def_id, name))
+                        (name, ty::BoundRegionKind::Named(def_id, name))
                     }
-                    ty::BrNamed(_, name) => {
+                    ty::BoundRegionKind::Named(_, name) => {
                         if let Some(lt_idx) = lifetime_idx {
                             if lt_idx > binder_level_idx {
                                 let kind = br.kind;
@@ -2948,7 +2947,10 @@ impl<'tcx> ty::TraitPredicate<'tcx> {
 }
 
 #[derive(Copy, Clone, TypeFoldable, TypeVisitable, Lift)]
-pub struct TraitPredPrintWithBoundConstness<'tcx>(ty::TraitPredicate<'tcx>, ty::BoundConstness);
+pub struct TraitPredPrintWithBoundConstness<'tcx>(
+    ty::TraitPredicate<'tcx>,
+    Option<ty::BoundConstness>,
+);
 
 impl<'tcx> fmt::Debug for TraitPredPrintWithBoundConstness<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2966,7 +2968,7 @@ impl<'tcx> ty::PolyTraitPredicate<'tcx> {
 
     fn print_with_bound_constness(
         self,
-        constness: ty::BoundConstness,
+        constness: Option<ty::BoundConstness>,
     ) -> ty::Binder<'tcx, TraitPredPrintWithBoundConstness<'tcx>> {
         self.map_bound(|trait_pred| TraitPredPrintWithBoundConstness(trait_pred, constness))
     }
@@ -3027,7 +3029,7 @@ define_print! {
     ty::FnSig<'tcx> {
         p!(write("{}", self.safety.prefix_str()));
 
-        if self.abi != Abi::Rust {
+        if self.abi != ExternAbi::Rust {
             p!(write("extern {} ", self.abi));
         }
 
@@ -3073,6 +3075,15 @@ define_print! {
         p!(print(self.trait_ref.print_trait_sugared()))
     }
 
+    ty::HostEffectPredicate<'tcx> {
+        let constness = match self.constness {
+            ty::BoundConstness::Const => { "const" }
+            ty::BoundConstness::Maybe => { "~const" }
+        };
+        p!(print(self.trait_ref.self_ty()), ": {constness} ");
+        p!(print(self.trait_ref.print_trait_sugared()))
+    }
+
     ty::TypeAndMut<'tcx> {
         p!(write("{}", self.mutbl.prefix_str()), print(self.ty))
     }
@@ -3085,6 +3096,7 @@ define_print! {
             ty::ClauseKind::RegionOutlives(predicate) => p!(print(predicate)),
             ty::ClauseKind::TypeOutlives(predicate) => p!(print(predicate)),
             ty::ClauseKind::Projection(predicate) => p!(print(predicate)),
+            ty::ClauseKind::HostEffect(predicate) => p!(print(predicate)),
             ty::ClauseKind::ConstArgHasType(ct, ty) => {
                 p!("the constant `", print(ct), "` has type `", print(ty), "`")
             },
@@ -3206,7 +3218,9 @@ define_print_and_forward_display! {
 
     TraitPredPrintWithBoundConstness<'tcx> {
         p!(print(self.0.trait_ref.self_ty()), ": ");
-        p!(pretty_print_bound_constness(self.1));
+        if let Some(constness) = self.1 {
+            p!(pretty_print_bound_constness(constness));
+        }
         if let ty::PredicatePolarity::Negative = self.0.polarity {
             p!("!");
         }

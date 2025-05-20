@@ -1082,8 +1082,6 @@ pub struct Resolver<'ra, 'tcx> {
     binding_parent_modules: FxHashMap<NameBinding<'ra>, Module<'ra>>,
 
     underscore_disambiguator: u32,
-    /// Disambiguator for anonymous adts.
-    empty_disambiguator: u32,
 
     /// Maps glob imports to the names of items actually imported.
     glob_map: FxHashMap<LocalDefId, FxHashSet<Symbol>>,
@@ -1122,7 +1120,8 @@ pub struct Resolver<'ra, 'tcx> {
     local_macro_def_scopes: FxHashMap<LocalDefId, Module<'ra>>,
     ast_transform_scopes: FxHashMap<LocalExpnId, Module<'ra>>,
     unused_macros: FxHashMap<LocalDefId, (NodeId, Ident)>,
-    unused_macro_rules: FxHashMap<(LocalDefId, usize), (Ident, Span)>,
+    /// A map from the macro to all its potentially unused arms.
+    unused_macro_rules: FxIndexMap<LocalDefId, FxHashMap<usize, (Ident, Span)>>,
     proc_macro_stubs: FxHashSet<LocalDefId>,
     /// Traces collected during macro resolution and validated when it's complete.
     single_segment_macro_resolutions:
@@ -1461,7 +1460,6 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             module_children: Default::default(),
             trait_map: NodeMap::default(),
             underscore_disambiguator: 0,
-            empty_disambiguator: 0,
             empty_module,
             module_map,
             block_map: Default::default(),
@@ -1693,9 +1691,9 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
 
     fn dummy_ext(&self, macro_kind: MacroKind) -> Lrc<SyntaxExtension> {
         match macro_kind {
-            MacroKind::Bang => self.dummy_ext_bang.clone(),
-            MacroKind::Derive => self.dummy_ext_derive.clone(),
-            MacroKind::Attr => self.non_macro_attr.ext.clone(),
+            MacroKind::Bang => Lrc::clone(&self.dummy_ext_bang),
+            MacroKind::Derive => Lrc::clone(&self.dummy_ext_derive),
+            MacroKind::Attr => Lrc::clone(&self.non_macro_attr.ext),
         }
     }
 
@@ -1808,12 +1806,11 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         assoc_item: Option<(Symbol, Namespace)>,
     ) -> bool {
         match (trait_module, assoc_item) {
-            (Some(trait_module), Some((name, ns))) => {
-                self.resolutions(trait_module).borrow().iter().any(|resolution| {
-                    let (&BindingKey { ident: assoc_ident, ns: assoc_ns, .. }, _) = resolution;
-                    assoc_ns == ns && assoc_ident.name == name
-                })
-            }
+            (Some(trait_module), Some((name, ns))) => self
+                .resolutions(trait_module)
+                .borrow()
+                .iter()
+                .any(|(key, _name_resolution)| key.ns == ns && key.ident.name == name),
             _ => true,
         }
     }
@@ -1841,9 +1838,6 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         let disambiguator = if ident.name == kw::Underscore {
             self.underscore_disambiguator += 1;
             self.underscore_disambiguator
-        } else if ident.name == kw::Empty {
-            self.empty_disambiguator += 1;
-            self.empty_disambiguator
         } else {
             0
         };

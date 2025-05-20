@@ -154,18 +154,17 @@ fn prepare_vtable_segments_inner<'tcx, T>(
 
         // emit innermost item, move to next sibling and stop there if possible, otherwise jump to outer level.
         while let Some((inner_most_trait_ref, emit_vptr, mut siblings)) = stack.pop() {
+            let has_entries =
+                has_own_existential_vtable_entries(tcx, inner_most_trait_ref.def_id());
+
             segment_visitor(VtblSegment::TraitOwnEntries {
                 trait_ref: inner_most_trait_ref,
-                emit_vptr: emit_vptr && !tcx.sess.opts.unstable_opts.no_trait_vptr,
+                emit_vptr: emit_vptr && has_entries && !tcx.sess.opts.unstable_opts.no_trait_vptr,
             })?;
 
             // If we've emitted (fed to `segment_visitor`) a trait that has methods present in the vtable,
             // we'll need to emit vptrs from now on.
-            if !emit_vptr_on_new_entry
-                && has_own_existential_vtable_entries(tcx, inner_most_trait_ref.def_id())
-            {
-                emit_vptr_on_new_entry = true;
-            }
+            emit_vptr_on_new_entry |= has_entries;
 
             if let Some(next_inner_most_trait_ref) =
                 siblings.find(|&sibling| visited.insert(sibling.upcast(tcx)))
@@ -276,8 +275,10 @@ fn vtable_entries<'tcx>(
                     // The trait type may have higher-ranked lifetimes in it;
                     // erase them if they appear, so that we get the type
                     // at some particular call site.
-                    let args =
-                        tcx.normalize_erasing_late_bound_regions(ty::ParamEnv::reveal_all(), args);
+                    let args = tcx.normalize_erasing_late_bound_regions(
+                        ty::TypingEnv::fully_monomorphized(),
+                        args,
+                    );
 
                     // It's possible that the method relies on where-clauses that
                     // do not hold for this particular set of type parameters.
@@ -294,7 +295,7 @@ fn vtable_entries<'tcx>(
 
                     let instance = ty::Instance::expect_resolve_for_vtable(
                         tcx,
-                        ty::ParamEnv::reveal_all(),
+                        ty::TypingEnv::fully_monomorphized(),
                         def_id,
                         args,
                         DUMMY_SP,
@@ -440,8 +441,8 @@ fn trait_refs_are_compatible<'tcx>(
         return false;
     }
 
-    let infcx = tcx.infer_ctxt().build();
-    let param_env = ty::ParamEnv::reveal_all();
+    let (infcx, param_env) =
+        tcx.infer_ctxt().build_with_typing_env(ty::TypingEnv::fully_monomorphized());
     let ocx = ObligationCtxt::new(&infcx);
     let hr_source_principal =
         ocx.normalize(&ObligationCause::dummy(), param_env, hr_vtable_principal);

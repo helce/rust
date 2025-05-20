@@ -14,6 +14,7 @@ use bootstrap::{
     Build, CONFIG_CHANGE_HISTORY, Config, Flags, Subcommand, find_recent_config_change_ids,
     human_readable_changes, t,
 };
+use build_helper::ci::CiEnv;
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -32,7 +33,7 @@ fn main() {
         // Display PID of process holding the lock
         // PID will be stored in a lock file
         let lock_path = config.out.join("lock");
-        let pid = fs::read_to_string(&lock_path).unwrap_or_default();
+        let pid = fs::read_to_string(&lock_path);
 
         build_lock = fd_lock::RwLock::new(t!(fs::OpenOptions::new()
             .write(true)
@@ -46,7 +47,11 @@ fn main() {
             }
             err => {
                 drop(err);
-                println!("WARNING: build directory locked by process {pid}, waiting for lock");
+                if let Ok(pid) = pid {
+                    println!("WARNING: build directory locked by process {pid}, waiting for lock");
+                } else {
+                    println!("WARNING: build directory locked, waiting for lock");
+                }
                 let mut lock = t!(build_lock.write());
                 t!(lock.write(process::id().to_string().as_ref()));
                 lock
@@ -54,9 +59,12 @@ fn main() {
         };
     }
 
-    // check_version warnings are not printed during setup
-    let changelog_suggestion =
-        if matches!(config.cmd, Subcommand::Setup { .. }) { None } else { check_version(&config) };
+    // check_version warnings are not printed during setup, or during CI
+    let changelog_suggestion = if matches!(config.cmd, Subcommand::Setup { .. }) || CiEnv::is_ci() {
+        None
+    } else {
+        check_version(&config)
+    };
 
     // NOTE: Since `./configure` generates a `config.toml`, distro maintainers will see the
     // changelog warning, not the `x.py setup` message.

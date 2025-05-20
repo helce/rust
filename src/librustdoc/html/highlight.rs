@@ -58,13 +58,6 @@ pub(crate) fn render_example_with_highlighting(
     write_footer(out, playground_button);
 }
 
-/// Highlights `src` as an item-decl, returning the HTML output.
-pub(crate) fn render_item_decl_with_highlighting(src: &str, out: &mut Buffer) {
-    write!(out, "<pre class=\"rust item-decl\">");
-    write_code(out, src, None, None);
-    write!(out, "</pre>");
-}
-
 fn write_header(
     out: &mut Buffer,
     class: &str,
@@ -868,10 +861,9 @@ impl<'src> Classifier<'src> {
                 },
                 Some(c) => c,
             },
-            TokenKind::RawIdent
-            | TokenKind::UnknownPrefix
-            | TokenKind::InvalidPrefix
-            | TokenKind::InvalidIdent => Class::Ident(self.new_span(before, text)),
+            TokenKind::RawIdent | TokenKind::UnknownPrefix | TokenKind::InvalidIdent => {
+                Class::Ident(self.new_span(before, text))
+            }
             TokenKind::Lifetime { .. }
             | TokenKind::RawLifetime
             | TokenKind::UnknownPrefixLifetime => Class::Lifetime,

@@ -137,7 +137,7 @@ pub(crate) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, arg: &Expr<'_>, name:
                                 _ if matches!(
                                     typeck.expr_adjustments(prev_expr).first(),
                                     Some(Adjustment {
-                                        kind: Adjust::Borrow(AutoBorrow::Ref(_, AutoBorrowMutability::Not))
+                                        kind: Adjust::Borrow(AutoBorrow::Ref(AutoBorrowMutability::Not))
                                             | Adjust::Deref(_),
                                         ..
                                     })
@@ -148,7 +148,7 @@ pub(crate) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, arg: &Expr<'_>, name:
                                 _ => {},
                             }
                         }
-                        requires_copy |= !ty.is_copy_modulo_regions(cx.tcx, cx.param_env);
+                        requires_copy |= !ty.is_copy_modulo_regions(cx.tcx, cx.typing_env());
                         break;
                     }
                 },
@@ -158,9 +158,9 @@ pub(crate) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, arg: &Expr<'_>, name:
         }
 
         if can_lint
-            && (!requires_copy || arg_ty.is_copy_modulo_regions(cx.tcx, cx.param_env))
+            && (!requires_copy || arg_ty.is_copy_modulo_regions(cx.tcx, cx.typing_env()))
             // This case could be handled, but a fair bit of care would need to be taken.
-            && (!requires_deref || arg_ty.is_freeze(cx.tcx, cx.param_env))
+            && (!requires_deref || arg_ty.is_freeze(cx.tcx, cx.typing_env()))
         {
             if requires_deref {
                 edits.push((param.span.shrink_to_lo(), "&".into()));
@@ -230,7 +230,7 @@ fn check_use<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) -> (UseKind<'tcx>,
             if use_cx
                 .adjustments
                 .first()
-                .is_some_and(|a| matches!(a.kind, Adjust::Borrow(AutoBorrow::Ref(_, AutoBorrowMutability::Not)))) =>
+                .is_some_and(|a| matches!(a.kind, Adjust::Borrow(AutoBorrow::Ref(AutoBorrowMutability::Not)))) =>
         {
             UseKind::AutoBorrowed
         },

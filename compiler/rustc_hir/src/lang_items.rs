@@ -242,6 +242,8 @@ language_item_table! {
     DerefPure,               sym::deref_pure,          deref_pure_trait,           Target::Trait,          GenericRequirement::Exact(0);
     DerefTarget,             sym::deref_target,        deref_target,               Target::AssocTy,        GenericRequirement::None;
     Receiver,                sym::receiver,            receiver_trait,             Target::Trait,          GenericRequirement::None;
+    ReceiverTarget,          sym::receiver_target,     receiver_target,            Target::AssocTy,        GenericRequirement::None;
+    LegacyReceiver,          sym::legacy_receiver,     legacy_receiver_trait,      Target::Trait,          GenericRequirement::None;
 
     Fn,                      kw::Fn,                   fn_trait,                   Target::Trait,          GenericRequirement::Exact(1);
     FnMut,                   sym::fn_mut,              fn_mut_trait,               Target::Trait,          GenericRequirement::Exact(1);
@@ -348,9 +350,6 @@ language_item_table! {
 
     MaybeUninit,             sym::maybe_uninit,        maybe_uninit,               Target::Union,          GenericRequirement::None;
 
-    /// Align offset for stride != 1; must not panic.
-    AlignOffset,             sym::align_offset,        align_offset_fn,            Target::Fn,             GenericRequirement::None;
-
     Termination,             sym::termination,         termination,                Target::Trait,          GenericRequirement::None;
 
     Try,                     sym::Try,                 try_trait,                  Target::Trait,          GenericRequirement::None;
@@ -415,14 +414,6 @@ language_item_table! {
 
     String,                  sym::String,              string,                     Target::Struct,         GenericRequirement::None;
     CStr,                    sym::CStr,                c_str,                      Target::Struct,         GenericRequirement::None;
-
-    EffectsRuntime,          sym::EffectsRuntime,      effects_runtime,            Target::Struct,         GenericRequirement::None;
-    EffectsNoRuntime,        sym::EffectsNoRuntime,    effects_no_runtime,         Target::Struct,         GenericRequirement::None;
-    EffectsMaybe,            sym::EffectsMaybe,        effects_maybe,              Target::Struct,         GenericRequirement::None;
-    EffectsIntersection,     sym::EffectsIntersection, effects_intersection,       Target::Trait,          GenericRequirement::None;
-    EffectsIntersectionOutput, sym::EffectsIntersectionOutput, effects_intersection_output, Target::AssocTy, GenericRequirement::None;
-    EffectsCompat,           sym::EffectsCompat,       effects_compat,             Target::Trait,          GenericRequirement::Exact(1);
-    EffectsTyCompat,         sym::EffectsTyCompat,     effects_ty_compat,          Target::Trait,          GenericRequirement::Exact(1);
 }
 
 pub enum GenericRequirement {

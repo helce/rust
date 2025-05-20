@@ -1,13 +1,13 @@
 use std::assert_matches::assert_matches;
 use std::ops::Deref;
 
+use rustc_abi::{Align, BackendRepr, Scalar, Size, WrappingRange};
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 use rustc_middle::ty::layout::{FnAbiOf, LayoutOf, TyAndLayout};
 use rustc_middle::ty::{Instance, Ty};
 use rustc_session::config::OptLevel;
 use rustc_span::Span;
-use rustc_target::abi::call::FnAbi;
-use rustc_target::abi::{Abi, Align, Scalar, Size, WrappingRange};
+use rustc_target::callconv::FnAbi;
 
 use super::abi::AbiBuilderMethods;
 use super::asm::AsmBuilderMethods;
@@ -84,6 +84,26 @@ pub trait BuilderMethods<'a, 'tcx>:
         then_llbb: Self::BasicBlock,
         else_llbb: Self::BasicBlock,
     );
+
+    // Conditional with expectation.
+    //
+    // This function is opt-in for back ends.
+    //
+    // The default implementation calls `self.expect()` before emiting the branch
+    // by calling `self.cond_br()`
+    fn cond_br_with_expect(
+        &mut self,
+        mut cond: Self::Value,
+        then_llbb: Self::BasicBlock,
+        else_llbb: Self::BasicBlock,
+        expect: Option<bool>,
+    ) {
+        if let Some(expect) = expect {
+            cond = self.expect(cond, expect);
+        }
+        self.cond_br(cond, then_llbb, else_llbb)
+    }
+
     fn switch(
         &mut self,
         v: Self::Value,
@@ -162,7 +182,7 @@ pub trait BuilderMethods<'a, 'tcx>:
 
     fn from_immediate(&mut self, val: Self::Value) -> Self::Value;
     fn to_immediate(&mut self, val: Self::Value, layout: TyAndLayout<'_>) -> Self::Value {
-        if let Abi::Scalar(scalar) = layout.abi {
+        if let BackendRepr::Scalar(scalar) = layout.backend_repr {
             self.to_immediate_scalar(val, scalar)
         } else {
             val
@@ -436,14 +456,6 @@ pub trait BuilderMethods<'a, 'tcx>:
 
     /// Called for `StorageDead`
     fn lifetime_end(&mut self, ptr: Self::Value, size: Size);
-
-    fn instrprof_increment(
-        &mut self,
-        fn_name: Self::Value,
-        hash: Self::Value,
-        num_counters: Self::Value,
-        index: Self::Value,
-    );
 
     fn call(
         &mut self,

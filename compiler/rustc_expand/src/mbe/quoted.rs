@@ -119,16 +119,16 @@ pub(super) fn parse(
     result
 }
 
-/// Asks for the `macro_metavar_expr` feature if it is not already declared
+/// Asks for the `macro_metavar_expr` feature if it is not enabled
 fn maybe_emit_macro_metavar_expr_feature(features: &Features, sess: &Session, span: Span) {
-    if !features.macro_metavar_expr {
+    if !features.macro_metavar_expr() {
         let msg = "meta-variable expressions are unstable";
         feature_err(sess, sym::macro_metavar_expr, span, msg).emit();
     }
 }
 
 fn maybe_emit_macro_metavar_expr_concat_feature(features: &Features, sess: &Session, span: Span) {
-    if !features.macro_metavar_expr_concat {
+    if !features.macro_metavar_expr_concat() {
         let msg = "the `concat` meta-variable expression is unstable";
         feature_err(sess, sym::macro_metavar_expr_concat, span, msg).emit();
     }
@@ -165,11 +165,12 @@ fn parse_tree<'a>(
             // during parsing.
             let mut next = outer_trees.next();
             let mut trees: Box<dyn Iterator<Item = &tokenstream::TokenTree>>;
-            if let Some(tokenstream::TokenTree::Delimited(.., Delimiter::Invisible, tts)) = next {
-                trees = Box::new(tts.trees());
-                next = trees.next();
-            } else {
-                trees = Box::new(outer_trees);
+            match next {
+                Some(tokenstream::TokenTree::Delimited(.., delim, tts)) if delim.skip() => {
+                    trees = Box::new(tts.trees());
+                    next = trees.next();
+                }
+                _ => trees = Box::new(outer_trees),
             }
 
             match next {

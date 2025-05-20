@@ -1,5 +1,6 @@
 //! See docs in build/expr/mod.rs
 
+use rustc_abi::Size;
 use rustc_ast as ast;
 use rustc_hir::LangItem;
 use rustc_middle::mir::interpret::{
@@ -11,7 +12,6 @@ use rustc_middle::ty::{
     self, CanonicalUserType, CanonicalUserTypeAnnotation, Ty, TyCtxt, UserTypeAnnotationIndex,
 };
 use rustc_middle::{bug, mir, span_bug};
-use rustc_target::abi::Size;
 use tracing::{instrument, trace};
 
 use crate::build::{Builder, parse_float_into_constval};
@@ -114,8 +114,7 @@ fn lit_to_mir_constant<'tcx>(
 ) -> Result<Const<'tcx>, LitToConstError> {
     let LitToConstInput { lit, ty, neg } = lit_input;
     let trunc = |n| {
-        let param_ty = ty::ParamEnv::reveal_all().and(ty);
-        let width = match tcx.layout_of(param_ty) {
+        let width = match tcx.layout_of(ty::TypingEnv::fully_monomorphized().as_query_input(ty)) {
             Ok(layout) => layout.size,
             Err(_) => {
                 tcx.dcx().bug(format!("couldn't compute width of literal: {:?}", lit_input.lit))

@@ -4,13 +4,14 @@
 
 use std::assert_matches::assert_matches;
 
+use rustc_abi::Size;
+use rustc_apfloat::ieee::{Double, Half, Quad, Single};
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{self, BinOp, ConstValue, NonDivergingIntrinsic};
 use rustc_middle::ty::layout::{LayoutOf as _, TyAndLayout, ValidityRequirement};
 use rustc_middle::ty::{GenericArgsRef, Ty, TyCtxt};
 use rustc_middle::{bug, ty};
 use rustc_span::symbol::{Symbol, sym};
-use rustc_target::abi::Size;
 use tracing::trace;
 
 use super::memory::MemoryKind;
@@ -33,7 +34,7 @@ pub(crate) fn alloc_type_name<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> ConstAll
 /// inside an `InterpCx` and instead have their value computed directly from rustc internal info.
 pub(crate) fn eval_nullary_intrinsic<'tcx>(
     tcx: TyCtxt<'tcx>,
-    param_env: ty::ParamEnv<'tcx>,
+    typing_env: ty::TypingEnv<'tcx>,
     def_id: DefId,
     args: GenericArgsRef<'tcx>,
 ) -> InterpResult<'tcx, ConstValue<'tcx>> {
@@ -47,11 +48,13 @@ pub(crate) fn eval_nullary_intrinsic<'tcx>(
         }
         sym::needs_drop => {
             ensure_monomorphic_enough(tcx, tp_ty)?;
-            ConstValue::from_bool(tp_ty.needs_drop(tcx, param_env))
+            ConstValue::from_bool(tp_ty.needs_drop(tcx, typing_env))
         }
         sym::pref_align_of => {
             // Correctly handles non-monomorphic calls, so there is no need for ensure_monomorphic_enough.
-            let layout = tcx.layout_of(param_env.and(tp_ty)).map_err(|e| err_inval!(Layout(*e)))?;
+            let layout = tcx
+                .layout_of(typing_env.as_query_input(tp_ty))
+                .map_err(|e| err_inval!(Layout(*e)))?;
             ConstValue::from_target_usize(layout.align.pref.bytes(), &tcx)
         }
         sym::type_id => {
@@ -148,8 +151,8 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                     sym::type_name => Ty::new_static_str(self.tcx.tcx),
                     _ => bug!(),
                 };
-                let val =
-                    self.ctfe_query(|tcx| tcx.const_eval_global_id(self.param_env, gid, tcx.span))?;
+                let val = self
+                    .ctfe_query(|tcx| tcx.const_eval_global_id(self.typing_env, gid, tcx.span))?;
                 let val = self.const_val_to_op(val, ty, Some(dest.layout))?;
                 self.copy_op(&val, dest)?;
             }
@@ -323,13 +326,12 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                     dist.checked_neg().unwrap(), // i64::MIN is impossible as no allocation can be that large
                     CheckInAllocMsg::OffsetFromTest,
                 )
-                .map_err(|_| {
+                .map_err_kind(|_| {
                     // Make the error more specific.
                     err_ub_custom!(
                         fluent::const_eval_offset_from_different_allocations,
                         name = intrinsic_name,
                     )
-                    .into()
                 })?;
 
                 // Perform division by size to compute return value.
@@ -355,7 +357,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
 
                 let should_panic = !self
                     .tcx
-                    .check_validity_requirement((requirement, self.param_env.and(ty)))
+                    .check_validity_requirement((requirement, self.typing_env.as_query_input(ty)))
                     .map_err(|_| err_inval!(TooGeneric))?;
 
                 if should_panic {
@@ -364,7 +366,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                     let msg = match requirement {
                         // For *all* intrinsics we first check `is_uninhabited` to give a more specific
                         // error message.
-                        _ if layout.abi.is_uninhabited() => format!(
+                        _ if layout.is_uninhabited() => format!(
                             "aborted execution: attempted to instantiate uninhabited type `{ty}`"
                         ),
                         ValidityRequirement::Inhabited => bug!("handled earlier"),
@@ -437,6 +439,26 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 let (_size, align) = self.get_vtable_size_and_align(ptr, None)?;
                 self.write_scalar(Scalar::from_target_usize(align.bytes(), self), dest)?;
             }
+
+            sym::minnumf16 => self.float_min_intrinsic::<Half>(args, dest)?,
+            sym::minnumf32 => self.float_min_intrinsic::<Single>(args, dest)?,
+            sym::minnumf64 => self.float_min_intrinsic::<Double>(args, dest)?,
+            sym::minnumf128 => self.float_min_intrinsic::<Quad>(args, dest)?,
+
+            sym::maxnumf16 => self.float_max_intrinsic::<Half>(args, dest)?,
+            sym::maxnumf32 => self.float_max_intrinsic::<Single>(args, dest)?,
+            sym::maxnumf64 => self.float_max_intrinsic::<Double>(args, dest)?,
+            sym::maxnumf128 => self.float_max_intrinsic::<Quad>(args, dest)?,
+
+            sym::copysignf16 => self.float_copysign_intrinsic::<Half>(args, dest)?,
+            sym::copysignf32 => self.float_copysign_intrinsic::<Single>(args, dest)?,
+            sym::copysignf64 => self.float_copysign_intrinsic::<Double>(args, dest)?,
+            sym::copysignf128 => self.float_copysign_intrinsic::<Quad>(args, dest)?,
+
+            sym::fabsf16 => self.float_abs_intrinsic::<Half>(args, dest)?,
+            sym::fabsf32 => self.float_abs_intrinsic::<Single>(args, dest)?,
+            sym::fabsf64 => self.float_abs_intrinsic::<Double>(args, dest)?,
+            sym::fabsf128 => self.float_abs_intrinsic::<Quad>(args, dest)?,
 
             // Unsupported intrinsic: skip the return_to_block below.
             _ => return interp_ok(false),
@@ -543,7 +565,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             self.binary_op(mir_op.wrapping_to_overflowing().unwrap(), l, r)?.to_scalar_pair();
         interp_ok(if overflowed.to_bool()? {
             let size = l.layout.size;
-            if l.layout.abi.is_signed() {
+            if l.layout.backend_repr.is_signed() {
                 // For signed ints the saturated value depends on the sign of the first
                 // term since the sign of the second term can be inferred from this and
                 // the fact that the operation has overflowed (if either is 0 no
@@ -696,5 +718,64 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         let lhs_bytes = get_bytes(self, lhs)?;
         let rhs_bytes = get_bytes(self, rhs)?;
         interp_ok(Scalar::from_bool(lhs_bytes == rhs_bytes))
+    }
+
+    fn float_min_intrinsic<F>(
+        &mut self,
+        args: &[OpTy<'tcx, M::Provenance>],
+        dest: &MPlaceTy<'tcx, M::Provenance>,
+    ) -> InterpResult<'tcx, ()>
+    where
+        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
+    {
+        let a: F = self.read_scalar(&args[0])?.to_float()?;
+        let b: F = self.read_scalar(&args[1])?.to_float()?;
+        let res = self.adjust_nan(a.min(b), &[a, b]);
+        self.write_scalar(res, dest)?;
+        interp_ok(())
+    }
+
+    fn float_max_intrinsic<F>(
+        &mut self,
+        args: &[OpTy<'tcx, M::Provenance>],
+        dest: &MPlaceTy<'tcx, M::Provenance>,
+    ) -> InterpResult<'tcx, ()>
+    where
+        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
+    {
+        let a: F = self.read_scalar(&args[0])?.to_float()?;
+        let b: F = self.read_scalar(&args[1])?.to_float()?;
+        let res = self.adjust_nan(a.max(b), &[a, b]);
+        self.write_scalar(res, dest)?;
+        interp_ok(())
+    }
+
+    fn float_copysign_intrinsic<F>(
+        &mut self,
+        args: &[OpTy<'tcx, M::Provenance>],
+        dest: &MPlaceTy<'tcx, M::Provenance>,
+    ) -> InterpResult<'tcx, ()>
+    where
+        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
+    {
+        let a: F = self.read_scalar(&args[0])?.to_float()?;
+        let b: F = self.read_scalar(&args[1])?.to_float()?;
+        // bitwise, no NaN adjustments
+        self.write_scalar(a.copy_sign(b), dest)?;
+        interp_ok(())
+    }
+
+    fn float_abs_intrinsic<F>(
+        &mut self,
+        args: &[OpTy<'tcx, M::Provenance>],
+        dest: &MPlaceTy<'tcx, M::Provenance>,
+    ) -> InterpResult<'tcx, ()>
+    where
+        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
+    {
+        let x: F = self.read_scalar(&args[0])?.to_float()?;
+        // bitwise, no NaN adjustments
+        self.write_scalar(x.abs(), dest)?;
+        interp_ok(())
     }
 }

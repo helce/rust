@@ -4,8 +4,8 @@ use rustc_middle::mir::{
     self, BasicBlock, CallReturnPlaces, Location, SwitchTargets, TerminatorEdges,
 };
 
-use super::visitor::{ResultsVisitable, ResultsVisitor};
-use super::{Analysis, Effect, EffectIndex, GenKillAnalysis, GenKillSet, SwitchIntTarget};
+use super::visitor::ResultsVisitor;
+use super::{Analysis, Effect, EffectIndex, Results, SwitchIntTarget};
 
 pub trait Direction {
     const IS_FORWARD: bool;
@@ -29,27 +29,18 @@ pub trait Direction {
         state: &mut A::Domain,
         block: BasicBlock,
         block_data: &'mir mir::BasicBlockData<'tcx>,
-        statement_effect: Option<&dyn Fn(BasicBlock, &mut A::Domain)>,
     ) -> TerminatorEdges<'mir, 'tcx>
     where
         A: Analysis<'tcx>;
 
-    fn gen_kill_statement_effects_in_block<'tcx, A>(
-        analysis: &mut A,
-        trans: &mut GenKillSet<A::Idx>,
-        block: BasicBlock,
-        block_data: &mir::BasicBlockData<'tcx>,
-    ) where
-        A: GenKillAnalysis<'tcx>;
-
-    fn visit_results_in_block<'mir, 'tcx, D, R>(
-        state: &mut D,
+    fn visit_results_in_block<'mir, 'tcx, A>(
+        state: &mut A::Domain,
         block: BasicBlock,
         block_data: &'mir mir::BasicBlockData<'tcx>,
-        results: &mut R,
-        vis: &mut impl ResultsVisitor<'mir, 'tcx, R, Domain = D>,
+        results: &mut Results<'tcx, A>,
+        vis: &mut impl ResultsVisitor<'mir, 'tcx, A>,
     ) where
-        R: ResultsVisitable<'tcx, Domain = D>;
+        A: Analysis<'tcx>;
 
     fn join_state_into_successors_of<'tcx, A>(
         analysis: &mut A,
@@ -62,7 +53,7 @@ pub trait Direction {
         A: Analysis<'tcx>;
 }
 
-/// Dataflow that runs from the exit of a block (the terminator), to its entry (the first statement).
+/// Dataflow that runs from the exit of a block (terminator), to its entry (the first statement).
 pub struct Backward;
 
 impl Direction for Backward {
@@ -73,7 +64,6 @@ impl Direction for Backward {
         state: &mut A::Domain,
         block: BasicBlock,
         block_data: &'mir mir::BasicBlockData<'tcx>,
-        statement_effect: Option<&dyn Fn(BasicBlock, &mut A::Domain)>,
     ) -> TerminatorEdges<'mir, 'tcx>
     where
         A: Analysis<'tcx>,
@@ -82,31 +72,12 @@ impl Direction for Backward {
         let location = Location { block, statement_index: block_data.statements.len() };
         analysis.apply_before_terminator_effect(state, terminator, location);
         let edges = analysis.apply_terminator_effect(state, terminator, location);
-        if let Some(statement_effect) = statement_effect {
-            statement_effect(block, state)
-        } else {
-            for (statement_index, statement) in block_data.statements.iter().enumerate().rev() {
-                let location = Location { block, statement_index };
-                analysis.apply_before_statement_effect(state, statement, location);
-                analysis.apply_statement_effect(state, statement, location);
-            }
-        }
-        edges
-    }
-
-    fn gen_kill_statement_effects_in_block<'tcx, A>(
-        analysis: &mut A,
-        trans: &mut GenKillSet<A::Idx>,
-        block: BasicBlock,
-        block_data: &mir::BasicBlockData<'tcx>,
-    ) where
-        A: GenKillAnalysis<'tcx>,
-    {
         for (statement_index, statement) in block_data.statements.iter().enumerate().rev() {
             let location = Location { block, statement_index };
-            analysis.before_statement_effect(trans, statement, location);
-            analysis.statement_effect(trans, statement, location);
+            analysis.apply_before_statement_effect(state, statement, location);
+            analysis.apply_statement_effect(state, statement, location);
         }
+        edges
     }
 
     fn apply_effects_in_range<'tcx, A>(
@@ -186,32 +157,32 @@ impl Direction for Backward {
         analysis.apply_statement_effect(state, statement, location);
     }
 
-    fn visit_results_in_block<'mir, 'tcx, D, R>(
-        state: &mut D,
+    fn visit_results_in_block<'mir, 'tcx, A>(
+        state: &mut A::Domain,
         block: BasicBlock,
         block_data: &'mir mir::BasicBlockData<'tcx>,
-        results: &mut R,
-        vis: &mut impl ResultsVisitor<'mir, 'tcx, R, Domain = D>,
+        results: &mut Results<'tcx, A>,
+        vis: &mut impl ResultsVisitor<'mir, 'tcx, A>,
     ) where
-        R: ResultsVisitable<'tcx, Domain = D>,
+        A: Analysis<'tcx>,
     {
-        results.reset_to_block_entry(state, block);
+        state.clone_from(results.entry_set_for_block(block));
 
         vis.visit_block_end(state);
 
         // Terminator
         let loc = Location { block, statement_index: block_data.statements.len() };
         let term = block_data.terminator();
-        results.reconstruct_before_terminator_effect(state, term, loc);
+        results.analysis.apply_before_terminator_effect(state, term, loc);
         vis.visit_terminator_before_primary_effect(results, state, term, loc);
-        results.reconstruct_terminator_effect(state, term, loc);
+        results.analysis.apply_terminator_effect(state, term, loc);
         vis.visit_terminator_after_primary_effect(results, state, term, loc);
 
         for (statement_index, stmt) in block_data.statements.iter().enumerate().rev() {
             let loc = Location { block, statement_index };
-            results.reconstruct_before_statement_effect(state, stmt, loc);
+            results.analysis.apply_before_statement_effect(state, stmt, loc);
             vis.visit_statement_before_primary_effect(results, state, stmt, loc);
-            results.reconstruct_statement_effect(state, stmt, loc);
+            results.analysis.apply_statement_effect(state, stmt, loc);
             vis.visit_statement_after_primary_effect(results, state, stmt, loc);
         }
 
@@ -330,40 +301,19 @@ impl Direction for Forward {
         state: &mut A::Domain,
         block: BasicBlock,
         block_data: &'mir mir::BasicBlockData<'tcx>,
-        statement_effect: Option<&dyn Fn(BasicBlock, &mut A::Domain)>,
     ) -> TerminatorEdges<'mir, 'tcx>
     where
         A: Analysis<'tcx>,
     {
-        if let Some(statement_effect) = statement_effect {
-            statement_effect(block, state)
-        } else {
-            for (statement_index, statement) in block_data.statements.iter().enumerate() {
-                let location = Location { block, statement_index };
-                analysis.apply_before_statement_effect(state, statement, location);
-                analysis.apply_statement_effect(state, statement, location);
-            }
+        for (statement_index, statement) in block_data.statements.iter().enumerate() {
+            let location = Location { block, statement_index };
+            analysis.apply_before_statement_effect(state, statement, location);
+            analysis.apply_statement_effect(state, statement, location);
         }
-
         let terminator = block_data.terminator();
         let location = Location { block, statement_index: block_data.statements.len() };
         analysis.apply_before_terminator_effect(state, terminator, location);
         analysis.apply_terminator_effect(state, terminator, location)
-    }
-
-    fn gen_kill_statement_effects_in_block<'tcx, A>(
-        analysis: &mut A,
-        trans: &mut GenKillSet<A::Idx>,
-        block: BasicBlock,
-        block_data: &mir::BasicBlockData<'tcx>,
-    ) where
-        A: GenKillAnalysis<'tcx>,
-    {
-        for (statement_index, statement) in block_data.statements.iter().enumerate() {
-            let location = Location { block, statement_index };
-            analysis.before_statement_effect(trans, statement, location);
-            analysis.statement_effect(trans, statement, location);
-        }
     }
 
     fn apply_effects_in_range<'tcx, A>(
@@ -439,32 +389,32 @@ impl Direction for Forward {
         }
     }
 
-    fn visit_results_in_block<'mir, 'tcx, F, R>(
-        state: &mut F,
+    fn visit_results_in_block<'mir, 'tcx, A>(
+        state: &mut A::Domain,
         block: BasicBlock,
         block_data: &'mir mir::BasicBlockData<'tcx>,
-        results: &mut R,
-        vis: &mut impl ResultsVisitor<'mir, 'tcx, R, Domain = F>,
+        results: &mut Results<'tcx, A>,
+        vis: &mut impl ResultsVisitor<'mir, 'tcx, A>,
     ) where
-        R: ResultsVisitable<'tcx, Domain = F>,
+        A: Analysis<'tcx>,
     {
-        results.reset_to_block_entry(state, block);
+        state.clone_from(results.entry_set_for_block(block));
 
         vis.visit_block_start(state);
 
         for (statement_index, stmt) in block_data.statements.iter().enumerate() {
             let loc = Location { block, statement_index };
-            results.reconstruct_before_statement_effect(state, stmt, loc);
+            results.analysis.apply_before_statement_effect(state, stmt, loc);
             vis.visit_statement_before_primary_effect(results, state, stmt, loc);
-            results.reconstruct_statement_effect(state, stmt, loc);
+            results.analysis.apply_statement_effect(state, stmt, loc);
             vis.visit_statement_after_primary_effect(results, state, stmt, loc);
         }
 
         let loc = Location { block, statement_index: block_data.statements.len() };
         let term = block_data.terminator();
-        results.reconstruct_before_terminator_effect(state, term, loc);
+        results.analysis.apply_before_terminator_effect(state, term, loc);
         vis.visit_terminator_before_primary_effect(results, state, term, loc);
-        results.reconstruct_terminator_effect(state, term, loc);
+        results.analysis.apply_terminator_effect(state, term, loc);
         vis.visit_terminator_after_primary_effect(results, state, term, loc);
 
         vis.visit_block_end(state);

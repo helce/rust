@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use itertools::Itertools;
 use rinja::Template;
+use rustc_abi::VariantIdx;
 use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
 use rustc_hir as hir;
@@ -14,7 +15,6 @@ use rustc_index::IndexVec;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::hygiene::MacroKind;
 use rustc_span::symbol::{Symbol, kw, sym};
-use rustc_target::abi::VariantIdx;
 use tracing::{debug, info};
 
 use super::type_layout::document_type_layout;
@@ -35,7 +35,6 @@ use crate::html::format::{
     Buffer, Ending, PrintWithSpace, display_fn, join_with_double_colon, print_abi_with_space,
     print_constness_with_space, print_where_clause, visibility_print_with_space,
 };
-use crate::html::highlight;
 use crate::html::markdown::{HeadingOffset, MarkdownSummaryLine};
 use crate::html::render::{document_full, document_item_info};
 use crate::html::url_parts_builder::UrlPartsBuilder;
@@ -934,16 +933,18 @@ fn item_trait(w: &mut Buffer, cx: &mut Context<'_>, it: &clean::Item, t: &clean:
     let cache = &cloned_shared.cache;
     let mut extern_crates = FxIndexSet::default();
 
-    if !t.is_object_safe(cx.tcx()) {
+    if !t.is_dyn_compatible(cx.tcx()) {
+        // FIXME(dyn_compat_renaming): Update the URL once the Reference is updated.
         write_section_heading(
             w,
-            "Object Safety",
-            "object-safety",
+            "Dyn Compatibility",
+            "dyn-compatibility",
             None,
             &format!(
-                "<div class=\"object-safety-info\">This trait is <b>not</b> \
-                <a href=\"{base}/reference/items/traits.html#object-safety\">\
-                object safe</a>.</div>",
+                "<div class=\"dyn-compatibility-info\"><p>This trait is <b>not</b> \
+                <a href=\"{base}/reference/items/traits.html#object-safety\">dyn compatible</a>.</p>\
+                <p><i>In older versions of Rust, dyn compatibility was called \"object safety\", \
+                so this trait is not object safe.</i></p></div>",
                 base = crate::clean::utils::DOC_RUST_LANG_ORG_CHANNEL
             ),
         );
@@ -1743,7 +1744,13 @@ fn item_variants(
 }
 
 fn item_macro(w: &mut Buffer, cx: &mut Context<'_>, it: &clean::Item, t: &clean::Macro) {
-    highlight::render_item_decl_with_highlighting(&t.source, w);
+    wrap_item(w, |w| {
+        // FIXME: Also print `#[doc(hidden)]` for `macro_rules!` if it `is_doc_hidden`.
+        if !t.macro_rules {
+            write!(w, "{}", visibility_print_with_space(it, cx));
+        }
+        write!(w, "{}", Escape(&t.source));
+    });
     write!(w, "{}", document(cx, it, None, HeadingOffset::H2))
 }
 

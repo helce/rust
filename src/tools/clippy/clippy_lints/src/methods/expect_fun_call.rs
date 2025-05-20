@@ -83,7 +83,7 @@ pub(super) fn check<'tcx>(
             hir::ExprKind::MethodCall(..) => {
                 cx.typeck_results()
                     .type_dependent_def_id(arg.hir_id)
-                    .map_or(false, |method_id| {
+                    .is_some_and(|method_id| {
                         matches!(
                             cx.tcx.fn_sig(method_id).instantiate_identity().output().skip_binder().kind(),
                             ty::Ref(re, ..) if re.is_static()
@@ -143,7 +143,7 @@ pub(super) fn check<'tcx>(
                 cx,
                 EXPECT_FUN_CALL,
                 span_replace_word,
-                format!("use of `{name}` followed by a function call"),
+                format!("function call inside of `{name}`"),
                 "try",
                 format!("unwrap_or_else({closure_args} panic!({sugg}))"),
                 applicability,
@@ -161,7 +161,7 @@ pub(super) fn check<'tcx>(
         cx,
         EXPECT_FUN_CALL,
         span_replace_word,
-        format!("use of `{name}` followed by a function call"),
+        format!("function call inside of `{name}`"),
         "try",
         format!("unwrap_or_else({closure_args} {{ panic!(\"{{}}\", {arg_root_snippet}) }})"),
         applicability,

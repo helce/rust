@@ -1153,6 +1153,16 @@ pub(crate) struct ReturnPositionImplTraitInTraitRefined<'tcx> {
     pub return_ty: Ty<'tcx>,
 }
 
+#[derive(LintDiagnostic)]
+#[diag(hir_analysis_rpitit_refined_lifetimes)]
+#[note]
+#[note(hir_analysis_feedback_note)]
+pub(crate) struct ReturnPositionImplTraitInTraitRefinedLifetimes {
+    #[suggestion(applicability = "maybe-incorrect", code = "{suggestion}")]
+    pub suggestion_span: Span,
+    pub suggestion: String,
+}
+
 #[derive(Diagnostic)]
 #[diag(hir_analysis_inherent_ty_outside, code = E0390)]
 #[help]
@@ -1434,24 +1444,27 @@ pub(crate) enum OnlyCurrentTraits {
     #[diag(hir_analysis_only_current_traits_outside, code = E0117)]
     Outside {
         #[primary_span]
-        #[label(hir_analysis_only_current_traits_label)]
         span: Span,
+        #[note(hir_analysis_only_current_traits_note_uncovered)]
+        #[note(hir_analysis_only_current_traits_note_more_info)]
         #[note(hir_analysis_only_current_traits_note)]
         note: (),
     },
     #[diag(hir_analysis_only_current_traits_primitive, code = E0117)]
     Primitive {
         #[primary_span]
-        #[label(hir_analysis_only_current_traits_label)]
         span: Span,
+        #[note(hir_analysis_only_current_traits_note_uncovered)]
+        #[note(hir_analysis_only_current_traits_note_more_info)]
         #[note(hir_analysis_only_current_traits_note)]
         note: (),
     },
     #[diag(hir_analysis_only_current_traits_arbitrary, code = E0117)]
     Arbitrary {
         #[primary_span]
-        #[label(hir_analysis_only_current_traits_label)]
         span: Span,
+        #[note(hir_analysis_only_current_traits_note_uncovered)]
+        #[note(hir_analysis_only_current_traits_note_more_info)]
         #[note(hir_analysis_only_current_traits_note)]
         note: (),
     },
@@ -1621,29 +1634,35 @@ pub(crate) struct InvalidReceiverTy<'tcx> {
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_analysis_effects_without_next_solver)]
+#[diag(hir_analysis_invalid_generic_receiver_ty, code = E0801)]
 #[note]
-#[help]
-pub(crate) struct EffectsWithoutNextSolver;
+#[help(hir_analysis_invalid_generic_receiver_ty_help)]
+pub(crate) struct InvalidGenericReceiverTy<'tcx> {
+    #[primary_span]
+    pub span: Span,
+    pub receiver_ty: Ty<'tcx>,
+}
 
 #[derive(Diagnostic)]
-#[diag(hir_analysis_cmse_call_inputs_stack_spill, code = E0798)]
+#[diag(hir_analysis_cmse_inputs_stack_spill, code = E0798)]
 #[note]
-pub(crate) struct CmseCallInputsStackSpill {
+pub(crate) struct CmseInputsStackSpill {
     #[primary_span]
     #[label]
     pub span: Span,
     pub plural: bool,
+    pub abi_name: &'static str,
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_analysis_cmse_call_output_stack_spill, code = E0798)]
+#[diag(hir_analysis_cmse_output_stack_spill, code = E0798)]
 #[note(hir_analysis_note1)]
 #[note(hir_analysis_note2)]
-pub(crate) struct CmseCallOutputStackSpill {
+pub(crate) struct CmseOutputStackSpill {
     #[primary_span]
     #[label]
     pub span: Span,
+    pub abi_name: &'static str,
 }
 
 #[derive(Diagnostic)]
@@ -1656,6 +1675,13 @@ pub(crate) struct CmseCallGeneric {
 #[derive(Diagnostic)]
 #[diag(hir_analysis_bad_return_type_notation_position)]
 pub(crate) struct BadReturnTypeNotation {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_cmse_entry_generic, code = E0798)]
+pub(crate) struct CmseEntryGeneric {
     #[primary_span]
     pub span: Span,
 }

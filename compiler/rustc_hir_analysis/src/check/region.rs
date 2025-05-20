@@ -17,6 +17,7 @@ use rustc_index::Idx;
 use rustc_middle::bug;
 use rustc_middle::middle::region::*;
 use rustc_middle::ty::TyCtxt;
+use rustc_session::lint;
 use rustc_span::source_map;
 use tracing::debug;
 
@@ -167,10 +168,23 @@ fn resolve_block<'tcx>(visitor: &mut RegionResolutionVisitor<'tcx>, blk: &'tcx h
             }
         }
         if let Some(tail_expr) = blk.expr {
-            if visitor.tcx.features().shorter_tail_lifetimes
-                && blk.span.edition().at_least_rust_2024()
+            let local_id = tail_expr.hir_id.local_id;
+            let edition = blk.span.edition();
+            if edition.at_least_rust_2024() {
+                visitor.terminating_scopes.insert(local_id);
+            } else if !visitor
+                .tcx
+                .lints_that_dont_need_to_run(())
+                .contains(&lint::LintId::of(lint::builtin::TAIL_EXPR_DROP_ORDER))
             {
-                visitor.terminating_scopes.insert(tail_expr.hir_id.local_id);
+                // If this temporary scope will be changing once the codebase adopts Rust 2024,
+                // and we are linting about possible semantic changes that would result,
+                // then record this node-id in the field `backwards_incompatible_scope`
+                // for future reference.
+                visitor
+                    .scope_tree
+                    .backwards_incompatible_scope
+                    .insert(local_id, Scope { id: local_id, data: ScopeData::Node });
             }
             visitor.visit_expr(tail_expr);
         }
@@ -466,7 +480,7 @@ fn resolve_expr<'tcx>(visitor: &mut RegionResolutionVisitor<'tcx>, expr: &'tcx h
 
         hir::ExprKind::If(cond, then, Some(otherwise)) => {
             let expr_cx = visitor.cx;
-            let data = if expr.span.at_least_rust_2024() && visitor.tcx.features().if_let_rescope {
+            let data = if expr.span.at_least_rust_2024() {
                 ScopeData::IfThenRescope
             } else {
                 ScopeData::IfThen
@@ -481,7 +495,7 @@ fn resolve_expr<'tcx>(visitor: &mut RegionResolutionVisitor<'tcx>, expr: &'tcx h
 
         hir::ExprKind::If(cond, then, None) => {
             let expr_cx = visitor.cx;
-            let data = if expr.span.at_least_rust_2024() && visitor.tcx.features().if_let_rescope {
+            let data = if expr.span.at_least_rust_2024() {
                 ScopeData::IfThenRescope
             } else {
                 ScopeData::IfThen

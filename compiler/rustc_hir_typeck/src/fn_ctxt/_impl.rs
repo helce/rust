@@ -1,6 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::slice;
 
+use rustc_abi::FieldIdx;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::{Applicability, Diag, ErrorGuaranteed, MultiSpan, StashKey};
 use rustc_hir as hir;
@@ -13,8 +14,8 @@ use rustc_hir_analysis::hir_ty_lowering::generics::{
     check_generic_arg_count_for_call, lower_generic_args,
 };
 use rustc_hir_analysis::hir_ty_lowering::{
-    ExplicitLateBound, GenericArgCountMismatch, GenericArgCountResult, GenericArgsLowerer,
-    GenericPathSegment, HirTyLowerer, IsMethodCall, RegionInferReason,
+    ExplicitLateBound, FeedConstTy, GenericArgCountMismatch, GenericArgCountResult,
+    GenericArgsLowerer, GenericPathSegment, HirTyLowerer, IsMethodCall, RegionInferReason,
 };
 use rustc_infer::infer::canonical::{Canonical, OriginalQueryValues, QueryResponse};
 use rustc_infer::infer::{DefineOpaqueTypes, InferResult};
@@ -32,7 +33,6 @@ use rustc_span::Span;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::hygiene::DesugaringKind;
 use rustc_span::symbol::kw;
-use rustc_target::abi::FieldIdx;
 use rustc_trait_selection::error_reporting::infer::need_type_info::TypeAnnotationNeeded;
 use rustc_trait_selection::traits::{
     self, NormalizeExt, ObligationCauseCode, StructurallyNormalizeExt,
@@ -254,17 +254,39 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
 
         for a in &adj {
-            if let Adjust::NeverToAny = a.kind {
-                if a.target.is_ty_var() {
-                    self.diverging_type_vars.borrow_mut().insert(a.target);
-                    debug!("apply_adjustments: adding `{:?}` as diverging type var", a.target);
+            match a.kind {
+                Adjust::NeverToAny => {
+                    if a.target.is_ty_var() {
+                        self.diverging_type_vars.borrow_mut().insert(a.target);
+                        debug!("apply_adjustments: adding `{:?}` as diverging type var", a.target);
+                    }
+                }
+                Adjust::Deref(Some(overloaded_deref)) => {
+                    self.enforce_context_effects(
+                        expr.span,
+                        overloaded_deref.method_call(self.tcx),
+                        self.tcx.mk_args(&[a.target.into()]),
+                    );
+                }
+                Adjust::Deref(None) => {
+                    // FIXME(effects): We *could* enforce `&T: ~const Deref` here.
+                }
+                Adjust::Pointer(_pointer_coercion) => {
+                    // FIXME(effects): We should probably enforce these.
+                }
+                Adjust::ReborrowPin(_mutability) => {
+                    // FIXME(effects): We could enforce these; they correspond to
+                    // `&mut T: DerefMut` tho, so it's kinda moot.
+                }
+                Adjust::Borrow(_) => {
+                    // No effects to enforce here.
                 }
             }
         }
 
         let autoborrow_mut = adj.iter().any(|adj| {
             matches!(adj, &Adjustment {
-                kind: Adjust::Borrow(AutoBorrow::Ref(_, AutoBorrowMutability::Mut { .. })),
+                kind: Adjust::Borrow(AutoBorrow::Ref(AutoBorrowMutability::Mut { .. })),
                 ..
             })
         });
@@ -469,7 +491,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             hir::ArrayLen::Infer(inf) => self.ct_infer(None, inf.span),
             hir::ArrayLen::Body(const_arg) => {
                 let span = const_arg.span();
-                let c = ty::Const::from_const_arg(self.tcx, const_arg, ty::FeedConstTy::No);
+                let c = self.lowerer().lower_const_arg(const_arg, FeedConstTy::No);
                 self.register_wf_obligation(c.into(), span, ObligationCauseCode::WellFormed(None));
                 self.normalize(span, c)
             }
@@ -481,8 +503,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         const_arg: &'tcx hir::ConstArg<'tcx>,
         param_def_id: DefId,
     ) -> ty::Const<'tcx> {
-        let ct =
-            ty::Const::from_const_arg(self.tcx, const_arg, ty::FeedConstTy::Param(param_def_id));
+        let ct = self.lowerer().lower_const_arg(const_arg, FeedConstTy::Param(param_def_id));
         self.register_wf_obligation(
             ct.into(),
             self.tcx.hir().span(const_arg.hir_id),
@@ -1025,7 +1046,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let container_id = assoc_item.container_id(tcx);
                 debug!(?def_id, ?container, ?container_id);
                 match container {
-                    ty::TraitContainer => {
+                    ty::AssocItemContainer::Trait => {
                         if let Err(e) = callee::check_legal_trait_for_method_call(
                             tcx,
                             path_span,
@@ -1037,7 +1058,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             self.set_tainted_by_errors(e);
                         }
                     }
-                    ty::ImplContainer => {
+                    ty::AssocItemContainer::Impl => {
                         if segments.len() == 1 {
                             // `<T>::assoc` will end up here, and so
                             // can `T::assoc`. If this came from an
@@ -1262,15 +1283,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     (GenericParamDefKind::Type { .. }, GenericArg::Infer(inf)) => {
                         self.fcx.ty_infer(Some(param), inf.span).into()
                     }
-                    (
-                        &GenericParamDefKind::Const { has_default, is_host_effect, .. },
-                        GenericArg::Infer(inf),
-                    ) => {
-                        if has_default && is_host_effect {
-                            self.fcx.var_for_effect(param)
-                        } else {
-                            self.fcx.ct_infer(Some(param), inf.span).into()
-                        }
+                    (&GenericParamDefKind::Const { .. }, GenericArg::Infer(inf)) => {
+                        self.fcx.ct_infer(Some(param), inf.span).into()
                     }
                     _ => unreachable!(),
                 }
@@ -1291,41 +1305,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             rustc_hir_analysis::hir_ty_lowering::RegionInferReason::Param(param),
                         )
                         .into(),
-                    GenericParamDefKind::Type { has_default, .. } => {
-                        if !infer_args && has_default {
-                            // If we have a default, then it doesn't matter that we're not
-                            // inferring the type arguments: we provide the default where any
-                            // is missing.
-                            tcx.type_of(param.def_id).instantiate(tcx, preceding_args).into()
-                        } else {
-                            // If no type arguments were provided, we have to infer them.
-                            // This case also occurs as a result of some malformed input, e.g.
-                            // a lifetime argument being given instead of a type parameter.
-                            // Using inference instead of `Error` gives better error messages.
-                            self.fcx.var_for_def(self.span, param)
+                    GenericParamDefKind::Type { .. } | GenericParamDefKind::Const { .. } => {
+                        if !infer_args && let Some(default) = param.default_value(tcx) {
+                            // If we have a default, then it doesn't matter that we're not inferring
+                            // the type/const arguments: We provide the default where any is missing.
+                            return default.instantiate(tcx, preceding_args);
                         }
-                    }
-                    GenericParamDefKind::Const { has_default, is_host_effect, .. } => {
-                        if has_default {
-                            // N.B. this is a bit of a hack. `infer_args` is passed depending on
-                            // whether the user has provided generic args. E.g. for `Vec::new`
-                            // we would have to infer the generic types. However, for `Vec::<T>::new`
-                            // where the allocator param `A` has a default we will *not* infer. But
-                            // for effect params this is a different story: if the user has not written
-                            // anything explicit for the effect param, we always need to try to infer
-                            // it before falling back to default, such that a `const fn` such as
-                            // `needs_drop::<()>` can still be called in const contexts. (if we defaulted
-                            // instead of inferred, typeck would error)
-                            if is_host_effect {
-                                return self.fcx.var_for_effect(param);
-                            } else if !infer_args {
-                                return tcx
-                                    .const_param_default(param.def_id)
-                                    .instantiate(tcx, preceding_args)
-                                    .into();
-                            }
-                        }
-
+                        // If no type/const arguments were provided, we have to infer them.
+                        // This case also occurs as a result of some malformed input, e.g.,
+                        // a lifetime argument being given instead of a type/const parameter.
+                        // Using inference instead of `Error` gives better error messages.
                         self.fcx.var_for_def(self.span, param)
                     }
                 }
@@ -1486,8 +1475,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     return ty::Const::new_error(self.tcx, guar);
                 }
             }
-        } else if self.tcx.features().generic_const_exprs {
-            ct.normalize(self.tcx, self.param_env)
+        } else if self.tcx.features().generic_const_exprs() {
+            rustc_trait_selection::traits::evaluate_const(&self.infcx, ct, self.param_env)
         } else {
             ct
         }

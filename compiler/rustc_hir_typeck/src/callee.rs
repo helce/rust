@@ -1,4 +1,4 @@
-use std::{iter, slice};
+use std::iter;
 
 use rustc_ast::util::parser::PREC_UNAMBIGUOUS;
 use rustc_errors::{Applicability, Diag, ErrorGuaranteed, StashKey};
@@ -16,11 +16,10 @@ use rustc_middle::{bug, span_bug};
 use rustc_span::Span;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::symbol::{Ident, sym};
-use rustc_target::spec::abi;
 use rustc_trait_selection::error_reporting::traits::DefIdOrName;
 use rustc_trait_selection::infer::InferCtxtExt as _;
 use rustc_trait_selection::traits::query::evaluate_obligation::InferCtxtExt as _;
-use tracing::{debug, instrument, trace};
+use tracing::{debug, instrument};
 
 use super::method::MethodCallee;
 use super::method::probe::ProbeScope;
@@ -63,7 +62,7 @@ enum CallStep<'tcx> {
 }
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
-    pub(crate) fn check_call(
+    pub(crate) fn check_expr_call(
         &self,
         call_expr: &'tcx hir::Expr<'tcx>,
         callee_expr: &'tcx hir::Expr<'tcx>,
@@ -75,8 +74,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 .check_expr_with_expectation_and_args(
                     callee_expr,
                     Expectation::NoExpectation,
-                    arg_exprs,
-                    Some(call_expr),
+                    Some((call_expr, arg_exprs)),
                 ),
             _ => self.check_expr(callee_expr),
         };
@@ -300,14 +298,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 Ident::with_dummy_span(method_name),
                 trait_def_id,
                 adjusted_ty,
-                opt_input_type.as_ref().map(slice::from_ref),
+                opt_input_type,
             ) {
                 let method = self.register_infer_ok_obligations(ok);
                 let mut autoref = None;
                 if borrow {
                     // Check for &self vs &mut self in the method signature. Since this is either
                     // the Fn or FnMut trait, it should be one of those.
-                    let ty::Ref(region, _, mutbl) = method.sig.inputs()[0].kind() else {
+                    let ty::Ref(_, _, mutbl) = method.sig.inputs()[0].kind() else {
                         bug!("Expected `FnMut`/`Fn` to take receiver by-ref/by-mut")
                     };
 
@@ -317,7 +315,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     let mutbl = AutoBorrowMutability::new(*mutbl, AllowTwoPhase::No);
 
                     autoref = Some(Adjustment {
-                        kind: Adjust::Borrow(AutoBorrow::Ref(*region, mutbl)),
+                        kind: Adjust::Borrow(AutoBorrow::Ref(mutbl)),
                         target: method.sig.inputs()[0],
                     });
                 }
@@ -461,7 +459,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
                 (fn_sig, Some(def_id))
             }
-            // FIXME(effects): these arms should error because we can't enforce them
+            // FIXME(const_trait_impl): these arms should error because we can't enforce them
             ty::FnPtr(sig_tys, hdr) => (sig_tys.with(hdr), None),
             _ => {
                 for arg in arg_exprs {
@@ -509,7 +507,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             def_id,
         );
 
-        if fn_sig.abi == abi::Abi::RustCall {
+        if fn_sig.abi == rustc_abi::ExternAbi::RustCall {
             let sp = arg_exprs.last().map_or(call_expr.span, |expr| expr.span);
             if let Some(ty) = fn_sig.inputs().last().copied() {
                 self.register_bound(
@@ -537,40 +535,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 //
                 // This check is here because there is currently no way to express a trait bound for `FnDef` types only.
                 if let ty::FnDef(def_id, _args) = *arg_ty.kind() {
-                    let fn_once_def_id =
-                        self.tcx.require_lang_item(hir::LangItem::FnOnce, Some(span));
-                    let fn_once_output_def_id =
-                        self.tcx.require_lang_item(hir::LangItem::FnOnceOutput, Some(span));
-                    if self.tcx.has_host_param(fn_once_def_id) {
-                        let const_param: ty::GenericArg<'tcx> =
-                            ([self.tcx.consts.false_, self.tcx.consts.true_])[idx].into();
-                        self.register_predicate(traits::Obligation::new(
-                            self.tcx,
-                            self.misc(span),
-                            self.param_env,
-                            ty::TraitRef::new(self.tcx, fn_once_def_id, [
-                                arg_ty.into(),
-                                fn_sig.inputs()[0].into(),
-                                const_param,
-                            ]),
-                        ));
-
-                        self.register_predicate(traits::Obligation::new(
-                            self.tcx,
-                            self.misc(span),
-                            self.param_env,
-                            ty::ProjectionPredicate {
-                                projection_term: ty::AliasTerm::new(
-                                    self.tcx,
-                                    fn_once_output_def_id,
-                                    [arg_ty.into(), fn_sig.inputs()[0].into(), const_param],
-                                ),
-                                term: fn_sig.output().into(),
-                            },
-                        ));
-
-                        self.select_obligations_where_possible(|_| {});
-                    } else if idx == 0 && !self.tcx.is_const_fn_raw(def_id) {
+                    if idx == 0 && !self.tcx.is_const_fn(def_id) {
                         self.dcx().emit_err(errors::ConstSelectMustBeConst { span });
                     }
                 } else {
@@ -876,27 +841,43 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         callee_did: DefId,
         callee_args: GenericArgsRef<'tcx>,
     ) {
-        let tcx = self.tcx;
+        // FIXME(const_trait_impl): We should be enforcing these effects unconditionally.
+        // This can be done as soon as we convert the standard library back to
+        // using const traits, since if we were to enforce these conditions now,
+        // we'd fail on basically every builtin trait call (i.e. `1 + 2`).
+        if !self.tcx.features().const_trait_impl() {
+            return;
+        }
 
-        // fast-reject if callee doesn't have the host effect param (non-const)
-        let generics = tcx.generics_of(callee_did);
-        let Some(host_effect_index) = generics.host_effect_index else { return };
+        // If we have `rustc_do_not_const_check`, do not check `~const` bounds.
+        if self.tcx.has_attr(self.body_id, sym::rustc_do_not_const_check) {
+            return;
+        }
 
-        let effect = tcx.expected_host_effect_param_for_body(self.body_id);
-
-        trace!(?effect, ?generics, ?callee_args);
-
-        let param = callee_args.const_at(host_effect_index);
-        let cause = self.misc(span);
-        // We know the type of `effect` to be `bool`, there will be no opaque type inference.
-        match self.at(&cause, self.param_env).eq(infer::DefineOpaqueTypes::Yes, effect, param) {
-            Ok(infer::InferOk { obligations, value: () }) => {
-                self.register_predicates(obligations);
+        let host = match self.tcx.hir().body_const_context(self.body_id) {
+            Some(hir::ConstContext::Const { .. } | hir::ConstContext::Static(_)) => {
+                ty::BoundConstness::Const
             }
-            Err(e) => {
-                // FIXME(effects): better diagnostic
-                self.err_ctxt().report_mismatched_consts(&cause, effect, param, e).emit();
+            Some(hir::ConstContext::ConstFn) => ty::BoundConstness::Maybe,
+            None => return,
+        };
+
+        // FIXME(const_trait_impl): Should this be `is_const_fn_raw`? It depends on if we move
+        // const stability checking here too, I guess.
+        if self.tcx.is_conditionally_const(callee_did) {
+            let q = self.tcx.const_conditions(callee_did);
+            // FIXME(const_trait_impl): Use this span with a better cause code.
+            for (cond, _) in q.instantiate(self.tcx, callee_args) {
+                self.register_predicate(Obligation::new(
+                    self.tcx,
+                    self.misc(span),
+                    self.param_env,
+                    cond.to_host_effect_clause(self.tcx, host),
+                ));
             }
+        } else {
+            // FIXME(const_trait_impl): This should eventually be caught here.
+            // For now, though, we defer some const checking to MIR.
         }
     }
 

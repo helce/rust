@@ -5,6 +5,13 @@ runners:
     env: { }
 
   - &job-linux-4c
+    os: ubuntu-20.04
+    # Free some disk space to avoid running out of space during the build.
+    free_disk: true
+    <<: *base-job
+
+  # Large runner used mainly for its bigger disk capacity
+  - &job-linux-4c-largedisk
     os: ubuntu-20.04-4core-16gb
     <<: *base-job
 
@@ -118,6 +125,9 @@ auto:
   - image: aarch64-gnu
     <<: *job-aarch64-linux
 
+  - image: aarch64-gnu-debug
+    <<: *job-aarch64-linux
+
   - image: arm-android
     <<: *job-linux-4c
 
@@ -197,7 +207,7 @@ auto:
   - image: dist-x86_64-musl
     env:
       CODEGEN_BACKENDS: llvm,cranelift
-    <<: *job-linux-8c
+    <<: *job-linux-4c
 
   - image: dist-x86_64-netbsd
     <<: *job-linux-4c
@@ -224,7 +234,7 @@ auto:
   # Tests integration with Rust for Linux.
   # Builds stage 1 compiler and tries to compile a few RfL examples with it.
   - image: x86_64-rust-for-linux
-    <<: *job-linux-8c
+    <<: *job-linux-4c
 
   - image: x86_64-gnu
     <<: *job-linux-4c
@@ -248,7 +258,9 @@ auto:
     <<: *job-linux-4c
 
   - image: x86_64-gnu-debug
-    <<: *job-linux-4c
+    # This seems to be needed because a full stage 2 build + run-make tests
+    # overwhelms the storage capacity of the standard 4c runner.
+    <<: *job-linux-4c-largedisk
 
   - image: x86_64-gnu-distcheck
     <<: *job-linux-8c
@@ -270,7 +282,7 @@ auto:
   - image: x86_64-gnu-tools
     env:
       DEPLOY_TOOLSTATES_JSON: toolstates-linux.json
-    <<: *job-linux-8c
+    <<: *job-linux-4c
 
   ####################
   #  macOS Builders  #
@@ -381,6 +393,8 @@ auto:
     <<: *job-windows-8c
 
   # Temporary builder to workaround CI issues
+  # See <https://github.com/rust-lang/rust/issues/127883>
+  #FIXME: Remove this, and re-enable the same tests in `checktools.sh`, once CI issues are fixed.
   - image: x86_64-msvc-ext2
     env:
       SCRIPT: >
@@ -451,7 +465,7 @@ auto:
       SCRIPT: python x.py dist bootstrap --include-default-paths
       DIST_REQUIRE_ALL_TOOLS: 1
       CODEGEN_BACKENDS: llvm,cranelift
-    <<: *job-windows-8c
+    <<: *job-windows
 
   - image: dist-aarch64-msvc
     env:
@@ -463,7 +477,7 @@ auto:
         --enable-profiler
       SCRIPT: python x.py dist bootstrap --include-default-paths
       DIST_REQUIRE_ALL_TOOLS: 1
-    <<: *job-windows-8c
+    <<: *job-windows
 
   - image: dist-i686-mingw
     env:
@@ -476,7 +490,7 @@ auto:
       SCRIPT: python x.py dist bootstrap --include-default-paths
       DIST_REQUIRE_ALL_TOOLS: 1
       CODEGEN_BACKENDS: llvm,cranelift
-    <<: *job-windows-8c
+    <<: *job-windows
 
   - image: dist-x86_64-mingw
     env:
@@ -489,10 +503,10 @@ auto:
       NO_DOWNLOAD_CI_LLVM: 1
       DIST_REQUIRE_ALL_TOOLS: 1
       CODEGEN_BACKENDS: llvm,cranelift
-    <<: *job-windows-8c
+    <<: *job-windows
 
   - image: dist-x86_64-msvc-alt
     env:
       RUST_CONFIGURE_ARGS: --build=x86_64-pc-windows-msvc --enable-extended --enable-profiler
       SCRIPT: python x.py dist bootstrap --include-default-paths
-    <<: *job-windows-8c
+    <<: *job-windows

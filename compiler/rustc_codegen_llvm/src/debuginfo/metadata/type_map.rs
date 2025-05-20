@@ -1,15 +1,15 @@
 use std::cell::RefCell;
 
+use rustc_abi::{Align, Size, VariantIdx};
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_macros::HashStable;
 use rustc_middle::bug;
-use rustc_middle::ty::{ParamEnv, PolyExistentialTraitRef, Ty, TyCtxt};
-use rustc_target::abi::{Align, Size, VariantIdx};
+use rustc_middle::ty::{self, PolyExistentialTraitRef, Ty, TyCtxt};
 
 use super::{SmallVec, UNKNOWN_LINE_NUMBER, unknown_file_metadata};
-use crate::common::CodegenCx;
+use crate::common::{AsCCharPtr, CodegenCx};
 use crate::debuginfo::utils::{DIB, create_DIArray, debug_context};
 use crate::llvm::debuginfo::{DIFlags, DIScope, DIType};
 use crate::llvm::{self};
@@ -49,12 +49,15 @@ pub(super) enum UniqueTypeId<'tcx> {
 
 impl<'tcx> UniqueTypeId<'tcx> {
     pub(crate) fn for_ty(tcx: TyCtxt<'tcx>, t: Ty<'tcx>) -> Self {
-        assert_eq!(t, tcx.normalize_erasing_regions(ParamEnv::reveal_all(), t));
+        assert_eq!(t, tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), t));
         UniqueTypeId::Ty(t, private::HiddenZst)
     }
 
     pub(crate) fn for_enum_variant_part(tcx: TyCtxt<'tcx>, enum_ty: Ty<'tcx>) -> Self {
-        assert_eq!(enum_ty, tcx.normalize_erasing_regions(ParamEnv::reveal_all(), enum_ty));
+        assert_eq!(
+            enum_ty,
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), enum_ty)
+        );
         UniqueTypeId::VariantPart(enum_ty, private::HiddenZst)
     }
 
@@ -63,7 +66,10 @@ impl<'tcx> UniqueTypeId<'tcx> {
         enum_ty: Ty<'tcx>,
         variant_idx: VariantIdx,
     ) -> Self {
-        assert_eq!(enum_ty, tcx.normalize_erasing_regions(ParamEnv::reveal_all(), enum_ty));
+        assert_eq!(
+            enum_ty,
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), enum_ty)
+        );
         UniqueTypeId::VariantStructType(enum_ty, variant_idx, private::HiddenZst)
     }
 
@@ -72,7 +78,10 @@ impl<'tcx> UniqueTypeId<'tcx> {
         enum_ty: Ty<'tcx>,
         variant_idx: VariantIdx,
     ) -> Self {
-        assert_eq!(enum_ty, tcx.normalize_erasing_regions(ParamEnv::reveal_all(), enum_ty));
+        assert_eq!(
+            enum_ty,
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), enum_ty)
+        );
         UniqueTypeId::VariantStructTypeCppLikeWrapper(enum_ty, variant_idx, private::HiddenZst)
     }
 
@@ -81,10 +90,13 @@ impl<'tcx> UniqueTypeId<'tcx> {
         self_type: Ty<'tcx>,
         implemented_trait: Option<PolyExistentialTraitRef<'tcx>>,
     ) -> Self {
-        assert_eq!(self_type, tcx.normalize_erasing_regions(ParamEnv::reveal_all(), self_type));
+        assert_eq!(
+            self_type,
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), self_type)
+        );
         assert_eq!(
             implemented_trait,
-            tcx.normalize_erasing_regions(ParamEnv::reveal_all(), implemented_trait)
+            tcx.normalize_erasing_regions(ty::TypingEnv::fully_monomorphized(), implemented_trait)
         );
         UniqueTypeId::VTableTy(self_type, implemented_trait, private::HiddenZst)
     }
@@ -191,7 +203,7 @@ pub(super) fn stub<'ll, 'tcx>(
                 llvm::LLVMRustDIBuilderCreateStructType(
                     DIB(cx),
                     containing_scope,
-                    name.as_ptr().cast(),
+                    name.as_c_char_ptr(),
                     name.len(),
                     unknown_file_metadata(cx),
                     UNKNOWN_LINE_NUMBER,
@@ -202,7 +214,7 @@ pub(super) fn stub<'ll, 'tcx>(
                     empty_array,
                     0,
                     vtable_holder,
-                    unique_type_id_str.as_ptr().cast(),
+                    unique_type_id_str.as_c_char_ptr(),
                     unique_type_id_str.len(),
                 )
             }
@@ -211,7 +223,7 @@ pub(super) fn stub<'ll, 'tcx>(
             llvm::LLVMRustDIBuilderCreateUnionType(
                 DIB(cx),
                 containing_scope,
-                name.as_ptr().cast(),
+                name.as_c_char_ptr(),
                 name.len(),
                 unknown_file_metadata(cx),
                 UNKNOWN_LINE_NUMBER,
@@ -220,7 +232,7 @@ pub(super) fn stub<'ll, 'tcx>(
                 flags,
                 Some(empty_array),
                 0,
-                unique_type_id_str.as_ptr().cast(),
+                unique_type_id_str.as_c_char_ptr(),
                 unique_type_id_str.len(),
             )
         },

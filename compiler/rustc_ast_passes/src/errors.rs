@@ -295,6 +295,7 @@ pub(crate) struct FnQualifierInExtern {
     pub span: Span,
     #[label]
     pub block: Span,
+    pub kw: &'static str,
 }
 
 #[derive(Diagnostic)]
@@ -413,13 +414,6 @@ pub(crate) struct PatternFnPointer {
 #[derive(Diagnostic)]
 #[diag(ast_passes_trait_object_single_bound, code = E0226)]
 pub(crate) struct TraitObjectBound {
-    #[primary_span]
-    pub span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(ast_passes_impl_trait_path, code = E0667)]
-pub(crate) struct ImplTraitPath {
     #[primary_span]
     pub span: Span,
 }
@@ -600,8 +594,8 @@ pub(crate) struct ConstBoundTraitObject {
     pub span: Span,
 }
 
-// FIXME(effects): Consider making the note/reason the message of the diagnostic.
-// FIXME(effects): Provide structured suggestions (e.g., add `const` / `#[const_trait]` here).
+// FIXME(const_trait_impl): Consider making the note/reason the message of the diagnostic.
+// FIXME(const_trait_impl): Provide structured suggestions (e.g., add `const` / `#[const_trait]` here).
 #[derive(Diagnostic)]
 #[diag(ast_passes_tilde_const_disallowed)]
 pub(crate) struct TildeConstDisallowed {

@@ -13,6 +13,7 @@
 
 mod alias_relate;
 mod assembly;
+mod effect_goals;
 mod eval_ctxt;
 pub mod inspect;
 mod normalizes_to;
@@ -142,7 +143,7 @@ where
     ) -> QueryResult<I> {
         match ct.kind() {
             ty::ConstKind::Unevaluated(uv) => {
-                // We never return `NoSolution` here as `try_const_eval_resolve` emits an
+                // We never return `NoSolution` here as `evaluate_const` emits an
                 // error itself when failing to evaluate, so emitting an additional fulfillment
                 // error in that case is unnecessary noise. This may change in the future once
                 // evaluation failures are allowed to impact selection, e.g. generic const
@@ -150,7 +151,7 @@ where
 
                 // FIXME(generic_const_exprs): Implement handling for generic
                 // const expressions here.
-                if let Some(_normalized) = self.try_const_eval_resolve(param_env, uv) {
+                if let Some(_normalized) = self.evaluate_const(param_env, uv) {
                     self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
                 } else {
                     self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
@@ -182,12 +183,6 @@ where
         let (ct, ty) = goal.predicate;
 
         let ct_ty = match ct.kind() {
-            // FIXME: Ignore effect vars because canonicalization doesn't handle them correctly
-            // and if we stall on the var then we wind up creating ambiguity errors in a probe
-            // for this goal which contains an effect var. Which then ends up ICEing.
-            ty::ConstKind::Infer(ty::InferConst::EffectVar(_)) => {
-                return self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes);
-            }
             ty::ConstKind::Infer(_) => {
                 return self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS);
             }
@@ -295,6 +290,37 @@ where
             Ok(ty)
         }
     }
+
+    /// Normalize a const for when it is structurally matched on, or more likely
+    /// when it needs `.try_to_*` called on it (e.g. to turn it into a usize).
+    ///
+    /// This function is necessary in nearly all cases before matching on a const.
+    /// Not doing so is likely to be incomplete and therefore unsound during
+    /// coherence.
+    #[instrument(level = "trace", skip(self, param_env), ret)]
+    fn structurally_normalize_const(
+        &mut self,
+        param_env: I::ParamEnv,
+        ct: I::Const,
+    ) -> Result<I::Const, NoSolution> {
+        if let ty::ConstKind::Unevaluated(..) = ct.kind() {
+            let normalized_ct = self.next_const_infer();
+            let alias_relate_goal = Goal::new(
+                self.cx(),
+                param_env,
+                ty::PredicateKind::AliasRelate(
+                    ct.into(),
+                    normalized_ct.into(),
+                    ty::AliasRelationDirection::Equate,
+                ),
+            );
+            self.add_goal(GoalSource::Misc, alias_relate_goal);
+            self.try_evaluate_added_goals()?;
+            Ok(self.resolve_vars_if_possible(normalized_ct))
+        } else {
+            Ok(ct)
+        }
+    }
 }
 
 fn response_no_constraints_raw<I: Interner>(
@@ -313,6 +339,5 @@ fn response_no_constraints_raw<I: Interner>(
             external_constraints: cx.mk_external_constraints(ExternalConstraintsData::default()),
             certainty,
         },
-        defining_opaque_types: Default::default(),
     }
 }

@@ -1,7 +1,7 @@
-//! Codegen `extern "platform-intrinsic"` intrinsics.
+//! Codegen SIMD intrinsics.
 
 use cranelift_codegen::ir::immediates::Offset32;
-use rustc_target::abi::Endian;
+use rustc_abi::Endian;
 
 use super::*;
 use crate::prelude::*;
@@ -14,7 +14,7 @@ fn report_simd_type_validation_error(
 ) {
     fx.tcx.dcx().span_err(span, format!("invalid monomorphization of `{}` intrinsic: expected SIMD input type, found non-SIMD `{}`", intrinsic, ty));
     // Prevent verifier error
-    fx.bcx.ins().trap(TrapCode::UnreachableCodeReached);
+    fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
 }
 
 pub(super) fn codegen_simd_intrinsic_call<'tcx>(
@@ -133,6 +133,7 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
                 .expect_const()
                 .try_to_valtree()
                 .expect("expected monomorphic const in codegen")
+                .0
                 .unwrap_branch();
 
             assert_eq!(x.layout(), y.layout());
@@ -189,7 +190,7 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
                     format!("simd_shuffle index must be a SIMD vector of `u32`, got `{}`", idx_ty),
                 );
                 // Prevent verifier error
-                fx.bcx.ins().trap(TrapCode::UnreachableCodeReached);
+                fx.bcx.ins().trap(TrapCode::user(1 /* unreachable */).unwrap());
                 return;
             };
             let n: u16 = idx_ty.simd_size_and_type(fx.tcx).0.try_into().unwrap();
@@ -806,8 +807,10 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
                 ty::Uint(i) if i.bit_width() == Some(expected_int_bits) => m.load_scalar(fx),
                 ty::Array(elem, len)
                     if matches!(elem.kind(), ty::Uint(ty::UintTy::U8))
-                        && len.try_eval_target_usize(fx.tcx, ty::ParamEnv::reveal_all())
-                            == Some(expected_bytes) =>
+                        && len
+                            .try_to_target_usize(fx.tcx)
+                            .expect("expected monomorphic const in codegen")
+                            == expected_bytes =>
                 {
                     m.force_stack(fx).0.load(
                         fx,
@@ -907,8 +910,10 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
                 ty::Uint(i) if i.bit_width() == Some(expected_int_bits) => {}
                 ty::Array(elem, len)
                     if matches!(elem.kind(), ty::Uint(ty::UintTy::U8))
-                        && len.try_eval_target_usize(fx.tcx, ty::ParamEnv::reveal_all())
-                            == Some(expected_bytes) => {}
+                        && len
+                            .try_to_target_usize(fx.tcx)
+                            .expect("expected monomorphic const in codegen")
+                            == expected_bytes => {}
                 _ => {
                     fx.tcx.dcx().span_fatal(
                         span,
@@ -1130,7 +1135,7 @@ pub(super) fn codegen_simd_intrinsic_call<'tcx>(
         _ => {
             fx.tcx.dcx().span_err(span, format!("Unknown SIMD intrinsic {}", intrinsic));
             // Prevent verifier error
-            fx.bcx.ins().trap(TrapCode::UnreachableCodeReached);
+            fx.bcx.ins().trap(TrapCode::user(0 /* unreachable */).unwrap());
             return;
         }
     }

@@ -93,6 +93,8 @@ impl Stability {
 pub struct ConstStability {
     pub level: StabilityLevel,
     pub feature: Symbol,
+    /// This is true iff the `const_stable_indirect` attribute is present.
+    pub const_stable_indirect: bool,
     /// whether the function has a `#[rustc_promotable]` attribute
     pub promotable: bool,
 }
@@ -275,10 +277,12 @@ pub fn find_const_stability(
 ) -> Option<(ConstStability, Span)> {
     let mut const_stab: Option<(ConstStability, Span)> = None;
     let mut promotable = false;
+    let mut const_stable_indirect = false;
 
     for attr in attrs {
         match attr.name_or_empty() {
             sym::rustc_promotable => promotable = true,
+            sym::rustc_const_stable_indirect => const_stable_indirect = true,
             sym::rustc_const_unstable => {
                 if const_stab.is_some() {
                     sess.dcx()
@@ -287,8 +291,15 @@ pub fn find_const_stability(
                 }
 
                 if let Some((feature, level)) = parse_unstability(sess, attr) {
-                    const_stab =
-                        Some((ConstStability { level, feature, promotable: false }, attr.span));
+                    const_stab = Some((
+                        ConstStability {
+                            level,
+                            feature,
+                            const_stable_indirect: false,
+                            promotable: false,
+                        },
+                        attr.span,
+                    ));
                 }
             }
             sym::rustc_const_stable => {
@@ -298,15 +309,22 @@ pub fn find_const_stability(
                     break;
                 }
                 if let Some((feature, level)) = parse_stability(sess, attr) {
-                    const_stab =
-                        Some((ConstStability { level, feature, promotable: false }, attr.span));
+                    const_stab = Some((
+                        ConstStability {
+                            level,
+                            feature,
+                            const_stable_indirect: false,
+                            promotable: false,
+                        },
+                        attr.span,
+                    ));
                 }
             }
             _ => {}
         }
     }
 
-    // Merge the const-unstable info into the stability info
+    // Merge promotable and const_stable_indirect into stability info
     if promotable {
         match &mut const_stab {
             Some((stab, _)) => stab.promotable = promotable,
@@ -317,8 +335,46 @@ pub fn find_const_stability(
             }
         }
     }
+    if const_stable_indirect {
+        match &mut const_stab {
+            Some((stab, _)) => {
+                if stab.is_const_unstable() {
+                    stab.const_stable_indirect = true;
+                } else {
+                    _ = sess.dcx().emit_err(session_diagnostics::RustcConstStableIndirectPairing {
+                        span: item_sp,
+                    })
+                }
+            }
+            _ => {
+                // This function has no const stability attribute, but has `const_stable_indirect`.
+                // We ignore that; unmarked functions are subject to recursive const stability
+                // checks by default so we do carry out the user's intent.
+            }
+        }
+    }
 
     const_stab
+}
+
+/// Calculates the const stability for a const function in a `-Zforce-unstable-if-unmarked` crate
+/// without the `staged_api` feature.
+pub fn unmarked_crate_const_stab(
+    _sess: &Session,
+    attrs: &[Attribute],
+    regular_stab: Stability,
+) -> ConstStability {
+    assert!(regular_stab.level.is_unstable());
+    // The only attribute that matters here is `rustc_const_stable_indirect`.
+    // We enforce recursive const stability rules for those functions.
+    let const_stable_indirect =
+        attrs.iter().any(|a| a.name_or_empty() == sym::rustc_const_stable_indirect);
+    ConstStability {
+        feature: regular_stab.feature,
+        const_stable_indirect,
+        promotable: false,
+        level: regular_stab.level,
+    }
 }
 
 /// Collects stability info from `rustc_default_body_unstable` attributes in `attrs`.
@@ -619,11 +675,11 @@ pub fn eval_condition(
                 // we can't use `try_gate_cfg` as symbols don't differentiate between `r#true`
                 // and `true`, and we want to keep the former working without feature gate
                 gate_cfg(
-                    &((
+                    &(
                         if *b { kw::True } else { kw::False },
                         sym::cfg_boolean_literals,
-                        |features: &Features| features.cfg_boolean_literals,
-                    )),
+                        |features: &Features| features.cfg_boolean_literals(),
+                    ),
                     cfg.span(),
                     sess,
                     features,
@@ -711,7 +767,7 @@ pub fn eval_condition(
                 }
                 sym::target => {
                     if let Some(features) = features
-                        && !features.cfg_target_compact
+                        && !features.cfg_target_compact()
                     {
                         feature_err(
                             sess,
@@ -723,7 +779,13 @@ pub fn eval_condition(
                     }
 
                     mis.iter().fold(true, |res, mi| {
-                        let mut mi = mi.meta_item().unwrap().clone();
+                        let Some(mut mi) = mi.meta_item().cloned() else {
+                            dcx.emit_err(session_diagnostics::CfgPredicateIdentifier {
+                                span: mi.span(),
+                            });
+                            return false;
+                        };
+
                         if let [seg, ..] = &mut mi.path.segments[..] {
                             seg.ident.name = Symbol::intern(&format!("target_{}", seg.ident.name));
                         }
@@ -825,7 +887,7 @@ pub fn find_deprecation(
     attrs: &[Attribute],
 ) -> Option<(Deprecation, Span)> {
     let mut depr: Option<(Deprecation, Span)> = None;
-    let is_rustc = features.staged_api;
+    let is_rustc = features.staged_api();
 
     'outer: for attr in attrs {
         if !attr.has_name(sym::deprecated) {
@@ -885,7 +947,7 @@ pub fn find_deprecation(
                                 }
                             }
                             sym::suggestion => {
-                                if !features.deprecated_suggestion {
+                                if !features.deprecated_suggestion() {
                                     sess.dcx().emit_err(
                                         session_diagnostics::DeprecatedItemSuggestion {
                                             span: mi.span,
@@ -903,7 +965,7 @@ pub fn find_deprecation(
                                 sess.dcx().emit_err(session_diagnostics::UnknownMetaItem {
                                     span: meta.span(),
                                     item: pprust::path_to_string(&mi.path),
-                                    expected: if features.deprecated_suggestion {
+                                    expected: if features.deprecated_suggestion() {
                                         &["since", "note", "suggestion"]
                                     } else {
                                         &["since", "note"]

@@ -3,19 +3,19 @@
 use std::iter;
 use std::ops::ControlFlow;
 
+use rustc_abi::ExternAbi;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
 use rustc_hir::lang_items::LangItem;
 use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer;
 use rustc_infer::infer::{BoundRegionConversionTime, DefineOpaqueTypes, InferOk, InferResult};
-use rustc_infer::traits::ObligationCauseCode;
+use rustc_infer::traits::{ObligationCauseCode, PredicateObligations};
 use rustc_macros::{TypeFoldable, TypeVisitable};
 use rustc_middle::span_bug;
 use rustc_middle::ty::visit::{TypeVisitable, TypeVisitableExt};
 use rustc_middle::ty::{self, GenericArgs, Ty, TyCtxt, TypeSuperVisitable, TypeVisitor};
 use rustc_span::def_id::LocalDefId;
 use rustc_span::{DUMMY_SP, Span};
-use rustc_target::spec::abi::Abi;
 use rustc_trait_selection::error_reporting::traits::ArgKind;
 use rustc_trait_selection::traits;
 use rustc_type_ir::ClosureKind;
@@ -508,7 +508,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             ret_param_ty,
             false,
             hir::Safety::Safe,
-            Abi::Rust,
+            ExternAbi::Rust,
         ));
 
         Some(ExpectedSig { cause_span, sig })
@@ -594,7 +594,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return_ty,
             false,
             hir::Safety::Safe,
-            Abi::Rust,
+            ExternAbi::Rust,
         ));
 
         Some(ExpectedSig { cause_span, sig })
@@ -706,7 +706,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 sig.output(),
                 sig.c_variadic,
                 hir::Safety::Safe,
-                Abi::RustCall,
+                ExternAbi::RustCall,
             )
         });
 
@@ -805,7 +805,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // [c1]: https://github.com/rust-lang/rust/pull/45072#issuecomment-341089706
         // [c2]: https://github.com/rust-lang/rust/pull/45072#issuecomment-341096796
         self.commit_if_ok(|_| {
-            let mut all_obligations = vec![];
+            let mut all_obligations = PredicateObligations::new();
             let supplied_sig = self.instantiate_binder_with_fresh_vars(
                 self.tcx.def_span(expr_def_id),
                 BoundRegionConversionTime::FnCall,
@@ -845,7 +845,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 supplied_output_ty,
                 expected_sigs.liberated_sig.c_variadic,
                 hir::Safety::Safe,
-                Abi::RustCall,
+                ExternAbi::RustCall,
             );
 
             Ok(InferOk { value: expected_sigs, obligations: all_obligations })
@@ -922,7 +922,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 supplied_return,
                 decl.c_variadic,
                 hir::Safety::Safe,
-                Abi::RustCall,
+                ExternAbi::RustCall,
             ),
             bound_vars,
         );
@@ -1086,7 +1086,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             err_ty,
             decl.c_variadic,
             hir::Safety::Safe,
-            Abi::RustCall,
+            ExternAbi::RustCall,
         ));
 
         debug!("supplied_sig_of_closure: result={:?}", result);

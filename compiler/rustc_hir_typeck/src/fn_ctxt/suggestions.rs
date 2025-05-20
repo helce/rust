@@ -261,7 +261,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if let hir::ExprKind::MethodCall(hir::PathSegment { ident: method, .. }, recv_expr, &[], _) =
             expr.kind
             && let Some(recv_ty) = self.typeck_results.borrow().expr_ty_opt(recv_expr)
-            && self.can_coerce(recv_ty, expected)
+            && self.may_coerce(recv_ty, expected)
             && let name = method.name.as_str()
             && (name.starts_with("to_") || name.starts_with("as_") || name == "into")
         {
@@ -349,7 +349,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return true;
         }
 
-        if self.suggest_fn_call(err, expr, found, |output| self.can_coerce(output, expected))
+        if self.suggest_fn_call(err, expr, found, |output| self.may_coerce(output, expected))
             && let ty::FnDef(def_id, ..) = *found.kind()
             && let Some(sp) = self.tcx.hir().span_if_local(def_id)
         {
@@ -568,7 +568,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if self.tcx.hir().is_inside_const_context(hir_id) || !expected.is_box() || found.is_box() {
             return false;
         }
-        if self.can_coerce(Ty::new_box(self.tcx, found), expected) {
+        if self.may_coerce(Ty::new_box(self.tcx, found), expected) {
             let suggest_boxing = match found.kind() {
                 ty::Tuple(tuple) if tuple.is_empty() => {
                     errors::SuggestBoxing::Unit { start: span.shrink_to_lo(), end: span }
@@ -663,7 +663,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         };
         match expected.kind() {
             ty::Adt(def, _) if Some(def.did()) == pin_did => {
-                if self.can_coerce(pin_box_found, expected) {
+                if self.may_coerce(pin_box_found, expected) {
                     debug!("can coerce {:?} to {:?}, suggesting Box::pin", pin_box_found, expected);
                     match found.kind() {
                         ty::Adt(def, _) if def.is_box() => {
@@ -689,7 +689,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         }
                     }
                     true
-                } else if self.can_coerce(pin_found, expected) {
+                } else if self.may_coerce(pin_found, expected) {
                     match found.kind() {
                         ty::Adt(def, _) if def.is_box() => {
                             err.help("use `Box::pin`");
@@ -701,7 +701,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     false
                 }
             }
-            ty::Adt(def, _) if def.is_box() && self.can_coerce(box_found, expected) => {
+            ty::Adt(def, _) if def.is_box() && self.may_coerce(box_found, expected) => {
                 // Check if the parent expression is a call to Pin::new. If it
                 // is and we were expecting a Box, ergo Pin<Box<expected>>, we
                 // can suggest Box::pin.
@@ -849,7 +849,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             hir::FnRetTy::Return(hir_ty) => {
                 if let hir::TyKind::OpaqueDef(op_ty, ..) = hir_ty.kind
                     // FIXME: account for RPITIT.
-                    && let [hir::GenericBound::Trait(trait_ref, _)] = op_ty.bounds
+                    && let [hir::GenericBound::Trait(trait_ref)] = op_ty.bounds
                     && let Some(hir::PathSegment { args: Some(generic_args), .. }) =
                         trait_ref.trait_ref.path.segments.last()
                     && let [constraint] = generic_args.constraints
@@ -884,7 +884,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     let ty = Binder::bind_with_vars(ty, bound_vars);
                     let ty = self.normalize(hir_ty.span, ty);
                     let ty = self.tcx.instantiate_bound_regions_with_erased(ty);
-                    if self.can_coerce(expected, ty) {
+                    if self.may_coerce(expected, ty) {
                         err.subdiagnostic(errors::ExpectedReturnTypeLabel::Other {
                             span: hir_ty.span,
                             expected,
@@ -1035,7 +1035,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // extract all bounds from the source code using their spans
         let all_matching_bounds_strs = predicates_from_where
             .filter_map(|bound| match bound {
-                GenericBound::Trait(_, _) => {
+                GenericBound::Trait(_) => {
                     self.tcx.sess.source_map().span_to_snippet(bound.span()).ok()
                 }
                 _ => None,
@@ -1141,12 +1141,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     ty::Asyncness::No => ty,
                 };
                 let ty = self.normalize(expr.span, ty);
-                self.can_coerce(found, ty)
+                self.may_coerce(found, ty)
             }
             hir::FnRetTy::DefaultReturn(_) if in_closure => {
                 self.ret_coercion.as_ref().map_or(false, |ret| {
                     let ret_ty = ret.borrow().expected_ty();
-                    self.can_coerce(found, ret_ty)
+                    self.may_coerce(found, ret_ty)
                 })
             }
             _ => false,
@@ -1510,7 +1510,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             provided_ty
         };
 
-        if !self.can_coerce(expected_ty, dummy_ty) {
+        if !self.may_coerce(expected_ty, dummy_ty) {
             return;
         }
         let msg = format!("use `{adt_name}::map_or` to deref inner value of `{adt_name}`");
@@ -1534,7 +1534,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expected_ty: Ty<'tcx>,
     ) {
         if let ty::Slice(elem_ty) | ty::Array(elem_ty, _) = expected_ty.kind() {
-            if self.can_coerce(blk_ty, *elem_ty)
+            if self.may_coerce(blk_ty, *elem_ty)
                 && blk.stmts.is_empty()
                 && blk.rules == hir::BlockCheckMode::DefaultBlock
             {
@@ -1744,7 +1744,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if item_ty.has_param() {
             return false;
         }
-        if self.can_coerce(item_ty, expected_ty) {
+        if self.may_coerce(item_ty, expected_ty) {
             err.span_suggestion_verbose(
                 segment.ident.span,
                 format!("try referring to the associated const `{capitalized_name}` instead",),
@@ -1796,7 +1796,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 false,
                 |did| {
                     let assoc_item = self.tcx.associated_item(did);
-                    assoc_item.container == ty::AssocItemContainer::TraitContainer
+                    assoc_item.container == ty::AssocItemContainer::Trait
                         && assoc_item.container_id(self.tcx) == clone_trait_did
                 },
             )
@@ -1804,7 +1804,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // diagnostic in cases where we have `(&&T).clone()` and we expect `T`).
             && !results.expr_adjustments(callee_expr).iter().any(|adj| matches!(adj.kind, ty::adjustment::Adjust::Deref(..)))
             // Check that we're in fact trying to clone into the expected type
-            && self.can_coerce(*pointee_ty, expected_ty)
+            && self.may_coerce(*pointee_ty, expected_ty)
             && let trait_ref = ty::TraitRef::new(self.tcx, clone_trait_did, [expected_ty])
             // And the expected type doesn't implement `Clone`
             && !self.predicate_must_hold_considering_regions(&traits::Obligation::new(
@@ -2022,7 +2022,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             } else {
                 return false;
             };
-        if is_ctor || !self.can_coerce(args.type_at(0), expected) {
+        if is_ctor || !self.may_coerce(args.type_at(0), expected) {
             return false;
         }
 
@@ -2293,7 +2293,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         .then(|| " (its field is private, but it's local to this crate and its privacy can be changed)".to_string());
 
                     let sole_field_ty = sole_field.ty(self.tcx, args);
-                    if self.can_coerce(expr_ty, sole_field_ty) {
+                    if self.may_coerce(expr_ty, sole_field_ty) {
                         let variant_path =
                             with_no_trimmed_paths!(self.tcx.def_path_str(variant.def_id));
                         // FIXME #56861: DRYer prelude filtering
@@ -2401,7 +2401,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
 
         let int_type = args.type_at(0);
-        if !self.can_coerce(expr_ty, int_type) {
+        if !self.may_coerce(expr_ty, int_type) {
             return false;
         }
 
@@ -2585,7 +2585,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         Ty::new_imm_ref(self.tcx, self.tcx.lifetimes.re_static, checked_ty)
                     }
                 };
-                if self.can_coerce(ref_ty, expected) {
+                if self.may_coerce(ref_ty, expected) {
                     let mut sugg_sp = sp;
                     if let hir::ExprKind::MethodCall(segment, receiver, args, _) = expr.kind {
                         let clone_trait =
@@ -2648,15 +2648,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
 
                     let make_sugg = |expr: &Expr<'_>, span: Span, sugg: &str| {
-                        let needs_parens = match expr.kind {
-                            // parenthesize if needed (Issue #46756)
-                            hir::ExprKind::Cast(_, _) | hir::ExprKind::Binary(_, _, _) => true,
-                            // parenthesize borrows of range literals (Issue #54505)
-                            _ if is_range_literal(expr) => true,
-                            _ => false,
-                        };
-
-                        if needs_parens {
+                        if self.needs_parentheses(expr) {
                             (
                                 vec![
                                     (span.shrink_to_lo(), format!("{prefix}{sugg}(")),
@@ -2869,6 +2861,19 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             return None;
                         }
 
+                        if self.needs_parentheses(expr) {
+                            return Some((
+                                vec![
+                                    (span, format!("{suggestion}(")),
+                                    (expr.span.shrink_to_hi(), ")".to_string()),
+                                ],
+                                message,
+                                Applicability::MachineApplicable,
+                                true,
+                                false,
+                            ));
+                        }
+
                         return Some((
                             vec![(span, suggestion)],
                             message,
@@ -2895,6 +2900,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
         }
         false
+    }
+
+    fn needs_parentheses(&self, expr: &hir::Expr<'_>) -> bool {
+        match expr.kind {
+            // parenthesize if needed (Issue #46756)
+            hir::ExprKind::Cast(_, _) | hir::ExprKind::Binary(_, _, _) => true,
+            // parenthesize borrows of range literals (Issue #54505)
+            _ if is_range_literal(expr) => true,
+            _ => false,
+        }
     }
 
     pub(crate) fn suggest_cast(
@@ -3388,6 +3403,40 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             );
         } else {
             err.span_label(block.span, "this block is missing a tail expression");
+        }
+    }
+
+    pub(crate) fn suggest_swapping_lhs_and_rhs(
+        &self,
+        err: &mut Diag<'_>,
+        rhs_ty: Ty<'tcx>,
+        lhs_ty: Ty<'tcx>,
+        rhs_expr: &'tcx hir::Expr<'tcx>,
+        lhs_expr: &'tcx hir::Expr<'tcx>,
+        op: hir::BinOp,
+    ) {
+        match op.node {
+            hir::BinOpKind::Eq => {
+                if let Some(partial_eq_def_id) = self.infcx.tcx.lang_items().eq_trait()
+                    && self
+                        .infcx
+                        .type_implements_trait(partial_eq_def_id, [rhs_ty, lhs_ty], self.param_env)
+                        .must_apply_modulo_regions()
+                {
+                    let sm = self.tcx.sess.source_map();
+                    if let Ok(rhs_snippet) = sm.span_to_snippet(rhs_expr.span)
+                        && let Ok(lhs_snippet) = sm.span_to_snippet(lhs_expr.span)
+                    {
+                        err.note(format!("`{rhs_ty}` implements `PartialEq<{lhs_ty}>`"));
+                        err.multipart_suggestion(
+                            "consider swapping the equality",
+                            vec![(lhs_expr.span, rhs_snippet), (rhs_expr.span, lhs_snippet)],
+                            Applicability::MaybeIncorrect,
+                        );
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }

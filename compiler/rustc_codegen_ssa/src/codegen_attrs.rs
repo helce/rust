@@ -20,8 +20,8 @@ use rustc_span::symbol::Ident;
 use rustc_span::{Span, sym};
 use rustc_target::spec::{SanitizerSet, abi};
 
-use crate::errors::{self, MissingFeatures, TargetFeatureDisableOrEnable};
-use crate::target_features::{check_target_feature_trait_unsafe, from_target_feature};
+use crate::errors;
+use crate::target_features::{check_target_feature_trait_unsafe, from_target_feature_attr};
 
 fn linkage_by_name(tcx: TyCtxt<'_>, def_id: LocalDefId, name: &str) -> Linkage {
     use rustc_middle::mir::mono::Linkage::*;
@@ -73,7 +73,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
         codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_BUILTINS;
     }
 
-    let supported_target_features = tcx.supported_target_features(LOCAL_CRATE);
+    let rust_target_features = tcx.rust_target_features(LOCAL_CRATE);
 
     let mut inline_span = None;
     let mut link_ordinal_span = None;
@@ -137,7 +137,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                 let inner = attr.meta_item_list();
                 match inner.as_deref() {
                     Some([item]) if item.has_name(sym::linker) => {
-                        if !tcx.features().used_with_arg {
+                        if !tcx.features().used_with_arg() {
                             feature_err(
                                 &tcx.sess,
                                 sym::used_with_arg,
@@ -149,7 +149,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                         codegen_fn_attrs.flags |= CodegenFnAttrFlags::USED_LINKER;
                     }
                     Some([item]) if item.has_name(sym::compiler) => {
-                        if !tcx.features().used_with_arg {
+                        if !tcx.features().used_with_arg() {
                             feature_err(
                                 &tcx.sess,
                                 sym::used_with_arg,
@@ -213,7 +213,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                     .emit();
                 }
                 if is_closure
-                    && !tcx.features().closure_track_caller
+                    && !tcx.features().closure_track_caller()
                     && !attr.span.allows_unstable(sym::closure_track_caller)
                 {
                     feature_err(
@@ -268,7 +268,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                         //
                         // This exception needs to be kept in sync with allowing
                         // `#[target_feature]` on `main` and `start`.
-                    } else if !tcx.features().target_feature_11 {
+                    } else if !tcx.features().target_feature_11() {
                         feature_err(
                             &tcx.sess,
                             sym::target_feature_11,
@@ -281,10 +281,10 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                         check_target_feature_trait_unsafe(tcx, did, attr.span);
                     }
                 }
-                from_target_feature(
+                from_target_feature_attr(
                     tcx,
                     attr,
-                    supported_target_features,
+                    rust_target_features,
                     &mut codegen_fn_attrs.target_features,
                 );
             }
@@ -584,7 +584,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
     // its parent function, which effectively inherits the features anyway. Boxing this closure
     // would result in this closure being compiled without the inherited target features, but this
     // is probably a poor usage of `#[inline(always)]` and easily avoided by not using the attribute.
-    if tcx.features().target_feature_11
+    if tcx.features().target_feature_11()
         && tcx.is_closure_like(did.to_def_id())
         && codegen_fn_attrs.inline != InlineAttr::Always
     {
@@ -676,10 +676,10 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
             .next()
             .map_or_else(|| tcx.def_span(did), |a| a.span);
         tcx.dcx()
-            .create_err(TargetFeatureDisableOrEnable {
+            .create_err(errors::TargetFeatureDisableOrEnable {
                 features,
                 span: Some(span),
-                missing_features: Some(MissingFeatures),
+                missing_features: Some(errors::MissingFeatures),
             })
             .emit();
     }
@@ -710,7 +710,7 @@ pub fn check_tied_features(
 /// applied to the method prototype.
 fn should_inherit_track_caller(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
     if let Some(impl_item) = tcx.opt_associated_item(def_id)
-        && let ty::AssocItemContainer::ImplContainer = impl_item.container
+        && let ty::AssocItemContainer::Impl = impl_item.container
         && let Some(trait_item) = impl_item.trait_item_def_id
     {
         return tcx.codegen_fn_attrs(trait_item).flags.intersects(CodegenFnAttrFlags::TRACK_CALLER);

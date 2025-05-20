@@ -62,7 +62,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         {
             let universe_info = error_info.to_universe_info(old_universe);
             for u in (old_universe + 1)..=universe {
-                self.borrowck_context.constraints.universe_causes.insert(u, universe_info.clone());
+                self.constraints.universe_causes.insert(u, universe_info.clone());
             }
         }
 
@@ -132,12 +132,12 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         locations: Locations,
         category: ConstraintCategory<'tcx>,
     ) {
-        let param_env = self.param_env;
+        let param_env = self.infcx.param_env;
         let predicate = predicate.upcast(self.tcx());
         let _: Result<_, ErrorGuaranteed> = self.fully_perform_op(
             locations,
             category,
-            param_env.and(type_op::prove_predicate::ProvePredicate::new(predicate)),
+            param_env.and(type_op::prove_predicate::ProvePredicate { predicate }),
         );
     }
 
@@ -158,11 +158,11 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
     where
         T: type_op::normalize::Normalizable<'tcx> + fmt::Display + Copy + 'tcx,
     {
-        let param_env = self.param_env;
+        let param_env = self.infcx.param_env;
         let result: Result<_, ErrorGuaranteed> = self.fully_perform_op(
             location.to_locations(),
             category,
-            param_env.and(type_op::normalize::Normalize::new(value)),
+            param_env.and(type_op::normalize::Normalize { value }),
         );
         result.unwrap_or(value)
     }
@@ -176,7 +176,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         let tcx = self.tcx();
         if self.infcx.next_trait_solver() {
             let body = self.body;
-            let param_env = self.param_env;
+            let param_env = self.infcx.param_env;
             self.fully_perform_op(
                 location.to_locations(),
                 ConstraintCategory::Boring,
@@ -223,7 +223,9 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         let _: Result<_, ErrorGuaranteed> = self.fully_perform_op(
             Locations::All(span),
             ConstraintCategory::Boring,
-            self.param_env.and(type_op::ascribe_user_type::AscribeUserType::new(mir_ty, user_ty)),
+            self.infcx
+                .param_env
+                .and(type_op::ascribe_user_type::AscribeUserType { mir_ty, user_ty }),
         );
     }
 
@@ -250,7 +252,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         let mir_ty = self.normalize(mir_ty, Locations::All(span));
 
         let cause = ObligationCause::dummy_with_span(span);
-        let param_env = self.param_env;
+        let param_env = self.infcx.param_env;
         let _: Result<_, ErrorGuaranteed> = self.fully_perform_op(
             Locations::All(span),
             ConstraintCategory::Boring,

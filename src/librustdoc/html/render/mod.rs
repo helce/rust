@@ -204,6 +204,7 @@ pub(crate) struct IndexItemFunctionType {
     inputs: Vec<RenderType>,
     output: Vec<RenderType>,
     where_clause: Vec<Vec<RenderType>>,
+    param_names: Vec<Symbol>,
 }
 
 impl IndexItemFunctionType {
@@ -2010,9 +2011,9 @@ fn render_rightside(w: &mut Buffer, cx: &Context<'_>, item: &clean::Item, render
     );
     if let Some(link) = src_href {
         if has_stability {
-            write!(rightside, " · <a class=\"src\" href=\"{link}\">source</a>")
+            write!(rightside, " · <a class=\"src\" href=\"{link}\">Source</a>")
         } else {
-            write!(rightside, "<a class=\"src rightside\" href=\"{link}\">source</a>")
+            write!(rightside, "<a class=\"src rightside\" href=\"{link}\">Source</a>")
         }
     }
     if has_stability && has_src_ref {

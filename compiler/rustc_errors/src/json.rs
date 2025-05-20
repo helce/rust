@@ -27,7 +27,7 @@ use termcolor::{ColorSpec, WriteColor};
 
 use crate::diagnostic::IsLint;
 use crate::emitter::{
-    ColorConfig, Destination, Emitter, HumanEmitter, HumanReadableErrorType,
+    ColorConfig, Destination, Emitter, HumanEmitter, HumanReadableErrorType, OutputTheme,
     should_show_source_code,
 };
 use crate::registry::Registry;
@@ -367,9 +367,9 @@ impl Diagnostic {
             ColorConfig::Always | ColorConfig::Auto => dst = Box::new(termcolor::Ansi::new(dst)),
             ColorConfig::Never => {}
         }
-        HumanEmitter::new(dst, je.fallback_bundle.clone())
+        HumanEmitter::new(dst, Lrc::clone(&je.fallback_bundle))
             .short_message(short)
-            .sm(Some(je.sm.clone()))
+            .sm(Some(Lrc::clone(&je.sm)))
             .fluent_bundle(je.fluent_bundle.clone())
             .diagnostic_width(je.diagnostic_width)
             .macro_backtrace(je.macro_backtrace)
@@ -377,6 +377,11 @@ impl Diagnostic {
             .terminal_url(je.terminal_url)
             .ui_testing(je.ui_testing)
             .ignored_directories_in_source_blocks(je.ignored_directories_in_source_blocks.clone())
+            .theme(if let HumanReadableErrorType::Unicode = je.json_rendered {
+                OutputTheme::Unicode
+            } else {
+                OutputTheme::Ascii
+            })
             .emit_diagnostic(diag);
         let buf = Arc::try_unwrap(buf.0).unwrap().into_inner().unwrap();
         let buf = String::from_utf8(buf).unwrap();

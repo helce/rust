@@ -105,8 +105,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     self.tcx.erase_regions(ty)
                 }
             };
-            InlineAsmCtxt::new_in_fn(self.tcx, self.param_env, get_operand_ty)
-                .check_asm(asm, enclosing_id);
+            InlineAsmCtxt::new_in_fn(
+                self.tcx,
+                self.infcx.typing_env(self.param_env),
+                get_operand_ty,
+            )
+            .check_asm(asm, enclosing_id);
         }
     }
 
@@ -658,7 +662,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 && fn_sig.inputs()[1..]
                     .iter()
                     .zip(input_types.iter())
-                    .all(|(expected, found)| self.can_coerce(*expected, *found))
+                    .all(|(expected, found)| self.may_coerce(*expected, *found))
                 && fn_sig.inputs()[1..].len() == input_types.len()
             {
                 err.span_suggestion_verbose(
@@ -722,7 +726,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
             let expectation = Expectation::rvalue_hint(self, expected_input_ty);
             let coerced_ty = expectation.only_has_type(self).unwrap_or(formal_input_ty);
-            let can_coerce = self.can_coerce(arg_ty, coerced_ty);
+            let can_coerce = self.may_coerce(arg_ty, coerced_ty);
             if !can_coerce {
                 return Compatibility::Incompatible(Some(ty::error::TypeError::Sorts(
                     ty::error::ExpectedFound::new(true, coerced_ty, arg_ty),
@@ -802,7 +806,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         provided_arg_tys.iter().map(|(ty, _)| *ty).skip(mismatch_idx + tys.len()),
                     ),
                 ) {
-                    if !self.can_coerce(provided_ty, *expected_ty) {
+                    if !self.may_coerce(provided_ty, *expected_ty) {
                         satisfied = false;
                         break;
                     }
@@ -827,6 +831,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 formal_and_expected_inputs[mismatch_idx.into()],
                                 provided_arg_tys[mismatch_idx.into()].0,
                             ),
+                            self.param_env,
                             terr,
                         );
                         err.span_label(
@@ -912,7 +917,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let trace =
                 mk_trace(provided_span, formal_and_expected_inputs[*expected_idx], provided_ty);
             if !matches!(trace.cause.as_failure_code(*e), FailureCode::Error0308) {
-                let mut err = self.err_ctxt().report_and_explain_type_error(trace, *e);
+                let mut err =
+                    self.err_ctxt().report_and_explain_type_error(trace, self.param_env, *e);
                 suggest_confusable(&mut err);
                 reported = Some(err.emit());
                 return false;
@@ -940,7 +946,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let (formal_ty, expected_ty) = formal_and_expected_inputs[*expected_idx];
             let (provided_ty, provided_arg_span) = provided_arg_tys[*provided_idx];
             let trace = mk_trace(provided_arg_span, (formal_ty, expected_ty), provided_ty);
-            let mut err = self.err_ctxt().report_and_explain_type_error(trace, *err);
+            let mut err =
+                self.err_ctxt().report_and_explain_type_error(trace, self.param_env, *err);
             self.emit_coerce_suggestions(
                 &mut err,
                 provided_args[*provided_idx],
@@ -1023,7 +1030,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 std::iter::zip(formal_and_expected_inputs.iter(), removed_arg_tys.iter()).all(
                     |((expected_ty, _), (provided_ty, _))| {
                         !provided_ty.references_error()
-                            && self.can_coerce(*provided_ty, *expected_ty)
+                            && self.may_coerce(*provided_ty, *expected_ty)
                     },
                 )
             };
@@ -1097,6 +1104,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let mut only_extras_so_far = errors
             .peek()
             .is_some_and(|first| matches!(first, Error::Extra(arg_idx) if arg_idx.index() == 0));
+        let mut prev_extra_idx = None;
         let mut suggestions = vec![];
         while let Some(error) = errors.next() {
             only_extras_so_far &= matches!(error, Error::Extra(_));
@@ -1112,9 +1120,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 &mut err,
                                 &trace.cause,
                                 None,
-                                Some(trace.values),
+                                Some(self.param_env.and(trace.values)),
                                 e,
-                                false,
                                 true,
                             );
                         }
@@ -1166,11 +1173,29 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         //     fn f() {}
                         //   - f(0, 1,)
                         //   + f()
-                        if only_extras_so_far
-                            && !errors
-                                .peek()
-                                .is_some_and(|next_error| matches!(next_error, Error::Extra(_)))
-                        {
+                        let trim_next_comma = match errors.peek() {
+                            Some(Error::Extra(provided_idx))
+                                if only_extras_so_far
+                                    && provided_idx.index() > arg_idx.index() + 1 =>
+                            // If the next Error::Extra ("next") doesn't next to current ("current"),
+                            // fn foo(_: (), _: u32) {}
+                            // - foo("current", (), 1u32, "next")
+                            // + foo((), 1u32)
+                            // If the previous error is not a `Error::Extra`, then do not trim the next comma
+                            // - foo((), "current", 42u32, "next")
+                            // + foo((), 42u32)
+                            {
+                                prev_extra_idx.map_or(true, |prev_extra_idx| {
+                                    prev_extra_idx + 1 == arg_idx.index()
+                                })
+                            }
+                            // If no error left, we need to delete the next comma
+                            None if only_extras_so_far => true,
+                            // Not sure if other error type need to be handled as well
+                            _ => false,
+                        };
+
+                        if trim_next_comma {
                             let next = provided_arg_tys
                                 .get(arg_idx + 1)
                                 .map(|&(_, sp)| sp)
@@ -1193,6 +1218,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             SuggestionText::Remove(_) => SuggestionText::Remove(true),
                             _ => SuggestionText::DidYouMean,
                         };
+                        prev_extra_idx = Some(arg_idx.index())
                     }
                 }
                 Error::Missing(expected_idx) => {
@@ -1543,7 +1569,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     // AST fragment checking
-    pub(in super::super) fn check_lit(
+    pub(in super::super) fn check_expr_lit(
         &self,
         lit: &hir::Lit,
         expected: Expectation<'tcx>,
@@ -1725,7 +1751,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         if let Some(blk) = decl.origin.try_get_else() {
             let previous_diverges = self.diverges.get();
-            let else_ty = self.check_block_with_expected(blk, NoExpectation);
+            let else_ty = self.check_expr_block(blk, NoExpectation);
             let cause = self.cause(blk.span, ObligationCauseCode::LetElse);
             if let Err(err) = self.demand_eqtype_with_origin(&cause, self.tcx.types.never, else_ty)
             {
@@ -1783,7 +1809,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     pub(crate) fn check_block_no_value(&self, blk: &'tcx hir::Block<'tcx>) {
         let unit = self.tcx.types.unit;
-        let ty = self.check_block_with_expected(blk, ExpectHasType(unit));
+        let ty = self.check_expr_block(blk, ExpectHasType(unit));
 
         // if the block produces a `!` value, that can always be
         // (effectively) coerced to unit.
@@ -1792,7 +1818,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
     }
 
-    pub(in super::super) fn check_block_with_expected(
+    pub(in super::super) fn check_expr_block(
         &self,
         blk: &'tcx hir::Block<'tcx>,
         expected: Expectation<'tcx>,
@@ -2124,7 +2150,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                     let expr_ty = self.typeck_results.borrow().expr_ty(expr);
                                     let return_ty = fn_sig.output();
                                     if !matches!(expr.kind, hir::ExprKind::Ret(..))
-                                        && self.can_coerce(expr_ty, return_ty)
+                                        && self.may_coerce(expr_ty, return_ty)
                                     {
                                         found_semi = true;
                                     }

@@ -1,5 +1,7 @@
 // tidy-alphabetical-start
-#![cfg_attr(bootstrap, feature(const_mut_refs))]
+#![cfg_attr(bootstrap, feature(const_three_way_compare))]
+#![cfg_attr(bootstrap, feature(strict_provenance))]
+#![cfg_attr(not(bootstrap), feature(strict_provenance_lints))]
 #![cfg_attr(target_has_atomic = "128", feature(integer_atomics))]
 #![cfg_attr(test, feature(cfg_match))]
 #![feature(alloc_layout_extra)]
@@ -15,19 +17,10 @@
 #![feature(cell_update)]
 #![feature(clone_to_uninit)]
 #![feature(const_align_of_val_raw)]
-#![feature(const_align_offset)]
 #![feature(const_black_box)]
-#![feature(const_hash)]
+#![feature(const_eval_select)]
 #![feature(const_heap)]
-#![feature(const_ip)]
-#![feature(const_ipv4)]
-#![feature(const_ipv6)]
-#![feature(const_likely)]
 #![feature(const_nonnull_new)]
-#![feature(const_option_ext)]
-#![feature(const_pin)]
-#![feature(const_pointer_is_aligned)]
-#![feature(const_three_way_compare)]
 #![feature(const_trait_impl)]
 #![feature(core_intrinsics)]
 #![feature(core_io_borrowed_buf)]
@@ -48,10 +41,11 @@
 #![feature(get_many_mut)]
 #![feature(hasher_prefixfree_extras)]
 #![feature(hashmap_internals)]
+#![feature(inline_const_pat)]
 #![feature(int_roundings)]
 #![feature(ip)]
+#![feature(ip_from)]
 #![feature(is_ascii_octdigit)]
-#![feature(isqrt)]
 #![feature(iter_advance_by)]
 #![feature(iter_array_chunks)]
 #![feature(iter_chain)]
@@ -88,7 +82,6 @@
 #![feature(std_internals)]
 #![feature(step_trait)]
 #![feature(str_internals)]
-#![feature(strict_provenance)]
 #![feature(strict_provenance_atomic_ptr)]
 #![feature(test)]
 #![feature(trait_upcasting)]
@@ -105,6 +98,37 @@
 #![allow(internal_features)]
 #![deny(fuzzy_provenance_casts)]
 #![deny(unsafe_op_in_unsafe_fn)]
+
+/// Version of `assert_matches` that ignores fancy runtime printing in const context and uses structural equality.
+macro_rules! assert_eq_const_safe {
+    ($left:expr, $right:expr$(, $($arg:tt)+)?) => {
+        {
+            fn runtime() {
+                assert_eq!($left, $right, $($arg)*);
+            }
+            const fn compiletime() {
+                assert!(matches!($left, const { $right }));
+            }
+            core::intrinsics::const_eval_select((), compiletime, runtime)
+        }
+    };
+}
+
+/// Creates a test for runtime and a test for constant-time.
+macro_rules! test_runtime_and_compiletime {
+    ($(
+        $(#[$attr:meta])*
+        fn $test:ident() $block:block
+    )*) => {
+        $(
+            $(#[$attr])*
+            #[test]
+            fn $test() $block
+            $(#[$attr])*
+            const _: () = $block;
+        )*
+    }
+}
 
 mod alloc;
 mod any;

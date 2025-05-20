@@ -14,7 +14,7 @@ macro_rules! declare_features {
         $(#[doc = $doc:tt])* (removed, $feature:ident, $ver:expr, $issue:expr, $reason:expr),
     )+) => {
         /// Formerly unstable features that have now been removed.
-        pub const REMOVED_FEATURES: &[RemovedFeature] = &[
+        pub const REMOVED_LANG_FEATURES: &[RemovedFeature] = &[
             $(RemovedFeature {
                 feature: Feature {
                     name: sym::$feature,
@@ -85,6 +85,8 @@ declare_features! (
     /// Allows default type parameters to influence type inference.
     (removed, default_type_parameter_fallback, "1.82.0", Some(27336),
      Some("never properly implemented; requires significant design work")),
+    /// Allows deriving traits as per `SmartPointer` specification
+    (removed, derive_smart_pointer, "1.79.0", Some(123430), Some("replaced by `CoercePointee`")),
     /// Allows using `#[doc(keyword = "...")]`.
     (removed, doc_keyword, "1.28.0", Some(51315),
      Some("merged into `#![feature(rustdoc_internals)]`")),
@@ -98,6 +100,9 @@ declare_features! (
      Some("renamed to `doc_notable_trait`")),
     /// Allows using `#[unsafe_destructor_blind_to_params]` (RFC 1238).
     (removed, dropck_parametricity, "1.38.0", Some(28498), None),
+    /// Uses generic effect parameters for ~const bounds
+    (removed, effects, "1.84.0", Some(102090),
+     Some("removed, redundant with `#![feature(const_trait_impl)]`")),
     /// Allows defining `existential type`s.
     (removed, existential_type, "1.38.0", Some(63063),
      Some("removed in favor of `#![feature(type_alias_impl_trait)]`")),
