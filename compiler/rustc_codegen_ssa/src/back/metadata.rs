@@ -246,7 +246,7 @@ pub(crate) fn create_object_file(sess: &Session) -> Option<write::Object<'static
         "msp430" => (Architecture::Msp430, None),
         "hexagon" => (Architecture::Hexagon, None),
         "bpf" => (Architecture::Bpf, None),
-        "e2k" => (Architecture::E2k, None),
+        "e2k" => (Architecture::E2K64, None),
         "loongarch64" => (Architecture::LoongArch64, None),
         "csky" => (Architecture::Csky, None),
         "arm64ec" => (Architecture::Aarch64, Some(SubArchitecture::Arm64EC)),
@@ -364,27 +364,27 @@ pub(crate) fn create_object_file(sess: &Session) -> Option<write::Object<'static
 
             e_flags
         }
-        Architecture::E2k => {
+        Architecture::E2K64 => {
             // Usually generic is elbrus-v2, but llvm sets it to elbrus-v4
             let e_flags = match sess.target.options.cpu.as_ref() {
                 // iset flags
-                "elbrus-v2" => elf::EF_E2K_MACH_EV2,
-                "elbrus-v3" => elf::EF_E2K_MACH_EV3,
-                "elbrus-v4" => elf::EF_E2K_MACH_EV4,
-                "elbrus-v5" => elf::EF_E2K_MACH_EV5,
-                "elbrus-v6" => elf::EF_E2K_MACH_EV6,
-                "elbrus-v7" => elf::EF_E2K_MACH_EV7,
+                "elbrus-v2" => elf::ef_e2k_mach_to_flag(0, elf::E_E2K_MACH_EV2),
+                "elbrus-v3" => elf::ef_e2k_mach_to_flag(0, elf::E_E2K_MACH_EV3),
+                "elbrus-v4" => elf::ef_e2k_mach_to_flag(0, elf::E_E2K_MACH_EV4),
+                "elbrus-v5" => elf::ef_e2k_mach_to_flag(0, elf::E_E2K_MACH_EV5),
+                "elbrus-v6" => elf::ef_e2k_mach_to_flag(0, elf::E_E2K_MACH_EV6),
+                "elbrus-v7" => elf::ef_e2k_mach_to_flag(0, elf::E_E2K_MACH_EV7),
                 // tune-cpu flags
-                "elbrus-4c"  => elf::EF_E2K_MACH_EV3     | elf::EF_E2K_INCOMPAT,
-                "elbrus-8c"  => elf::EF_E2K_MACH_8C      | elf::EF_E2K_INCOMPAT,
-                "elbrus-1c+" => elf::EF_E2K_MACH_1CPLUS  | elf::EF_E2K_INCOMPAT,
-                "elbrus-8c2" => elf::EF_E2K_MACH_EV5     | elf::EF_E2K_INCOMPAT,
-                "elbrus-12c" => elf::EF_E2K_MACH_12C     | elf::EF_E2K_INCOMPAT,
-                "elbrus-16c" => elf::EF_E2K_MACH_16C     | elf::EF_E2K_INCOMPAT,
-                "elbrus-2c3" => elf::EF_E2K_MACH_2C3     | elf::EF_E2K_INCOMPAT,
-                "elbrus-48c" => elf::EF_E2K_MACH_48C     | elf::EF_E2K_INCOMPAT,
-                "elbrus-8v7" => elf::EF_E2K_MACH_8V7     | elf::EF_E2K_INCOMPAT,
-                _ => elf::EF_E2K_MACH_EV4,
+                "elbrus-4c"  => elf::ef_e2k_mach_to_flag(elf::EF_E2K_INCOMPAT, elf::E_E2K_MACH_EV3),
+                "elbrus-8c"  => elf::ef_e2k_mach_to_flag(elf::EF_E2K_INCOMPAT, elf::E_E2K_MACH_8C),
+                "elbrus-1c+" => elf::ef_e2k_mach_to_flag(elf::EF_E2K_INCOMPAT, elf::E_E2K_MACH_1CPLUS),
+                "elbrus-8c2" => elf::ef_e2k_mach_to_flag(elf::EF_E2K_INCOMPAT, elf::E_E2K_MACH_EV5),
+                "elbrus-12c" => elf::ef_e2k_mach_to_flag(elf::EF_E2K_INCOMPAT, elf::E_E2K_MACH_12C),
+                "elbrus-16c" => elf::ef_e2k_mach_to_flag(elf::EF_E2K_INCOMPAT, elf::E_E2K_MACH_16C),
+                "elbrus-2c3" => elf::ef_e2k_mach_to_flag(elf::EF_E2K_INCOMPAT, elf::E_E2K_MACH_2C3),
+                "elbrus-48c" => elf::ef_e2k_mach_to_flag(elf::EF_E2K_INCOMPAT, elf::E_E2K_MACH_48C),
+                "elbrus-8v7" => elf::ef_e2k_mach_to_flag(elf::EF_E2K_INCOMPAT, elf::E_E2K_MACH_8V7),
+                _ => elf::ef_e2k_mach_to_flag(0, elf::E_E2K_MACH_EV4),
             };
 
             e_flags
