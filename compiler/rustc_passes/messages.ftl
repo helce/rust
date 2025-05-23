@@ -112,9 +112,11 @@ passes_coroutine_on_non_closure =
     attribute should be applied to closures
     .label = not a closure
 
-passes_coverage_not_fn_or_closure =
-    attribute should be applied to a function definition or closure
-    .label = not a function or closure
+passes_coverage_attribute_not_allowed =
+    coverage attribute not allowed here
+    .not_fn_impl_mod = not a function, impl block, or module
+    .no_body = function has no body
+    .help = coverage attribute can be applied to a function (with body), impl block, or module
 
 passes_dead_codes =
     { $multiple ->
@@ -211,8 +213,9 @@ passes_doc_invalid =
 passes_doc_keyword_empty_mod =
     `#[doc(keyword = "...")]` should be used on empty modules
 
-passes_doc_keyword_invalid_ident =
-    `{$doc_keyword}` is not a valid identifier
+passes_doc_keyword_not_keyword =
+    nonexistent keyword `{$keyword}` used in `#[doc(keyword = "...")]`
+    .help = only existing keywords are allowed in core/std
 
 passes_doc_keyword_not_mod =
     `#[doc(keyword = "...")]` should be used on modules
@@ -355,6 +358,9 @@ passes_ignored_derived_impls =
 
 passes_implied_feature_not_exist =
     feature `{$implied_by}` implying `{$feature}` does not exist
+
+passes_incorrect_do_not_recommend_args =
+    `#[diagnostic::do_not_recommend]` does not expect any arguments
 
 passes_incorrect_do_not_recommend_location =
     `#[diagnostic::do_not_recommend]` can only be placed on trait implementations
@@ -558,6 +564,14 @@ passes_no_mangle_foreign =
 passes_no_patterns =
     patterns not allowed in naked function parameters
 
+passes_no_sanitize =
+    `#[no_sanitize({$attr_str})]` should be applied to {$accepted_kind}
+    .label = not {$accepted_kind}
+
+passes_non_exaustive_with_default_field_values =
+    `#[non_exhaustive]` can't be used to annotate items with default field values
+    .label = this struct has default field values
+
 passes_non_exported_macro_invalid_attrs =
     attribute should be applied to function or closure
     .label = not a function or closure
@@ -704,8 +718,6 @@ passes_should_be_applied_to_struct_enum =
 passes_should_be_applied_to_trait =
     attribute should be applied to a trait
     .label = not a trait
-
-passes_skipping_const_checks = skipping const checks
 
 passes_stability_promotable =
     attribute cannot be applied to an expression

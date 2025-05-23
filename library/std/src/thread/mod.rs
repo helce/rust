@@ -186,7 +186,7 @@ mod current;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use current::current;
-pub(crate) use current::{current_id, drop_current, set_current, try_current};
+pub(crate) use current::{current_id, current_or_unnamed, drop_current, set_current, try_current};
 
 mod spawnhook;
 
@@ -391,6 +391,7 @@ impl Builder {
     /// handler.join().unwrap();
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub fn spawn<F, T>(self, f: F) -> io::Result<JoinHandle<T>>
     where
         F: FnOnce() -> T,
@@ -458,6 +459,7 @@ impl Builder {
     ///
     /// [`io::Result`]: crate::io::Result
     #[stable(feature = "thread_spawn_unchecked", since = "1.82.0")]
+    #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub unsafe fn spawn_unchecked<F, T>(self, f: F) -> io::Result<JoinHandle<T>>
     where
         F: FnOnce() -> T,
@@ -467,6 +469,7 @@ impl Builder {
         Ok(JoinHandle(unsafe { self.spawn_unchecked_(f, None) }?))
     }
 
+    #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     unsafe fn spawn_unchecked_<'scope, F, T>(
         self,
         f: F,
@@ -721,6 +724,7 @@ impl Builder {
 /// [`join`]: JoinHandle::join
 /// [`Err`]: crate::result::Result::Err
 #[stable(feature = "rust1", since = "1.0.0")]
+#[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 pub fn spawn<F, T>(f: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T,
@@ -1021,11 +1025,11 @@ impl Drop for PanicGuard {
 ///
 /// # Memory Ordering
 ///
-/// Calls to `park` _synchronize-with_ calls to `unpark`, meaning that memory
+/// Calls to `unpark` _synchronize-with_ calls to `park`, meaning that memory
 /// operations performed before a call to `unpark` are made visible to the thread that
 /// consumes the token and returns from `park`. Note that all `park` and `unpark`
-/// operations for a given thread form a total order and `park` synchronizes-with
-/// _all_ prior `unpark` operations.
+/// operations for a given thread form a total order and _all_ prior `unpark` operations
+/// synchronize-with `park`.
 ///
 /// In atomic ordering terms, `unpark` performs a `Release` operation and `park`
 /// performs the corresponding `Acquire` operation. Calls to `unpark` for the same
@@ -1146,9 +1150,9 @@ pub fn park_timeout_ms(ms: u32) {
 #[stable(feature = "park_timeout", since = "1.4.0")]
 pub fn park_timeout(dur: Duration) {
     let guard = PanicGuard;
-    // SAFETY: park_timeout is called on the parker owned by this thread.
+    // SAFETY: park_timeout is called on a handle owned by this thread.
     unsafe {
-        current().0.parker().park_timeout(dur);
+        current().park_timeout(dur);
     }
     // No panic occurred, do not abort.
     forget(guard);
@@ -1444,6 +1448,15 @@ impl Thread {
     /// May only be called from the thread to which this handle belongs.
     pub(crate) unsafe fn park(&self) {
         unsafe { self.0.parker().park() }
+    }
+
+    /// Like the public [`park_timeout`], but callable on any handle. This is
+    /// used to allow parking in TLS destructors.
+    ///
+    /// # Safety
+    /// May only be called from the thread to which this handle belongs.
+    pub(crate) unsafe fn park_timeout(&self, dur: Duration) {
+        unsafe { self.0.parker().park_timeout(dur) }
     }
 
     /// Atomically makes the handle's token available if it is not already.

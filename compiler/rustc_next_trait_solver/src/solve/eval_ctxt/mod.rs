@@ -214,8 +214,8 @@ where
     D: SolverDelegate<Interner = I>,
     I: Interner,
 {
-    pub(super) fn typing_mode(&self, param_env_for_debug_assertion: I::ParamEnv) -> TypingMode<I> {
-        self.delegate.typing_mode(param_env_for_debug_assertion)
+    pub(super) fn typing_mode(&self) -> TypingMode<I> {
+        self.delegate.typing_mode()
     }
 
     pub(super) fn set_is_normalizes_to_goal(&mut self) {
@@ -440,7 +440,7 @@ where
         if let Some(kind) = kind.no_bound_vars() {
             match kind {
                 ty::PredicateKind::Clause(ty::ClauseKind::Trait(predicate)) => {
-                    self.compute_trait_goal(Goal { param_env, predicate })
+                    self.compute_trait_goal(Goal { param_env, predicate }).map(|(r, _via)| r)
                 }
                 ty::PredicateKind::Clause(ty::ClauseKind::HostEffect(predicate)) => {
                     self.compute_host_effect_goal(Goal { param_env, predicate })
@@ -642,6 +642,12 @@ where
         for goal in goals {
             self.add_goal(source, goal);
         }
+    }
+
+    pub(super) fn next_region_var(&mut self) -> I::Region {
+        let region = self.delegate.next_region_infer();
+        self.inspect.add_var_value(region);
+        region
     }
 
     pub(super) fn next_ty_infer(&mut self) -> I::Ty {

@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::mem;
 use std::ops::Bound;
 
+use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_errors::DiagArgValue;
 use rustc_hir::def::DefKind;
 use rustc_hir::{self as hir, BindingMode, ByRef, HirId, Mutability};
@@ -15,10 +16,9 @@ use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_session::lint::Level;
 use rustc_session::lint::builtin::{DEPRECATED_SAFE_2024, UNSAFE_OP_IN_UNSAFE_FN, UNUSED_UNSAFE};
 use rustc_span::def_id::{DefId, LocalDefId};
-use rustc_span::symbol::Symbol;
-use rustc_span::{Span, sym};
+use rustc_span::{Span, Symbol, sym};
 
-use crate::build::ExprCategory;
+use crate::builder::ExprCategory;
 use crate::errors::*;
 
 struct UnsafetyVisitor<'a, 'tcx> {
@@ -339,8 +339,13 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
         };
 
         match &pat.kind {
-            PatKind::Leaf { .. } => {
+            PatKind::Leaf { subpatterns, .. } => {
                 if let ty::Adt(adt_def, ..) = pat.ty.kind() {
+                    for pat in subpatterns {
+                        if adt_def.non_enum_variant().fields[pat.field].safety.is_unsafe() {
+                            self.requires_unsafe(pat.pattern.span, UseOfUnsafeField);
+                        }
+                    }
                     if adt_def.is_union() {
                         let old_in_union_destructure =
                             std::mem::replace(&mut self.in_union_destructure, true);
@@ -358,6 +363,15 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                 } else {
                     visit::walk_pat(self, pat);
                 }
+            }
+            PatKind::Variant { adt_def, args: _, variant_index, subpatterns } => {
+                for pat in subpatterns {
+                    let field = &pat.field;
+                    if adt_def.variant(*variant_index).fields[*field].safety.is_unsafe() {
+                        self.requires_unsafe(pat.pattern.span, UseOfUnsafeField);
+                    }
+                }
+                visit::walk_pat(self, pat);
             }
             PatKind::Binding { mode: BindingMode(ByRef::Yes(rm), _), ty, .. } => {
                 if self.inside_adt {
@@ -460,12 +474,14 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
             ExprKind::Scope { value, lint_level: LintLevel::Explicit(hir_id), region_scope: _ } => {
                 let prev_id = self.hir_context;
                 self.hir_context = hir_id;
-                self.visit_expr(&self.thir[value]);
+                ensure_sufficient_stack(|| {
+                    self.visit_expr(&self.thir[value]);
+                });
                 self.hir_context = prev_id;
                 return; // don't visit the whole expression
             }
             ExprKind::Call { fun, ty: _, args: _, from_hir_call: _, fn_span: _ } => {
-                if self.thir[fun].ty.fn_sig(self.tcx).safety() == hir::Safety::Unsafe {
+                if self.thir[fun].ty.fn_sig(self.tcx).safety().is_unsafe() {
                     let func_id = if let ty::FnDef(func_id, _) = self.thir[fun].ty.kind() {
                         Some(*func_id)
                     } else {
@@ -579,15 +595,20 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
             }
             ExprKind::Adt(box AdtExpr {
                 adt_def,
-                variant_index: _,
+                variant_index,
                 args: _,
                 user_ty: _,
                 fields: _,
                 base: _,
-            }) => match self.tcx.layout_scalar_valid_range(adt_def.did()) {
-                (Bound::Unbounded, Bound::Unbounded) => {}
-                _ => self.requires_unsafe(expr.span, InitializingTypeWith),
-            },
+            }) => {
+                if adt_def.variant(variant_index).has_unsafe_fields() {
+                    self.requires_unsafe(expr.span, InitializingTypeWithUnsafeField)
+                }
+                match self.tcx.layout_scalar_valid_range(adt_def.did()) {
+                    (Bound::Unbounded, Bound::Unbounded) => {}
+                    _ => self.requires_unsafe(expr.span, InitializingTypeWith),
+                }
+            }
             ExprKind::Closure(box ClosureExpr {
                 closure_id,
                 args: _,
@@ -601,23 +622,24 @@ impl<'a, 'tcx> Visitor<'a, 'tcx> for UnsafetyVisitor<'a, 'tcx> {
                 let def_id = did.expect_local();
                 self.visit_inner_body(def_id);
             }
-            ExprKind::Field { lhs, .. } => {
+            ExprKind::Field { lhs, variant_index, name } => {
                 let lhs = &self.thir[lhs];
-                if let ty::Adt(adt_def, _) = lhs.ty.kind()
-                    && adt_def.is_union()
-                {
-                    if let Some(assigned_ty) = self.assignment_info {
-                        if assigned_ty.needs_drop(self.tcx, self.typing_env) {
-                            // This would be unsafe, but should be outright impossible since we
-                            // reject such unions.
-                            assert!(
-                                self.tcx.dcx().has_errors().is_some(),
-                                "union fields that need dropping should be impossible: \
-                                {assigned_ty}"
-                            );
+                if let ty::Adt(adt_def, _) = lhs.ty.kind() {
+                    if adt_def.variant(variant_index).fields[name].safety.is_unsafe() {
+                        self.requires_unsafe(expr.span, UseOfUnsafeField);
+                    } else if adt_def.is_union() {
+                        if let Some(assigned_ty) = self.assignment_info {
+                            if assigned_ty.needs_drop(self.tcx, self.typing_env) {
+                                // This would be unsafe, but should be outright impossible since we
+                                // reject such unions.
+                                assert!(
+                                    self.tcx.dcx().has_errors().is_some(),
+                                    "union fields that need dropping should be impossible: {assigned_ty}"
+                                );
+                            }
+                        } else {
+                            self.requires_unsafe(expr.span, AccessToUnionField);
                         }
-                    } else {
-                        self.requires_unsafe(expr.span, AccessToUnionField);
                     }
                 }
             }
@@ -689,8 +711,10 @@ enum UnsafeOpKind {
     CallToUnsafeFunction(Option<DefId>),
     UseOfInlineAssembly,
     InitializingTypeWith,
+    InitializingTypeWithUnsafeField,
     UseOfMutableStatic,
     UseOfExternStatic,
+    UseOfUnsafeField,
     DerefOfRawPointer,
     AccessToUnionField,
     MutationOfLayoutConstrainedField,
@@ -770,6 +794,15 @@ impl UnsafeOpKind {
                     unsafe_not_inherited_note,
                 },
             ),
+            InitializingTypeWithUnsafeField => tcx.emit_node_span_lint(
+                UNSAFE_OP_IN_UNSAFE_FN,
+                hir_id,
+                span,
+                UnsafeOpInUnsafeFnInitializingTypeWithUnsafeFieldRequiresUnsafe {
+                    span,
+                    unsafe_not_inherited_note,
+                },
+            ),
             UseOfMutableStatic => tcx.emit_node_span_lint(
                 UNSAFE_OP_IN_UNSAFE_FN,
                 hir_id,
@@ -784,6 +817,15 @@ impl UnsafeOpKind {
                 hir_id,
                 span,
                 UnsafeOpInUnsafeFnUseOfExternStaticRequiresUnsafe {
+                    span,
+                    unsafe_not_inherited_note,
+                },
+            ),
+            UseOfUnsafeField => tcx.emit_node_span_lint(
+                UNSAFE_OP_IN_UNSAFE_FN,
+                hir_id,
+                span,
+                UnsafeOpInUnsafeFnUseOfUnsafeFieldRequiresUnsafe {
                     span,
                     unsafe_not_inherited_note,
                 },
@@ -927,6 +969,20 @@ impl UnsafeOpKind {
                     unsafe_not_inherited_note,
                 });
             }
+            InitializingTypeWithUnsafeField if unsafe_op_in_unsafe_fn_allowed => {
+                dcx.emit_err(
+                    InitializingTypeWithUnsafeFieldRequiresUnsafeUnsafeOpInUnsafeFnAllowed {
+                        span,
+                        unsafe_not_inherited_note,
+                    },
+                );
+            }
+            InitializingTypeWithUnsafeField => {
+                dcx.emit_err(InitializingTypeWithUnsafeFieldRequiresUnsafe {
+                    span,
+                    unsafe_not_inherited_note,
+                });
+            }
             UseOfMutableStatic if unsafe_op_in_unsafe_fn_allowed => {
                 dcx.emit_err(UseOfMutableStaticRequiresUnsafeUnsafeOpInUnsafeFnAllowed {
                     span,
@@ -944,6 +1000,15 @@ impl UnsafeOpKind {
             }
             UseOfExternStatic => {
                 dcx.emit_err(UseOfExternStaticRequiresUnsafe { span, unsafe_not_inherited_note });
+            }
+            UseOfUnsafeField if unsafe_op_in_unsafe_fn_allowed => {
+                dcx.emit_err(UseOfUnsafeFieldRequiresUnsafeUnsafeOpInUnsafeFnAllowed {
+                    span,
+                    unsafe_not_inherited_note,
+                });
+            }
+            UseOfUnsafeField => {
+                dcx.emit_err(UseOfUnsafeFieldRequiresUnsafe { span, unsafe_not_inherited_note });
             }
             DerefOfRawPointer if unsafe_op_in_unsafe_fn_allowed => {
                 dcx.emit_err(DerefOfRawPointerRequiresUnsafeUnsafeOpInUnsafeFnAllowed {
@@ -1049,11 +1114,7 @@ pub(crate) fn check_unsafety(tcx: TyCtxt<'_>, def: LocalDefId) {
 
     let hir_id = tcx.local_def_id_to_hir_id(def);
     let safety_context = tcx.hir().fn_sig_by_hir_id(hir_id).map_or(SafetyContext::Safe, |fn_sig| {
-        if fn_sig.header.safety == hir::Safety::Unsafe {
-            SafetyContext::UnsafeFn
-        } else {
-            SafetyContext::Safe
-        }
+        if fn_sig.header.safety.is_unsafe() { SafetyContext::UnsafeFn } else { SafetyContext::Safe }
     });
     let body_target_features = &tcx.body_codegen_attrs(def.to_def_id()).target_features;
     let mut warnings = Vec::new();

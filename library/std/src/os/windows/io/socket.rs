@@ -101,7 +101,7 @@ impl OwnedSocket {
 
     #[cfg(target_vendor = "uwp")]
     pub(crate) fn set_no_inherit(&self) -> io::Result<()> {
-        Err(io::const_io_error!(io::ErrorKind::Unsupported, "Unavailable on UWP"))
+        Err(io::const_error!(io::ErrorKind::Unsupported, "Unavailable on UWP"))
     }
 }
 
@@ -273,6 +273,14 @@ impl<T: AsSocket> AsSocket for crate::sync::Arc<T> {
 
 #[stable(feature = "as_windows_ptrs", since = "1.71.0")]
 impl<T: AsSocket> AsSocket for crate::rc::Rc<T> {
+    #[inline]
+    fn as_socket(&self) -> BorrowedSocket<'_> {
+        (**self).as_socket()
+    }
+}
+
+#[unstable(feature = "unique_rc_arc", issue = "112566")]
+impl<T: AsSocket + ?Sized> AsSocket for crate::rc::UniqueRc<T> {
     #[inline]
     fn as_socket(&self) -> BorrowedSocket<'_> {
         (**self).as_socket()

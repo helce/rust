@@ -23,8 +23,7 @@ use rustc_middle::ty::{
     TypeVisitableExt,
 };
 use rustc_session::{DataTypeKind, FieldInfo, FieldKind, SizeKind, VariantInfo};
-use rustc_span::sym;
-use rustc_span::symbol::Symbol;
+use rustc_span::{Symbol, sym};
 use tracing::{debug, instrument, trace};
 use {rustc_abi as abi, rustc_hir as hir};
 
@@ -46,10 +45,10 @@ fn layout_of<'tcx>(
     let PseudoCanonicalInput { typing_env, value: ty } = query;
     debug!(?ty);
 
-    // Optimization: We convert to RevealAll and convert opaque types in the where bounds
-    // to their hidden types. This reduces overall uncached invocations of `layout_of` and
-    // is thus a small performance improvement.
-    let typing_env = typing_env.with_reveal_all_normalized(tcx);
+    // Optimization: We convert to TypingMode::PostAnalysis and convert opaque types in
+    // the where bounds to their hidden types. This reduces overall uncached invocations
+    // of `layout_of` and is thus a small performance improvement.
+    let typing_env = typing_env.with_post_analysis_normalized(tcx);
     let unnormalized_ty = ty;
 
     // FIXME: We might want to have two different versions of `layout_of`:
@@ -81,7 +80,7 @@ fn layout_of<'tcx>(
         record_layout_for_printing(&cx, layout);
     }
 
-    invariant::partially_check_layout(&cx, &layout);
+    invariant::layout_sanity_check(&cx, &layout);
 
     Ok(layout)
 }
@@ -667,6 +666,11 @@ fn layout_of_uncached<'tcx>(
             tcx.mk_layout(layout)
         }
 
+        ty::UnsafeBinder(bound_ty) => {
+            let ty = tcx.instantiate_bound_regions_with_erased(bound_ty.into());
+            cx.layout_of(ty)?.layout
+        }
+
         // Types with no meaningful known layout.
         ty::Alias(..) => {
             // NOTE(eddyb) `layout_of` query should've normalized these away,
@@ -1105,15 +1109,13 @@ fn variant_info_for_adt<'tcx>(
     };
 
     match layout.variants {
+        Variants::Empty => (vec![], None),
+
         Variants::Single { index } => {
-            if !adt_def.variants().is_empty() && layout.fields != FieldsShape::Primitive {
-                debug!("print-type-size `{:#?}` variant {}", layout, adt_def.variant(index).name);
-                let variant_def = &adt_def.variant(index);
-                let fields: Vec<_> = variant_def.fields.iter().map(|f| f.name).collect();
-                (vec![build_variant_info(Some(variant_def.name), &fields, layout)], None)
-            } else {
-                (vec![], None)
-            }
+            debug!("print-type-size `{:#?}` variant {}", layout, adt_def.variant(index).name);
+            let variant_def = &adt_def.variant(index);
+            let fields: Vec<_> = variant_def.fields.iter().map(|f| f.name).collect();
+            (vec![build_variant_info(Some(variant_def.name), &fields, layout)], None)
         }
 
         Variants::Multiple { tag, ref tag_encoding, .. } => {

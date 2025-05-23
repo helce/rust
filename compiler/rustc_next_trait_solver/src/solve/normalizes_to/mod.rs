@@ -6,7 +6,7 @@ mod weak_types;
 use rustc_type_ir::fast_reject::DeepRejectCtxt;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
-use rustc_type_ir::{self as ty, Interner, NormalizesTo, TypingMode, Upcast as _};
+use rustc_type_ir::{self as ty, Interner, NormalizesTo, Upcast as _};
 use tracing::instrument;
 
 use crate::delegate::SolverDelegate;
@@ -71,21 +71,10 @@ where
                 Ok(())
             }
             ty::AliasTermKind::OpaqueTy => {
-                match self.typing_mode(param_env) {
-                    // Opaques are never rigid outside of analysis mode.
-                    TypingMode::Coherence | TypingMode::PostAnalysis => Err(NoSolution),
-                    // During analysis, opaques are only rigid if we may not define it.
-                    TypingMode::Analysis { defining_opaque_types } => {
-                        if rigid_alias
-                            .def_id
-                            .as_local()
-                            .is_some_and(|def_id| defining_opaque_types.contains(&def_id))
-                        {
-                            Err(NoSolution)
-                        } else {
-                            Ok(())
-                        }
-                    }
+                if self.opaque_type_is_rigid(rigid_alias.def_id) {
+                    Ok(())
+                } else {
+                    Err(NoSolution)
                 }
             }
             // FIXME(generic_const_exprs): we would need to support generic consts here
@@ -99,10 +88,17 @@ where
     /// returns `NoSolution`.
     #[instrument(level = "trace", skip(self), ret)]
     fn normalize_at_least_one_step(&mut self, goal: Goal<I, NormalizesTo<I>>) -> QueryResult<I> {
-        match goal.predicate.alias.kind(self.cx()) {
+        let cx = self.cx();
+        match goal.predicate.alias.kind(cx) {
             ty::AliasTermKind::ProjectionTy | ty::AliasTermKind::ProjectionConst => {
                 let candidates = self.assemble_and_evaluate_candidates(goal);
-                self.merge_candidates(candidates)
+                let (_, proven_via) =
+                    self.probe(|_| ProbeKind::ShadowedEnvProbing).enter(|ecx| {
+                        let trait_goal: Goal<I, ty::TraitPredicate<I>> =
+                            goal.with(cx, goal.predicate.alias.trait_ref(cx));
+                        ecx.compute_trait_goal(trait_goal)
+                    })?;
+                self.merge_candidates(proven_via, candidates)
             }
             ty::AliasTermKind::InherentTy => self.normalize_inherent_associated_type(goal),
             ty::AliasTermKind::OpaqueTy => self.normalize_opaque_type(goal),
@@ -155,7 +151,7 @@ where
         then: impl FnOnce(&mut EvalCtxt<'_, D>) -> QueryResult<I>,
     ) -> Result<Candidate<I>, NoSolution> {
         if let Some(projection_pred) = assumption.as_projection_clause() {
-            if projection_pred.projection_def_id() == goal.predicate.def_id() {
+            if projection_pred.item_def_id() == goal.predicate.def_id() {
                 let cx = ecx.cx();
                 if !DeepRejectCtxt::relate_rigid_rigid(ecx.cx()).args_may_unify(
                     goal.predicate.alias.args,
@@ -623,6 +619,11 @@ where
                     Some(tail_ty) => Ty::new_projection(cx, metadata_def_id, [tail_ty]),
                 },
 
+                ty::UnsafeBinder(_) => {
+                    // FIXME(unsafe_binder): Figure out how to handle pointee for unsafe binders.
+                    todo!()
+                }
+
                 ty::Infer(
                     ty::TyVar(_) | ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_),
                 )
@@ -826,6 +827,11 @@ where
             | ty::Tuple(_)
             | ty::Error(_) => self_ty.discriminant_ty(ecx.cx()),
 
+            ty::UnsafeBinder(_) => {
+                // FIXME(unsafe_binders): instantiate this with placeholders?? i guess??
+                todo!("discr subgoal...")
+            }
+
             // We do not call `Ty::discriminant_ty` on alias, param, or placeholder
             // types, which return `<self_ty as DiscriminantKind>::Discriminant`
             // (or ICE in the case of placeholders). Projecting a type to itself
@@ -872,6 +878,11 @@ where
             | ty::Slice(_)
             | ty::Tuple(_)
             | ty::Error(_) => self_ty.async_destructor_ty(ecx.cx()),
+
+            ty::UnsafeBinder(_) => {
+                // FIXME(unsafe_binders): Instantiate the binder with placeholders I guess.
+                todo!()
+            }
 
             // We do not call `Ty::async_destructor_ty` on alias, param, or placeholder
             // types, which return `<self_ty as AsyncDestruct>::AsyncDestructor`

@@ -225,6 +225,7 @@ pub trait Interner:
 
     fn impl_is_const(self, def_id: Self::DefId) -> bool;
     fn fn_is_const(self, def_id: Self::DefId) -> bool;
+    fn alias_has_const_conditions(self, def_id: Self::DefId) -> bool;
     fn const_conditions(
         self,
         def_id: Self::DefId,
@@ -268,6 +269,9 @@ pub trait Interner:
     fn trait_is_fundamental(self, def_id: Self::DefId) -> bool;
 
     fn trait_may_be_implemented_via_object(self, trait_def_id: Self::DefId) -> bool;
+
+    /// Returns `true` if this is an `unsafe trait`.
+    fn trait_is_unsafe(self, trait_def_id: Self::DefId) -> bool;
 
     fn is_impl_trait_in_trait(self, def_id: Self::DefId) -> bool;
 

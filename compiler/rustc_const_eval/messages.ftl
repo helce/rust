@@ -110,7 +110,7 @@ const_eval_extern_type_field = `extern type` field does not have a known offset
 const_eval_fn_ptr_call =
     function pointers need an RFC before allowed to be called in {const_eval_const_context}s
 const_eval_for_loop_into_iter_non_const =
-    cannot convert `{$ty}` into an iterator in {const_eval_const_context}s
+    cannot use `for` loop on `{$ty}` in {const_eval_const_context}s
 
 const_eval_frame_note = {$times ->
     [0] {const_eval_frame_note_inner}
@@ -253,7 +253,7 @@ const_eval_non_const_fmt_macro_call =
     cannot call non-const formatting macro in {const_eval_const_context}s
 
 const_eval_non_const_fn_call =
-    cannot call non-const fn `{$def_path_str}` in {const_eval_const_context}s
+    cannot call non-const {$def_descr} `{$def_path_str}` in {const_eval_const_context}s
 
 const_eval_non_const_impl =
     impl defined here, but it is not `const`
@@ -324,11 +324,11 @@ const_eval_ptr_as_bytes_1 =
     this code performed an operation that depends on the underlying bytes representing a pointer
 const_eval_ptr_as_bytes_2 =
     the absolute address of a pointer is not known at compile-time, so such operations are not supported
-const_eval_question_branch_non_const =
-    `?` cannot determine the branch of `{$ty}` in {const_eval_const_context}s
 
+const_eval_question_branch_non_const =
+    `?` is not allowed on `{$ty}` in {const_eval_const_context}s
 const_eval_question_from_residual_non_const =
-    `?` cannot convert from residual of `{$ty}` in {const_eval_const_context}s
+    `?` is not allowed on `{$ty}` in {const_eval_const_context}s
 
 const_eval_range = in the range {$lo}..={$hi}
 const_eval_range_lower = greater or equal to {$lo}

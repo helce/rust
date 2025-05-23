@@ -10,8 +10,12 @@ use rustc_errors::{
 };
 use rustc_hir::def::{CtorKind, DefKind, Res};
 use rustc_hir::pat_util::EnumerateAndAdjustIterator;
-use rustc_hir::{self as hir, BindingMode, ByRef, HirId, LangItem, Mutability, Pat, PatKind};
+use rustc_hir::{
+    self as hir, BindingMode, ByRef, ExprKind, HirId, LangItem, Mutability, Pat, PatKind,
+    expr_needs_parens,
+};
 use rustc_infer::infer;
+use rustc_middle::traits::PatternOriginExpr;
 use rustc_middle::ty::{self, Ty, TypeVisitableExt};
 use rustc_middle::{bug, span_bug};
 use rustc_session::lint::builtin::NON_EXHAUSTIVE_OMITTED_PATTERNS;
@@ -19,8 +23,7 @@ use rustc_session::parse::feature_err;
 use rustc_span::edit_distance::find_best_match_for_name;
 use rustc_span::hygiene::DesugaringKind;
 use rustc_span::source_map::Spanned;
-use rustc_span::symbol::{Ident, kw, sym};
-use rustc_span::{BytePos, DUMMY_SP, Span};
+use rustc_span::{BytePos, DUMMY_SP, Ident, Span, kw, sym};
 use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::traits::{ObligationCause, ObligationCauseCode};
 use tracing::{debug, instrument, trace};
@@ -94,10 +97,32 @@ struct PatInfo<'a, 'tcx> {
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     fn pattern_cause(&self, ti: &TopInfo<'tcx>, cause_span: Span) -> ObligationCause<'tcx> {
+        // If origin_expr exists, then expected represents the type of origin_expr.
+        // If span also exists, then span == origin_expr.span (although it doesn't need to exist).
+        // In that case, we can peel away references from both and treat them
+        // as the same.
+        let origin_expr_info = ti.origin_expr.map(|mut cur_expr| {
+            let mut count = 0;
+
+            // cur_ty may have more layers of references than cur_expr.
+            // We can only make suggestions about cur_expr, however, so we'll
+            // use that as our condition for stopping.
+            while let ExprKind::AddrOf(.., inner) = &cur_expr.kind {
+                cur_expr = inner;
+                count += 1;
+            }
+
+            PatternOriginExpr {
+                peeled_span: cur_expr.span,
+                peeled_count: count,
+                peeled_prefix_suggestion_parentheses: expr_needs_parens(cur_expr),
+            }
+        });
+
         let code = ObligationCauseCode::Pattern {
             span: ti.span,
             root_ty: ti.expected,
-            origin_expr: ti.origin_expr.is_some(),
+            origin_expr: origin_expr_info,
         };
         self.cause(cause_span, code)
     }
@@ -674,7 +699,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         // Determine the binding mode...
         let bm = match user_bind_annot {
-            BindingMode(ByRef::No, Mutability::Mut) if matches!(def_br, ByRef::Yes(_)) => {
+            BindingMode(ByRef::No, Mutability::Mut) if let ByRef::Yes(def_br_mutbl) = def_br => {
                 if pat.span.at_least_rust_2024()
                     && (self.tcx.features().ref_pat_eat_one_layer_2024()
                         || self.tcx.features().ref_pat_eat_one_layer_2024_structural())
@@ -692,25 +717,25 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     BindingMode(def_br, Mutability::Mut)
                 } else {
                     // `mut` resets the binding mode on edition <= 2021
-                    *self
-                        .typeck_results
-                        .borrow_mut()
-                        .rust_2024_migration_desugared_pats_mut()
-                        .entry(pat_info.top_info.hir_id)
-                        .or_default() |= pat.span.at_least_rust_2024();
+                    self.add_rust_2024_migration_desugared_pat(
+                        pat_info.top_info.hir_id,
+                        pat,
+                        ident.span,
+                        def_br_mutbl,
+                    );
                     BindingMode(ByRef::No, Mutability::Mut)
                 }
             }
             BindingMode(ByRef::No, mutbl) => BindingMode(def_br, mutbl),
             BindingMode(ByRef::Yes(_), _) => {
-                if matches!(def_br, ByRef::Yes(_)) {
+                if let ByRef::Yes(def_br_mutbl) = def_br {
                     // `ref`/`ref mut` overrides the binding mode on edition <= 2021
-                    *self
-                        .typeck_results
-                        .borrow_mut()
-                        .rust_2024_migration_desugared_pats_mut()
-                        .entry(pat_info.top_info.hir_id)
-                        .or_default() |= pat.span.at_least_rust_2024();
+                    self.add_rust_2024_migration_desugared_pat(
+                        pat_info.top_info.hir_id,
+                        pat,
+                        ident.span,
+                        def_br_mutbl,
+                    );
                 }
                 user_bind_annot
             }
@@ -2238,14 +2263,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
         } else {
             // Reset binding mode on old editions
-            if pat_info.binding_mode != ByRef::No {
+            if let ByRef::Yes(inh_mut) = pat_info.binding_mode {
                 pat_info.binding_mode = ByRef::No;
-                *self
-                    .typeck_results
-                    .borrow_mut()
-                    .rust_2024_migration_desugared_pats_mut()
-                    .entry(pat_info.top_info.hir_id)
-                    .or_default() |= pat.span.at_least_rust_2024();
+                self.add_rust_2024_migration_desugared_pat(
+                    pat_info.top_info.hir_id,
+                    pat,
+                    inner.span,
+                    inh_mut,
+                )
             }
         }
 
@@ -2603,5 +2628,72 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             ty::Slice(..) | ty::Array(..) => (true, ty),
             _ => (false, ty),
         }
+    }
+
+    /// Record a pattern that's invalid under Rust 2024 match ergonomics, along with a problematic
+    /// span, so that the pattern migration lint can desugar it during THIR construction.
+    fn add_rust_2024_migration_desugared_pat(
+        &self,
+        pat_id: HirId,
+        subpat: &'tcx Pat<'tcx>,
+        cutoff_span: Span,
+        def_br_mutbl: Mutability,
+    ) {
+        // Try to trim the span we're labeling to just the `&` or binding mode that's an issue.
+        // If the subpattern's span is is from an expansion, the emitted label will not be trimmed.
+        let source_map = self.tcx.sess.source_map();
+        let cutoff_span = source_map
+            .span_extend_prev_while(cutoff_span, |c| c.is_whitespace() || c == '(')
+            .unwrap_or(cutoff_span);
+        // Ensure we use the syntax context and thus edition of `subpat.span`; this will be a hard
+        // error if the subpattern is of edition >= 2024.
+        let trimmed_span = subpat.span.until(cutoff_span).with_ctxt(subpat.span.ctxt());
+
+        let mut typeck_results = self.typeck_results.borrow_mut();
+        let mut table = typeck_results.rust_2024_migration_desugared_pats_mut();
+        // FIXME(ref_pat_eat_one_layer_2024): The migration diagnostic doesn't know how to track the
+        // default binding mode in the presence of Rule 3 or Rule 5. As a consequence, the labels it
+        // gives for default binding modes are wrong, as well as suggestions based on the default
+        // binding mode. This keeps it from making those suggestions, as doing so could panic.
+        let info = table.entry(pat_id).or_insert_with(|| ty::Rust2024IncompatiblePatInfo {
+            primary_labels: Vec::new(),
+            bad_modifiers: false,
+            bad_ref_pats: false,
+            suggest_eliding_modes: !self.tcx.features().ref_pat_eat_one_layer_2024()
+                && !self.tcx.features().ref_pat_eat_one_layer_2024_structural(),
+        });
+
+        // Only provide a detailed label if the problematic subpattern isn't from an expansion.
+        // In the case that it's from a macro, we'll add a more detailed note in the emitter.
+        let from_expansion = subpat.span.from_expansion();
+        let primary_label = if from_expansion {
+            // NB: This wording assumes the only expansions that can produce problematic reference
+            // patterns and bindings are macros. If a desugaring or AST pass is added that can do
+            // so, we may want to inspect the span's source callee or macro backtrace.
+            "occurs within macro expansion".to_owned()
+        } else {
+            let pat_kind = if let PatKind::Binding(user_bind_annot, _, _, _) = subpat.kind {
+                info.bad_modifiers |= true;
+                // If the user-provided binding modifier doesn't match the default binding mode, we'll
+                // need to suggest reference patterns, which can affect other bindings.
+                // For simplicity, we opt to suggest making the pattern fully explicit.
+                info.suggest_eliding_modes &=
+                    user_bind_annot == BindingMode(ByRef::Yes(def_br_mutbl), Mutability::Not);
+                "binding modifier"
+            } else {
+                info.bad_ref_pats |= true;
+                // For simplicity, we don't try to suggest eliding reference patterns. Thus, we'll
+                // suggest adding them instead, which can affect the types assigned to bindings.
+                // As such, we opt to suggest making the pattern fully explicit.
+                info.suggest_eliding_modes = false;
+                "reference pattern"
+            };
+            let dbm_str = match def_br_mutbl {
+                Mutability::Not => "ref",
+                Mutability::Mut => "ref mut",
+            };
+            format!("{pat_kind} not allowed under `{dbm_str}` default binding mode")
+        };
+        info.primary_labels.push((trimmed_span, primary_label));
     }
 }

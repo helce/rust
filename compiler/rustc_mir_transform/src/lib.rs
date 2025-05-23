@@ -163,7 +163,7 @@ declare_passes! {
     mod remove_unneeded_drops : RemoveUnneededDrops;
     mod remove_zsts : RemoveZsts;
     mod required_consts : RequiredConstsVisitor;
-    mod reveal_all : RevealAll;
+    mod post_analysis_normalize : PostAnalysisNormalize;
     mod sanity_check : SanityCheck;
     // This pass is public to allow external drivers to perform MIR cleanup
     pub mod simplify :
@@ -189,6 +189,7 @@ declare_passes! {
     mod simplify_comparison_integral : SimplifyComparisonIntegral;
     mod single_use_consts : SingleUseConsts;
     mod sroa : ScalarReplacementOfAggregates;
+    mod strip_debuginfo : StripDebugInfo;
     mod unreachable_enum_branching : UnreachableEnumBranching;
     mod unreachable_prop : UnreachablePropagation;
     mod validate : Validator;
@@ -436,6 +437,8 @@ fn mir_promoted(
         Some(MirPhase::Analysis(AnalysisPhase::Initial)),
     );
 
+    lint_tail_expr_drop_order::run_lint(tcx, def, &body);
+
     let promoted = promote_pass.promoted_fragments.into_inner();
     (tcx.alloc_steal_mir(body), tcx.alloc_steal_promoted(promoted))
 }
@@ -491,7 +494,6 @@ fn mir_drops_elaborated_and_const_checked(tcx: TyCtxt<'_>, def: LocalDefId) -> &
     }
 
     let (body, _) = tcx.mir_promoted(def);
-    lint_tail_expr_drop_order::run_lint(tcx, def, &body.borrow());
     let mut body = body.steal();
 
     if let Some(error_reported) = tainted_by_errors {
@@ -604,8 +606,8 @@ fn run_runtime_lowering_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         // These next passes must be executed together.
         &add_call_guards::CriticalCallEdges,
         // Must be done before drop elaboration because we need to drop opaque types, too.
-        &reveal_all::RevealAll,
-        // Calling this after reveal_all ensures that we don't deal with opaque types.
+        &post_analysis_normalize::PostAnalysisNormalize,
+        // Calling this after `PostAnalysisNormalize` ensures that we don't deal with opaque types.
         &add_subtyping_projections::Subtyper,
         &elaborate_drops::ElaborateDrops,
         // This will remove extraneous landing pads which are no longer
@@ -699,6 +701,8 @@ fn run_optimization_passes<'tcx>(tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
             &o1(simplify_branches::SimplifyConstCondition::Final),
             &o1(remove_noop_landing_pads::RemoveNoopLandingPads),
             &o1(simplify::SimplifyCfg::Final),
+            // After the last SimplifyCfg, because this wants one-block functions.
+            &strip_debuginfo::StripDebugInfo,
             &copy_prop::CopyProp,
             &dead_store_elimination::DeadStoreElimination::Final,
             &nrvo::RenameReturnPlace,

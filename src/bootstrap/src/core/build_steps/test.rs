@@ -3,12 +3,14 @@
 //! `./x.py test` (aka [`Kind::Test`]) is currently allowed to reach build steps in other modules.
 //! However, this contains ~all test parts we expect people to be able to build and run locally.
 
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::{env, fs, iter};
 
 use clap_complete::shells;
 
+use crate::core::build_steps::compile::run_cargo;
 use crate::core::build_steps::doc::DocumentationFormat;
 use crate::core::build_steps::synthetic_targets::MirOptPanicAbortSyntheticTarget;
 use crate::core::build_steps::tool::{self, SourceType, Tool};
@@ -261,12 +263,16 @@ pub struct Cargo {
     host: TargetSelection,
 }
 
+impl Cargo {
+    const CRATE_PATH: &str = "src/tools/cargo";
+}
+
 impl Step for Cargo {
     type Output = ();
     const ONLY_HOSTS: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("src/tools/cargo")
+        run.path(Self::CRATE_PATH)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -284,7 +290,7 @@ impl Step for Cargo {
             Mode::ToolRustc,
             self.host,
             Kind::Test,
-            "src/tools/cargo",
+            Self::CRATE_PATH,
             SourceType::Submodule,
             &[],
         );
@@ -299,6 +305,10 @@ impl Step for Cargo {
         // those features won't be able to land.
         cargo.env("CARGO_TEST_DISABLE_NIGHTLY", "1");
         cargo.env("PATH", path_for_cargo(builder, compiler));
+        // Cargo's test suite uses `CARGO_RUSTC_CURRENT_DIR` to determine the path that `file!` is
+        // relative to. Cargo no longer sets this env var, so we have to do that. This has to be the
+        // same value as `-Zroot-dir`.
+        cargo.env("CARGO_RUSTC_CURRENT_DIR", builder.src.display().to_string());
 
         #[cfg(feature = "build-metrics")]
         builder.metrics.begin_test_suite(
@@ -399,7 +409,7 @@ impl Step for Rustfmt {
         let host = self.host;
         let compiler = builder.compiler(stage, host);
 
-        builder.ensure(tool::Rustfmt { compiler, target: self.host, extra_features: Vec::new() });
+        builder.ensure(tool::Rustfmt { compiler, target: self.host });
 
         let mut cargo = tool::prepare_tool_cargo(
             builder,
@@ -501,17 +511,9 @@ impl Step for Miri {
         let host_compiler = builder.compiler(stage - 1, host);
 
         // Build our tools.
-        let miri = builder.ensure(tool::Miri {
-            compiler: host_compiler,
-            target: host,
-            extra_features: Vec::new(),
-        });
+        let miri = builder.ensure(tool::Miri { compiler: host_compiler, target: host });
         // the ui tests also assume cargo-miri has been built
-        builder.ensure(tool::CargoMiri {
-            compiler: host_compiler,
-            target: host,
-            extra_features: Vec::new(),
-        });
+        builder.ensure(tool::CargoMiri { compiler: host_compiler, target: host });
 
         // We also need sysroots, for Miri and for the host (the latter for build scripts).
         // This is for the tests so everything is done with the target compiler.
@@ -730,7 +732,7 @@ impl Step for Clippy {
         let host = self.host;
         let compiler = builder.compiler(stage, host);
 
-        builder.ensure(tool::Clippy { compiler, target: self.host, extra_features: Vec::new() });
+        builder.ensure(tool::Clippy { compiler, target: self.host });
         let mut cargo = tool::prepare_tool_cargo(
             builder,
             compiler,
@@ -1060,23 +1062,33 @@ impl Step for Tidy {
         }
 
         if builder.config.channel == "dev" || builder.config.channel == "nightly" {
-            builder.info("fmt check");
-            if builder.initial_rustfmt().is_none() {
-                let inferred_rustfmt_dir = builder.initial_rustc.parent().unwrap();
-                eprintln!(
-                    "\
+            if !builder.config.json_output {
+                builder.info("fmt check");
+                if builder.initial_rustfmt().is_none() {
+                    let inferred_rustfmt_dir = builder.initial_sysroot.join("bin");
+                    eprintln!(
+                        "\
 ERROR: no `rustfmt` binary found in {PATH}
 INFO: `rust.channel` is currently set to \"{CHAN}\"
 HELP: if you are testing a beta branch, set `rust.channel` to \"beta\" in the `config.toml` file
 HELP: to skip test's attempt to check tidiness, pass `--skip src/tools/tidy` to `x.py test`",
-                    PATH = inferred_rustfmt_dir.display(),
-                    CHAN = builder.config.channel,
+                        PATH = inferred_rustfmt_dir.display(),
+                        CHAN = builder.config.channel,
+                    );
+                    crate::exit!(1);
+                }
+                let all = false;
+                crate::core::build_steps::format::format(
+                    builder,
+                    !builder.config.cmd.bless(),
+                    all,
+                    &[],
                 );
-                crate::exit!(1);
+            } else {
+                eprintln!(
+                    "WARNING: `--json-output` is not supported on rustfmt, formatting will be skipped"
+                );
             }
-            let all = false;
-            crate::core::build_steps::format::format(builder, !builder.config.cmd.bless(), all, &[
-            ]);
         }
 
         builder.info("tidy check");
@@ -1113,69 +1125,21 @@ fn testdir(builder: &Builder<'_>, host: TargetSelection) -> PathBuf {
     builder.out.join(host).join("test")
 }
 
-macro_rules! default_test {
-    ($name:ident { path: $path:expr, mode: $mode:expr, suite: $suite:expr }) => {
-        test!($name { path: $path, mode: $mode, suite: $suite, default: true, host: false });
-    };
-}
-
-macro_rules! default_test_with_compare_mode {
-    ($name:ident { path: $path:expr, mode: $mode:expr, suite: $suite:expr,
-                   compare_mode: $compare_mode:expr }) => {
-        test_with_compare_mode!($name {
-            path: $path,
-            mode: $mode,
-            suite: $suite,
-            default: true,
-            host: false,
-            compare_mode: $compare_mode
-        });
-    };
-}
-
-macro_rules! host_test {
-    ($name:ident { path: $path:expr, mode: $mode:expr, suite: $suite:expr }) => {
-        test!($name { path: $path, mode: $mode, suite: $suite, default: true, host: true });
-    };
-}
-
+/// Declares a test step that invokes compiletest on a particular test suite.
 macro_rules! test {
-    ($name:ident { path: $path:expr, mode: $mode:expr, suite: $suite:expr, default: $default:expr,
-                   host: $host:expr }) => {
-        test_definitions!($name {
-            path: $path,
-            mode: $mode,
-            suite: $suite,
-            default: $default,
-            host: $host,
-            compare_mode: None
-        });
-    };
-}
-
-macro_rules! test_with_compare_mode {
-    ($name:ident { path: $path:expr, mode: $mode:expr, suite: $suite:expr, default: $default:expr,
-                   host: $host:expr, compare_mode: $compare_mode:expr }) => {
-        test_definitions!($name {
-            path: $path,
-            mode: $mode,
-            suite: $suite,
-            default: $default,
-            host: $host,
-            compare_mode: Some($compare_mode)
-        });
-    };
-}
-
-macro_rules! test_definitions {
-    ($name:ident {
-        path: $path:expr,
-        mode: $mode:expr,
-        suite: $suite:expr,
-        default: $default:expr,
-        host: $host:expr,
-        compare_mode: $compare_mode:expr
-    }) => {
+    (
+        $( #[$attr:meta] )* // allow docstrings and attributes
+        $name:ident {
+            path: $path:expr,
+            mode: $mode:expr,
+            suite: $suite:expr,
+            default: $default:expr
+            $( , only_hosts: $only_hosts:expr )? // default: false
+            $( , compare_mode: $compare_mode:expr )? // default: None
+            $( , )? // optional trailing comma
+        }
+    ) => {
+        $( #[$attr] )*
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         pub struct $name {
             pub compiler: Compiler,
@@ -1185,7 +1149,12 @@ macro_rules! test_definitions {
         impl Step for $name {
             type Output = ();
             const DEFAULT: bool = $default;
-            const ONLY_HOSTS: bool = $host;
+            const ONLY_HOSTS: bool = (const {
+                #[allow(unused_assignments, unused_mut)]
+                let mut value = false;
+                $( value = $only_hosts; )?
+                value
+            });
 
             fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
                 run.suite_path($path)
@@ -1204,7 +1173,12 @@ macro_rules! test_definitions {
                     mode: $mode,
                     suite: $suite,
                     path: $path,
-                    compare_mode: $compare_mode,
+                    compare_mode: (const {
+                        #[allow(unused_assignments, unused_mut)]
+                        let mut value = None;
+                        $( value = $compare_mode; )?
+                        value
+                    }),
                 })
             }
         }
@@ -1212,13 +1186,18 @@ macro_rules! test_definitions {
 }
 
 /// Declares an alias for running the [`Coverage`] tests in only one mode.
-/// Adapted from [`test_definitions`].
+/// Adapted from [`test`].
 macro_rules! coverage_test_alias {
-    ($name:ident {
-        alias_and_mode: $alias_and_mode:expr, // &'static str
-        default: $default:expr, // bool
-        only_hosts: $only_hosts:expr $(,)? // bool
-    }) => {
+    (
+        $( #[$attr:meta] )* // allow docstrings and attributes
+        $name:ident {
+            alias_and_mode: $alias_and_mode:expr, // &'static str
+            default: $default:expr, // bool
+            only_hosts: $only_hosts:expr // bool
+            $( , )? // optional trailing comma
+        }
+    ) => {
+        $( #[$attr] )*
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         pub struct $name {
             pub compiler: Compiler,
@@ -1390,37 +1369,74 @@ impl Step for CrateBuildHelper {
     }
 }
 
-default_test!(Ui { path: "tests/ui", mode: "ui", suite: "ui" });
+test!(Ui { path: "tests/ui", mode: "ui", suite: "ui", default: true });
 
-default_test!(Crashes { path: "tests/crashes", mode: "crashes", suite: "crashes" });
+test!(Crashes { path: "tests/crashes", mode: "crashes", suite: "crashes", default: true });
 
-default_test!(Codegen { path: "tests/codegen", mode: "codegen", suite: "codegen" });
+test!(Codegen { path: "tests/codegen", mode: "codegen", suite: "codegen", default: true });
 
-default_test!(CodegenUnits {
+test!(CodegenUnits {
     path: "tests/codegen-units",
     mode: "codegen-units",
-    suite: "codegen-units"
+    suite: "codegen-units",
+    default: true,
 });
 
-default_test!(Incremental { path: "tests/incremental", mode: "incremental", suite: "incremental" });
+test!(Incremental {
+    path: "tests/incremental",
+    mode: "incremental",
+    suite: "incremental",
+    default: true,
+});
 
-default_test_with_compare_mode!(Debuginfo {
+test!(Debuginfo {
     path: "tests/debuginfo",
     mode: "debuginfo",
     suite: "debuginfo",
-    compare_mode: "split-dwarf"
+    default: true,
+    compare_mode: Some("split-dwarf"),
 });
 
-host_test!(UiFullDeps { path: "tests/ui-fulldeps", mode: "ui", suite: "ui-fulldeps" });
+test!(UiFullDeps {
+    path: "tests/ui-fulldeps",
+    mode: "ui",
+    suite: "ui-fulldeps",
+    default: true,
+    only_hosts: true,
+});
 
-host_test!(Rustdoc { path: "tests/rustdoc", mode: "rustdoc", suite: "rustdoc" });
-host_test!(RustdocUi { path: "tests/rustdoc-ui", mode: "ui", suite: "rustdoc-ui" });
+test!(Rustdoc {
+    path: "tests/rustdoc",
+    mode: "rustdoc",
+    suite: "rustdoc",
+    default: true,
+    only_hosts: true,
+});
+test!(RustdocUi {
+    path: "tests/rustdoc-ui",
+    mode: "ui",
+    suite: "rustdoc-ui",
+    default: true,
+    only_hosts: true,
+});
 
-host_test!(RustdocJson { path: "tests/rustdoc-json", mode: "rustdoc-json", suite: "rustdoc-json" });
+test!(RustdocJson {
+    path: "tests/rustdoc-json",
+    mode: "rustdoc-json",
+    suite: "rustdoc-json",
+    default: true,
+    only_hosts: true,
+});
 
-host_test!(Pretty { path: "tests/pretty", mode: "pretty", suite: "pretty" });
+test!(Pretty {
+    path: "tests/pretty",
+    mode: "pretty",
+    suite: "pretty",
+    default: true,
+    only_hosts: true,
+});
 
-/// Special-handling is needed for `run-make`, so don't use `default_test` for defining `RunMake`
+/// Special-handling is needed for `run-make`, so don't use `test!` for defining `RunMake`
 /// tests.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct RunMake {
@@ -1455,7 +1471,7 @@ impl Step for RunMake {
     }
 }
 
-default_test!(Assembly { path: "tests/assembly", mode: "assembly", suite: "assembly" });
+test!(Assembly { path: "tests/assembly", mode: "assembly", suite: "assembly", default: true });
 
 /// Coverage tests are a bit more complicated than other test suites, because
 /// we want to run the same set of test files in multiple different modes,
@@ -1532,27 +1548,33 @@ impl Step for Coverage {
     }
 }
 
-// Runs `tests/coverage` in "coverage-map" mode only.
-// Used by `x test` and `x test coverage-map`.
-coverage_test_alias!(CoverageMap {
-    alias_and_mode: "coverage-map",
-    default: true,
-    only_hosts: false,
-});
-// Runs `tests/coverage` in "coverage-run" mode only.
-// Used by `x test` and `x test coverage-run`.
-coverage_test_alias!(CoverageRun {
-    alias_and_mode: "coverage-run",
-    default: true,
-    // Compiletest knows how to automatically skip these tests when cross-compiling,
-    // but skipping the whole step here makes it clearer that they haven't run at all.
-    only_hosts: true,
-});
+coverage_test_alias! {
+    /// Runs the `tests/coverage` test suite in "coverage-map" mode only.
+    /// Used by `x test` and `x test coverage-map`.
+    CoverageMap {
+        alias_and_mode: "coverage-map",
+        default: true,
+        only_hosts: false,
+    }
+}
+coverage_test_alias! {
+    /// Runs the `tests/coverage` test suite in "coverage-run" mode only.
+    /// Used by `x test` and `x test coverage-run`.
+    CoverageRun {
+        alias_and_mode: "coverage-run",
+        default: true,
+        // Compiletest knows how to automatically skip these tests when cross-compiling,
+        // but skipping the whole step here makes it clearer that they haven't run at all.
+        only_hosts: true,
+    }
+}
 
-host_test!(CoverageRunRustdoc {
+test!(CoverageRunRustdoc {
     path: "tests/coverage-run-rustdoc",
     mode: "coverage-run",
-    suite: "coverage-run-rustdoc"
+    suite: "coverage-run-rustdoc",
+    default: true,
+    only_hosts: true,
 });
 
 // For the mir-opt suite we do not use macros, as we need custom behavior when blessing.
@@ -1698,7 +1720,7 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
 
         // ensure that `libproc_macro` is available on the host.
         if suite == "mir-opt" {
-            builder.ensure(compile::Std::new_for_mir_opt_tests(compiler, compiler.host));
+            builder.ensure(compile::Std::new(compiler, compiler.host).is_for_mir_opt_tests(true));
         } else {
             builder.ensure(compile::Std::new(compiler, compiler.host));
         }
@@ -1711,7 +1733,7 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
         let mut cmd = builder.tool_cmd(Tool::Compiletest);
 
         if suite == "mir-opt" {
-            builder.ensure(compile::Std::new_for_mir_opt_tests(compiler, target));
+            builder.ensure(compile::Std::new(compiler, target).is_for_mir_opt_tests(true));
         } else {
             builder.ensure(compile::Std::new(compiler, target));
         }
@@ -1807,6 +1829,10 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
 
         if builder.config.cmd.force_rerun() {
             cmd.arg("--force-rerun");
+        }
+
+        if builder.config.cmd.no_capture() {
+            cmd.arg("--no-capture");
         }
 
         let compare_mode =
@@ -2185,6 +2211,7 @@ struct BookTest {
     path: PathBuf,
     name: &'static str,
     is_ext_doc: bool,
+    dependencies: Vec<&'static str>,
 }
 
 impl Step for BookTest {
@@ -2237,6 +2264,57 @@ impl BookTest {
         // Books often have feature-gated example text.
         rustbook_cmd.env("RUSTC_BOOTSTRAP", "1");
         rustbook_cmd.env("PATH", new_path).arg("test").arg(path);
+
+        // Books may also need to build dependencies. For example, `TheBook` has
+        // code samples which use the `trpl` crate. For the `rustdoc` invocation
+        // to find them them successfully, they need to be built first and their
+        // paths used to generate the
+        let libs = if !self.dependencies.is_empty() {
+            let mut lib_paths = vec![];
+            for dep in self.dependencies {
+                let mode = Mode::ToolRustc;
+                let target = builder.config.build;
+                let cargo = tool::prepare_tool_cargo(
+                    builder,
+                    compiler,
+                    mode,
+                    target,
+                    Kind::Build,
+                    dep,
+                    SourceType::Submodule,
+                    &[],
+                );
+
+                let stamp = builder
+                    .cargo_out(compiler, mode, target)
+                    .join(PathBuf::from(dep).file_name().unwrap())
+                    .with_extension("stamp");
+
+                let output_paths = run_cargo(builder, cargo, vec![], &stamp, vec![], false, false);
+                let directories = output_paths
+                    .into_iter()
+                    .filter_map(|p| p.parent().map(ToOwned::to_owned))
+                    .fold(HashSet::new(), |mut set, dir| {
+                        set.insert(dir);
+                        set
+                    });
+
+                lib_paths.extend(directories);
+            }
+            lib_paths
+        } else {
+            vec![]
+        };
+
+        if !libs.is_empty() {
+            let paths = libs
+                .into_iter()
+                .map(|path| path.into_os_string())
+                .collect::<Vec<OsString>>()
+                .join(OsStr::new(","));
+            rustbook_cmd.args([OsString::from("--library-path"), paths]);
+        }
+
         builder.add_rust_test_threads(&mut rustbook_cmd);
         let _guard = builder.msg(
             Kind::Test,
@@ -2295,6 +2373,7 @@ macro_rules! test_book {
         $name:ident, $path:expr, $book_name:expr,
         default=$default:expr
         $(,submodules = $submodules:expr)?
+        $(,dependencies=$dependencies:expr)?
         ;
     )+) => {
         $(
@@ -2324,11 +2403,21 @@ macro_rules! test_book {
                             builder.require_submodule(submodule, None);
                         }
                     )*
+
+                    let dependencies = vec![];
+                    $(
+                        let mut dependencies = dependencies;
+                        for dep in $dependencies {
+                            dependencies.push(dep);
+                        }
+                    )?
+
                     builder.ensure(BookTest {
                         compiler: self.compiler,
                         path: PathBuf::from($path),
                         name: $book_name,
                         is_ext_doc: !$default,
+                        dependencies,
                     });
                 }
             }
@@ -2343,7 +2432,7 @@ test_book!(
     RustcBook, "src/doc/rustc", "rustc", default=true;
     RustByExample, "src/doc/rust-by-example", "rust-by-example", default=false, submodules=["src/doc/rust-by-example"];
     EmbeddedBook, "src/doc/embedded-book", "embedded-book", default=false, submodules=["src/doc/embedded-book"];
-    TheBook, "src/doc/book", "book", default=false, submodules=["src/doc/book"];
+    TheBook, "src/doc/book", "book", default=false, submodules=["src/doc/book"], dependencies=["src/doc/book/packages/trpl"];
     UnstableBook, "src/doc/unstable-book", "unstable-book", default=true;
     EditionGuide, "src/doc/edition-guide", "edition-guide", default=false, submodules=["src/doc/edition-guide"];
 );
@@ -2359,7 +2448,9 @@ impl Step for ErrorIndex {
     const ONLY_HOSTS: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("src/tools/error_index_generator")
+        // Also add `error-index` here since that is what appears in the error message
+        // when this fails.
+        run.path("src/tools/error_index_generator").alias("error-index")
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -2423,35 +2514,6 @@ fn markdown_test(builder: &Builder<'_>, compiler: Compiler, markdown: &Path) -> 
         cmd.run_capture(builder).is_success()
     } else {
         cmd.run(builder)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RustcGuide;
-
-impl Step for RustcGuide {
-    type Output = ();
-    const DEFAULT: bool = false;
-    const ONLY_HOSTS: bool = true;
-
-    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("src/doc/rustc-dev-guide")
-    }
-
-    fn make_run(run: RunConfig<'_>) {
-        run.builder.ensure(RustcGuide);
-    }
-
-    fn run(self, builder: &Builder<'_>) {
-        let relative_path = "src/doc/rustc-dev-guide";
-        builder.require_submodule(relative_path, None);
-
-        let src = builder.src.join(relative_path);
-        let mut rustbook_cmd = builder.tool_cmd(Tool::Rustbook).delay_failure();
-        rustbook_cmd.arg("linkcheck").arg(&src);
-        let toolstate =
-            if rustbook_cmd.run(builder) { ToolState::TestPass } else { ToolState::TestFail };
-        builder.save_toolstate("rustc-dev-guide", toolstate);
     }
 }
 
@@ -2538,7 +2600,7 @@ fn prepare_cargo_test(
 ) -> BootstrapCommand {
     let mut cargo = cargo.into();
 
-    // Propegate `--bless` if it has not already been set/unset
+    // Propagate `--bless` if it has not already been set/unset
     // Any tools that want to use this should bless if `RUSTC_BLESS` is set to
     // anything other than `0`.
     if builder.config.cmd.bless() && !cargo.get_envs().any(|v| v.0 == "RUSTC_BLESS") {
@@ -2551,6 +2613,11 @@ fn prepare_cargo_test(
     if builder.kind == Kind::Test && !builder.fail_fast {
         cargo.arg("--no-fail-fast");
     }
+
+    if builder.config.json_output {
+        cargo.arg("--message-format=json");
+    }
+
     match builder.doc_tests {
         DocTests::Only => {
             cargo.arg("--doc");
@@ -2647,7 +2714,7 @@ impl Step for Crate {
 
         // Prepare sysroot
         // See [field@compile::Std::force_recompile].
-        builder.ensure(compile::Std::force_recompile(compiler, compiler.host));
+        builder.ensure(compile::Std::new(compiler, compiler.host).force_recompile(true));
 
         // If we're not doing a full bootstrap but we're testing a stage2
         // version of libstd, then what we're actually testing is the libstd
@@ -2683,11 +2750,15 @@ impl Step for Crate {
             // `lib.rs` file, and a `lib.miri.rs` file exists in the same folder, we build that
             // instead. But crucially we only do that for the library, not the test builds.
             cargo.env("MIRI_REPLACE_LIBRS_IF_NOT_TEST", "1");
+            // std needs to be built with `-Zforce-unstable-if-unmarked`. For some reason the builder
+            // does not set this directly, but relies on the rustc wrapper to set it, and we are not using
+            // the wrapper -- hence we have to set it ourselves.
+            cargo.rustflag("-Zforce-unstable-if-unmarked");
             cargo
         } else {
             // Also prepare a sysroot for the target.
             if builder.config.build != target {
-                builder.ensure(compile::Std::force_recompile(compiler, target));
+                builder.ensure(compile::Std::new(compiler, target).force_recompile(true));
                 builder.ensure(RemoteCopyLibs { compiler, target });
             }
 
@@ -3054,9 +3125,8 @@ impl Step for Bootstrap {
 
         let mut cmd = command(&builder.initial_cargo);
         cmd.arg("test")
-            .args(["--features", "bootstrap-self-test"])
             .current_dir(builder.src.join("src/bootstrap"))
-            .env("RUSTFLAGS", "-Cdebuginfo=2")
+            .env("RUSTFLAGS", "--cfg test -Cdebuginfo=2")
             .env("CARGO_TARGET_DIR", builder.out.join("bootstrap"))
             .env("RUSTC_BOOTSTRAP", "1")
             .env("RUSTDOC", builder.rustdoc(compiler))
@@ -3404,7 +3474,6 @@ impl Step for CodegenCranelift {
             // FIXME remove once vendoring is handled
             .arg("--skip-test")
             .arg("testsuite.extended_sysroot");
-        cargo.args(builder.config.test_args());
 
         cargo.into_cmd().run(builder);
     }
@@ -3464,10 +3533,10 @@ impl Step for CodegenGCC {
         let compiler = self.compiler;
         let target = self.target;
 
-        builder.ensure(compile::Std::new_with_extra_rust_args(compiler, target, &[
-            "-Csymbol-mangling-version=v0",
-            "-Cpanic=abort",
-        ]));
+        builder.ensure(
+            compile::Std::new(compiler, target)
+                .extra_rust_args(&["-Csymbol-mangling-version=v0", "-Cpanic=abort"]),
+        );
 
         // If we're not doing a full bootstrap but we're testing a stage2
         // version of libstd, then what we're actually testing is the libstd
@@ -3599,14 +3668,42 @@ impl Step for TestFloatParse {
             &[],
         );
 
-        cargo_run.arg("--");
-        if builder.config.args().is_empty() {
-            // By default, exclude tests that take longer than ~1m.
-            cargo_run.arg("--skip-huge");
-        } else {
-            cargo_run.args(builder.config.args());
+        if !matches!(env::var("FLOAT_PARSE_TESTS_NO_SKIP_HUGE").as_deref(), Ok("1") | Ok("true")) {
+            cargo_run.args(["--", "--skip-huge"]);
         }
 
         cargo_run.into_cmd().run(builder);
+    }
+}
+
+#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+pub struct CollectLicenseMetadata;
+
+impl Step for CollectLicenseMetadata {
+    type Output = PathBuf;
+    const ONLY_HOSTS: bool = true;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        run.path("src/tools/collect-license-metadata")
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(CollectLicenseMetadata);
+    }
+
+    fn run(self, builder: &Builder<'_>) -> Self::Output {
+        let Some(reuse) = &builder.config.reuse else {
+            panic!("REUSE is required to collect the license metadata");
+        };
+
+        let dest = builder.src.join("license-metadata.json");
+
+        let mut cmd = builder.tool_cmd(Tool::CollectLicenseMetadata);
+        cmd.env("REUSE_EXE", reuse);
+        cmd.env("DEST", &dest);
+        cmd.env("ONLY_CHECK", "1");
+        cmd.run(builder);
+
+        dest
     }
 }

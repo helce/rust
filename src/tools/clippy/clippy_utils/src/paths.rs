@@ -23,7 +23,6 @@ pub const LATE_LINT_PASS: [&str; 3] = ["rustc_lint", "passes", "LateLintPass"];
 pub const LINT: [&str; 2] = ["rustc_lint_defs", "Lint"];
 pub const SYMBOL: [&str; 3] = ["rustc_span", "symbol", "Symbol"];
 pub const SYMBOL_AS_STR: [&str; 4] = ["rustc_span", "symbol", "Symbol", "as_str"];
-pub const SYMBOL_INTERN: [&str; 4] = ["rustc_span", "symbol", "Symbol", "intern"];
 pub const SYMBOL_TO_IDENT_STRING: [&str; 4] = ["rustc_span", "symbol", "Symbol", "to_ident_string"];
 pub const SYM_MODULE: [&str; 3] = ["rustc_span", "symbol", "sym"];
 pub const SYNTAX_CONTEXT: [&str; 3] = ["rustc_span", "hygiene", "SyntaxContext"];
@@ -36,7 +35,7 @@ pub const CHILD_KILL: [&str; 4] = ["std", "process", "Child", "kill"];
 pub const PANIC_ANY: [&str; 3] = ["std", "panic", "panic_any"];
 
 // Paths in clippy itself
-pub const MSRV: [&str; 3] = ["clippy_config", "msrvs", "Msrv"];
+pub const MSRV: [&str; 3] = ["clippy_utils", "msrvs", "Msrv"];
 
 // Paths in external crates
 #[expect(clippy::invalid_paths)] // internal lints do not know about all external crates

@@ -5,9 +5,9 @@ use rustc_hir::def::DefKind;
 use rustc_index::bit_set::BitSet;
 use rustc_middle::bug;
 use rustc_middle::query::Providers;
+use rustc_middle::ty::fold::fold_regions;
 use rustc_middle::ty::{
-    self, EarlyBinder, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitableExt,
-    TypeVisitor, Upcast,
+    self, EarlyBinder, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitor, Upcast,
 };
 use rustc_span::DUMMY_SP;
 use rustc_span::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
@@ -36,6 +36,8 @@ fn sized_constraint_for_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'
         | CoroutineWitness(..)
         | Never
         | Dynamic(_, _, ty::DynStar) => None,
+
+        UnsafeBinder(_) => todo!(),
 
         // these are never sized
         Str | Slice(..) | Dynamic(_, _, ty::Dyn) | Foreign(..) => Some(ty),
@@ -95,9 +97,6 @@ fn adt_sized_constraint<'tcx>(
     let tail_ty = tcx.type_of(tail_def.did).instantiate_identity();
 
     let constraint_ty = sized_constraint_for_ty(tcx, tail_ty)?;
-    if let Err(guar) = constraint_ty.error_reported() {
-        return Some(ty::EarlyBinder::bind(Ty::new_error(tcx, guar)));
-    }
 
     // perf hack: if there is a `constraint_ty: Sized` bound, then we know
     // that the type is sized and do not need to check it on the impl.
@@ -162,8 +161,7 @@ fn param_env(tcx: TyCtxt<'_>, def_id: DefId) -> ty::ParamEnv<'_> {
 
     let local_did = def_id.as_local();
 
-    let unnormalized_env =
-        ty::ParamEnv::new(tcx.mk_clauses(&predicates), traits::Reveal::UserFacing);
+    let unnormalized_env = ty::ParamEnv::new(tcx.mk_clauses(&predicates));
 
     let body_id = local_did.unwrap_or(CRATE_DEF_ID);
     let cause = traits::ObligationCause::misc(tcx.def_span(def_id), body_id);
@@ -202,7 +200,7 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for ImplTraitInTraitFinder<'_, 'tcx> {
             // We have entered some binders as we've walked into the
             // bounds of the RPITIT. Shift these binders back out when
             // constructing the top-level projection predicate.
-            let shifted_alias_ty = self.tcx.fold_regions(unshifted_alias_ty, |re, depth| {
+            let shifted_alias_ty = fold_regions(self.tcx, unshifted_alias_ty, |re, depth| {
                 if let ty::ReBound(index, bv) = re.kind() {
                     if depth != ty::INNERMOST {
                         return ty::Region::new_error_with_message(
@@ -253,8 +251,10 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for ImplTraitInTraitFinder<'_, 'tcx> {
     }
 }
 
-fn param_env_reveal_all_normalized(tcx: TyCtxt<'_>, def_id: DefId) -> ty::ParamEnv<'_> {
-    tcx.param_env(def_id).with_reveal_all_normalized(tcx)
+fn param_env_normalized_for_post_analysis(tcx: TyCtxt<'_>, def_id: DefId) -> ty::ParamEnv<'_> {
+    // This is a bit ugly but the easiest way to avoid code duplication.
+    let typing_env = ty::TypingEnv::non_body_analysis(tcx, def_id);
+    typing_env.with_post_analysis_normalized(tcx).param_env
 }
 
 /// If the given trait impl enables exploiting the former order dependence of trait objects,
@@ -366,7 +366,7 @@ pub(crate) fn provide(providers: &mut Providers) {
         asyncness,
         adt_sized_constraint,
         param_env,
-        param_env_reveal_all_normalized,
+        param_env_normalized_for_post_analysis,
         self_ty_of_trait_impl_enabling_order_dep_trait_object_hack,
         defaultness,
         unsizing_params_for_adt,

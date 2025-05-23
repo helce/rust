@@ -89,8 +89,7 @@ use rustc_middle::ty::{self, GenericArgs, GenericArgsRef, Ty, TyCtxt, TypingMode
 use rustc_middle::{bug, span_bug};
 use rustc_session::parse::feature_err;
 use rustc_span::def_id::CRATE_DEF_ID;
-use rustc_span::symbol::{Ident, kw, sym};
-use rustc_span::{BytePos, DUMMY_SP, Span, Symbol};
+use rustc_span::{BytePos, DUMMY_SP, Ident, Span, Symbol, kw, sym};
 use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
 use rustc_trait_selection::error_reporting::infer::ObligationCauseExt as _;
 use rustc_trait_selection::error_reporting::traits::suggestions::ReturnsVisitor;
@@ -108,7 +107,7 @@ pub fn provide(providers: &mut Providers) {
         adt_async_destructor,
         region_scope_tree,
         collect_return_position_impl_trait_in_trait_tys,
-        compare_impl_const: compare_impl_item::compare_impl_const_raw,
+        compare_impl_item: compare_impl_item::compare_impl_item,
         check_coroutine_obligations: check::check_coroutine_obligations,
         ..*providers
     };

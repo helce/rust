@@ -39,8 +39,7 @@ pub use rustc_session::lint::builtin::*;
 use rustc_session::{declare_lint, declare_lint_pass, impl_lint_pass};
 use rustc_span::edition::Edition;
 use rustc_span::source_map::Spanned;
-use rustc_span::symbol::{Ident, Symbol, kw, sym};
-use rustc_span::{BytePos, InnerSpan, Span};
+use rustc_span::{BytePos, Ident, InnerSpan, Span, Symbol, kw, sym};
 use rustc_target::asm::InlineAsmArch;
 use rustc_trait_selection::infer::{InferCtxtExt, TyCtxtInferExt};
 use rustc_trait_selection::traits::misc::type_allowed_to_implement_copy;
@@ -387,7 +386,7 @@ pub struct MissingDoc;
 
 impl_lint_pass!(MissingDoc => [MISSING_DOCS]);
 
-fn has_doc(attr: &ast::Attribute) -> bool {
+fn has_doc(attr: &hir::Attribute) -> bool {
     if attr.is_doc_comment() {
         return true;
     }
@@ -586,7 +585,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingCopyImplementations {
                 return;
             }
         }
-        if ty.is_copy_modulo_regions(cx.tcx, cx.typing_env()) {
+        if cx.type_is_copy_modulo_regions(ty) {
             return;
         }
         if type_implements_negative_copy_modulo_regions(cx.tcx, ty, cx.typing_env()) {
@@ -625,6 +624,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingCopyImplementations {
             cx.param_env,
             ty,
             traits::ObligationCause::misc(item.span, item.owner_id.def_id),
+            hir::Safety::Safe,
         )
         .is_ok()
         {
@@ -1011,7 +1011,7 @@ declare_lint_pass!(InvalidNoMangleItems => [NO_MANGLE_CONST_ITEMS, NO_MANGLE_GEN
 impl<'tcx> LateLintPass<'tcx> for InvalidNoMangleItems {
     fn check_item(&mut self, cx: &LateContext<'_>, it: &hir::Item<'_>) {
         let attrs = cx.tcx.hir().attrs(it.hir_id());
-        let check_no_mangle_on_generic_fn = |no_mangle_attr: &ast::Attribute,
+        let check_no_mangle_on_generic_fn = |no_mangle_attr: &hir::Attribute,
                                              impl_generics: Option<&hir::Generics<'_>>,
                                              generics: &hir::Generics<'_>,
                                              span| {
@@ -1175,7 +1175,7 @@ declare_lint_pass!(
 );
 
 impl<'tcx> LateLintPass<'tcx> for UnstableFeatures {
-    fn check_attribute(&mut self, cx: &LateContext<'_>, attr: &ast::Attribute) {
+    fn check_attribute(&mut self, cx: &LateContext<'_>, attr: &hir::Attribute) {
         if attr.has_name(sym::feature)
             && let Some(items) = attr.meta_item_list()
         {
@@ -1407,7 +1407,7 @@ declare_lint_pass!(TypeAliasBounds => [TYPE_ALIAS_BOUNDS]);
 impl TypeAliasBounds {
     pub(crate) fn affects_object_lifetime_defaults(pred: &hir::WherePredicate<'_>) -> bool {
         // Bounds of the form `T: 'a` with `T` type param affect object lifetime defaults.
-        if let hir::WherePredicate::BoundPredicate(pred) = pred
+        if let hir::WherePredicateKind::BoundPredicate(pred) = pred.kind
             && pred.bounds.iter().any(|bound| matches!(bound, hir::GenericBound::Outlives(_)))
             && pred.bound_generic_params.is_empty() // indeed, even if absent from the RHS
             && pred.bounded_ty.as_generic_param().is_some()
@@ -1451,11 +1451,11 @@ impl<'tcx> LateLintPass<'tcx> for TypeAliasBounds {
         let mut inline_sugg = Vec::new();
 
         for p in generics.predicates {
-            let span = p.span();
-            if p.in_where_clause() {
+            let span = p.span;
+            if p.kind.in_where_clause() {
                 where_spans.push(span);
             } else {
-                for b in p.bounds() {
+                for b in p.kind.bounds() {
                     inline_spans.push(b.span());
                 }
                 inline_sugg.push((span, String::new()));
@@ -1813,7 +1813,7 @@ declare_lint! {
     "detects edition keywords being used as an identifier",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "issue #49716 <https://github.com/rust-lang/rust/issues/49716>",
+        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/gen-keyword.html>",
     };
 }
 
@@ -1828,7 +1828,7 @@ impl KeywordIdents {
     fn check_tokens(&mut self, cx: &EarlyContext<'_>, tokens: &TokenStream) {
         // Check if the preceding token is `$`, because we want to allow `$async`, etc.
         let mut prev_dollar = false;
-        for tt in tokens.trees() {
+        for tt in tokens.iter() {
             match tt {
                 // Only report non-raw idents.
                 TokenTree::Token(token, _) => {
@@ -2071,7 +2071,7 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitOutlivesRequirements {
             let num_where_predicates = hir_generics
                 .predicates
                 .iter()
-                .filter(|predicate| predicate.in_where_clause())
+                .filter(|predicate| predicate.kind.in_where_clause())
                 .count();
 
             let mut bound_count = 0;
@@ -2080,8 +2080,8 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitOutlivesRequirements {
             let mut dropped_where_predicate_count = 0;
             for (i, where_predicate) in hir_generics.predicates.iter().enumerate() {
                 let (relevant_lifetimes, bounds, predicate_span, in_where_clause) =
-                    match where_predicate {
-                        hir::WherePredicate::RegionPredicate(predicate) => {
+                    match where_predicate.kind {
+                        hir::WherePredicateKind::RegionPredicate(predicate) => {
                             if let Some(ResolvedArg::EarlyBound(region_def_id)) =
                                 cx.tcx.named_bound_var(predicate.lifetime.hir_id)
                             {
@@ -2090,21 +2090,21 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitOutlivesRequirements {
                                         cx.tcx,
                                         // don't warn if the inferred span actually came from the predicate we're looking at
                                         // this happens if the type is recursively defined
-                                        inferred_outlives
-                                            .iter()
-                                            .filter(|(_, span)| !predicate.span.contains(*span)),
+                                        inferred_outlives.iter().filter(|(_, span)| {
+                                            !where_predicate.span.contains(*span)
+                                        }),
                                         item.owner_id.def_id,
                                         region_def_id,
                                     ),
                                     &predicate.bounds,
-                                    predicate.span,
+                                    where_predicate.span,
                                     predicate.in_where_clause,
                                 )
                             } else {
                                 continue;
                             }
                         }
-                        hir::WherePredicate::BoundPredicate(predicate) => {
+                        hir::WherePredicateKind::BoundPredicate(predicate) => {
                             // FIXME we can also infer bounds on associated types,
                             // and should check for them here.
                             match predicate.bounded_ty.kind {
@@ -2118,12 +2118,12 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitOutlivesRequirements {
                                             // don't warn if the inferred span actually came from the predicate we're looking at
                                             // this happens if the type is recursively defined
                                             inferred_outlives.iter().filter(|(_, span)| {
-                                                !predicate.span.contains(*span)
+                                                !where_predicate.span.contains(*span)
                                             }),
                                             index,
                                         ),
                                         &predicate.bounds,
-                                        predicate.span,
+                                        where_predicate.span,
                                         predicate.origin == PredicateOrigin::WhereClause,
                                     )
                                 }
@@ -2161,7 +2161,7 @@ impl<'tcx> LateLintPass<'tcx> for ExplicitOutlivesRequirements {
                     } else if i + 1 < num_where_predicates {
                         // If all the bounds on a predicate were inferable and there are
                         // further predicates, we want to eat the trailing comma.
-                        let next_predicate_span = hir_generics.predicates[i + 1].span();
+                        let next_predicate_span = hir_generics.predicates[i + 1].span;
                         if next_predicate_span.from_expansion() {
                             where_lint_spans.push(predicate_span);
                         } else {
@@ -3037,7 +3037,7 @@ impl EarlyLintPass for SpecialModuleName {
         for item in &krate.items {
             if let ast::ItemKind::Mod(
                 _,
-                ast::ModKind::Unloaded | ast::ModKind::Loaded(_, ast::Inline::No, _),
+                ast::ModKind::Unloaded | ast::ModKind::Loaded(_, ast::Inline::No, _, _),
             ) = item.kind
             {
                 if item.attrs.iter().any(|a| a.has_name(sym::path)) {

@@ -14,7 +14,19 @@ use crate::core::builder::Builder;
 use crate::utils::exec::command;
 use crate::utils::helpers::{self, program_out_of_date, t};
 
-fn rustfmt(src: &Path, rustfmt: &Path, paths: &[PathBuf], check: bool) -> impl FnMut(bool) -> bool {
+#[must_use]
+enum RustfmtStatus {
+    InProgress,
+    Ok,
+    Failed,
+}
+
+fn rustfmt(
+    src: &Path,
+    rustfmt: &Path,
+    paths: &[PathBuf],
+    check: bool,
+) -> impl FnMut(bool) -> RustfmtStatus {
     let mut cmd = Command::new(rustfmt);
     // Avoid the submodule config paths from coming into play. We only allow a single global config
     // for the workspace for now.
@@ -26,40 +38,27 @@ fn rustfmt(src: &Path, rustfmt: &Path, paths: &[PathBuf], check: bool) -> impl F
         cmd.arg("--check");
     }
     cmd.args(paths);
-    let cmd_debug = format!("{cmd:?}");
     let mut cmd = cmd.spawn().expect("running rustfmt");
     // Poor man's async: return a closure that might wait for rustfmt's completion (depending on
     // the value of the `block` argument).
-    move |block: bool| -> bool {
+    move |block: bool| -> RustfmtStatus {
         let status = if !block {
             match cmd.try_wait() {
                 Ok(Some(status)) => Ok(status),
-                Ok(None) => return false,
+                Ok(None) => return RustfmtStatus::InProgress,
                 Err(err) => Err(err),
             }
         } else {
             cmd.wait()
         };
-        if !status.unwrap().success() {
-            eprintln!(
-                "fmt error: Running `{}` failed.\nIf you're running `tidy`, \
-                try again with `--bless`. Or, if you just want to format \
-                code, run `./x.py fmt` instead.",
-                cmd_debug,
-            );
-            crate::exit!(1);
-        }
-        true
+        if status.unwrap().success() { RustfmtStatus::Ok } else { RustfmtStatus::Failed }
     }
 }
 
 fn get_rustfmt_version(build: &Builder<'_>) -> Option<(String, PathBuf)> {
     let stamp_file = build.out.join("rustfmt.stamp");
 
-    let mut cmd = command(match build.initial_rustfmt() {
-        Some(p) => p,
-        None => return None,
-    });
+    let mut cmd = command(build.initial_rustfmt()?);
     cmd.arg("--version");
 
     let output = cmd.allow_failure().run_capture(build);
@@ -243,6 +242,8 @@ pub fn format(build: &Builder<'_>, check: bool, all: bool, paths: &[PathBuf]) {
     // Spawn child processes on a separate thread so we can batch entries we have received from
     // ignore.
     let thread = std::thread::spawn(move || {
+        let mut result = Ok(());
+
         let mut children = VecDeque::new();
         while let Ok(path) = rx.recv() {
             // Try getting more paths from the channel to amortize the overhead of spawning
@@ -254,22 +255,38 @@ pub fn format(build: &Builder<'_>, check: bool, all: bool, paths: &[PathBuf]) {
 
             // Poll completion before waiting.
             for i in (0..children.len()).rev() {
-                if children[i](false) {
-                    children.swap_remove_back(i);
-                    break;
+                match children[i](false) {
+                    RustfmtStatus::InProgress => {}
+                    RustfmtStatus::Failed => {
+                        result = Err(());
+                        children.swap_remove_back(i);
+                        break;
+                    }
+                    RustfmtStatus::Ok => {
+                        children.swap_remove_back(i);
+                        break;
+                    }
                 }
             }
 
             if children.len() >= max_processes {
                 // Await oldest child.
-                children.pop_front().unwrap()(true);
+                match children.pop_front().unwrap()(true) {
+                    RustfmtStatus::InProgress | RustfmtStatus::Ok => {}
+                    RustfmtStatus::Failed => result = Err(()),
+                }
             }
         }
 
         // Await remaining children.
         for mut child in children {
-            child(true);
+            match child(true) {
+                RustfmtStatus::InProgress | RustfmtStatus::Ok => {}
+                RustfmtStatus::Failed => result = Err(()),
+            }
         }
+
+        result
     });
 
     let formatted_paths = Mutex::new(Vec::new());
@@ -279,7 +296,7 @@ pub fn format(build: &Builder<'_>, check: bool, all: bool, paths: &[PathBuf]) {
         Box::new(move |entry| {
             let cwd = std::env::current_dir();
             let entry = t!(entry);
-            if entry.file_type().map_or(false, |t| t.is_file()) {
+            if entry.file_type().is_some_and(|t| t.is_file()) {
                 formatted_paths_ref.lock().unwrap().push({
                     // `into_path` produces an absolute path. Try to strip `cwd` to get a shorter
                     // relative path.
@@ -302,7 +319,12 @@ pub fn format(build: &Builder<'_>, check: bool, all: bool, paths: &[PathBuf]) {
 
     drop(tx);
 
-    thread.join().unwrap();
+    let result = thread.join().unwrap();
+
+    if result.is_err() {
+        crate::exit!(1);
+    }
+
     if !check {
         update_rustfmt_version(build);
     }

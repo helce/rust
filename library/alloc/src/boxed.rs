@@ -191,9 +191,7 @@ use core::error::{self, Error};
 use core::fmt;
 use core::future::Future;
 use core::hash::{Hash, Hasher};
-#[cfg(not(bootstrap))]
-use core::marker::PointerLike;
-use core::marker::{Tuple, Unsize};
+use core::marker::{PointerLike, Tuple, Unsize};
 use core::mem::{self, SizedTypeProperties};
 use core::ops::{
     AsyncFn, AsyncFnMut, AsyncFnOnce, CoerceUnsized, Coroutine, CoroutineState, Deref, DerefMut,
@@ -227,7 +225,7 @@ pub use thin::ThinBox;
 #[fundamental]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_insignificant_dtor]
-#[cfg_attr(not(bootstrap), doc(search_unbox))]
+#[doc(search_unbox)]
 // The declaration of the `Box` struct must be kept in sync with the
 // compiler or ICEs will happen.
 pub struct Box<
@@ -763,6 +761,26 @@ impl<T> Box<[T]> {
         };
         unsafe { Ok(RawVec::from_raw_parts_in(ptr.as_ptr(), len, Global).into_box(len)) }
     }
+
+    /// Converts the boxed slice into a boxed array.
+    ///
+    /// This operation does not reallocate; the underlying array of the slice is simply reinterpreted as an array type.
+    ///
+    /// If `N` is not exactly equal to the length of `self`, then this method returns `None`.
+    #[unstable(feature = "slice_as_array", issue = "133508")]
+    #[inline]
+    #[must_use]
+    pub fn into_array<const N: usize>(self) -> Option<Box<[T; N]>> {
+        if self.len() == N {
+            let ptr = Self::into_raw(self) as *mut [T; N];
+
+            // SAFETY: The underlying array of a slice has the exact same layout as an actual array `[T; N]` if `N` is equal to the slice's length.
+            let me = unsafe { Box::from_raw(ptr) };
+            Some(me)
+        } else {
+            None
+        }
+    }
 }
 
 impl<T, A: Allocator> Box<[T], A> {
@@ -1027,6 +1045,8 @@ impl<T: ?Sized> Box<T> {
     /// memory problems. For example, a double-free may occur if the
     /// function is called twice on the same raw pointer.
     ///
+    /// The raw pointer must point to a block of memory allocated by the global allocator.
+    ///
     /// The safety conditions are described in the [memory layout] section.
     ///
     /// # Examples
@@ -1130,6 +1150,7 @@ impl<T: ?Sized, A: Allocator> Box<T, A> {
     /// memory problems. For example, a double-free may occur if the
     /// function is called twice on the same raw pointer.
     ///
+    /// The raw pointer must point to a block of memory allocated by `alloc`
     ///
     /// # Examples
     ///
@@ -1502,7 +1523,7 @@ impl<T: ?Sized, A: Allocator> Box<T, A> {
     /// [`as_ptr`]: Self::as_ptr
     #[unstable(feature = "box_as_ptr", issue = "129090")]
     #[rustc_never_returns_null_ptr]
-    #[cfg_attr(not(bootstrap), rustc_as_ptr)]
+    #[rustc_as_ptr]
     #[inline]
     pub fn as_mut_ptr(b: &mut Self) -> *mut T {
         // This is a primitive deref, not going through `DerefMut`, and therefore not materializing
@@ -1551,7 +1572,7 @@ impl<T: ?Sized, A: Allocator> Box<T, A> {
     /// [`as_ptr`]: Self::as_ptr
     #[unstable(feature = "box_as_ptr", issue = "129090")]
     #[rustc_never_returns_null_ptr]
-    #[cfg_attr(not(bootstrap), rustc_as_ptr)]
+    #[rustc_as_ptr]
     #[inline]
     pub fn as_ptr(b: &Self) -> *const T {
         // This is a primitive deref, not going through `DerefMut`, and therefore not materializing
@@ -1987,7 +2008,8 @@ impl<Args: Tuple, F: Fn<Args> + ?Sized, A: Allocator> Fn<Args> for Box<F, A> {
     }
 }
 
-#[unstable(feature = "async_fn_traits", issue = "none")]
+#[cfg_attr(bootstrap, unstable(feature = "async_closure", issue = "62290"))]
+#[cfg_attr(not(bootstrap), stable(feature = "async_closure", since = "1.85.0"))]
 impl<Args: Tuple, F: AsyncFnOnce<Args> + ?Sized, A: Allocator> AsyncFnOnce<Args> for Box<F, A> {
     type Output = F::Output;
     type CallOnceFuture = F::CallOnceFuture;
@@ -1997,7 +2019,8 @@ impl<Args: Tuple, F: AsyncFnOnce<Args> + ?Sized, A: Allocator> AsyncFnOnce<Args>
     }
 }
 
-#[unstable(feature = "async_fn_traits", issue = "none")]
+#[cfg_attr(bootstrap, unstable(feature = "async_closure", issue = "62290"))]
+#[cfg_attr(not(bootstrap), stable(feature = "async_closure", since = "1.85.0"))]
 impl<Args: Tuple, F: AsyncFnMut<Args> + ?Sized, A: Allocator> AsyncFnMut<Args> for Box<F, A> {
     type CallRefFuture<'a>
         = F::CallRefFuture<'a>
@@ -2009,7 +2032,8 @@ impl<Args: Tuple, F: AsyncFnMut<Args> + ?Sized, A: Allocator> AsyncFnMut<Args> f
     }
 }
 
-#[unstable(feature = "async_fn_traits", issue = "none")]
+#[cfg_attr(bootstrap, unstable(feature = "async_closure", issue = "62290"))]
+#[cfg_attr(not(bootstrap), stable(feature = "async_closure", since = "1.85.0"))]
 impl<Args: Tuple, F: AsyncFn<Args> + ?Sized, A: Allocator> AsyncFn<Args> for Box<F, A> {
     extern "rust-call" fn async_call(&self, args: Args) -> Self::CallRefFuture<'_> {
         F::async_call(self, args)
@@ -2134,6 +2158,5 @@ impl<E: Error> Error for Box<E> {
     }
 }
 
-#[cfg(not(bootstrap))]
 #[unstable(feature = "pointer_like_trait", issue = "none")]
 impl<T> PointerLike for Box<T> {}

@@ -4,6 +4,7 @@
 use rustc_type_ir::fast_reject::DeepRejectCtxt;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
+use rustc_type_ir::solve::inspect::ProbeKind;
 use rustc_type_ir::{self as ty, Interner, elaborate};
 use tracing::instrument;
 
@@ -83,6 +84,10 @@ where
     ) -> Vec<Candidate<I>> {
         let cx = ecx.cx();
         let mut candidates = vec![];
+
+        if !ecx.cx().alias_has_const_conditions(alias_ty.def_id) {
+            return vec![];
+        }
 
         for clause in elaborate::elaborate(
             cx,
@@ -338,10 +343,27 @@ where
     }
 
     fn consider_builtin_destruct_candidate(
-        _ecx: &mut EvalCtxt<'_, D>,
-        _goal: Goal<I, Self>,
+        ecx: &mut EvalCtxt<'_, D>,
+        goal: Goal<I, Self>,
     ) -> Result<Candidate<I>, NoSolution> {
-        Err(NoSolution)
+        let cx = ecx.cx();
+
+        let self_ty = goal.predicate.self_ty();
+        let const_conditions = structural_traits::const_conditions_for_destruct(cx, self_ty)?;
+
+        ecx.probe_builtin_trait_candidate(BuiltinImplSource::Misc).enter(|ecx| {
+            ecx.add_goals(
+                GoalSource::Misc,
+                const_conditions.into_iter().map(|trait_ref| {
+                    goal.with(
+                        cx,
+                        ty::Binder::dummy(trait_ref)
+                            .to_host_effect_clause(cx, goal.predicate.constness),
+                    )
+                }),
+            );
+            ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+        })
     }
 
     fn consider_builtin_transmute_candidate(
@@ -370,6 +392,11 @@ where
         goal: Goal<I, ty::HostEffectPredicate<I>>,
     ) -> QueryResult<I> {
         let candidates = self.assemble_and_evaluate_candidates(goal);
-        self.merge_candidates(candidates)
+        let (_, proven_via) = self.probe(|_| ProbeKind::ShadowedEnvProbing).enter(|ecx| {
+            let trait_goal: Goal<I, ty::TraitPredicate<I>> =
+                goal.with(ecx.cx(), goal.predicate.trait_ref);
+            ecx.compute_trait_goal(trait_goal)
+        })?;
+        self.merge_candidates(proven_via, candidates)
     }
 }

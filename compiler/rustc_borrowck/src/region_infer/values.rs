@@ -99,6 +99,14 @@ impl LivenessValues {
         }
     }
 
+    /// Returns the liveness matrix of points where each region is live. Panics if the liveness
+    /// values have been created without any per-point data (that is, for promoteds).
+    pub(crate) fn points(&self) -> &SparseIntervalMatrix<RegionVid, PointIndex> {
+        self.points
+            .as_ref()
+            .expect("this `LivenessValues` wasn't created using `with_specific_points`")
+    }
+
     /// Iterate through each region that has a value in this set.
     pub(crate) fn regions(&self) -> impl Iterator<Item = RegionVid> + '_ {
         self.points.as_ref().expect("use with_specific_points").rows()
@@ -197,6 +205,11 @@ impl LivenessValues {
     #[inline]
     pub(crate) fn point_from_location(&self, location: Location) -> PointIndex {
         self.elements.point_from_location(location)
+    }
+
+    #[inline]
+    pub(crate) fn location_from_point(&self, point: PointIndex) -> Location {
+        self.elements.to_location(point)
     }
 
     /// When using `-Zpolonius=next`, returns whether the `loan_idx` is live at the given `point`.

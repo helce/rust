@@ -26,8 +26,7 @@ use rustc_index::{Idx, IndexSlice, IndexVec};
 use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
 use rustc_serialize::{Decodable, Encodable};
 use rustc_span::source_map::Spanned;
-use rustc_span::symbol::Symbol;
-use rustc_span::{DUMMY_SP, Span};
+use rustc_span::{DUMMY_SP, Span, Symbol};
 use tracing::trace;
 
 pub use self::query::*;
@@ -629,8 +628,7 @@ impl<'tcx> Body<'tcx> {
     ) -> Option<(u128, &'a SwitchTargets)> {
         // There are two places here we need to evaluate a constant.
         let eval_mono_const = |constant: &ConstOperand<'tcx>| {
-            // FIXME(#132279): what is this, why are we using an empty environment with
-            // `RevealAll` here.
+            // FIXME(#132279): what is this, why are we using an empty environment here.
             let typing_env = ty::TypingEnv::fully_monomorphized();
             let mono_literal = instance.instantiate_mir_and_normalize_erasing_regions(
                 tcx,
@@ -1350,8 +1348,8 @@ pub struct BasicBlockData<'tcx> {
 }
 
 impl<'tcx> BasicBlockData<'tcx> {
-    pub fn new(terminator: Option<Terminator<'tcx>>) -> BasicBlockData<'tcx> {
-        BasicBlockData { statements: vec![], terminator, is_cleanup: false }
+    pub fn new(terminator: Option<Terminator<'tcx>>, is_cleanup: bool) -> BasicBlockData<'tcx> {
+        BasicBlockData { statements: vec![], terminator, is_cleanup }
     }
 
     /// Accessor for terminator.

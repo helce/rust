@@ -232,6 +232,26 @@ use crate::{fmt, intrinsics, ptr, slice};
 /// remain `#[repr(transparent)]`. That said, `MaybeUninit<T>` will *always* guarantee that it has
 /// the same size, alignment, and ABI as `T`; it's just that the way `MaybeUninit` implements that
 /// guarantee may evolve.
+///
+/// Note that even though `T` and `MaybeUninit<T>` are ABI compatible it is still unsound to
+/// transmute `&mut T` to `&mut MaybeUninit<T>` and expose that to safe code because it would allow
+/// safe code to access uninitialized memory:
+///
+/// ```rust,no_run
+/// use core::mem::MaybeUninit;
+///
+/// fn unsound_transmute<T>(val: &mut T) -> &mut MaybeUninit<T> {
+///     unsafe { core::mem::transmute(val) }
+/// }
+///
+/// fn main() {
+///     let mut code = 0;
+///     let code = &mut code;
+///     let code2 = unsound_transmute(code);
+///     *code2 = MaybeUninit::uninit();
+///     std::process::exit(*code); // UB! Accessing uninitialized memory.
+/// }
+/// ```
 #[stable(feature = "maybe_uninit", since = "1.36.0")]
 // Lang item so we can wrap other types in it. This is useful for coroutines.
 #[lang = "maybe_uninit"]
@@ -255,7 +275,11 @@ impl<T: Copy> Clone for MaybeUninit<T> {
 #[stable(feature = "maybe_uninit_debug", since = "1.41.0")]
 impl<T> fmt::Debug for MaybeUninit<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad(type_name::<Self>())
+        // NB: there is no `.pad_fmt` so we can't use a simpler `format_args!("MaybeUninit<{..}>").
+        // This needs to be adjusted if `MaybeUninit` moves modules.
+        let full_name = type_name::<Self>();
+        let short_name = full_name.split_once("mem::maybe_uninit::").unwrap().1;
+        f.pad(short_name)
     }
 }
 
@@ -481,9 +505,9 @@ impl<T> MaybeUninit<T> {
     ///     }
     /// }
     /// ```
-    #[stable(feature = "maybe_uninit_write", since = "1.55.0")]
-    #[rustc_const_unstable(feature = "const_maybe_uninit_write", issue = "63567")]
     #[inline(always)]
+    #[stable(feature = "maybe_uninit_write", since = "1.55.0")]
+    #[rustc_const_stable(feature = "const_maybe_uninit_write", since = "1.85.0")]
     pub const fn write(&mut self, val: T) -> &mut T {
         *self = MaybeUninit::new(val);
         // SAFETY: We just initialized this value.
@@ -525,7 +549,7 @@ impl<T> MaybeUninit<T> {
     /// until they are, it is advisable to avoid them.)
     #[stable(feature = "maybe_uninit", since = "1.36.0")]
     #[rustc_const_stable(feature = "const_maybe_uninit_as_ptr", since = "1.59.0")]
-    #[cfg_attr(not(bootstrap), rustc_as_ptr)]
+    #[rustc_as_ptr]
     #[inline(always)]
     pub const fn as_ptr(&self) -> *const T {
         // `MaybeUninit` and `ManuallyDrop` are both `repr(transparent)` so we can cast the pointer.
@@ -567,7 +591,7 @@ impl<T> MaybeUninit<T> {
     /// until they are, it is advisable to avoid them.)
     #[stable(feature = "maybe_uninit", since = "1.36.0")]
     #[rustc_const_stable(feature = "const_maybe_uninit_as_mut_ptr", since = "1.83.0")]
-    #[cfg_attr(not(bootstrap), rustc_as_ptr)]
+    #[rustc_as_ptr]
     #[inline(always)]
     pub const fn as_mut_ptr(&mut self) -> *mut T {
         // `MaybeUninit` and `ManuallyDrop` are both `repr(transparent)` so we can cast the pointer.
@@ -907,10 +931,7 @@ impl<T> MaybeUninit<T> {
     /// };
     /// ```
     #[stable(feature = "maybe_uninit_ref", since = "1.55.0")]
-    #[rustc_const_stable(
-        feature = "const_maybe_uninit_assume_init",
-        since = "1.84.0"
-    )]
+    #[rustc_const_stable(feature = "const_maybe_uninit_assume_init", since = "1.84.0")]
     #[inline(always)]
     pub const unsafe fn assume_init_mut(&mut self) -> &mut T {
         // SAFETY: the caller must guarantee that `self` is initialized.

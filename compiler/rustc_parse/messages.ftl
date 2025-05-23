@@ -169,9 +169,6 @@ parse_enum_struct_mutually_exclusive = `enum` and `struct` are mutually exclusiv
 parse_eq_field_init = expected `:`, found `=`
     .suggestion = replace equals symbol with a colon
 
-parse_equals_struct_default = default values on `struct` fields aren't supported
-    .suggestion = remove this unsupported default value
-
 parse_escape_only_char = {$byte ->
     [true] byte
     *[false] character
@@ -342,6 +339,9 @@ parse_incorrect_semicolon =
     expected item, found `;`
     .suggestion = remove this semicolon
     .help = {$name} declarations are not followed by a semicolon
+
+parse_incorrect_type_on_self = type not allowed for shorthand `self` parameter
+    .suggestion = move the modifiers on `self` to the type
 
 parse_incorrect_use_of_await = incorrect use of `await`
     .parentheses_suggestion = `await` is not a method call, remove the parentheses
@@ -716,6 +716,10 @@ parse_require_colon_after_labeled_expression = labeled expression must be follow
     .label = the label
     .suggestion = add `:` after the label
 
+parse_reserved_multihash = reserved multi-hash token is forbidden
+    .note = sequences of two or more # are reserved for future use since Rust 2024
+    .suggestion_whitespace = consider inserting whitespace here
+
 parse_reserved_string = invalid string literal
     .note = unprefixed guarded string literals are reserved for future use since Rust 2024
     .suggestion_whitespace = consider inserting whitespace here
@@ -827,7 +831,7 @@ parse_unexpected_expr_in_pat =
     }, found an expression
 
     .label = not a pattern
-    .note = arbitrary expressions are not allowed in patterns: <https://doc.rust-lang.org/book/ch18-00-patterns.html>
+    .note = arbitrary expressions are not allowed in patterns: <https://doc.rust-lang.org/book/ch19-00-patterns.html>
 
 parse_unexpected_expr_in_pat_const_sugg = consider extracting the expression into a `const`
 

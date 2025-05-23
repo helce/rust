@@ -10,14 +10,16 @@ use rustc_index::{IndexSlice, IndexVec};
 use rustc_middle::span_bug;
 use rustc_middle::ty::{ResolverAstLowering, TyCtxt};
 use rustc_span::edit_distance::find_best_match_for_name;
-use rustc_span::symbol::{Ident, kw, sym};
-use rustc_span::{DesugaringKind, Span, Symbol};
+use rustc_span::{DesugaringKind, Ident, Span, Symbol, kw, sym};
 use rustc_target::spec::abi;
 use smallvec::{SmallVec, smallvec};
 use thin_vec::ThinVec;
 use tracing::instrument;
 
-use super::errors::{InvalidAbi, InvalidAbiReason, InvalidAbiSuggestion, MisplacedRelaxTraitBound};
+use super::errors::{
+    InvalidAbi, InvalidAbiReason, InvalidAbiSuggestion, MisplacedRelaxTraitBound,
+    TupleStructWithDefault,
+};
 use super::{
     AstOwner, FnDeclKind, ImplTraitContext, ImplTraitPosition, LoweringContext, ParamMode,
     ResolverAstLoweringExt,
@@ -173,7 +175,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         id: NodeId,
         hir_id: hir::HirId,
         ident: &mut Ident,
-        attrs: &'hir [Attribute],
+        attrs: &'hir [hir::Attribute],
         vis_span: Span,
         i: &ItemKind,
     ) -> hir::ItemKind<'hir> {
@@ -235,7 +237,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 })
             }
             ItemKind::Mod(_, mod_kind) => match mod_kind {
-                ModKind::Loaded(items, _, spans) => {
+                ModKind::Loaded(items, _, spans, _) => {
                     hir::ItemKind::Mod(self.lower_mod(items, spans))
                 }
                 ModKind::Unloaded => panic!("`mod` items should have been loaded by now"),
@@ -464,7 +466,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         id: NodeId,
         vis_span: Span,
         ident: &mut Ident,
-        attrs: &'hir [Attribute],
+        attrs: &'hir [hir::Attribute],
     ) -> hir::ItemKind<'hir> {
         let path = &tree.prefix;
         let segments = prefix.segments.iter().chain(path.segments.iter()).cloned().collect();
@@ -690,13 +692,27 @@ impl<'hir> LoweringContext<'_, 'hir> {
             VariantData::Tuple(fields, id) => {
                 let ctor_id = self.lower_node_id(*id);
                 self.alias_attrs(ctor_id, parent_id);
-                hir::VariantData::Tuple(
-                    self.arena.alloc_from_iter(
-                        fields.iter().enumerate().map(|f| self.lower_field_def(f)),
-                    ),
-                    ctor_id,
-                    self.local_def_id(*id),
-                )
+                let fields = self
+                    .arena
+                    .alloc_from_iter(fields.iter().enumerate().map(|f| self.lower_field_def(f)));
+                for field in &fields[..] {
+                    if let Some(default) = field.default {
+                        // Default values in tuple struct and tuple variants are not allowed by the
+                        // RFC due to concerns about the syntax, both in the item definition and the
+                        // expression. We could in the future allow `struct S(i32 = 0);` and force
+                        // users to construct the value with `let _ = S { .. };`.
+                        if self.tcx.features().default_field_values() {
+                            self.dcx().emit_err(TupleStructWithDefault { span: default.span });
+                        } else {
+                            let _ = self.dcx().span_delayed_bug(
+                                default.span,
+                                "expected `default values on `struct` fields aren't supported` \
+                                 feature-gate error but none was produced",
+                            );
+                        }
+                    }
+                }
+                hir::VariantData::Tuple(fields, ctor_id, self.local_def_id(*id))
             }
             VariantData::Unit(id) => {
                 let ctor_id = self.lower_node_id(*id);
@@ -723,7 +739,9 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 None => Ident::new(sym::integer(index), self.lower_span(f.span)),
             },
             vis_span: self.lower_span(f.vis.span),
+            default: f.default.as_ref().map(|v| self.lower_anon_const_to_anon_const(v)),
             ty,
+            safety: self.lower_safety(f.safety, hir::Safety::Safe),
         }
     }
 
@@ -1153,9 +1171,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 // we can keep the same name for the parameter.
                 // This lets rustdoc render it correctly in documentation.
                 hir::PatKind::Binding(_, _, ident, _) => (ident, false),
-                hir::PatKind::Wild => {
-                    (Ident::with_dummy_span(rustc_span::symbol::kw::Underscore), false)
-                }
+                hir::PatKind::Wild => (Ident::with_dummy_span(rustc_span::kw::Underscore), false),
                 _ => {
                     // Replace the ident for bindings that aren't simple.
                     let name = format!("__arg{index}");
@@ -1373,7 +1389,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         }
     }
 
-    pub(super) fn lower_safety(&mut self, s: Safety, default: hir::Safety) -> hir::Safety {
+    pub(super) fn lower_safety(&self, s: Safety, default: hir::Safety) -> hir::Safety {
         match s {
             Safety::Unsafe(_) => hir::Safety::Unsafe,
             Safety::Default => default,
@@ -1400,7 +1416,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         // keep track of the Span info. Now, `<dyn HirTyLowerer>::add_implicit_sized_bound`
         // checks both param bounds and where clauses for `?Sized`.
         for pred in &generics.where_clause.predicates {
-            let WherePredicate::BoundPredicate(bound_pred) = pred else {
+            let WherePredicateKind::BoundPredicate(bound_pred) = &pred.kind else {
                 continue;
             };
             let compute_is_param = || {
@@ -1537,9 +1553,9 @@ impl<'hir> LoweringContext<'_, 'hir> {
             }
         });
         let span = self.lower_span(span);
-
-        match kind {
-            GenericParamKind::Const { .. } => None,
+        let hir_id = self.next_id();
+        let kind = self.arena.alloc(match kind {
+            GenericParamKind::Const { .. } => return None,
             GenericParamKind::Type { .. } => {
                 let def_id = self.local_def_id(id).to_def_id();
                 let hir_id = self.next_id();
@@ -1554,38 +1570,36 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 let ty_id = self.next_id();
                 let bounded_ty =
                     self.ty_path(ty_id, param_span, hir::QPath::Resolved(None, ty_path));
-                Some(hir::WherePredicate::BoundPredicate(hir::WhereBoundPredicate {
-                    hir_id: self.next_id(),
+                hir::WherePredicateKind::BoundPredicate(hir::WhereBoundPredicate {
                     bounded_ty: self.arena.alloc(bounded_ty),
                     bounds,
-                    span,
                     bound_generic_params: &[],
                     origin,
-                }))
+                })
             }
             GenericParamKind::Lifetime => {
                 let ident = self.lower_ident(ident);
                 let lt_id = self.next_node_id();
                 let lifetime = self.new_named_lifetime(id, lt_id, ident);
-                Some(hir::WherePredicate::RegionPredicate(hir::WhereRegionPredicate {
+                hir::WherePredicateKind::RegionPredicate(hir::WhereRegionPredicate {
                     lifetime,
-                    span,
                     bounds,
                     in_where_clause: false,
-                }))
+                })
             }
-        }
+        });
+        Some(hir::WherePredicate { hir_id, span, kind })
     }
 
     fn lower_where_predicate(&mut self, pred: &WherePredicate) -> hir::WherePredicate<'hir> {
-        match pred {
-            WherePredicate::BoundPredicate(WhereBoundPredicate {
+        let hir_id = self.lower_node_id(pred.id);
+        let span = self.lower_span(pred.span);
+        let kind = self.arena.alloc(match &pred.kind {
+            WherePredicateKind::BoundPredicate(WhereBoundPredicate {
                 bound_generic_params,
                 bounded_ty,
                 bounds,
-                span,
-            }) => hir::WherePredicate::BoundPredicate(hir::WhereBoundPredicate {
-                hir_id: self.next_id(),
+            }) => hir::WherePredicateKind::BoundPredicate(hir::WhereBoundPredicate {
                 bound_generic_params: self
                     .lower_generic_params(bound_generic_params, hir::GenericParamSource::Binder),
                 bounded_ty: self
@@ -1594,12 +1608,10 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     bounds,
                     ImplTraitContext::Disallowed(ImplTraitPosition::Bound),
                 ),
-                span: self.lower_span(*span),
                 origin: PredicateOrigin::WhereClause,
             }),
-            WherePredicate::RegionPredicate(WhereRegionPredicate { lifetime, bounds, span }) => {
-                hir::WherePredicate::RegionPredicate(hir::WhereRegionPredicate {
-                    span: self.lower_span(*span),
+            WherePredicateKind::RegionPredicate(WhereRegionPredicate { lifetime, bounds }) => {
+                hir::WherePredicateKind::RegionPredicate(hir::WhereRegionPredicate {
                     lifetime: self.lower_lifetime(lifetime),
                     bounds: self.lower_param_bounds(
                         bounds,
@@ -1608,15 +1620,15 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     in_where_clause: true,
                 })
             }
-            WherePredicate::EqPredicate(WhereEqPredicate { lhs_ty, rhs_ty, span }) => {
-                hir::WherePredicate::EqPredicate(hir::WhereEqPredicate {
+            WherePredicateKind::EqPredicate(WhereEqPredicate { lhs_ty, rhs_ty }) => {
+                hir::WherePredicateKind::EqPredicate(hir::WhereEqPredicate {
                     lhs_ty: self
                         .lower_ty(lhs_ty, ImplTraitContext::Disallowed(ImplTraitPosition::Bound)),
                     rhs_ty: self
                         .lower_ty(rhs_ty, ImplTraitContext::Disallowed(ImplTraitPosition::Bound)),
-                    span: self.lower_span(*span),
                 })
             }
-        }
+        });
+        hir::WherePredicate { hir_id, span, kind }
     }
 }

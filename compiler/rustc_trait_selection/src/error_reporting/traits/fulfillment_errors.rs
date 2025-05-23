@@ -27,8 +27,7 @@ use rustc_middle::ty::{
     self, ToPolyTraitRef, TraitRef, Ty, TyCtxt, TypeFoldable, TypeVisitableExt, Upcast,
 };
 use rustc_middle::{bug, span_bug};
-use rustc_span::symbol::sym;
-use rustc_span::{BytePos, DUMMY_SP, Span, Symbol};
+use rustc_span::{BytePos, DUMMY_SP, Span, Symbol, sym};
 use tracing::{debug, instrument};
 
 use super::on_unimplemented::{AppendConstMessage, OnUnimplementedNote};
@@ -725,7 +724,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                     &obligation.cause,
                     None,
                     None,
-                    TypeError::Sorts(ty::error::ExpectedFound::new(true, expected_ty, ct_ty)),
+                    TypeError::Sorts(ty::error::ExpectedFound::new(expected_ty, ct_ty)),
                     false,
                 );
                 diag
@@ -794,7 +793,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                     closure_def_id,
                     found_kind,
                     expected_kind,
-                    "async ",
+                    "Async",
                 );
                 self.note_obligation_cause(&mut err, &obligation);
                 self.point_at_returns_when_relevant(&mut err, &obligation);
@@ -1449,7 +1448,6 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 secondary_span,
                 values.map(|(_, normalized_ty, expected_ty)| {
                     obligation.param_env.and(infer::ValuePairs::Terms(ExpectedFound::new(
-                        true,
                         expected_ty,
                         normalized_ty,
                     )))
@@ -1534,6 +1532,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 ty::CoroutineWitness(..) => Some(20),
                 ty::CoroutineClosure(..) => Some(21),
                 ty::Pat(..) => Some(22),
+                ty::UnsafeBinder(..) => Some(23),
                 ty::Placeholder(..) | ty::Bound(..) | ty::Infer(..) | ty::Error(_) => None,
             }
         }
@@ -1746,9 +1745,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                     };
                     (
                         data.span,
-                        format!(
-                            "one version of crate `{crate_name}` is used here, as a {dependency}"
-                        ),
+                        format!("one version of crate `{crate_name}` used here, as a {dependency}"),
                     )
                 })
             {
@@ -2741,7 +2738,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             (obligation.cause.clone(), terr)
         };
         self.report_and_explain_type_error(
-            TypeTrace::trait_refs(&cause, true, expected_trait_ref, found_trait_ref),
+            TypeTrace::trait_refs(&cause, expected_trait_ref, found_trait_ref),
             obligation.param_env,
             terr,
         )
@@ -2832,7 +2829,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         if Some(expected_trait_ref.def_id) != self.tcx.lang_items().coroutine_trait() && not_tupled
         {
             return Ok(self.report_and_explain_type_error(
-                TypeTrace::trait_refs(&obligation.cause, true, expected_trait_ref, found_trait_ref),
+                TypeTrace::trait_refs(&obligation.cause, expected_trait_ref, found_trait_ref),
                 obligation.param_env,
                 ty::error::TypeError::Mismatch,
             ));

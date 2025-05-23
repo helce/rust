@@ -2,7 +2,7 @@ use core::cmp::min;
 use core::iter;
 
 use hir::def_id::LocalDefId;
-use rustc_ast::util::parser::{ExprPrecedence, PREC_UNAMBIGUOUS};
+use rustc_ast::util::parser::ExprPrecedence;
 use rustc_data_structures::packed::Pu128;
 use rustc_errors::{Applicability, Diag, MultiSpan};
 use rustc_hir as hir;
@@ -10,7 +10,7 @@ use rustc_hir::def::{CtorKind, CtorOf, DefKind, Res};
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{
     Arm, CoroutineDesugaring, CoroutineKind, CoroutineSource, Expr, ExprKind, GenericBound, HirId,
-    Node, Path, QPath, Stmt, StmtKind, TyKind, WherePredicate,
+    Node, Path, QPath, Stmt, StmtKind, TyKind, WherePredicateKind, expr_needs_parens,
 };
 use rustc_hir_analysis::collect::suggest_impl_trait;
 use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer;
@@ -24,8 +24,7 @@ use rustc_middle::ty::{
 };
 use rustc_session::errors::ExprParenthesesNeeded;
 use rustc_span::source_map::Spanned;
-use rustc_span::symbol::{Ident, sym};
-use rustc_span::{Span, Symbol};
+use rustc_span::{Ident, Span, Symbol, sym};
 use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
 use rustc_trait_selection::error_reporting::traits::DefIdOrName;
 use rustc_trait_selection::infer::InferCtxtExt;
@@ -35,7 +34,6 @@ use tracing::{debug, instrument};
 
 use super::FnCtxt;
 use crate::fn_ctxt::rustc_span::BytePos;
-use crate::hir::is_range_literal;
 use crate::method::probe;
 use crate::method::probe::{IsSuggestion, Mode, ProbeScope};
 use crate::{errors, fluent_generated as fluent};
@@ -398,7 +396,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     // so we remove the user's `clone` call.
                     {
                         vec![(receiver_method.ident.span, conversion_method.name.to_string())]
-                    } else if expr.precedence().order() < ExprPrecedence::MethodCall.order() {
+                    } else if expr.precedence() < ExprPrecedence::Unambiguous {
                         vec![
                             (expr.span.shrink_to_lo(), "(".to_string()),
                             (expr.span.shrink_to_hi(), format!(").{}()", conversion_method.name)),
@@ -1004,8 +1002,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // get all where BoundPredicates here, because they are used in two cases below
         let where_predicates = predicates
             .iter()
-            .filter_map(|p| match p {
-                WherePredicate::BoundPredicate(hir::WhereBoundPredicate {
+            .filter_map(|p| match p.kind {
+                WherePredicateKind::BoundPredicate(hir::WhereBoundPredicate {
                     bounds,
                     bounded_ty,
                     ..
@@ -1376,7 +1374,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         {
             let span = expr.span.find_oldest_ancestor_in_same_ctxt();
 
-            let mut sugg = if expr.precedence().order() >= PREC_UNAMBIGUOUS {
+            let mut sugg = if expr.precedence() >= ExprPrecedence::Unambiguous {
                 vec![(span.shrink_to_hi(), ".into()".to_owned())]
             } else {
                 vec![
@@ -2648,7 +2646,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
 
                     let make_sugg = |expr: &Expr<'_>, span: Span, sugg: &str| {
-                        if self.needs_parentheses(expr) {
+                        if expr_needs_parens(expr) {
                             (
                                 vec![
                                     (span.shrink_to_lo(), format!("{prefix}{sugg}(")),
@@ -2861,7 +2859,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             return None;
                         }
 
-                        if self.needs_parentheses(expr) {
+                        if expr_needs_parens(expr) {
                             return Some((
                                 vec![
                                     (span, format!("{suggestion}(")),
@@ -2900,16 +2898,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
         }
         false
-    }
-
-    fn needs_parentheses(&self, expr: &hir::Expr<'_>) -> bool {
-        match expr.kind {
-            // parenthesize if needed (Issue #46756)
-            hir::ExprKind::Cast(_, _) | hir::ExprKind::Binary(_, _, _) => true,
-            // parenthesize borrows of range literals (Issue #54505)
-            _ if is_range_literal(expr) => true,
-            _ => false,
-        }
     }
 
     pub(crate) fn suggest_cast(
@@ -3000,7 +2988,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             "change the type of the numeric literal from `{checked_ty}` to `{expected_ty}`",
         );
 
-        let close_paren = if expr.precedence().order() < PREC_UNAMBIGUOUS {
+        let close_paren = if expr.precedence() < ExprPrecedence::Unambiguous {
             sugg.push((expr.span.shrink_to_lo(), "(".to_string()));
             ")"
         } else {
@@ -3025,7 +3013,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let len = src.trim_end_matches(&checked_ty.to_string()).len();
                 expr.span.with_lo(expr.span.lo() + BytePos(len as u32))
             },
-            if expr.precedence().order() < PREC_UNAMBIGUOUS {
+            if expr.precedence() < ExprPrecedence::Unambiguous {
                 // Readd `)`
                 format!("{expected_ty})")
             } else {
@@ -3394,7 +3382,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let Some(ty) = self.node_ty_opt(tail_expr.hir_id) else {
             return;
         };
-        if self.can_eq(self.param_env, expected_ty, ty) {
+        if self.can_eq(self.param_env, expected_ty, ty)
+            // FIXME: this happens with macro calls. Need to figure out why the stmt
+            // `println!();` doesn't include the `;` in its `Span`. (#133845)
+            // We filter these out to avoid ICEs with debug assertions on caused by
+            // empty suggestions.
+            && stmt.span.hi() != tail_expr.span.hi()
+        {
             err.span_suggestion_short(
                 stmt.span.with_lo(tail_expr.span.hi()),
                 "remove this semicolon",

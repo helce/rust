@@ -21,6 +21,7 @@ use tracing::{debug, instrument};
 use super::TypingEnv;
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use crate::query::Providers;
+use crate::ty::fold::fold_regions;
 use crate::ty::layout::{FloatExt, IntegerExt};
 use crate::ty::{
     self, Asyncness, FallibleTypeFolder, GenericArgKind, GenericArgsRef, Ty, TyCtxt, TypeFoldable,
@@ -169,6 +170,24 @@ impl<'tcx> TyCtxt<'tcx> {
             Res::Err => None,
             _ => None,
         }
+    }
+
+    /// Checks whether `ty: Copy` holds while ignoring region constraints.
+    ///
+    /// This impacts whether values of `ty` are *moved* or *copied*
+    /// when referenced. This means that we may generate MIR which
+    /// does copies even when the type actually doesn't satisfy the
+    /// full requirements for the `Copy` trait (cc #29149) -- this
+    /// winds up being reported as an error during NLL borrow check.
+    ///
+    /// This function should not be used if there is an `InferCtxt` available.
+    /// Use `InferCtxt::type_is_copy_modulo_regions` instead.
+    pub fn type_is_copy_modulo_regions(
+        self,
+        typing_env: ty::TypingEnv<'tcx>,
+        ty: Ty<'tcx>,
+    ) -> bool {
+        ty.is_trivially_pure_clone_copy() || self.is_copy_raw(typing_env.as_query_input(ty))
     }
 
     /// Returns the deeply last field of nested structures, or the same type if
@@ -370,7 +389,7 @@ impl<'tcx> TyCtxt<'tcx> {
                     .delay_as_bug();
             }
 
-            dtor_candidate = Some((*item_id, self.constness(impl_did)));
+            dtor_candidate = Some((*item_id, self.impl_trait_header(impl_did).unwrap().constness));
         });
 
         let (did, constness) = dtor_candidate?;
@@ -423,8 +442,8 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn async_drop_glue_morphology(self, did: DefId) -> AsyncDropGlueMorphology {
         let ty: Ty<'tcx> = self.type_of(did).instantiate_identity();
 
-        // Async drop glue morphology is an internal detail, so reveal_all probably
-        // should be fine
+        // Async drop glue morphology is an internal detail, so
+        // using `TypingMode::PostAnalysis` probably should be fine.
         let typing_env = ty::TypingEnv::fully_monomorphized();
         if ty.needs_async_drop(self, typing_env) {
             AsyncDropGlueMorphology::Custom
@@ -735,7 +754,7 @@ impl<'tcx> TyCtxt<'tcx> {
             .filter(|decl| !decl.ignore_for_traits)
             .map(move |decl| {
                 let mut vars = vec![];
-                let ty = self.fold_regions(decl.ty, |re, debruijn| {
+                let ty = fold_regions(self, decl.ty, |re, debruijn| {
                     assert_eq!(re, self.lifetimes.re_erased);
                     let var = ty::BoundVar::from_usize(vars.len());
                     vars.push(ty::BoundVariableKind::Region(ty::BoundRegionKind::Anon));
@@ -1053,7 +1072,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for OpaqueTypeExpander<'tcx> {
                     // This is because for default trait methods with RPITITs, we
                     // install a `NormalizesTo(Projection(RPITIT) -> Opaque(RPITIT))`
                     // predicate, which would trivially cause a cycle when we do
-                    // anything that requires `ParamEnv::with_reveal_all_normalized`.
+                    // anything that requires `TypingEnv::with_post_analysis_normalized`.
                     term: projection_pred.term,
                 })
                 .upcast(self.tcx)
@@ -1173,21 +1192,6 @@ impl<'tcx> Ty<'tcx> {
             .map(|(min, _)| ty::Const::from_bits(tcx, min, typing_env, self))
     }
 
-    /// Checks whether values of this type `T` are *moved* or *copied*
-    /// when referenced -- this amounts to a check for whether `T:
-    /// Copy`, but note that we **don't** consider lifetimes when
-    /// doing this check. This means that we may generate MIR which
-    /// does copies even when the type actually doesn't satisfy the
-    /// full requirements for the `Copy` trait (cc #29149) -- this
-    /// winds up being reported as an error during NLL borrow check.
-    pub fn is_copy_modulo_regions(
-        self,
-        tcx: TyCtxt<'tcx>,
-        typing_env: ty::TypingEnv<'tcx>,
-    ) -> bool {
-        self.is_trivially_pure_clone_copy() || tcx.is_copy_raw(typing_env.as_query_input(self))
-    }
-
     /// Checks whether values of this type `T` have a size known at
     /// compile time (i.e., whether `T: Sized`). Lifetimes are ignored
     /// for the purposes of this check, so it can be an
@@ -1237,6 +1241,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Foreign(_)
             | ty::Coroutine(..)
             | ty::CoroutineWitness(..)
+            | ty::UnsafeBinder(_)
             | ty::Infer(_)
             | ty::Alias(..)
             | ty::Param(_)
@@ -1277,10 +1282,20 @@ impl<'tcx> Ty<'tcx> {
             | ty::Foreign(_)
             | ty::Coroutine(..)
             | ty::CoroutineWitness(..)
+            | ty::UnsafeBinder(_)
             | ty::Infer(_)
             | ty::Alias(..)
             | ty::Param(_)
             | ty::Placeholder(_) => false,
+        }
+    }
+
+    /// Checks whether this type is an ADT that has unsafe fields.
+    pub fn has_unsafe_fields(self) -> bool {
+        if let ty::Adt(adt_def, ..) = self.kind() {
+            adt_def.all_fields().any(|x| x.safety.is_unsafe())
+        } else {
+            false
         }
     }
 
@@ -1308,6 +1323,9 @@ impl<'tcx> Ty<'tcx> {
             | ty::FnPtr(..)
             | ty::Infer(ty::FreshIntTy(_))
             | ty::Infer(ty::FreshFloatTy(_)) => AsyncDropGlueMorphology::Noop,
+
+            // FIXME(unsafe_binders):
+            ty::UnsafeBinder(_) => todo!(),
 
             ty::Tuple(tys) if tys.is_empty() => AsyncDropGlueMorphology::Noop,
             ty::Adt(adt_def, _) if adt_def.is_manually_drop() => AsyncDropGlueMorphology::Noop,
@@ -1509,7 +1527,7 @@ impl<'tcx> Ty<'tcx> {
                 false
             }
 
-            ty::Foreign(_) | ty::CoroutineWitness(..) | ty::Error(_) => false,
+            ty::Foreign(_) | ty::CoroutineWitness(..) | ty::Error(_) | ty::UnsafeBinder(_) => false,
         }
     }
 
@@ -1668,46 +1686,8 @@ pub fn needs_drop_components_with_async<'tcx>(
         | ty::Closure(..)
         | ty::CoroutineClosure(..)
         | ty::Coroutine(..)
-        | ty::CoroutineWitness(..) => Ok(smallvec![ty]),
-    }
-}
-
-pub fn is_trivially_const_drop(ty: Ty<'_>) -> bool {
-    match *ty.kind() {
-        ty::Bool
-        | ty::Char
-        | ty::Int(_)
-        | ty::Uint(_)
-        | ty::Float(_)
-        | ty::Infer(ty::IntVar(_))
-        | ty::Infer(ty::FloatVar(_))
-        | ty::Str
-        | ty::RawPtr(_, _)
-        | ty::Ref(..)
-        | ty::FnDef(..)
-        | ty::FnPtr(..)
-        | ty::Never
-        | ty::Foreign(_) => true,
-
-        ty::Alias(..)
-        | ty::Dynamic(..)
-        | ty::Error(_)
-        | ty::Bound(..)
-        | ty::Param(_)
-        | ty::Placeholder(_)
-        | ty::Infer(_) => false,
-
-        // Not trivial because they have components, and instead of looking inside,
-        // we'll just perform trait selection.
-        ty::Closure(..)
-        | ty::CoroutineClosure(..)
-        | ty::Coroutine(..)
         | ty::CoroutineWitness(..)
-        | ty::Adt(..) => false,
-
-        ty::Array(ty, _) | ty::Slice(ty) | ty::Pat(ty, _) => is_trivially_const_drop(ty),
-
-        ty::Tuple(tys) => tys.iter().all(|ty| is_trivially_const_drop(ty)),
+        | ty::UnsafeBinder(_) => Ok(smallvec![ty]),
     }
 }
 

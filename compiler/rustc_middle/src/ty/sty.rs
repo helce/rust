@@ -15,8 +15,7 @@ use rustc_hir as hir;
 use rustc_hir::LangItem;
 use rustc_hir::def_id::DefId;
 use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, extension};
-use rustc_span::symbol::{Symbol, sym};
-use rustc_span::{DUMMY_SP, Span};
+use rustc_span::{DUMMY_SP, Span, Symbol, sym};
 use rustc_type_ir::TyKind::*;
 use rustc_type_ir::visit::TypeVisitableExt;
 use rustc_type_ir::{self as ir, BoundVar, CollectAndApply, DynKind};
@@ -675,6 +674,11 @@ impl<'tcx> Ty<'tcx> {
     }
 
     #[inline]
+    pub fn new_unsafe_binder(tcx: TyCtxt<'tcx>, b: Binder<'tcx, Ty<'tcx>>) -> Ty<'tcx> {
+        Ty::new(tcx, UnsafeBinder(b.into()))
+    }
+
+    #[inline]
     pub fn new_dynamic(
         tcx: TyCtxt<'tcx>,
         obj: &'tcx List<ty::PolyExistentialPredicate<'tcx>>,
@@ -963,6 +967,10 @@ impl<'tcx> rustc_type_ir::inherent::Ty<TyCtxt<'tcx>> for Ty<'tcx> {
         Ty::new_pat(interner, ty, pat)
     }
 
+    fn new_unsafe_binder(interner: TyCtxt<'tcx>, ty: ty::Binder<'tcx, Ty<'tcx>>) -> Self {
+        Ty::new_unsafe_binder(interner, ty)
+    }
+
     fn new_unit(interner: TyCtxt<'tcx>) -> Self {
         interner.types.unit
     }
@@ -977,6 +985,10 @@ impl<'tcx> rustc_type_ir::inherent::Ty<TyCtxt<'tcx>> for Ty<'tcx> {
 
     fn async_destructor_ty(self, interner: TyCtxt<'tcx>) -> Ty<'tcx> {
         self.async_destructor_ty(interner)
+    }
+
+    fn has_unsafe_fields(self) -> bool {
+        Ty::has_unsafe_fields(self)
     }
 }
 
@@ -1477,6 +1489,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::CoroutineWitness(..)
             | ty::Never
             | ty::Tuple(_)
+            | ty::UnsafeBinder(_)
             | ty::Error(_)
             | ty::Infer(IntVar(_) | FloatVar(_)) => tcx.types.u8,
 
@@ -1656,6 +1669,8 @@ impl<'tcx> Ty<'tcx> {
             // metadata of `tail`.
             ty::Param(_) | ty::Alias(..) => Err(tail),
 
+            | ty::UnsafeBinder(_) => todo!("FIXME(unsafe_binder)"),
+
             ty::Infer(ty::TyVar(_))
             | ty::Pat(..)
             | ty::Bound(..)
@@ -1816,6 +1831,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Float(_)
             | ty::FnDef(..)
             | ty::FnPtr(..)
+            | ty::UnsafeBinder(_)
             | ty::RawPtr(..)
             | ty::Char
             | ty::Ref(..)
@@ -1895,6 +1911,8 @@ impl<'tcx> Ty<'tcx> {
             // Might be, but not "trivial" so just giving the safe answer.
             ty::Adt(..) | ty::Closure(..) | ty::CoroutineClosure(..) => false,
 
+            ty::UnsafeBinder(_) => false,
+
             // Needs normalization or revealing to determine, so no is the safe answer.
             ty::Alias(..) => false,
 
@@ -1973,7 +1991,8 @@ impl<'tcx> Ty<'tcx> {
             | Coroutine(_, _)
             | CoroutineWitness(..)
             | Never
-            | Tuple(_) => true,
+            | Tuple(_)
+            | UnsafeBinder(_) => true,
             Error(_) | Infer(_) | Alias(_, _) | Param(_) | Bound(_, _) | Placeholder(_) => false,
         }
     }

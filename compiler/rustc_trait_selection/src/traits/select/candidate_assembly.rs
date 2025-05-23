@@ -18,6 +18,7 @@ use rustc_infer::traits::{
 use rustc_middle::ty::fast_reject::DeepRejectCtxt;
 use rustc_middle::ty::{self, ToPolyTraitRef, Ty, TypeVisitableExt, TypingMode};
 use rustc_middle::{bug, span_bug};
+use rustc_type_ir::Interner;
 use tracing::{debug, instrument, trace};
 
 use super::SelectionCandidate::*;
@@ -91,14 +92,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             } else if tcx.is_lang_item(def_id, LangItem::Sized) {
                 // Sized is never implementable by end-users, it is
                 // always automatically computed.
-
-                // FIXME: Consider moving this check to the top level as it
-                // may also be useful for predicates other than `Sized`
-                // Error type cannot possibly implement `Sized` (fixes #123154)
-                if let Err(e) = obligation.predicate.skip_binder().self_ty().error_reported() {
-                    return Err(SelectionError::Overflow(e.into()));
-                }
-
                 let sized_conditions = self.sized_conditions(obligation);
                 self.assemble_builtin_bound_candidates(sized_conditions, &mut candidates);
             } else if tcx.is_lang_item(def_id, LangItem::Unsize) {
@@ -229,13 +222,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         candidates: &mut SelectionCandidateSet<'tcx>,
     ) -> Result<(), SelectionError<'tcx>> {
         debug!(?stack.obligation);
-
-        // An error type will unify with anything. So, avoid
-        // matching an error type with `ParamCandidate`.
-        // This helps us avoid spurious errors like issue #121941.
-        if stack.obligation.predicate.references_error() {
-            return Ok(());
-        }
 
         let bounds = stack
             .obligation
@@ -563,19 +549,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         obligation: &PolyTraitObligation<'tcx>,
         candidates: &mut SelectionCandidateSet<'tcx>,
     ) {
-        // Essentially any user-written impl will match with an error type,
-        // so creating `ImplCandidates` isn't useful. However, we might
-        // end up finding a candidate elsewhere (e.g. a `BuiltinCandidate` for `Sized`)
-        // This helps us avoid overflow: see issue #72839
-        // Since compilation is already guaranteed to fail, this is just
-        // to try to show the 'nicest' possible errors to the user.
-        // We don't check for errors in the `ParamEnv` - in practice,
-        // it seems to cause us to be overly aggressive in deciding
-        // to give up searching for candidates, leading to spurious errors.
-        if obligation.predicate.references_error() {
-            return;
-        }
-
         let drcx = DeepRejectCtxt::relate_rigid_infer(self.tcx());
         let obligation_args = obligation.predicate.skip_binder().trait_ref.args;
         self.tcx().for_each_relevant_impl(
@@ -646,7 +619,8 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 continue;
             }
 
-            match obligation.self_ty().skip_binder().kind() {
+            let self_ty = obligation.self_ty().skip_binder();
+            match self_ty.kind() {
                 // Fast path to avoid evaluating an obligation that trivially holds.
                 // There may be more bounds, but these are checked by the regular path.
                 ty::FnPtr(..) => return false,
@@ -678,6 +652,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 | ty::CoroutineClosure(..)
                 | ty::Coroutine(_, _)
                 | ty::CoroutineWitness(..)
+                | ty::UnsafeBinder(_)
                 | ty::Never
                 | ty::Tuple(_)
                 | ty::Error(_) => return true,
@@ -788,9 +763,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         //
                         // Note that this is only sound as projection candidates of opaque types
                         // are always applicable for auto traits.
-                    } else if let TypingMode::Coherence =
-                        self.infcx.typing_mode(obligation.param_env)
-                    {
+                    } else if let TypingMode::Coherence = self.infcx.typing_mode() {
                         // We do not emit auto trait candidates for opaque types in coherence.
                         // Doing so can result in weird dependency cycles.
                         candidates.ambiguous = true;
@@ -823,7 +796,14 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 | ty::Coroutine(..)
                 | ty::Never
                 | ty::Tuple(_)
-                | ty::CoroutineWitness(..) => {
+                | ty::CoroutineWitness(..)
+                | ty::UnsafeBinder(_) => {
+                    // Only consider auto impls of unsafe traits when there are
+                    // no unsafe fields.
+                    if self.tcx().trait_is_unsafe(def_id) && self_ty.has_unsafe_fields() {
+                        return;
+                    }
+
                     // Only consider auto impls if there are no manual impls for the root of `self_ty`.
                     //
                     // For example, we only consider auto candidates for `&i32: Auto` if no explicit impl
@@ -839,7 +819,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         candidates.vec.push(AutoImplCandidate)
                     }
                 }
-                ty::Error(_) => {} // do not add an auto trait impl for `ty::Error` for now.
+                ty::Error(_) => {
+                    candidates.vec.push(AutoImplCandidate);
+                }
             }
         }
     }
@@ -933,7 +915,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         //
         // FIXME(@lcnr): This should probably only trigger during analysis,
         // disabling candidates during codegen is also questionable.
-        if let TypingMode::Coherence = self.infcx.typing_mode(param_env) {
+        if let TypingMode::Coherence = self.infcx.typing_mode() {
             return None;
         }
 
@@ -1199,6 +1181,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             | ty::FnDef(_, _)
             | ty::Pat(_, _)
             | ty::FnPtr(..)
+            | ty::UnsafeBinder(_)
             | ty::Dynamic(_, _, _)
             | ty::Closure(..)
             | ty::CoroutineClosure(..)
@@ -1243,6 +1226,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             | ty::CoroutineClosure(..)
             | ty::Coroutine(..)
             | ty::CoroutineWitness(..)
+            | ty::UnsafeBinder(_)
             | ty::Never
             | ty::Tuple(..)
             | ty::Alias(..)

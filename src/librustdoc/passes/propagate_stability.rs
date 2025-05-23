@@ -6,7 +6,7 @@
 //! [`core::error`] module is marked as stable since 1.81.0, so we want to show
 //! [`core::error::Error`] as stable since 1.81.0 as well.
 
-use rustc_attr::{Stability, StabilityLevel};
+use rustc_attr_parsing::{Stability, StabilityLevel};
 use rustc_hir::def_id::CRATE_DEF_ID;
 
 use crate::clean::{Crate, Item, ItemId, ItemKind};
@@ -30,7 +30,7 @@ struct StabilityPropagator<'a, 'tcx> {
     cx: &'a mut DocContext<'tcx>,
 }
 
-impl<'a, 'tcx> DocFolder for StabilityPropagator<'a, 'tcx> {
+impl DocFolder for StabilityPropagator<'_, '_> {
     fn fold_item(&mut self, mut item: Item) -> Option<Item> {
         let parent_stability = self.parent_stability;
 
@@ -67,11 +67,12 @@ impl<'a, 'tcx> DocFolder for StabilityPropagator<'a, 'tcx> {
                     // Don't inherit the parent's stability for these items, because they
                     // are potentially accessible even if the parent is more unstable.
                     ItemKind::ImplItem(..)
-                    | ItemKind::TyMethodItem(..)
+                    | ItemKind::RequiredMethodItem(..)
                     | ItemKind::MethodItem(..)
-                    | ItemKind::TyAssocConstItem(..)
-                    | ItemKind::AssocConstItem(..)
-                    | ItemKind::TyAssocTypeItem(..)
+                    | ItemKind::RequiredAssocConstItem(..)
+                    | ItemKind::ProvidedAssocConstItem(..)
+                    | ItemKind::ImplAssocConstItem(..)
+                    | ItemKind::RequiredAssocTypeItem(..)
                     | ItemKind::AssocTypeItem(..)
                     | ItemKind::PrimitiveItem(..)
                     | ItemKind::KeywordItem => own_stability,

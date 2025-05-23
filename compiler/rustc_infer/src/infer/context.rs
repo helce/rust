@@ -7,7 +7,7 @@ use rustc_middle::ty::relate::combine::PredicateEmittingRelation;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::{DUMMY_SP, ErrorGuaranteed};
 
-use super::{BoundRegionConversionTime, InferCtxt, SubregionOrigin};
+use super::{BoundRegionConversionTime, InferCtxt, RegionVariableOrigin, SubregionOrigin};
 
 impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
     type Interner = TyCtxt<'tcx>;
@@ -20,11 +20,8 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
         self.next_trait_solver
     }
 
-    fn typing_mode(
-        &self,
-        param_env_for_debug_assertion: ty::ParamEnv<'tcx>,
-    ) -> ty::TypingMode<'tcx> {
-        self.typing_mode(param_env_for_debug_assertion)
+    fn typing_mode(&self) -> ty::TypingMode<'tcx> {
+        self.typing_mode()
     }
 
     fn universe(&self) -> ty::UniverseIndex {
@@ -88,6 +85,10 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
 
     fn opportunistic_resolve_lt_var(&self, vid: ty::RegionVid) -> ty::Region<'tcx> {
         self.inner.borrow_mut().unwrap_region_constraints().opportunistic_resolve_var(self.tcx, vid)
+    }
+
+    fn next_region_infer(&self) -> ty::Region<'tcx> {
+        self.next_region_var(RegionVariableOrigin::MiscVariable(DUMMY_SP))
     }
 
     fn next_ty_infer(&self) -> Ty<'tcx> {

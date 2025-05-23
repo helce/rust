@@ -197,8 +197,7 @@ impl Config {
         if !path_is_dylib(fname) {
             // Finally, set the correct .interp for binaries
             let dynamic_linker_path = nix_deps_dir.join("nix-support/dynamic-linker");
-            // FIXME: can we support utf8 here? `args` doesn't accept Vec<u8>, only OsString ...
-            let dynamic_linker = t!(String::from_utf8(t!(fs::read(dynamic_linker_path))));
+            let dynamic_linker = t!(fs::read_to_string(dynamic_linker_path));
             patchelf.args(["--set-interpreter", dynamic_linker.trim_end()]);
         }
 
@@ -427,9 +426,8 @@ impl Config {
         let version = &self.stage0_metadata.compiler.version;
         let host = self.build;
 
-        let bin_root = self.out.join(host).join("stage0");
-        let clippy_stamp = bin_root.join(".clippy-stamp");
-        let cargo_clippy = bin_root.join("bin").join(exe("cargo-clippy", host));
+        let clippy_stamp = self.initial_sysroot.join(".clippy-stamp");
+        let cargo_clippy = self.initial_sysroot.join("bin").join(exe("cargo-clippy", host));
         if cargo_clippy.exists() && !program_out_of_date(&clippy_stamp, date) {
             return cargo_clippy;
         }
@@ -445,14 +443,14 @@ impl Config {
         cargo_clippy
     }
 
-    #[cfg(feature = "bootstrap-self-test")]
+    #[cfg(test)]
     pub(crate) fn maybe_download_rustfmt(&self) -> Option<PathBuf> {
         None
     }
 
     /// NOTE: rustfmt is a completely different toolchain than the bootstrap compiler, so it can't
     /// reuse target directories or artifacts
-    #[cfg(not(feature = "bootstrap-self-test"))]
+    #[cfg(not(test))]
     pub(crate) fn maybe_download_rustfmt(&self) -> Option<PathBuf> {
         use build_helper::stage0_parser::VersionMetadata;
 
@@ -535,10 +533,10 @@ impl Config {
         );
     }
 
-    #[cfg(feature = "bootstrap-self-test")]
+    #[cfg(test)]
     pub(crate) fn download_beta_toolchain(&self) {}
 
-    #[cfg(not(feature = "bootstrap-self-test"))]
+    #[cfg(not(test))]
     pub(crate) fn download_beta_toolchain(&self) {
         self.verbose(|| println!("downloading stage0 beta artifacts"));
 
@@ -715,10 +713,10 @@ download-rustc = false
         self.unpack(&tarball, &bin_root, prefix);
     }
 
-    #[cfg(feature = "bootstrap-self-test")]
+    #[cfg(test)]
     pub(crate) fn maybe_download_ci_llvm(&self) {}
 
-    #[cfg(not(feature = "bootstrap-self-test"))]
+    #[cfg(not(test))]
     pub(crate) fn maybe_download_ci_llvm(&self) {
         use build_helper::exit;
 
@@ -790,7 +788,7 @@ download-rustc = false
         };
     }
 
-    #[cfg(not(feature = "bootstrap-self-test"))]
+    #[cfg(not(test))]
     fn download_ci_llvm(&self, llvm_sha: &str) {
         let llvm_assertions = self.llvm_assertions;
 
@@ -830,7 +828,7 @@ download-rustc = false
 
 fn path_is_dylib(path: &Path) -> bool {
     // The .so is not necessarily the extension, it might be libLLVM.so.18.1
-    path.to_str().map_or(false, |path| path.contains(".so"))
+    path.to_str().is_some_and(|path| path.contains(".so"))
 }
 
 /// Checks whether the CI rustc is available for the given target triple.

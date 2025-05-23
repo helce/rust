@@ -62,7 +62,9 @@ This API is completely unstable and subject to change.
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
 #![feature(assert_matches)]
+#![feature(coroutines)]
 #![feature(if_let_guard)]
+#![feature(iter_from_coroutine)]
 #![feature(iter_intersperse)]
 #![feature(let_chains)]
 #![feature(never_type)]
@@ -99,8 +101,8 @@ use rustc_middle::mir::interpret::GlobalId;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, Const, Ty, TyCtxt};
 use rustc_session::parse::feature_err;
-use rustc_span::Span;
 use rustc_span::symbol::sym;
+use rustc_span::Span;
 use rustc_trait_selection::traits;
 
 use self::hir_ty_lowering::{FeedConstTy, HirTyLowerer};

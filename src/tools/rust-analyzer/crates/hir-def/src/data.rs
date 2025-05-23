@@ -94,7 +94,7 @@ impl FunctionData {
             .map(Box::new);
         let rustc_allow_incoherent_impl = attrs.by_key(&sym::rustc_allow_incoherent_impl).exists();
         if flags.contains(FnFlags::HAS_UNSAFE_KW)
-            && !crate_graph[krate].edition.at_least_2024()
+            // && !crate_graph[krate].edition.at_least_2024()
             && attrs.by_key(&sym::rustc_deprecated_safe_2024).exists()
         {
             flags.remove(FnFlags::HAS_UNSAFE_KW);
@@ -369,7 +369,7 @@ impl ImplData {
 
         let item_tree = tree_id.item_tree(db);
         let impl_def = &item_tree[tree_id.value];
-        let target_trait = impl_def.target_trait.clone();
+        let target_trait = impl_def.target_trait;
         let self_ty = impl_def.self_ty;
         let is_negative = impl_def.is_negative;
         let is_unsafe = impl_def.is_unsafe;

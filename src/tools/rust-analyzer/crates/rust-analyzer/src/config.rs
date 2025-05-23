@@ -3,17 +3,13 @@
 //! Of particular interest is the `feature_flags` hash map: while other fields
 //! configure the server itself, feature flags are passed into analysis, and
 //! tweak things like automatic insertion of `()` in completions.
-use std::{
-    env, fmt, iter,
-    ops::Not,
-    sync::{LazyLock, OnceLock},
-};
+use std::{env, fmt, iter, ops::Not, sync::OnceLock};
 
 use cfg::{CfgAtom, CfgDiff};
 use hir::Symbol;
 use ide::{
     AssistConfig, CallHierarchyConfig, CallableSnippets, CompletionConfig,
-     DiagnosticsConfig, ExprFillDefaultMode, GenericParameterHints,
+    CompletionFieldsToResolve, DiagnosticsConfig, ExprFillDefaultMode, GenericParameterHints,
     HighlightConfig, HighlightRelatedConfig, HoverConfig, HoverDocFormat, InlayFieldsToResolve,
     InlayHintsConfig, JoinLinesConfig, MemoryLayoutHoverConfig, MemoryLayoutHoverRenderKind,
     Snippet, SnippetScope, SourceRootId,
@@ -308,8 +304,8 @@ config_data! {
         /// Show documentation.
         signatureInfo_documentation_enable: bool                       = true,
 
-        /// Whether to insert closing angle brackets when typing an opening angle bracket of a generic argument list.
-        typing_autoClosingAngleBrackets_enable: bool = false,
+        /// Specify the characters to exclude from triggering typing assists. The default trigger characters are `.`, `=`, `<`, `>`, `{`, and `(`.
+        typing_excludeChars: Option<String> = Some("|<".to_owned()),
 
 
         /// Enables automatic discovery of projects using [`DiscoverWorkspaceConfig::command`].
@@ -558,6 +554,9 @@ config_data! {
         ///
         /// This option does not take effect until rust-analyzer is restarted.
         cargo_sysroot: Option<String>    = Some("discover".to_owned()),
+        /// How to query metadata for the sysroot crate. Using cargo metadata allows rust-analyzer
+        /// to analyze third-party dependencies of the standard libraries.
+        cargo_sysrootQueryMetadata: SysrootQueryMetadata = SysrootQueryMetadata::CargoMetadata,
         /// Relative path to the sysroot library sources. If left unset, this will default to
         /// `{cargo.sysroot}/lib/rustlib/src/rust/library`.
         ///
@@ -645,7 +644,8 @@ config_data! {
         /// Aliased as `"checkOnSave.targets"`.
         check_targets | checkOnSave_targets | checkOnSave_target: Option<CheckOnSaveTargets> = None,
         /// Whether `--workspace` should be passed to `cargo check`.
-        /// If false, `-p <package>` will be passed instead.
+        /// If false, `-p <package>` will be passed instead if applicable. In case it is not, no
+        /// check will be performed.
         check_workspace: bool = true,
 
         /// These proc-macros will be ignored when trying to expand them.
@@ -727,6 +727,12 @@ enum RatomlFile {
     Crate(LocalConfigInput),
 }
 
+#[derive(Clone, Debug)]
+struct ClientInfo {
+    name: String,
+    version: Option<Version>,
+}
+
 #[derive(Clone)]
 pub struct Config {
     /// Projects that have a Cargo.toml or a rust-project.json in a
@@ -741,7 +747,7 @@ pub struct Config {
     caps: ClientCapabilities,
     root_path: AbsPathBuf,
     snippets: Vec<Snippet>,
-    visual_studio_code_version: Option<Version>,
+    client_info: Option<ClientInfo>,
 
     default_config: &'static DefaultConfigData,
     /// Config node that obtains its initial value during the server initialization and
@@ -774,7 +780,7 @@ impl fmt::Debug for Config {
             .field("caps", &self.caps)
             .field("root_path", &self.root_path)
             .field("snippets", &self.snippets)
-            .field("visual_studio_code_version", &self.visual_studio_code_version)
+            .field("client_info", &self.client_info)
             .field("client_config", &self.client_config)
             .field("user_config", &self.user_config)
             .field("ratoml_file", &self.ratoml_file)
@@ -795,25 +801,14 @@ impl std::ops::Deref for Config {
 }
 
 impl Config {
-    /// Path to the root configuration file. This can be seen as a generic way to define what would be `$XDG_CONFIG_HOME/rust-analyzer/rust-analyzer.toml` in Linux.
-    /// This path is equal to:
-    ///
-    /// |Platform | Value                                 | Example                                  |
-    /// | ------- | ------------------------------------- | ---------------------------------------- |
-    /// | Linux   | `$XDG_CONFIG_HOME` or `$HOME`/.config | /home/alice/.config                      |
-    /// | macOS   | `$HOME`/Library/Application Support   | /Users/Alice/Library/Application Support |
-    /// | Windows | `{FOLDERID_RoamingAppData}`           | C:\Users\Alice\AppData\Roaming           |
-    pub fn user_config_path() -> Option<&'static AbsPath> {
-        static USER_CONFIG_PATH: LazyLock<Option<AbsPathBuf>> = LazyLock::new(|| {
-            let user_config_path = if let Some(path) = env::var_os("__TEST_RA_USER_CONFIG_DIR") {
-                std::path::PathBuf::from(path)
-            } else {
-                dirs::config_dir()?.join("rust-analyzer")
-            }
-            .join("rust-analyzer.toml");
-            Some(AbsPathBuf::assert_utf8(user_config_path))
-        });
-        USER_CONFIG_PATH.as_deref()
+    /// Path to the user configuration dir. This can be seen as a generic way to define what would be `$XDG_CONFIG_HOME/rust-analyzer` in Linux.
+    pub fn user_config_dir_path() -> Option<AbsPathBuf> {
+        let user_config_path = if let Some(path) = env::var_os("__TEST_RA_USER_CONFIG_DIR") {
+            std::path::PathBuf::from(path)
+        } else {
+            dirs::config_dir()?.join("rust-analyzer")
+        };
+        Some(AbsPathBuf::assert_utf8(user_config_path))
     }
 
     pub fn same_source_root_parent_map(
@@ -833,6 +828,7 @@ impl Config {
         let mut should_update = false;
 
         if let Some(change) = change.user_config_change {
+            tracing::info!("updating config from user config toml: {:#}", change);
             if let Ok(table) = toml::from_str(&change) {
                 let mut toml_errors = vec![];
                 validate_toml_table(
@@ -925,7 +921,7 @@ impl Config {
                     RatomlFileKind::Crate => {
                         if let Some(text) = text {
                             let mut toml_errors = vec![];
-                            tracing::info!("updating ra-toml config: {:#}", text);
+                            tracing::info!("updating ra-toml crate config: {:#}", text);
                             match toml::from_str(&text) {
                                 Ok(table) => {
                                     validate_toml_table(
@@ -967,6 +963,7 @@ impl Config {
                     }
                     RatomlFileKind::Workspace => {
                         if let Some(text) = text {
+                            tracing::info!("updating ra-toml workspace config: {:#}", text);
                             let mut toml_errors = vec![];
                             match toml::from_str(&text) {
                                 Ok(table) => {
@@ -1253,7 +1250,7 @@ pub struct NotificationsConfig {
     pub cargo_toml_not_found: bool,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum RustfmtConfig {
     Rustfmt { extra_args: Vec<String>, enable_range_formatting: bool },
     CustomCommand { command: String, args: Vec<String> },
@@ -1332,7 +1329,7 @@ impl Config {
         root_path: AbsPathBuf,
         caps: lsp_types::ClientCapabilities,
         workspace_roots: Vec<AbsPathBuf>,
-        visual_studio_code_version: Option<Version>,
+        client_info: Option<lsp_types::ClientInfo>,
     ) -> Self {
         static DEFAULT_CONFIG_DATA: OnceLock<&'static DefaultConfigData> = OnceLock::new();
 
@@ -1343,7 +1340,10 @@ impl Config {
             root_path,
             snippets: Default::default(),
             workspace_roots,
-            visual_studio_code_version,
+            client_info: client_info.map(|it| ClientInfo {
+                name: it.name,
+                version: it.version.as_deref().map(Version::parse).and_then(Result::ok),
+            }),
             client_config: (FullConfigInput::default(), ConfigErrors(vec![])),
             default_config: DEFAULT_CONFIG_DATA.get_or_init(|| Box::leak(Box::default())),
             source_root_parent_map: Arc::new(FxHashMap::default()),
@@ -1418,6 +1418,7 @@ impl Config {
     }
 
     pub fn completion(&self, source_root: Option<SourceRootId>) -> CompletionConfig {
+        let client_capability_fields = self.completion_resolve_support_properties();
         CompletionConfig {
             enable_postfix_completions: self.completion_postfix_enable(source_root).to_owned(),
             enable_imports_on_the_fly: self.completion_autoimport_enable(source_root).to_owned()
@@ -1442,6 +1443,11 @@ impl Config {
             limit: self.completion_limit(source_root).to_owned(),
             enable_term_search: self.completion_termSearch_enable(source_root).to_owned(),
             term_search_fuel: self.completion_termSearch_fuel(source_root).to_owned() as u64,
+            fields_to_resolve: if self.client_is_neovim() {
+                CompletionFieldsToResolve::empty()
+            } else {
+                CompletionFieldsToResolve::from_client_capabilities(&client_capability_fields)
+            },
         }
     }
 
@@ -1601,13 +1607,9 @@ impl Config {
             } else {
                 None
             },
-            fields_to_resolve: InlayFieldsToResolve {
-                resolve_text_edits: client_capability_fields.contains("textEdits"),
-                resolve_hint_tooltip: client_capability_fields.contains("tooltip"),
-                resolve_label_tooltip: client_capability_fields.contains("label.tooltip"),
-                resolve_label_location: client_capability_fields.contains("label.location"),
-                resolve_label_command: client_capability_fields.contains("label.command"),
-            },
+            fields_to_resolve: InlayFieldsToResolve::from_client_capabilities(
+                &client_capability_fields,
+            ),
             implicit_drop_hints: self.inlayHints_implicitDrops_enable().to_owned(),
             range_exclusive_hints: self.inlayHints_rangeExclusiveHints_enable().to_owned(),
         }
@@ -1858,6 +1860,12 @@ impl Config {
             },
             target: self.cargo_target(source_root).clone(),
             sysroot,
+            sysroot_query_metadata: match self.cargo_sysrootQueryMetadata(None) {
+                SysrootQueryMetadata::CargoMetadata => {
+                    project_model::SysrootQueryMetadata::CargoMetadata
+                }
+                SysrootQueryMetadata::None => project_model::SysrootQueryMetadata::None,
+            },
             sysroot_src,
             rustc_source,
             cfg_overrides: project_model::CfgOverrides {
@@ -2147,14 +2155,25 @@ impl Config {
         }
     }
 
-    pub fn typing_autoclose_angle(&self) -> bool {
-        *self.typing_autoClosingAngleBrackets_enable()
+    pub fn typing_exclude_chars(&self) -> Option<String> {
+        self.typing_excludeChars().clone()
     }
 
     // VSCode is our reference implementation, so we allow ourselves to work around issues by
     // special casing certain versions
     pub fn visual_studio_code_version(&self) -> Option<&Version> {
-        self.visual_studio_code_version.as_ref()
+        self.client_info
+            .as_ref()
+            .filter(|it| it.name.starts_with("Visual Studio Code"))
+            .and_then(|it| it.version.as_ref())
+    }
+
+    pub fn client_is_helix(&self) -> bool {
+        self.client_info.as_ref().map(|it| it.name == "helix").unwrap_or_default()
+    }
+
+    pub fn client_is_neovim(&self) -> bool {
+        self.client_info.as_ref().map(|it| it.name == "Neovim").unwrap_or_default()
     }
 }
 // Deserialization definitions
@@ -2547,6 +2566,13 @@ pub enum NumThreads {
     Logical,
     #[serde(untagged)]
     Concrete(usize),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SysrootQueryMetadata {
+    CargoMetadata,
+    None,
 }
 
 macro_rules! _default_val {
@@ -3399,6 +3425,14 @@ fn field_props(field: &str, ty: &str, doc: &[&str], default: &str) -> serde_json
                     }
                 }
             ]
+        },
+        "SysrootQueryMetadata" => set! {
+            "type": "string",
+            "enum": ["none", "cargo_metadata"],
+            "enumDescriptions": [
+                "Do not query sysroot metadata, always use stitched sysroot.",
+                "Use `cargo metadata` to query sysroot metadata."
+            ],
         },
         _ => panic!("missing entry for {ty}: {default} (field {field})"),
     }

@@ -11,7 +11,7 @@ use rustc_ast_ir::Mutability;
 use crate::elaborate::Elaboratable;
 use crate::fold::{TypeFoldable, TypeSuperFoldable};
 use crate::relate::Relate;
-use crate::solve::Reveal;
+use crate::solve::AdtDestructorKind;
 use crate::visit::{Flags, TypeSuperVisitable, TypeVisitable};
 use crate::{self as ty, CollectAndApply, Interner, UpcastFrom};
 
@@ -112,6 +112,8 @@ pub trait Ty<I: Interner<Ty = Self>>:
 
     fn new_pat(interner: I, ty: Self, pat: I::Pat) -> Self;
 
+    fn new_unsafe_binder(interner: I, ty: ty::Binder<I, I::Ty>) -> Self;
+
     fn tuple_fields(self) -> I::Tys;
 
     fn to_opt_closure_kind(self) -> Option<ty::ClosureKind>;
@@ -135,6 +137,9 @@ pub trait Ty<I: Interner<Ty = Self>>:
     fn is_fn_ptr(self) -> bool {
         matches!(self.kind(), ty::FnPtr(..))
     }
+
+    /// Checks whether this type is an ADT that has unsafe fields.
+    fn has_unsafe_fields(self) -> bool;
 
     fn fn_sig(self, interner: I) -> ty::Binder<I, ty::FnSig<I>> {
         match self.kind() {
@@ -182,6 +187,7 @@ pub trait Ty<I: Interner<Ty = Self>>:
             | ty::Ref(_, _, _)
             | ty::FnDef(_, _)
             | ty::FnPtr(..)
+            | ty::UnsafeBinder(_)
             | ty::Dynamic(_, _, _)
             | ty::Closure(_, _)
             | ty::CoroutineClosure(_, _)
@@ -257,8 +263,6 @@ pub trait Const<I: Interner<Const = Self>>:
     + Relate<I>
     + Flags
 {
-    fn try_to_target_usize(self, interner: I) -> Option<u64>;
-
     fn new_infer(interner: I, var: ty::InferConst) -> Self;
 
     fn new_var(interner: I, var: ty::ConstVid) -> Self;
@@ -537,12 +541,12 @@ pub trait AdtDef<I: Interner>: Copy + Debug + Hash + Eq {
     fn sized_constraint(self, interner: I) -> Option<ty::EarlyBinder<I, I::Ty>>;
 
     fn is_fundamental(self) -> bool;
+
+    fn destructor(self, interner: I) -> Option<AdtDestructorKind>;
 }
 
 pub trait ParamEnv<I: Interner>: Copy + Debug + Hash + Eq + TypeFoldable<I> {
-    fn reveal(self) -> Reveal;
-
-    fn caller_bounds(self) -> impl IntoIterator<Item = I::Clause>;
+    fn caller_bounds(self) -> impl SliceLike<Item = I::Clause>;
 }
 
 pub trait Features<I: Interner>: Copy {

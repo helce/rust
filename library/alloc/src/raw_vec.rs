@@ -103,7 +103,6 @@ impl<T> RawVec<T, Global> {
     /// `RawVec` with capacity `usize::MAX`. Useful for implementing
     /// delayed allocation.
     #[must_use]
-    #[cfg_attr(bootstrap, rustc_const_stable(feature = "raw_vec_internals_const", since = "1.81"))]
     pub const fn new() -> Self {
         Self::new_in(Global)
     }
@@ -179,7 +178,6 @@ impl<T, A: Allocator> RawVec<T, A> {
     /// Like `new`, but parameterized over the choice of allocator for
     /// the returned `RawVec`.
     #[inline]
-    #[cfg_attr(bootstrap, rustc_const_stable(feature = "raw_vec_internals_const", since = "1.81"))]
     pub const fn new_in(alloc: A) -> Self {
         Self { inner: RawVecInner::new_in(alloc, align_of::<T>()), _marker: PhantomData }
     }
@@ -409,7 +407,6 @@ unsafe impl<#[may_dangle] T, A: Allocator> Drop for RawVec<T, A> {
 
 impl<A: Allocator> RawVecInner<A> {
     #[inline]
-    #[cfg_attr(bootstrap, rustc_const_stable(feature = "raw_vec_internals_const", since = "1.81"))]
     const fn new_in(alloc: A, align: usize) -> Self {
         let ptr = unsafe { core::mem::transmute(align) };
         // `cap: 0` means "unallocated". zero-sized types are ignored.
@@ -423,7 +420,7 @@ impl<A: Allocator> RawVecInner<A> {
         match Self::try_allocate_in(capacity, AllocInit::Uninitialized, alloc, elem_layout) {
             Ok(this) => {
                 unsafe {
-                    // Make it more obvious that a subsquent Vec::reserve(capacity) will not allocate.
+                    // Make it more obvious that a subsequent Vec::reserve(capacity) will not allocate.
                     hint::assert_unchecked(!this.needs_to_grow(0, capacity, elem_layout));
                 }
                 this
@@ -757,7 +754,9 @@ impl<A: Allocator> RawVecInner<A> {
     }
 }
 
-#[inline(never)]
+// not marked inline(never) since we want optimizers to be able to observe the specifics of this
+// function, see tests/codegen/vec-reserve-extend.rs.
+#[cold]
 fn finish_grow<A>(
     new_layout: Layout,
     current_memory: Option<(NonNull<u8>, Layout)>,

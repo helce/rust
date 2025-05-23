@@ -116,7 +116,6 @@ impl<T: ?Sized> *const T {
     /// println!("{:?}", unsafe { &*bad });
     /// ```
     #[unstable(feature = "set_ptr_value", issue = "75091")]
-    #[cfg_attr(bootstrap, rustc_const_stable(feature = "ptr_metadata_const", since = "1.83.0"))]
     #[must_use = "returns a new pointer rather than modifying its argument"]
     #[inline]
     pub const fn with_metadata_of<U>(self, meta: *const U) -> *const U
@@ -364,7 +363,6 @@ impl<T: ?Sized> *const T {
     /// ```
     #[inline]
     #[unstable(feature = "ptr_as_uninit", issue = "75402")]
-    #[rustc_const_unstable(feature = "ptr_as_uninit", issue = "75402")]
     pub const unsafe fn as_uninit_ref<'a>(self) -> Option<&'a MaybeUninit<T>>
     where
         T: Sized,
@@ -521,11 +519,12 @@ impl<T: ?Sized> *const T {
     /// let mut out = String::new();
     /// while ptr != end_rounded_up {
     ///     unsafe {
-    ///         write!(&mut out, "{}, ", *ptr).unwrap();
+    ///         write!(&mut out, "{}, ", *ptr)?;
     ///     }
     ///     ptr = ptr.wrapping_offset(step);
     /// }
     /// assert_eq!(out.as_str(), "1, 3, 5, ");
+    /// # std::fmt::Result::Ok(())
     /// ```
     #[stable(feature = "ptr_wrapping_offset", since = "1.16.0")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
@@ -1035,7 +1034,6 @@ impl<T: ?Sized> *const T {
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
     #[rustc_const_stable(feature = "const_ptr_offset", since = "1.61.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(unchecked_neg))]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub const unsafe fn sub(self, count: usize) -> Self
@@ -1145,11 +1143,12 @@ impl<T: ?Sized> *const T {
     /// let mut out = String::new();
     /// while ptr != end_rounded_up {
     ///     unsafe {
-    ///         write!(&mut out, "{}, ", *ptr).unwrap();
+    ///         write!(&mut out, "{}, ", *ptr)?;
     ///     }
     ///     ptr = ptr.wrapping_add(step);
     /// }
     /// assert_eq!(out, "1, 3, 5, ");
+    /// # std::fmt::Result::Ok(())
     /// ```
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
@@ -1223,11 +1222,12 @@ impl<T: ?Sized> *const T {
     /// let mut out = String::new();
     /// while ptr != start_rounded_down {
     ///     unsafe {
-    ///         write!(&mut out, "{}, ", *ptr).unwrap();
+    ///         write!(&mut out, "{}, ", *ptr)?;
     ///     }
     ///     ptr = ptr.wrapping_sub(step);
     /// }
     /// assert_eq!(out, "5, 3, 1, ");
+    /// # std::fmt::Result::Ok(())
     /// ```
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
@@ -1543,6 +1543,21 @@ impl<T> *const [T] {
         self as *const T
     }
 
+    /// Gets a raw pointer to the underlying array.
+    ///
+    /// If `N` is not exactly equal to the length of `self`, then this method returns `None`.
+    #[unstable(feature = "slice_as_array", issue = "133508")]
+    #[inline]
+    #[must_use]
+    pub const fn as_array<const N: usize>(self) -> Option<*const [T; N]> {
+        if self.len() == N {
+            let me = self.as_ptr() as *const [T; N];
+            Some(me)
+        } else {
+            None
+        }
+    }
+
     /// Returns a raw pointer to an element or subslice, without doing bounds
     /// checking.
     ///
@@ -1618,7 +1633,6 @@ impl<T> *const [T] {
     /// [`is_null`]: #method.is_null
     #[inline]
     #[unstable(feature = "ptr_as_uninit", issue = "75402")]
-    #[rustc_const_unstable(feature = "ptr_as_uninit", issue = "75402")]
     pub const unsafe fn as_uninit_slice<'a>(self) -> Option<&'a [MaybeUninit<T>]> {
         if self.is_null() {
             None

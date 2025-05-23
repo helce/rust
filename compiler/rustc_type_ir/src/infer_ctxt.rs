@@ -39,9 +39,44 @@ pub enum TypingMode<I: Interner> {
     ///
     /// We only normalize opaque types which may get defined by the current body,
     /// which are stored in `defining_opaque_types`.
+    ///
+    /// We also refuse to project any associated type that is marked `default`.
+    /// Non-`default` ("final") types are always projected. This is necessary in
+    /// general for soundness of specialization. However, we *could* allow projections
+    /// in fully-monomorphic cases. We choose not to, because we prefer for `default type`
+    /// to force the type definition to be treated abstractly by any consumers of the
+    /// impl. Concretely, that means that the following example will
+    /// fail to compile:
+    ///
+    /// ```compile_fail,E0308
+    /// #![feature(specialization)]
+    /// trait Assoc {
+    ///     type Output;
+    /// }
+    ///
+    /// impl<T> Assoc for T {
+    ///     default type Output = bool;
+    /// }
+    ///
+    /// fn main() {
+    ///     let x: <() as Assoc>::Output = true;
+    /// }
+    /// ```
     Analysis { defining_opaque_types: I::DefiningOpaqueTypes },
+    /// Any analysis after borrowck for a given body should be able to use all the
+    /// hidden types defined by borrowck, without being able to define any new ones.
+    ///
+    /// This is currently only used by the new solver, but should be implemented in
+    /// the old solver as well.
+    PostBorrowckAnalysis { defined_opaque_types: I::DefiningOpaqueTypes },
     /// After analysis, mostly during codegen and MIR optimizations, we're able to
-    /// reveal all opaque types.
+    /// reveal all opaque types. As the concrete type should *never* be observable
+    /// directly by the user, this should not be used by checks which may expose
+    /// such details to the user.
+    ///
+    /// There are some exceptions to this as for example `layout_of` and const-evaluation
+    /// always run in `PostAnalysis` mode, even when used during analysis. This exposes
+    /// some information about the underlying type to users, but not the type itself.
     PostAnalysis,
 }
 
@@ -55,6 +90,12 @@ impl<I: Interner> TypingMode<I> {
     /// types defined by that body.
     pub fn analysis_in_body(cx: I, body_def_id: I::LocalDefId) -> TypingMode<I> {
         TypingMode::Analysis { defining_opaque_types: cx.opaque_types_defined_by(body_def_id) }
+    }
+
+    pub fn post_borrowck_analysis(cx: I, body_def_id: I::LocalDefId) -> TypingMode<I> {
+        TypingMode::PostBorrowckAnalysis {
+            defined_opaque_types: cx.opaque_types_defined_by(body_def_id),
+        }
     }
 }
 
@@ -70,10 +111,7 @@ pub trait InferCtxtLike: Sized {
         true
     }
 
-    fn typing_mode(
-        &self,
-        param_env_for_debug_assertion: <Self::Interner as Interner>::ParamEnv,
-    ) -> TypingMode<Self::Interner>;
+    fn typing_mode(&self) -> TypingMode<Self::Interner>;
 
     fn universe(&self) -> ty::UniverseIndex;
     fn create_next_universe(&self) -> ty::UniverseIndex;
@@ -100,6 +138,7 @@ pub trait InferCtxtLike: Sized {
         vid: ty::RegionVid,
     ) -> <Self::Interner as Interner>::Region;
 
+    fn next_region_infer(&self) -> <Self::Interner as Interner>::Region;
     fn next_ty_infer(&self) -> <Self::Interner as Interner>::Ty;
     fn next_const_infer(&self) -> <Self::Interner as Interner>::Const;
     fn fresh_args_for_item(

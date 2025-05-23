@@ -444,7 +444,7 @@ pub enum AliasTermKind {
     /// An associated type in an inherent `impl`
     InherentTy,
     /// An opaque type (usually from `impl Trait` in type aliases or function return types)
-    /// Can only be normalized away in RevealAll mode
+    /// Can only be normalized away in PostAnalysis mode or its defining scope.
     OpaqueTy,
     /// A type alias that actually checks its trait bounds.
     /// Currently only used if the type alias references opaque types.
@@ -684,19 +684,6 @@ impl<I: Interner> ty::Binder<I, ProjectionPredicate<I>> {
         self.skip_binder().projection_term.trait_def_id(cx)
     }
 
-    /// Get the trait ref required for this projection to be well formed.
-    /// Note that for generic associated types the predicates of the associated
-    /// type also need to be checked.
-    #[inline]
-    pub fn required_poly_trait_ref(&self, cx: I) -> ty::Binder<I, TraitRef<I>> {
-        // Note: unlike with `TraitRef::to_poly_trait_ref()`,
-        // `self.0.trait_ref` is permitted to have escaping regions.
-        // This is because here `self` has a `Binder` and so does our
-        // return value, so we are preserving the number of binding
-        // levels.
-        self.map_bound(|predicate| predicate.projection_term.trait_ref(cx))
-    }
-
     pub fn term(&self) -> ty::Binder<I, I::Term> {
         self.map_bound(|predicate| predicate.term)
     }
@@ -705,7 +692,7 @@ impl<I: Interner> ty::Binder<I, ProjectionPredicate<I>> {
     ///
     /// Note that this is not the `DefId` of the `TraitRef` containing this
     /// associated type, which is in `tcx.associated_item(projection_def_id()).container`.
-    pub fn projection_def_id(&self) -> I::DefId {
+    pub fn item_def_id(&self) -> I::DefId {
         // Ok to skip binder since trait `DefId` does not care about regions.
         self.skip_binder().projection_term.def_id
     }

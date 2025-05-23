@@ -77,6 +77,8 @@ const LLD_FILE_NAMES: &[&str] = &["ld.lld", "ld64.lld", "lld-link", "wasm-ld"];
 #[allow(clippy::type_complexity)] // It's fine for hard-coded list and type is explained above.
 const EXTRA_CHECK_CFGS: &[(Option<Mode>, &str, Option<&[&'static str]>)] = &[
     (None, "bootstrap", None),
+    // #[cfg(bootstrap)] to be removed when Cargo is updated
+    (None, "test", None),
     (Some(Mode::Rustc), "llvm_enzyme", None),
     (Some(Mode::Codegen), "llvm_enzyme", None),
     (Some(Mode::ToolRustc), "llvm_enzyme", None),
@@ -158,7 +160,7 @@ pub struct Build {
     initial_rustc: PathBuf,
     initial_cargo: PathBuf,
     initial_lld: PathBuf,
-    initial_libdir: PathBuf,
+    initial_relative_libdir: PathBuf,
     initial_sysroot: PathBuf,
 
     // Runtime state filled in later on
@@ -312,46 +314,19 @@ impl Build {
         let in_tree_llvm_info = config.in_tree_llvm_info.clone();
         let in_tree_gcc_info = config.in_tree_gcc_info.clone();
 
-        let initial_target_libdir_str = if config.dry_run() {
-            "/dummy/lib/path/to/lib/".to_string()
-        } else {
-            output(
-                Command::new(&config.initial_rustc)
-                    .arg("--target")
-                    .arg(config.build.rustc_target_arg())
-                    .arg("--print")
-                    .arg("target-libdir"),
-            )
-        };
+        let initial_target_libdir_str =
+            config.initial_sysroot.join("lib/rustlib").join(config.build).join("lib");
+
         let initial_target_dir = Path::new(&initial_target_libdir_str).parent().unwrap();
         let initial_lld = initial_target_dir.join("bin").join("rust-lld");
 
-        let initial_sysroot = if config.dry_run() {
-            "/dummy".to_string()
-        } else {
-            output(Command::new(&config.initial_rustc).arg("--print").arg("sysroot"))
-        }
-        .trim()
-        .to_string();
-
-        // FIXME(Zalathar): Determining this path occasionally fails locally for
-        // unknown reasons, so we print some extra context to help track down why.
-        let find_initial_libdir = || {
-            let initial_libdir =
-                initial_target_dir.parent()?.parent()?.strip_prefix(&initial_sysroot).ok()?;
-            Some(initial_libdir.to_path_buf())
-        };
-        let Some(initial_libdir) = find_initial_libdir() else {
-            panic!(
-                "couldn't determine `initial_libdir`:
-- config.initial_rustc:      {rustc:?}
-- initial_target_libdir_str: {initial_target_libdir_str:?}
-- initial_target_dir:        {initial_target_dir:?}
-- initial_sysroot:           {initial_sysroot:?}
-",
-                rustc = config.initial_rustc,
-            );
-        };
+        let initial_relative_libdir = initial_target_dir
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .strip_prefix(&config.initial_sysroot)
+            .expect("Couldn’t determine initial relative libdir.")
+            .to_path_buf();
 
         let version = std::fs::read_to_string(src.join("src").join("version"))
             .expect("failed to read src/version");
@@ -380,11 +355,11 @@ impl Build {
         }
 
         let mut build = Build {
+            initial_lld,
+            initial_relative_libdir,
             initial_rustc: config.initial_rustc.clone(),
             initial_cargo: config.initial_cargo.clone(),
-            initial_lld,
-            initial_libdir,
-            initial_sysroot: initial_sysroot.into(),
+            initial_sysroot: config.initial_sysroot.clone(),
             local_rebuild: config.local_rebuild,
             fail_fast: config.cmd.fail_fast(),
             doc_tests: config.cmd.doc_tests(),
@@ -496,6 +471,10 @@ impl Build {
     /// The given `err_hint` will be shown to the user if the submodule is not
     /// checked out and submodule management is disabled.
     pub fn require_submodule(&self, submodule: &str, err_hint: Option<&str>) {
+        if self.rust_info().is_from_tarball() {
+            return;
+        }
+
         // When testing bootstrap itself, it is much faster to ignore
         // submodules. Almost all Steps work fine without their submodules.
         if cfg!(test) && !self.config.submodules() {
@@ -662,11 +641,12 @@ impl Build {
         if self.config.backtrace {
             features.insert("backtrace");
         }
+
         if self.config.profiler_enabled(target) {
             features.insert("profiler");
         }
-        // Generate memcpy, etc.  FIXME: Remove this once compiler-builtins
-        // automatically detects this target.
+
+        // If zkvm target, generate memcpy, etc.
         if target.contains("zkvm") {
             features.insert("compiler-builtins-mem");
         }
@@ -1725,7 +1705,7 @@ Executed at: {executed_at}"#,
             }
         }
         if let Ok(()) = fs::hard_link(&src, dst) {
-            // Attempt to "easy copy" by creating a hard link (symlinks are priviledged on windows),
+            // Attempt to "easy copy" by creating a hard link (symlinks are privileged on windows),
             // but if that fails just fall back to a slow `copy` operation.
         } else {
             if let Err(e) = fs::copy(&src, dst) {

@@ -326,7 +326,7 @@ impl f16 {
     #[inline]
     #[must_use]
     #[unstable(feature = "f16", issue = "116909")]
-    #[rustc_allow_const_fn_unstable(const_float_methods)] // for `abs`
+    #[rustc_const_unstable(feature = "f16", issue = "116909")]
     pub const fn is_finite(self) -> bool {
         // There's no need to handle NaN separately: if self is NaN,
         // the comparison is not true, exactly as desired.
@@ -605,7 +605,6 @@ impl f16 {
     /// ```
     #[inline]
     #[unstable(feature = "f16", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_methods", issue = "130843")]
     #[must_use = "this returns the result of the operation, without modifying the original"]
     pub const fn recip(self) -> Self {
         1.0 / self
@@ -626,7 +625,6 @@ impl f16 {
     /// ```
     #[inline]
     #[unstable(feature = "f16", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_methods", issue = "130843")]
     #[must_use = "this returns the result of the operation, without modifying the original"]
     pub const fn to_degrees(self) -> Self {
         // Use a literal for better precision.
@@ -650,7 +648,6 @@ impl f16 {
     /// ```
     #[inline]
     #[unstable(feature = "f16", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_methods", issue = "130843")]
     #[must_use = "this returns the result of the operation, without modifying the original"]
     pub const fn to_radians(self) -> f16 {
         // Use a literal for better precision.
@@ -677,7 +674,7 @@ impl f16 {
     /// ```
     #[inline]
     #[unstable(feature = "f16", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_methods", issue = "130843")]
+    #[rustc_const_unstable(feature = "f16", issue = "116909")]
     #[must_use = "this returns the result of the comparison, without modifying either input"]
     pub const fn max(self, other: f16) -> f16 {
         intrinsics::maxnumf16(self, other)
@@ -702,7 +699,7 @@ impl f16 {
     /// ```
     #[inline]
     #[unstable(feature = "f16", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_methods", issue = "130843")]
+    #[rustc_const_unstable(feature = "f16", issue = "116909")]
     #[must_use = "this returns the result of the comparison, without modifying either input"]
     pub const fn min(self, other: f16) -> f16 {
         intrinsics::minnumf16(self, other)
@@ -798,7 +795,6 @@ impl f16 {
     ///
     /// ```
     /// #![feature(f16)]
-    /// #![feature(num_midpoint)]
     /// # #[cfg(target_arch = "aarch64")] { // FIXME(f16_F128): rust-lang/rust#123885
     ///
     /// assert_eq!(1f16.midpoint(4.0), 2.5);
@@ -807,8 +803,8 @@ impl f16 {
     /// ```
     #[inline]
     #[unstable(feature = "f16", issue = "116909")]
-    // #[unstable(feature = "num_midpoint", issue = "110840")]
-    pub fn midpoint(self, other: f16) -> f16 {
+    #[rustc_const_unstable(feature = "f16", issue = "116909")]
+    pub const fn midpoint(self, other: f16) -> f16 {
         const LO: f16 = f16::MIN_POSITIVE * 2.;
         const HI: f16 = f16::MAX / 2.;
 
@@ -1228,7 +1224,6 @@ impl f16 {
     /// ```
     #[inline]
     #[unstable(feature = "f16", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_methods", issue = "130843")]
     #[must_use = "method returns a new number and does not mutate the original value"]
     pub const fn clamp(mut self, min: f16, max: f16) -> f16 {
         const_assert!(
@@ -1269,7 +1264,7 @@ impl f16 {
     /// ```
     #[inline]
     #[unstable(feature = "f16", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_methods", issue = "130843")]
+    #[rustc_const_unstable(feature = "f16", issue = "116909")]
     #[must_use = "method returns a new number and does not mutate the original value"]
     pub const fn abs(self) -> Self {
         // FIXME(f16_f128): replace with `intrinsics::fabsf16` when available
@@ -1298,7 +1293,7 @@ impl f16 {
     /// ```
     #[inline]
     #[unstable(feature = "f16", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_methods", issue = "130843")]
+    #[rustc_const_unstable(feature = "f16", issue = "116909")]
     #[must_use = "method returns a new number and does not mutate the original value"]
     pub const fn signum(self) -> f16 {
         if self.is_nan() { Self::NAN } else { 1.0_f16.copysign(self) }
@@ -1336,7 +1331,7 @@ impl f16 {
     /// ```
     #[inline]
     #[unstable(feature = "f16", issue = "116909")]
-    #[rustc_const_unstable(feature = "const_float_methods", issue = "130843")]
+    #[rustc_const_unstable(feature = "f16", issue = "116909")]
     #[must_use = "method returns a new number and does not mutate the original value"]
     pub const fn copysign(self, sign: f16) -> f16 {
         // SAFETY: this is actually a safe intrinsic

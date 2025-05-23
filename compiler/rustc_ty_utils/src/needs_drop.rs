@@ -202,7 +202,12 @@ where
                         }
                     }
 
-                    _ if component.is_copy_modulo_regions(tcx, self.typing_env) => {}
+                    ty::UnsafeBinder(bound_ty) => {
+                        let ty = self.tcx.instantiate_bound_regions_with_erased(bound_ty.into());
+                        queue_type(self, ty);
+                    }
+
+                    _ if tcx.type_is_copy_modulo_regions(self.typing_env, component) => {}
 
                     ty::Closure(_, args) => {
                         for upvar in args.as_closure().upvar_tys() {
@@ -431,13 +436,13 @@ fn adt_significant_drop_tys(
 #[instrument(level = "debug", skip(tcx), ret)]
 fn list_significant_drop_tys<'tcx>(
     tcx: TyCtxt<'tcx>,
-    ty: ty::ParamEnvAnd<'tcx, Ty<'tcx>>,
+    key: ty::PseudoCanonicalInput<'tcx, Ty<'tcx>>,
 ) -> &'tcx ty::List<Ty<'tcx>> {
     tcx.mk_type_list(
         &drop_tys_helper(
             tcx,
-            ty.value,
-            ty::TypingEnv { typing_mode: ty::TypingMode::PostAnalysis, param_env: ty.param_env },
+            key.value,
+            key.typing_env,
             adt_consider_insignificant_dtor(tcx),
             true,
             true,

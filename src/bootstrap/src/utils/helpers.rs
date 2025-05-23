@@ -55,24 +55,30 @@ pub fn exe(name: &str, target: TargetSelection) -> String {
 
 /// Returns `true` if the file name given looks like a dynamic library.
 pub fn is_dylib(path: &Path) -> bool {
-    path.extension().and_then(|ext| ext.to_str()).map_or(false, |ext| {
+    path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
         ext == "dylib" || ext == "so" || ext == "dll" || (ext == "a" && is_aix_shared_archive(path))
     })
 }
 
+/// Returns `true` if the given path is part of a submodule.
+pub fn is_path_in_submodule(builder: &Builder<'_>, path: &str) -> bool {
+    let submodule_paths = build_helper::util::parse_gitmodules(&builder.src);
+    submodule_paths.iter().any(|submodule_path| path.starts_with(submodule_path))
+}
+
 fn is_aix_shared_archive(path: &Path) -> bool {
-    // FIXME(#133268): reading the entire file as &[u8] into memory seems excessive
-    // look into either mmap it or use the ReadCache
-    let data = match fs::read(path) {
-        Ok(data) => data,
-        Err(_) => return false,
-    };
-    let file = match ArchiveFile::parse(&*data) {
+    let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(_) => return false,
     };
+    let reader = object::ReadCache::new(file);
+    let archive = match ArchiveFile::parse(&reader) {
+        Ok(result) => result,
+        Err(_) => return false,
+    };
 
-    file.members()
+    archive
+        .members()
         .filter_map(Result::ok)
         .any(|entry| String::from_utf8_lossy(entry.name()).contains(".so"))
 }

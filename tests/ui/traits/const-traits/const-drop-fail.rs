@@ -1,7 +1,7 @@
-//@ known-bug: #110395
-
+//@ compile-flags: -Znext-solver
 //@ revisions: stock precise
-#![feature(const_trait_impl)]
+
+#![feature(const_trait_impl, const_destruct)]
 #![cfg_attr(precise, feature(const_precise_live_drops))]
 
 use std::marker::{Destruct, PhantomData};
@@ -30,7 +30,9 @@ macro_rules! check_all {
 
 check_all! {
     NonTrivialDrop,
+    //~^ ERROR the trait bound `NonTrivialDrop: const Destruct` is not satisfied
     ConstImplWithDropGlue(NonTrivialDrop),
+    //~^ ERROR the trait bound `NonTrivialDrop: const Destruct` is not satisfied
 }
 
 fn main() {}

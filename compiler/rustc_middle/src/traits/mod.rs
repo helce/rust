@@ -20,10 +20,9 @@ use rustc_macros::{
     Decodable, Encodable, HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable,
 };
 use rustc_span::def_id::{CRATE_DEF_ID, LocalDefId};
-use rustc_span::symbol::Symbol;
-use rustc_span::{DUMMY_SP, Span};
+use rustc_span::{DUMMY_SP, Span, Symbol};
 // FIXME: Remove this import and import via `solve::`
-pub use rustc_type_ir::solve::{BuiltinImplSource, Reveal};
+pub use rustc_type_ir::solve::BuiltinImplSource;
 use smallvec::{SmallVec, smallvec};
 use thin_vec::ThinVec;
 
@@ -204,6 +203,10 @@ pub enum ObligationCauseCode<'tcx> {
     /// list of the item.
     WhereClauseInExpr(DefId, Span, HirId, usize),
 
+    /// Like `WhereClauseinExpr`, but indexes into the `const_conditions`
+    /// rather than the `predicates_of`.
+    HostEffectInExpr(DefId, Span, HirId, usize),
+
     /// A type like `&'a T` is WF only if `T: 'a`.
     ReferenceOutlivesReferent(Ty<'tcx>),
 
@@ -244,11 +247,11 @@ pub enum ObligationCauseCode<'tcx> {
         /// If element is a `const fn` or const ctor we display a help message suggesting
         /// to move it to a new `const` item while saying that `T` doesn't implement `Copy`.
         is_constable: IsConstable,
-        elt_type: Ty<'tcx>,
+
+        /// Span of the repeat element.
+        ///
+        /// This is used to suggest wrapping it in a `const { ... }` block.
         elt_span: Span,
-        /// Span of the statement/item in which the repeat expression occurs. We can use this to
-        /// place a `const` declaration before it
-        elt_stmt_span: Span,
     },
 
     /// Types of fields (other than the last, except for packed structs) in a struct must be sized.
@@ -312,8 +315,8 @@ pub enum ObligationCauseCode<'tcx> {
         span: Option<Span>,
         /// The root expected type induced by a scrutinee or type expression.
         root_ty: Ty<'tcx>,
-        /// Whether the `Span` came from an expression or a type expression.
-        origin_expr: bool,
+        /// Information about the `Span`, if it came from an expression, otherwise `None`.
+        origin_expr: Option<PatternOriginExpr>,
     },
 
     /// Computing common supertype in an if expression
@@ -526,6 +529,25 @@ pub struct MatchExpressionArmCause<'tcx> {
     pub tail_defines_return_position_impl_trait: Option<LocalDefId>,
 }
 
+/// Information about the origin expression of a pattern, relevant to diagnostics.
+/// Fields here refer to the scrutinee of a pattern.
+/// If the scrutinee isn't given in the diagnostic, then this won't exist.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(TypeFoldable, TypeVisitable, HashStable, TyEncodable, TyDecodable)]
+pub struct PatternOriginExpr {
+    /// A span representing the scrutinee expression, with all leading references
+    /// peeled from the expression.
+    /// Only references in the expression are peeled - if the expression refers to a variable
+    /// whose type is a reference, then that reference is kept because it wasn't created
+    /// in the expression.
+    pub peeled_span: Span,
+    /// The number of references that were peeled to produce `peeled_span`.
+    pub peeled_count: usize,
+    /// Does the peeled expression need to be wrapped in parentheses for
+    /// a prefix suggestion (i.e., dereference) to be valid.
+    pub peeled_prefix_suggestion_parentheses: bool,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[derive(TypeFoldable, TypeVisitable, HashStable, TyEncodable, TyDecodable)]
 pub struct IfExpressionCause<'tcx> {
@@ -551,7 +573,7 @@ pub struct DerivedCause<'tcx> {
     pub parent_code: InternedObligationCauseCode<'tcx>,
 }
 
-#[derive(Clone, Debug, TypeVisitable)]
+#[derive(Clone, Debug, PartialEq, Eq, TypeVisitable)]
 pub enum SelectionError<'tcx> {
     /// The trait is not implemented.
     Unimplemented,
@@ -573,7 +595,7 @@ pub enum SelectionError<'tcx> {
     ConstArgHasWrongType { ct: ty::Const<'tcx>, ct_ty: Ty<'tcx>, expected_ty: Ty<'tcx> },
 }
 
-#[derive(Clone, Debug, TypeVisitable)]
+#[derive(Clone, Debug, PartialEq, Eq, TypeVisitable)]
 pub struct SignatureMismatchData<'tcx> {
     pub found_trait_ref: ty::TraitRef<'tcx>,
     pub expected_trait_ref: ty::TraitRef<'tcx>,

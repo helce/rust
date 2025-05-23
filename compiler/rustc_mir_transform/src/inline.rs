@@ -4,7 +4,7 @@ use std::iter;
 use std::ops::{Range, RangeFrom};
 
 use rustc_abi::{ExternAbi, FieldIdx};
-use rustc_attr::InlineAttr;
+use rustc_attr_parsing::InlineAttr;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_index::Idx;
@@ -210,12 +210,6 @@ impl<'tcx> Inliner<'tcx> {
         let callee_body = try_instance_mir(self.tcx, callsite.callee.def)?;
         self.check_mir_body(callsite, callee_body, callee_attrs, cross_crate_inlinable)?;
 
-        if !self.tcx.consider_optimizing(|| {
-            format!("Inline {:?} into {:?}", callsite.callee, caller_body.source)
-        }) {
-            return Err("optimization fuel exhausted");
-        }
-
         let Ok(callee_body) = callsite.callee.try_instantiate_mir_and_normalize_erasing_regions(
             self.tcx,
             self.typing_env,
@@ -226,15 +220,7 @@ impl<'tcx> Inliner<'tcx> {
 
         // Normally, this shouldn't be required, but trait normalization failure can create a
         // validation ICE.
-        if !validate_types(
-            self.tcx,
-            MirPhase::Runtime(RuntimePhase::Optimized),
-            self.typing_env,
-            &callee_body,
-            &caller_body,
-        )
-        .is_empty()
-        {
+        if !validate_types(self.tcx, self.typing_env, &callee_body, &caller_body).is_empty() {
             return Err("failed to validate callee body");
         }
 
@@ -586,11 +572,13 @@ impl<'tcx> Inliner<'tcx> {
         let return_block = if let Some(block) = target {
             // Prepare a new block for code that should execute when call returns. We don't use
             // target block directly since it might have other predecessors.
-            let mut data = BasicBlockData::new(Some(Terminator {
-                source_info: terminator.source_info,
-                kind: TerminatorKind::Goto { target: block },
-            }));
-            data.is_cleanup = caller_body[block].is_cleanup;
+            let data = BasicBlockData::new(
+                Some(Terminator {
+                    source_info: terminator.source_info,
+                    kind: TerminatorKind::Goto { target: block },
+                }),
+                caller_body[block].is_cleanup,
+            );
             Some(caller_body.basic_blocks_mut().push(data))
         } else {
             None

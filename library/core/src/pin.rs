@@ -373,9 +373,9 @@
 //! exactly what we did with our `AddrTracker` example above. Without doing this, you *must not*
 //! rely on pinning-related guarantees to apply to your type!
 //!
-//! If need to truly pin a value of a foreign or built-in type that implements [`Unpin`], you'll
-//! need to create your own wrapper type around the [`Unpin`] type you want to pin and then
-//! opts-out of [`Unpin`] using [`PhantomPinned`].
+//! If you really need to pin a value of a foreign or built-in type that implements [`Unpin`],
+//! you'll need to create your own wrapper type around the [`Unpin`] type you want to pin and then
+//! opt-out of [`Unpin`] using [`PhantomPinned`].
 //!
 //! Exposing access to the inner field which you want to remain pinned must then be carefully
 //! considered as well! Remember, exposing a method that gives access to a
@@ -595,7 +595,7 @@
 //! [drop-impl]: self#implementing-drop-for-types-with-address-sensitive-states
 //!
 //! The [`drop`] function takes [`&mut self`], but this is called *even if that `self` has been
-//! pinned*! Implementing [`Drop`] for a type with address-sensitive states, because if `self` was
+//! pinned*! Implementing [`Drop`] for a type with address-sensitive states requires some care, because if `self` was
 //! indeed in an address-sensitive state before [`drop`] was called, it is as if the compiler
 //! automatically called [`Pin::get_unchecked_mut`].
 //!

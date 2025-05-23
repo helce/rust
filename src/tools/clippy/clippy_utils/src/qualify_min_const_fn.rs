@@ -3,9 +3,9 @@
 // of terminologies might not be relevant in the context of Clippy. Note that its behavior might
 // differ from the time of `rustc` even if the name stays the same.
 
-use clippy_config::msrvs::{self, Msrv};
+use crate::msrvs::{self, Msrv};
 use hir::LangItem;
-use rustc_attr::StableSince;
+use rustc_attr_parsing::{RustcVersion, StableSince};
 use rustc_const_eval::check_consts::ConstCx;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
@@ -381,14 +381,14 @@ fn check_terminator<'tcx>(
 fn is_stable_const_fn(tcx: TyCtxt<'_>, def_id: DefId, msrv: &Msrv) -> bool {
     tcx.is_const_fn(def_id)
         && tcx.lookup_const_stability(def_id).is_none_or(|const_stab| {
-            if let rustc_attr::StabilityLevel::Stable { since, .. } = const_stab.level {
+            if let rustc_attr_parsing::StabilityLevel::Stable { since, .. } = const_stab.level {
                 // Checking MSRV is manually necessary because `rustc` has no such concept. This entire
                 // function could be removed if `rustc` provided a MSRV-aware version of `is_stable_const_fn`.
                 // as a part of an unimplemented MSRV check https://github.com/rust-lang/rust/issues/65262.
 
                 let const_stab_rust_version = match since {
                     StableSince::Version(version) => version,
-                    StableSince::Current => rustc_session::RustcVersion::CURRENT,
+                    StableSince::Current => RustcVersion::CURRENT,
                     StableSince::Err => return false,
                 };
 
@@ -404,14 +404,12 @@ fn is_ty_const_destruct<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, body: &Body<'tcx>
     // FIXME(const_trait_impl, fee1-dead) revert to const destruct once it works again
     #[expect(unused)]
     fn is_ty_const_destruct_unused<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, body: &Body<'tcx>) -> bool {
-        // Avoid selecting for simple cases, such as builtin types.
-        if ty::util::is_trivially_const_drop(ty) {
-            return true;
+        // If this doesn't need drop at all, then don't select `~const Destruct`.
+        if !ty.needs_drop(tcx, body.typing_env(tcx)) {
+            return false;
         }
 
-
-        let (infcx, param_env) =
-            tcx.infer_ctxt().build_with_typing_env(body.typing_env(tcx));
+        let (infcx, param_env) = tcx.infer_ctxt().build_with_typing_env(body.typing_env(tcx));
         // FIXME(const_trait_impl) constness
         let obligation = Obligation::new(
             tcx,

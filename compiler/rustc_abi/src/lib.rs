@@ -8,6 +8,38 @@
 #![warn(unreachable_pub)]
 // tidy-alphabetical-end
 
+/*! ABI handling for rustc
+
+## What is an "ABI"?
+
+Literally, "application binary interface", which means it is everything about how code interacts,
+at the machine level, with other code. This means it technically covers all of the following:
+- object binary format for e.g. relocations or offset tables
+- in-memory layout of types
+- procedure calling conventions
+
+When we discuss "ABI" in the context of rustc, we are probably discussing calling conventions.
+To describe those `rustc_abi` also covers type layout, as it must for values passed on the stack.
+Despite `rustc_abi` being about calling conventions, it is good to remember these usages exist.
+You will encounter all of them and more if you study target-specific codegen enough!
+Even in general conversation, when someone says "the Rust ABI is unstable", it may allude to
+either or both of
+- `repr(Rust)` types have a mostly-unspecified layout
+- `extern "Rust" fn(A) -> R` has an unspecified calling convention
+
+## Crate Goal
+
+ABI is a foundational concept, so the `rustc_abi` crate serves as an equally foundational crate.
+It cannot carry all details relevant to an ABI: those permeate code generation and linkage.
+Instead, `rustc_abi` is intended to provide the interface for reasoning about the binary interface.
+It should contain traits and types that other crates then use in their implementation.
+For example, a platform's `extern "C" fn` calling convention will be implemented in `rustc_target`
+but `rustc_abi` contains the types for calculating layout and describing register-passing.
+This makes it easier to describe things in the same way across targets, codegen backends, and
+even other Rust compilers, such as rust-analyzer!
+
+*/
+
 use std::fmt;
 #[cfg(feature = "nightly")]
 use std::iter::Step;
@@ -1215,6 +1247,15 @@ impl Scalar {
             Scalar::Union { .. } => true,
         }
     }
+
+    /// Returns `true` if this is a signed integer scalar
+    #[inline]
+    pub fn is_signed(&self) -> bool {
+        match self.primitive() {
+            Primitive::Int(_, signed) => signed,
+            _ => false,
+        }
+    }
 }
 
 // NOTE: This struct is generic over the FieldIdx for rust-analyzer usage.
@@ -1401,10 +1442,7 @@ impl BackendRepr {
     #[inline]
     pub fn is_signed(&self) -> bool {
         match self {
-            BackendRepr::Scalar(scal) => match scal.primitive() {
-                Primitive::Int(_, signed) => signed,
-                _ => false,
-            },
+            BackendRepr::Scalar(scal) => scal.is_signed(),
             _ => panic!("`is_signed` on non-scalar ABI {self:?}"),
         }
     }
@@ -1498,8 +1536,14 @@ impl BackendRepr {
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 #[cfg_attr(feature = "nightly", derive(HashStable_Generic))]
 pub enum Variants<FieldIdx: Idx, VariantIdx: Idx> {
+    /// A type with no valid variants. Must be uninhabited.
+    Empty,
+
     /// Single enum variants, structs/tuples, unions, and all non-ADTs.
-    Single { index: VariantIdx },
+    Single {
+        /// Always `0` for types that cannot have multiple variants.
+        index: VariantIdx,
+    },
 
     /// Enum-likes with more than one variant: each variant comes with
     /// a *discriminant* (usually the same as the variant index but the user can
@@ -1528,14 +1572,22 @@ pub enum TagEncoding<VariantIdx: Idx> {
     /// The variant `untagged_variant` contains a niche at an arbitrary
     /// offset (field `tag_field` of the enum), which for a variant with
     /// discriminant `d` is set to
-    /// `(d - niche_variants.start).wrapping_add(niche_start)`.
+    /// `(d - niche_variants.start).wrapping_add(niche_start)`
+    /// (this is wrapping arithmetic using the type of the niche field).
     ///
     /// For example, `Option<(usize, &T)>`  is represented such that
     /// `None` has a null pointer for the second tuple field, and
     /// `Some` is the identity function (with a non-null reference).
+    ///
+    /// Other variants that are not `untagged_variant` and that are outside the `niche_variants`
+    /// range cannot be represented; they must be uninhabited.
     Niche {
         untagged_variant: VariantIdx,
+        /// This range *may* contain `untagged_variant`; that is then just a "dead value" and
+        /// not used to encode anything.
         niche_variants: RangeInclusive<VariantIdx>,
+        /// This is inbounds of the type of the niche field
+        /// (not sign-extended, i.e., all bits beyond the niche field size are 0).
         niche_start: u128,
     },
 }

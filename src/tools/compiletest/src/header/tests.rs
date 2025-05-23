@@ -35,11 +35,14 @@ fn make_test_description<R: Read>(
 
 #[test]
 fn test_parse_normalize_rule() {
-    let good_data = &[(
-        r#"normalize-stderr-32bit: "something (32 bits)" -> "something ($WORD bits)""#,
-        "something (32 bits)",
-        "something ($WORD bits)",
-    )];
+    let good_data = &[
+        (
+            r#""something (32 bits)" -> "something ($WORD bits)""#,
+            "something (32 bits)",
+            "something ($WORD bits)",
+        ),
+        (r#"  " with whitespace"   ->   "    replacement""#, " with whitespace", "    replacement"),
+    ];
 
     for &(input, expected_regex, expected_replacement) in good_data {
         let parsed = parse_normalize_rule(input);
@@ -49,15 +52,15 @@ fn test_parse_normalize_rule() {
     }
 
     let bad_data = &[
-        r#"normalize-stderr-32bit "something (32 bits)" -> "something ($WORD bits)""#,
-        r#"normalize-stderr-16bit: something (16 bits) -> something ($WORD bits)"#,
-        r#"normalize-stderr-32bit: something (32 bits) -> something ($WORD bits)"#,
-        r#"normalize-stderr-32bit: "something (32 bits) -> something ($WORD bits)"#,
-        r#"normalize-stderr-32bit: "something (32 bits)" -> "something ($WORD bits)"#,
-        r#"normalize-stderr-32bit: "something (32 bits)" -> "something ($WORD bits)"."#,
+        r#"something (11 bits) -> something ($WORD bits)"#,
+        r#"something (12 bits) -> something ($WORD bits)"#,
+        r#""something (13 bits) -> something ($WORD bits)"#,
+        r#""something (14 bits)" -> "something ($WORD bits)"#,
+        r#""something (15 bits)" -> "something ($WORD bits)"."#,
     ];
 
     for &input in bad_data {
+        println!("- {input:?}");
         let parsed = parse_normalize_rule(input);
         assert_eq!(parsed, None);
     }
@@ -786,4 +789,41 @@ fn test_not_trailing_directive() {
     let mut poisoned = false;
     run_path(&mut poisoned, Path::new("a.rs"), b"//@ revisions: incremental");
     assert!(!poisoned);
+}
+
+#[test]
+fn test_needs_target_has_atomic() {
+    use std::collections::BTreeSet;
+
+    // `x86_64-unknown-linux-gnu` supports `["8", "16", "32", "64", "ptr"]` but not `128`.
+
+    let config = cfg().target("x86_64-unknown-linux-gnu").build();
+    // Expectation sanity check.
+    assert_eq!(
+        config.target_cfg().target_has_atomic,
+        BTreeSet::from([
+            "8".to_string(),
+            "16".to_string(),
+            "32".to_string(),
+            "64".to_string(),
+            "ptr".to_string()
+        ]),
+        "expected `x86_64-unknown-linux-gnu` to not have 128-bit atomic support"
+    );
+
+    assert!(!check_ignore(&config, "//@ needs-target-has-atomic: 8"));
+    assert!(!check_ignore(&config, "//@ needs-target-has-atomic: 16"));
+    assert!(!check_ignore(&config, "//@ needs-target-has-atomic: 32"));
+    assert!(!check_ignore(&config, "//@ needs-target-has-atomic: 64"));
+    assert!(!check_ignore(&config, "//@ needs-target-has-atomic: ptr"));
+
+    assert!(check_ignore(&config, "//@ needs-target-has-atomic: 128"));
+
+    assert!(!check_ignore(&config, "//@ needs-target-has-atomic: 8,16,32,64,ptr"));
+
+    assert!(check_ignore(&config, "//@ needs-target-has-atomic: 8,16,32,64,ptr,128"));
+
+    // Check whitespace between widths is permitted.
+    assert!(!check_ignore(&config, "//@ needs-target-has-atomic: 8, ptr"));
+    assert!(check_ignore(&config, "//@ needs-target-has-atomic: 8, ptr, 128"));
 }

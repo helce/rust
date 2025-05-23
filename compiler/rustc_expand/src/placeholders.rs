@@ -2,10 +2,9 @@ use rustc_ast::mut_visit::*;
 use rustc_ast::ptr::P;
 use rustc_ast::token::Delimiter;
 use rustc_ast::visit::AssocCtxt;
-use rustc_ast::{self as ast};
+use rustc_ast::{self as ast, Safety};
 use rustc_data_structures::fx::FxHashMap;
-use rustc_span::DUMMY_SP;
-use rustc_span::symbol::Ident;
+use rustc_span::{DUMMY_SP, Ident};
 use smallvec::{SmallVec, smallvec};
 use thin_vec::ThinVec;
 
@@ -173,6 +172,8 @@ pub(crate) fn placeholder(
             ty: ty(),
             vis,
             is_placeholder: true,
+            safety: Safety::Default,
+            default: None,
         }]),
         AstFragmentKind::Variants => AstFragment::Variants(smallvec![ast::Variant {
             attrs: Default::default(),

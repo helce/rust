@@ -12,11 +12,10 @@ use rustc_hir::intravisit::{self, Visitor};
 use rustc_middle::span_bug;
 use rustc_middle::traits::ObligationCause;
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, PointerCoercion};
-use rustc_middle::ty::fold::{TypeFoldable, TypeFolder};
+use rustc_middle::ty::fold::{TypeFoldable, TypeFolder, fold_regions};
 use rustc_middle::ty::visit::TypeVisitableExt;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeSuperFoldable};
-use rustc_span::Span;
-use rustc_span::symbol::sym;
+use rustc_span::{Span, sym};
 use rustc_trait_selection::error_reporting::infer::need_type_info::TypeAnnotationNeeded;
 use rustc_trait_selection::solve;
 use tracing::{debug, instrument};
@@ -476,7 +475,7 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
             for (local_id, c_ty) in sorted_user_provided_types {
                 let hir_id = HirId { owner: common_hir_owner, local_id };
 
-                if let ty::UserType::TypeOf(_, user_args) = c_ty.value {
+                if let ty::UserTypeKind::TypeOf(_, user_args) = c_ty.value.kind {
                     // This is a unit-testing mechanism.
                     let span = self.tcx().hir().span(hir_id);
                     // We need to buffer the errors in order to guarantee a consistent
@@ -555,11 +554,13 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
             let hidden_type = self.resolve(decl.hidden_type, &decl.hidden_type.span);
             let opaque_type_key = self.resolve(opaque_type_key, &decl.hidden_type.span);
 
-            if let ty::Alias(ty::Opaque, alias_ty) = hidden_type.ty.kind()
-                && alias_ty.def_id == opaque_type_key.def_id.to_def_id()
-                && alias_ty.args == opaque_type_key.args
-            {
-                continue;
+            if !self.fcx.next_trait_solver() {
+                if let ty::Alias(ty::Opaque, alias_ty) = hidden_type.ty.kind()
+                    && alias_ty.def_id == opaque_type_key.def_id.to_def_id()
+                    && alias_ty.args == opaque_type_key.args
+                {
+                    continue;
+                }
             }
 
             // Here we only detect impl trait definition conflicts when they
@@ -827,7 +828,10 @@ impl<'cx, 'tcx> Resolver<'cx, 'tcx> {
         // no reason to keep regions around. They will be repopulated during MIR
         // borrowck, and specifically region constraints will be populated during
         // MIR typeck which is run on the new body.
-        value = tcx.fold_regions(value, |_, _| tcx.lifetimes.re_erased);
+        //
+        // We're not using `tcx.erase_regions` as that also anonymizes bound variables,
+        // regressing borrowck diagnostics.
+        value = fold_regions(tcx, value, |_, _| tcx.lifetimes.re_erased);
 
         // Normalize consts in writeback, because GCE doesn't normalize eagerly.
         if tcx.features().generic_const_exprs() {

@@ -84,21 +84,43 @@ fn is_console(handle: c::HANDLE) -> bool {
     unsafe { c::GetConsoleMode(handle, &mut mode) != 0 }
 }
 
+/// Returns true if the attached console's code page is currently UTF-8.
+#[cfg(not(target_vendor = "win7"))]
+fn is_utf8_console() -> bool {
+    unsafe { c::GetConsoleOutputCP() == c::CP_UTF8 }
+}
+
+#[cfg(target_vendor = "win7")]
+fn is_utf8_console() -> bool {
+    // Windows 7 has a fun "feature" where WriteFile on a console handle will return
+    // the number of UTF-16 code units written and not the number of bytes from the input string.
+    // So we always claim the console isn't UTF-8 to trigger the WriteConsole fallback code.
+    false
+}
+
 fn write(handle_id: u32, data: &[u8], incomplete_utf8: &mut IncompleteUtf8) -> io::Result<usize> {
     if data.is_empty() {
         return Ok(0);
     }
 
     let handle = get_handle(handle_id)?;
-    if !is_console(handle) {
+    if !is_console(handle) || is_utf8_console() {
         unsafe {
             let handle = Handle::from_raw_handle(handle);
             let ret = handle.write(data);
             let _ = handle.into_raw_handle(); // Don't close the handle
             return ret;
         }
+    } else {
+        write_console_utf16(data, incomplete_utf8, handle)
     }
+}
 
+fn write_console_utf16(
+    data: &[u8],
+    incomplete_utf8: &mut IncompleteUtf8,
+    handle: c::HANDLE,
+) -> io::Result<usize> {
     if incomplete_utf8.len > 0 {
         assert!(
             incomplete_utf8.len < 4,
@@ -107,7 +129,7 @@ fn write(handle_id: u32, data: &[u8], incomplete_utf8: &mut IncompleteUtf8) -> i
         if data[0] >> 6 != 0b10 {
             // not a continuation byte - reject
             incomplete_utf8.len = 0;
-            return Err(io::const_io_error!(
+            return Err(io::const_error!(
                 io::ErrorKind::InvalidData,
                 "Windows stdio in console mode does not support writing non-UTF-8 byte sequences",
             ));
@@ -129,7 +151,7 @@ fn write(handle_id: u32, data: &[u8], incomplete_utf8: &mut IncompleteUtf8) -> i
                 return Ok(1);
             }
             Err(_) => {
-                return Err(io::const_io_error!(
+                return Err(io::const_error!(
                     io::ErrorKind::InvalidData,
                     "Windows stdio in console mode does not support writing non-UTF-8 byte sequences",
                 ));
@@ -153,7 +175,7 @@ fn write(handle_id: u32, data: &[u8], incomplete_utf8: &mut IncompleteUtf8) -> i
                 incomplete_utf8.len = 1;
                 return Ok(1);
             } else {
-                return Err(io::const_io_error!(
+                return Err(io::const_error!(
                     io::ErrorKind::InvalidData,
                     "Windows stdio in console mode does not support writing non-UTF-8 byte sequences",
                 ));
@@ -392,7 +414,7 @@ fn utf16_to_utf8(utf16: &[u16], utf8: &mut [u8]) -> io::Result<usize> {
     };
     if result == 0 {
         // We can't really do any better than forget all data and return an error.
-        Err(io::const_io_error!(
+        Err(io::const_error!(
             io::ErrorKind::InvalidData,
             "Windows stdin in console mode does not support non-UTF-16 input; \
             encountered unpaired surrogate",

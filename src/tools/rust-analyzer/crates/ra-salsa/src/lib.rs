@@ -291,7 +291,7 @@ pub trait ParallelDatabase: Database + Send {
     /// # Panics
     ///
     /// It is not permitted to create a snapshot from inside of a
-    /// query. Attepting to do so will panic.
+    /// query. Attempting to do so will panic.
     ///
     /// # Deadlock warning
     ///
@@ -610,11 +610,9 @@ where
 #[non_exhaustive]
 pub enum Cancelled {
     /// The query was operating on revision R, but there is a pending write to move to revision R+1.
-    #[non_exhaustive]
     PendingWrite,
 
     /// The query was blocked on another thread, and that thread panicked.
-    #[non_exhaustive]
     PropagatedPanic,
 }
 

@@ -1,8 +1,8 @@
 //! Computes a normalizes-to (projection) goal for opaque types. This goal
-//! behaves differently depending on the param-env's reveal mode and whether
-//! the opaque is in a defining scope.
+//! behaves differently depending on the current `TypingMode`.
 
 use rustc_index::bit_set::GrowableBitSet;
+use rustc_type_ir::fold::fold_regions;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::{self as ty, Interner, TypingMode};
 
@@ -22,7 +22,7 @@ where
         let opaque_ty = goal.predicate.alias;
         let expected = goal.predicate.term.as_type().expect("no such thing as an opaque const");
 
-        match self.typing_mode(goal.param_env) {
+        match self.typing_mode() {
             TypingMode::Coherence => {
                 // An impossible opaque type bound is the only way this goal will fail
                 // e.g. assigning `impl Copy := NotCopy`
@@ -94,6 +94,26 @@ where
                     goal.param_env,
                     expected,
                 );
+                self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+            }
+            TypingMode::PostBorrowckAnalysis { defined_opaque_types } => {
+                let Some(def_id) = opaque_ty.def_id.as_local() else {
+                    return Err(NoSolution);
+                };
+
+                if !defined_opaque_types.contains(&def_id) {
+                    return Err(NoSolution);
+                }
+
+                let actual = cx.type_of(opaque_ty.def_id).instantiate(cx, opaque_ty.args);
+                // FIXME: Actually use a proper binder here instead of relying on `ReErased`.
+                //
+                // This is also probably unsound or sth :shrug:
+                let actual = fold_regions(cx, actual, |re, _dbi| match re.kind() {
+                    ty::ReErased => self.next_region_var(),
+                    _ => re,
+                });
+                self.eq(goal.param_env, expected, actual)?;
                 self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
             }
             TypingMode::PostAnalysis => {

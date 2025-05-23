@@ -135,6 +135,12 @@ Unsetting this disables sysroot loading.
 
 This option does not take effect until rust-analyzer is restarted.
 --
+[[rust-analyzer.cargo.sysrootQueryMetadata]]rust-analyzer.cargo.sysrootQueryMetadata (default: `"cargo_metadata"`)::
++
+--
+How to query metadata for the sysroot crate. Using cargo metadata allows rust-analyzer
+to analyze third-party dependencies of the standard libraries.
+--
 [[rust-analyzer.cargo.sysrootSrc]]rust-analyzer.cargo.sysrootSrc (default: `null`)::
 +
 --
@@ -264,7 +270,8 @@ Aliased as `"checkOnSave.targets"`.
 +
 --
 Whether `--workspace` should be passed to `cargo check`.
-If false, `-p <package>` will be passed instead.
+If false, `-p <package>` will be passed instead if applicable. In case it is not, no
+check will be performed.
 --
 [[rust-analyzer.completion.addSemicolonToUnit]]rust-analyzer.completion.addSemicolonToUnit (default: `true`)::
 +
@@ -986,10 +993,10 @@ Show full signature of the callable. Only shows parameters if disabled.
 --
 Show documentation.
 --
-[[rust-analyzer.typing.autoClosingAngleBrackets.enable]]rust-analyzer.typing.autoClosingAngleBrackets.enable (default: `false`)::
+[[rust-analyzer.typing.excludeChars]]rust-analyzer.typing.excludeChars (default: `"|<"`)::
 +
 --
-Whether to insert closing angle brackets when typing an opening angle bracket of a generic argument list.
+Specify the characters to exclude from triggering typing assists. The default trigger characters are `.`, `=`, `<`, `>`, `{`, and `(`.
 --
 [[rust-analyzer.workspace.discoverConfig]]rust-analyzer.workspace.discoverConfig (default: `null`)::
 +

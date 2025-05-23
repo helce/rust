@@ -8,12 +8,12 @@ use cargo_metadata::{CargoOpt, MetadataCommand};
 use la_arena::{Arena, Idx};
 use paths::{AbsPath, AbsPathBuf, Utf8PathBuf};
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde::Deserialize;
+use serde_derive::Deserialize;
 use serde_json::from_value;
 use span::Edition;
 use toolchain::Tool;
 
-use crate::{utf8_stdout, ManifestPath, Sysroot};
+use crate::{utf8_stdout, ManifestPath, Sysroot, SysrootQueryMetadata};
 use crate::{CfgOverrides, InvocationStrategy};
 
 /// [`CargoWorkspace`] represents the logical structure of, well, a Cargo
@@ -33,6 +33,7 @@ pub struct CargoWorkspace {
     workspace_root: AbsPathBuf,
     target_directory: AbsPathBuf,
     manifest_path: ManifestPath,
+    is_virtual_workspace: bool,
 }
 
 impl ops::Index<Package> for CargoWorkspace {
@@ -85,6 +86,8 @@ pub struct CargoConfig {
     pub target: Option<String>,
     /// Sysroot loading behavior
     pub sysroot: Option<RustLibSource>,
+    /// How to query metadata for the sysroot crate.
+    pub sysroot_query_metadata: SysrootQueryMetadata,
     pub sysroot_src: Option<AbsPathBuf>,
     /// rustc private crate source
     pub rustc_source: Option<RustLibSource>,
@@ -382,12 +385,19 @@ impl CargoWorkspace {
         .with_context(|| format!("Failed to run `{:?}`", meta.cargo_command()))
     }
 
-    pub fn new(mut meta: cargo_metadata::Metadata, manifest_path: ManifestPath) -> CargoWorkspace {
+    pub fn new(
+        mut meta: cargo_metadata::Metadata,
+        ws_manifest_path: ManifestPath,
+    ) -> CargoWorkspace {
         let mut pkg_by_id = FxHashMap::default();
         let mut packages = Arena::default();
         let mut targets = Arena::default();
 
         let ws_members = &meta.workspace_members;
+
+        let workspace_root = AbsPathBuf::assert(meta.workspace_root);
+        let target_directory = AbsPathBuf::assert(meta.target_directory);
+        let mut is_virtual_workspace = true;
 
         meta.packages.sort_by(|a, b| a.id.cmp(&b.id));
         for meta_pkg in meta.packages {
@@ -427,12 +437,13 @@ impl CargoWorkspace {
             let is_local = source.is_none();
             let is_member = ws_members.contains(&id);
 
-            let manifest = AbsPathBuf::assert(manifest_path);
+            let manifest = ManifestPath::try_from(AbsPathBuf::assert(manifest_path)).unwrap();
+            is_virtual_workspace &= manifest != ws_manifest_path;
             let pkg = packages.alloc(PackageData {
                 id: id.repr.clone(),
                 name,
                 version,
-                manifest: manifest.clone().try_into().unwrap(),
+                manifest: manifest.clone(),
                 targets: Vec::new(),
                 is_local,
                 is_member,
@@ -466,7 +477,7 @@ impl CargoWorkspace {
                         // modified manifest file into a special target dir which is then used as
                         // the source path. We don't want that, we want the original here so map it
                         // back
-                        manifest.clone()
+                        manifest.clone().into()
                     } else {
                         AbsPathBuf::assert(src_path)
                     },
@@ -491,11 +502,14 @@ impl CargoWorkspace {
             packages[source].active_features.extend(node.features);
         }
 
-        let workspace_root = AbsPathBuf::assert(meta.workspace_root);
-
-        let target_directory = AbsPathBuf::assert(meta.target_directory);
-
-        CargoWorkspace { packages, targets, workspace_root, target_directory, manifest_path }
+        CargoWorkspace {
+            packages,
+            targets,
+            workspace_root,
+            target_directory,
+            manifest_path: ws_manifest_path,
+            is_virtual_workspace,
+        }
     }
 
     pub fn packages(&self) -> impl ExactSizeIterator<Item = Package> + '_ {
@@ -576,6 +590,10 @@ impl CargoWorkspace {
 
     fn is_unique(&self, name: &str) -> bool {
         self.packages.iter().filter(|(_, v)| v.name == name).count() == 1
+    }
+
+    pub fn is_virtual_workspace(&self) -> bool {
+        self.is_virtual_workspace
     }
 }
 

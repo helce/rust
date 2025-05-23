@@ -2593,7 +2593,12 @@ class DocSearch {
             const writeFn = (fnType, result) => {
                 if (fnType.id < 0) {
                     if (fnParamNames[-1 - fnType.id] === "") {
-                        for (const nested of fnType.generics) {
+                        // Normally, there's no need to shown an unhighlighted
+                        // where clause, but if it's impl Trait, then we do.
+                        const generics = fnType.generics.length > 0 ?
+                            fnType.generics :
+                            obj.type.where_clause[-1 - fnType.id];
+                        for (const nested of generics) {
                             writeFn(nested, result);
                         }
                         return;
@@ -2844,7 +2849,7 @@ class DocSearch {
          *     - Limit checks that Ty matches Vec<Ty>,
          *       but not Vec<ParamEnvAnd<WithInfcx<ConstTy<Interner<Ty=Ty>>>>>
          *
-         * @return {[FunctionType]|null} - Returns highlighed results if a match, null otherwise.
+         * @return {[FunctionType]|null} - Returns highlighted results if a match, null otherwise.
          */
         function unifyFunctionTypes(
             fnTypesIn,
@@ -3144,7 +3149,7 @@ class DocSearch {
          *     - Limit checks that Ty matches Vec<Ty>,
          *       but not Vec<ParamEnvAnd<WithInfcx<ConstTy<Interner<Ty=Ty>>>>>
          *
-         * @return {[FunctionType]|null} - Returns highlighed results if a match, null otherwise.
+         * @return {[FunctionType]|null} - Returns highlighted results if a match, null otherwise.
          */
         function unifyGenericTypes(
             fnTypesIn,

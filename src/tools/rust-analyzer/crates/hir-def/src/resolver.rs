@@ -576,10 +576,12 @@ impl Resolver {
             match scope {
                 Scope::BlockScope(m) => traits.extend(m.def_map[m.module_id].scope.traits()),
                 &Scope::ImplDefScope(impl_) => {
-                    if let Some(target_trait) = &db.impl_data(impl_).target_trait {
-                        if let Some(TypeNs::TraitId(trait_)) =
-                            self.resolve_path_in_type_ns_fully(db, &target_trait.path)
-                        {
+                    let impl_data = db.impl_data(impl_);
+                    if let Some(target_trait) = impl_data.target_trait {
+                        if let Some(TypeNs::TraitId(trait_)) = self.resolve_path_in_type_ns_fully(
+                            db,
+                            &impl_data.types_map[target_trait.path],
+                        ) {
                             traits.insert(trait_);
                         }
                     }
@@ -640,9 +642,9 @@ impl Resolver {
         })
     }
 
-    pub fn generic_params(&self) -> Option<&Arc<GenericParams>> {
+    pub fn generic_params(&self) -> Option<&GenericParams> {
         self.scopes().find_map(|scope| match scope {
-            Scope::GenericParams { params, .. } => Some(params),
+            Scope::GenericParams { params, .. } => Some(&**params),
             _ => None,
         })
     }
@@ -931,8 +933,8 @@ impl ModuleItemMap {
                 Some(ResolveValueResult::ValueNs(value, import))
             }
             Some(idx) => {
-                let (def, _, import) = module_def.take_types_full()?;
-                let ty = match def {
+                let def = module_def.take_types_full()?;
+                let ty = match def.def {
                     ModuleDefId::AdtId(it) => TypeNs::AdtId(it),
                     ModuleDefId::TraitId(it) => TypeNs::TraitId(it),
                     ModuleDefId::TraitAliasId(it) => TypeNs::TraitAliasId(it),
@@ -946,7 +948,7 @@ impl ModuleItemMap {
                     | ModuleDefId::MacroId(_)
                     | ModuleDefId::StaticId(_) => return None,
                 };
-                Some(ResolveValueResult::Partial(ty, idx, import))
+                Some(ResolveValueResult::Partial(ty, idx, def.import))
             }
         }
     }
@@ -984,8 +986,8 @@ fn to_value_ns(per_ns: PerNs) -> Option<(ValueNs, Option<ImportId>)> {
 }
 
 fn to_type_ns(per_ns: PerNs) -> Option<(TypeNs, Option<ImportOrExternCrate>)> {
-    let (def, _, import) = per_ns.take_types_full()?;
-    let res = match def {
+    let def = per_ns.take_types_full()?;
+    let res = match def.def {
         ModuleDefId::AdtId(it) => TypeNs::AdtId(it),
         ModuleDefId::EnumVariantId(it) => TypeNs::EnumVariantId(it),
 
@@ -1001,7 +1003,7 @@ fn to_type_ns(per_ns: PerNs) -> Option<(TypeNs, Option<ImportOrExternCrate>)> {
         | ModuleDefId::StaticId(_)
         | ModuleDefId::ModuleId(_) => return None,
     };
-    Some((res, import))
+    Some((res, def.import))
 }
 
 #[derive(Default)]
@@ -1017,14 +1019,14 @@ impl ScopeNames {
         }
     }
     fn add_per_ns(&mut self, name: &Name, def: PerNs) {
-        if let &Some((ty, _, _)) = &def.types {
-            self.add(name, ScopeDef::ModuleDef(ty))
+        if let Some(ty) = &def.types {
+            self.add(name, ScopeDef::ModuleDef(ty.def))
         }
-        if let &Some((def, _, _)) = &def.values {
-            self.add(name, ScopeDef::ModuleDef(def))
+        if let Some(def) = &def.values {
+            self.add(name, ScopeDef::ModuleDef(def.def))
         }
-        if let &Some((mac, _, _)) = &def.macros {
-            self.add(name, ScopeDef::ModuleDef(ModuleDefId::MacroId(mac)))
+        if let Some(mac) = &def.macros {
+            self.add(name, ScopeDef::ModuleDef(ModuleDefId::MacroId(mac.def)))
         }
         if def.is_none() {
             self.add(name, ScopeDef::Unknown)

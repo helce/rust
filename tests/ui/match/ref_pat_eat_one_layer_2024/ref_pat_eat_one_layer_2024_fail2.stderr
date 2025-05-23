@@ -1,5 +1,5 @@
 error[E0507]: cannot move out of a shared reference
-  --> $DIR/ref_pat_eat_one_layer_2024_fail2.rs:7:29
+  --> $DIR/ref_pat_eat_one_layer_2024_fail2.rs:6:29
    |
 LL |     if let Some(&Some(x)) = Some(&Some(&mut 0)) {
    |                       -     ^^^^^^^^^^^^^^^^^^^
@@ -7,13 +7,14 @@ LL |     if let Some(&Some(x)) = Some(&Some(&mut 0)) {
    |                       data moved here
    |                       move occurs because `x` has type `&mut u32`, which does not implement the `Copy` trait
    |
-help: consider borrowing the pattern binding
+help: consider removing the borrow
    |
-LL |     if let Some(&Some(ref x)) = Some(&Some(&mut 0)) {
-   |                       +++
+LL -     if let Some(&Some(x)) = Some(&Some(&mut 0)) {
+LL +     if let Some(Some(x)) = Some(&Some(&mut 0)) {
+   |
 
 error[E0596]: cannot borrow data in a `&` reference as mutable
-  --> $DIR/ref_pat_eat_one_layer_2024_fail2.rs:12:10
+  --> $DIR/ref_pat_eat_one_layer_2024_fail2.rs:11:10
    |
 LL |     let &ref mut x = &0;
    |          ^^^^^^^^^ cannot borrow as mutable

@@ -1,9 +1,10 @@
 use super::api::{self, WinError};
 use super::{IoResult, to_u16s};
+use crate::alloc::{Layout, alloc, dealloc};
 use crate::borrow::Cow;
 use crate::ffi::{OsStr, OsString, c_void};
 use crate::io::{self, BorrowedCursor, Error, IoSlice, IoSliceMut, SeekFrom};
-use crate::mem::{self, MaybeUninit};
+use crate::mem::{self, MaybeUninit, offset_of};
 use crate::os::windows::io::{AsHandle, BorrowedHandle};
 use crate::os::windows::prelude::*;
 use crate::path::{Path, PathBuf};
@@ -295,6 +296,10 @@ impl OpenOptions {
 impl File {
     pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
         let path = maybe_verbatim(path)?;
+        Self::open_native(&path, opts)
+    }
+
+    fn open_native(path: &[u16], opts: &OpenOptions) -> io::Result<File> {
         let creation = opts.get_creation_mode()?;
         let handle = unsafe {
             c::CreateFileW(
@@ -315,19 +320,28 @@ impl File {
                 && api::get_last_error() == WinError::ALREADY_EXISTS
             {
                 unsafe {
-                    // This originally used `FileAllocationInfo` instead of
-                    // `FileEndOfFileInfo` but that wasn't supported by WINE.
-                    // It's arguable which fits the semantics of `OpenOptions`
-                    // better so let's just use the more widely supported method.
-                    let eof = c::FILE_END_OF_FILE_INFO { EndOfFile: 0 };
+                    // This first tries `FileAllocationInfo` but falls back to
+                    // `FileEndOfFileInfo` in order to support WINE.
+                    // If WINE gains support for FileAllocationInfo, we should
+                    // remove the fallback.
+                    let alloc = c::FILE_ALLOCATION_INFO { AllocationSize: 0 };
                     let result = c::SetFileInformationByHandle(
                         handle.as_raw_handle(),
-                        c::FileEndOfFileInfo,
-                        (&raw const eof).cast::<c_void>(),
-                        mem::size_of::<c::FILE_END_OF_FILE_INFO>() as u32,
+                        c::FileAllocationInfo,
+                        (&raw const alloc).cast::<c_void>(),
+                        mem::size_of::<c::FILE_ALLOCATION_INFO>() as u32,
                     );
                     if result == 0 {
-                        return Err(io::Error::last_os_error());
+                        let eof = c::FILE_END_OF_FILE_INFO { EndOfFile: 0 };
+                        let result = c::SetFileInformationByHandle(
+                            handle.as_raw_handle(),
+                            c::FileEndOfFileInfo,
+                            (&raw const eof).cast::<c_void>(),
+                            mem::size_of::<c::FILE_END_OF_FILE_INFO>() as u32,
+                        );
+                        if result == 0 {
+                            return Err(io::Error::last_os_error());
+                        }
                     }
                 }
             }
@@ -677,7 +691,7 @@ impl File {
                     )
                 }
                 _ => {
-                    return Err(io::const_io_error!(
+                    return Err(io::const_error!(
                         io::ErrorKind::Uncategorized,
                         "Unsupported reparse point type",
                     ));
@@ -718,7 +732,7 @@ impl File {
             || times.modified.map_or(false, is_zero)
             || times.created.map_or(false, is_zero)
         {
-            return Err(io::const_io_error!(
+            return Err(io::const_error!(
                 io::ErrorKind::InvalidInput,
                 "Cannot set file timestamp to 0",
             ));
@@ -728,7 +742,7 @@ impl File {
             || times.modified.map_or(false, is_max)
             || times.created.map_or(false, is_max)
         {
-            return Err(io::const_io_error!(
+            return Err(io::const_error!(
                 io::ErrorKind::InvalidInput,
                 "Cannot set file timestamp to 0xFFFF_FFFF_FFFF_FFFF",
             ));
@@ -1223,7 +1237,73 @@ pub fn unlink(p: &Path) -> io::Result<()> {
 pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
     let old = maybe_verbatim(old)?;
     let new = maybe_verbatim(new)?;
-    cvt(unsafe { c::MoveFileExW(old.as_ptr(), new.as_ptr(), c::MOVEFILE_REPLACE_EXISTING) })?;
+
+    if unsafe { c::MoveFileExW(old.as_ptr(), new.as_ptr(), c::MOVEFILE_REPLACE_EXISTING) } == 0 {
+        let err = api::get_last_error();
+        // if `MoveFileExW` fails with ERROR_ACCESS_DENIED then try to move
+        // the file while ignoring the readonly attribute.
+        // This is accomplished by calling `SetFileInformationByHandle` with `FileRenameInfoEx`.
+        if err == WinError::ACCESS_DENIED {
+            let mut opts = OpenOptions::new();
+            opts.access_mode(c::DELETE);
+            opts.custom_flags(c::FILE_FLAG_OPEN_REPARSE_POINT | c::FILE_FLAG_BACKUP_SEMANTICS);
+            let Ok(f) = File::open_native(&old, &opts) else { return Err(err).io_result() };
+
+            // Calculate the layout of the `FILE_RENAME_INFO` we pass to `SetFileInformation`
+            // This is a dynamically sized struct so we need to get the position of the last field to calculate the actual size.
+            let Ok(new_len_without_nul_in_bytes): Result<u32, _> = ((new.len() - 1) * 2).try_into()
+            else {
+                return Err(err).io_result();
+            };
+            let offset: u32 = offset_of!(c::FILE_RENAME_INFO, FileName).try_into().unwrap();
+            let struct_size = offset + new_len_without_nul_in_bytes + 2;
+            let layout =
+                Layout::from_size_align(struct_size as usize, align_of::<c::FILE_RENAME_INFO>())
+                    .unwrap();
+
+            // SAFETY: We allocate enough memory for a full FILE_RENAME_INFO struct and a filename.
+            let file_rename_info;
+            unsafe {
+                file_rename_info = alloc(layout).cast::<c::FILE_RENAME_INFO>();
+                if file_rename_info.is_null() {
+                    return Err(io::ErrorKind::OutOfMemory.into());
+                }
+
+                (&raw mut (*file_rename_info).Anonymous).write(c::FILE_RENAME_INFO_0 {
+                    Flags: c::FILE_RENAME_FLAG_REPLACE_IF_EXISTS
+                        | c::FILE_RENAME_FLAG_POSIX_SEMANTICS,
+                });
+
+                (&raw mut (*file_rename_info).RootDirectory).write(ptr::null_mut());
+                // Don't include the NULL in the size
+                (&raw mut (*file_rename_info).FileNameLength).write(new_len_without_nul_in_bytes);
+
+                new.as_ptr().copy_to_nonoverlapping(
+                    (&raw mut (*file_rename_info).FileName).cast::<u16>(),
+                    new.len(),
+                );
+            }
+
+            let result = unsafe {
+                c::SetFileInformationByHandle(
+                    f.as_raw_handle(),
+                    c::FileRenameInfoEx,
+                    file_rename_info.cast::<c_void>(),
+                    struct_size,
+                )
+            };
+            unsafe { dealloc(file_rename_info.cast::<u8>(), layout) };
+            if result == 0 {
+                if api::get_last_error() == WinError::DIR_NOT_EMPTY {
+                    return Err(WinError::DIR_NOT_EMPTY).io_result();
+                } else {
+                    return Err(err).io_result();
+                }
+            }
+        } else {
+            return Err(err).io_result();
+        }
+    }
     Ok(())
 }
 
@@ -1305,10 +1385,9 @@ pub fn link(original: &Path, link: &Path) -> io::Result<()> {
 
 #[cfg(target_vendor = "uwp")]
 pub fn link(_original: &Path, _link: &Path) -> io::Result<()> {
-    return Err(io::const_io_error!(
-        io::ErrorKind::Unsupported,
-        "hard link are not supported on UWP",
-    ));
+    return Err(
+        io::const_error!(io::ErrorKind::Unsupported, "hard link are not supported on UWP",),
+    );
 }
 
 pub fn stat(path: &Path) -> io::Result<FileAttr> {
@@ -1495,7 +1574,7 @@ pub fn junction_point(original: &Path, link: &Path) -> io::Result<()> {
             let bytes = unsafe { OsStr::from_encoded_bytes_unchecked(&abs_path[2..]) };
             r"\??\UNC\".encode_utf16().chain(bytes.encode_wide()).collect()
         } else {
-            return Err(io::const_io_error!(io::ErrorKind::InvalidInput, "path is not valid"));
+            return Err(io::const_error!(io::ErrorKind::InvalidInput, "path is not valid"));
         }
     };
     // Defined inline so we don't have to mess about with variable length buffer.
@@ -1512,10 +1591,7 @@ pub fn junction_point(original: &Path, link: &Path) -> io::Result<()> {
     }
     let data_len = 12 + (abs_path.len() * 2);
     if data_len > u16::MAX as usize {
-        return Err(io::const_io_error!(
-            io::ErrorKind::InvalidInput,
-            "`original` path is too long"
-        ));
+        return Err(io::const_error!(io::ErrorKind::InvalidInput, "`original` path is too long"));
     }
     let data_len = data_len as u16;
     let mut header = MountPointBuffer {

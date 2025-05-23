@@ -199,6 +199,10 @@ where
         errors
     }
 
+    fn has_pending_obligations(&self) -> bool {
+        !self.obligations.pending.is_empty() || !self.obligations.overflowed.is_empty()
+    }
+
     fn pending_obligations(&self) -> PredicateObligations<'tcx> {
         self.obligations.clone_pending()
     }
@@ -264,14 +268,14 @@ fn fulfillment_error_for_no_solution<'tcx>(
             let (a, b) = infcx.enter_forall_and_leak_universe(
                 obligation.predicate.kind().rebind((pred.a, pred.b)),
             );
-            let expected_found = ExpectedFound::new(true, a, b);
+            let expected_found = ExpectedFound::new(a, b);
             FulfillmentErrorCode::Subtype(expected_found, TypeError::Sorts(expected_found))
         }
         ty::PredicateKind::Coerce(pred) => {
             let (a, b) = infcx.enter_forall_and_leak_universe(
                 obligation.predicate.kind().rebind((pred.a, pred.b)),
             );
-            let expected_found = ExpectedFound::new(false, a, b);
+            let expected_found = ExpectedFound::new(b, a);
             FulfillmentErrorCode::Subtype(expected_found, TypeError::Sorts(expected_found))
         }
         ty::PredicateKind::Clause(_)
@@ -346,12 +350,21 @@ fn find_best_leaf_obligation<'tcx>(
     consider_ambiguities: bool,
 ) -> PredicateObligation<'tcx> {
     let obligation = infcx.resolve_vars_if_possible(obligation.clone());
+    // FIXME: we use a probe here as the `BestObligation` visitor does not
+    // check whether it uses candidates which get shadowed by where-bounds.
+    //
+    // We should probably fix the visitor to not do so instead, as this also
+    // means the leaf obligation may be incorrect.
     infcx
-        .visit_proof_tree(obligation.clone().into(), &mut BestObligation {
-            obligation: obligation.clone(),
-            consider_ambiguities,
+        .fudge_inference_if_ok(|| {
+            infcx
+                .visit_proof_tree(obligation.clone().into(), &mut BestObligation {
+                    obligation: obligation.clone(),
+                    consider_ambiguities,
+                })
+                .break_value()
+                .ok_or(())
         })
-        .break_value()
         .unwrap_or(obligation)
 }
 

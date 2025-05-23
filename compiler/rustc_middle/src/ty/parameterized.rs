@@ -80,12 +80,13 @@ trivially_parameterized_over_tcx! {
     rustc_ast::Attribute,
     rustc_ast::DelimArgs,
     rustc_ast::expand::StrippedCfgItem<rustc_hir::def_id::DefIndex>,
-    rustc_attr::ConstStability,
-    rustc_attr::DefaultBodyStability,
-    rustc_attr::Deprecation,
-    rustc_attr::Stability,
+    rustc_attr_parsing::ConstStability,
+    rustc_attr_parsing::DefaultBodyStability,
+    rustc_attr_parsing::Deprecation,
+    rustc_attr_parsing::Stability,
     rustc_hir::Constness,
     rustc_hir::Defaultness,
+    rustc_hir::Safety,
     rustc_hir::CoroutineKind,
     rustc_hir::IsAsync,
     rustc_hir::LangItem,
@@ -108,8 +109,9 @@ trivially_parameterized_over_tcx! {
     rustc_span::Symbol,
     rustc_span::def_id::DefPathHash,
     rustc_span::hygiene::SyntaxContextData,
-    rustc_span::symbol::Ident,
+    rustc_span::Ident,
     rustc_type_ir::Variance,
+    rustc_hir::Attribute,
 }
 
 // HACK(compiler-errors): This macro rule can only take a fake path,
@@ -139,5 +141,5 @@ parameterized_over_tcx! {
     ty::Predicate,
     ty::Clause,
     ty::ClauseKind,
-    ty::ImplTraitHeader
+    ty::ImplTraitHeader,
 }

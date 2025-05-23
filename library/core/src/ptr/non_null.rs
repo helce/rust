@@ -7,7 +7,7 @@ use crate::pin::PinCoerceUnsized;
 use crate::ptr::Unique;
 use crate::slice::{self, SliceIndex};
 use crate::ub_checks::assert_unsafe_precondition;
-use crate::{fmt, hash, intrinsics, ptr};
+use crate::{fmt, hash, intrinsics, mem, ptr};
 
 /// `*mut T` but non-zero and [covariant].
 ///
@@ -69,6 +69,8 @@ use crate::{fmt, hash, intrinsics, ptr};
 #[rustc_nonnull_optimization_guaranteed]
 #[rustc_diagnostic_item = "NonNull"]
 pub struct NonNull<T: ?Sized> {
+    // Remember to use `.as_ptr()` instead of `.pointer`, as field projecting to
+    // this is banned by <https://github.com/rust-lang/compiler-team/issues/807>.
     pointer: *const T,
 }
 
@@ -222,7 +224,7 @@ impl<T: ?Sized> NonNull<T> {
     /// }
     /// ```
     #[stable(feature = "nonnull", since = "1.25.0")]
-    #[rustc_const_unstable(feature = "const_nonnull_new", issue = "93235")]
+    #[rustc_const_stable(feature = "const_nonnull_new", since = "1.85.0")]
     #[inline]
     pub const fn new(ptr: *mut T) -> Option<Self> {
         if !ptr.is_null() {
@@ -289,7 +291,7 @@ impl<T: ?Sized> NonNull<T> {
     pub fn addr(self) -> NonZero<usize> {
         // SAFETY: The pointer is guaranteed by the type to be non-null,
         // meaning that the address will be non-zero.
-        unsafe { NonZero::new_unchecked(self.pointer.addr()) }
+        unsafe { NonZero::new_unchecked(self.as_ptr().addr()) }
     }
 
     /// Creates a new pointer with the given address and the [provenance][crate::ptr#provenance] of
@@ -303,7 +305,7 @@ impl<T: ?Sized> NonNull<T> {
     #[stable(feature = "strict_provenance", since = "1.84.0")]
     pub fn with_addr(self, addr: NonZero<usize>) -> Self {
         // SAFETY: The result of `ptr::from::with_addr` is non-null because `addr` is guaranteed to be non-zero.
-        unsafe { NonNull::new_unchecked(self.pointer.with_addr(addr.get()) as *mut _) }
+        unsafe { NonNull::new_unchecked(self.as_ptr().with_addr(addr.get()) as *mut _) }
     }
 
     /// Creates a new pointer by mapping `self`'s address to a new one, preserving the
@@ -342,7 +344,12 @@ impl<T: ?Sized> NonNull<T> {
     #[must_use]
     #[inline(always)]
     pub const fn as_ptr(self) -> *mut T {
-        self.pointer as *mut T
+        // This is a transmute for the same reasons as `NonZero::get`.
+
+        // SAFETY: `NonNull` is `transparent` over a `*const T`, and `*const T`
+        // and `*mut T` have the same layout, so transitively we can transmute
+        // our `NonNull` to a `*mut T` directly.
+        unsafe { mem::transmute::<Self, *mut T>(self) }
     }
 
     /// Returns a shared reference to the value. If the value may be uninitialized, [`as_uninit_ref`]
@@ -491,7 +498,7 @@ impl<T: ?Sized> NonNull<T> {
         // Additionally safety contract of `offset` guarantees that the resulting pointer is
         // pointing to an allocation, there can't be an allocation at null, thus it's safe to
         // construct `NonNull`.
-        unsafe { NonNull { pointer: intrinsics::offset(self.pointer, count) } }
+        unsafe { NonNull { pointer: intrinsics::offset(self.as_ptr(), count) } }
     }
 
     /// Calculates the offset from a pointer in bytes.
@@ -515,7 +522,7 @@ impl<T: ?Sized> NonNull<T> {
         // Additionally safety contract of `offset` guarantees that the resulting pointer is
         // pointing to an allocation, there can't be an allocation at null, thus it's safe to
         // construct `NonNull`.
-        unsafe { NonNull { pointer: self.pointer.byte_offset(count) } }
+        unsafe { NonNull { pointer: self.as_ptr().byte_offset(count) } }
     }
 
     /// Adds an offset to a pointer (convenience for `.offset(count as isize)`).
@@ -567,7 +574,7 @@ impl<T: ?Sized> NonNull<T> {
         // Additionally safety contract of `offset` guarantees that the resulting pointer is
         // pointing to an allocation, there can't be an allocation at null, thus it's safe to
         // construct `NonNull`.
-        unsafe { NonNull { pointer: intrinsics::offset(self.pointer, count) } }
+        unsafe { NonNull { pointer: intrinsics::offset(self.as_ptr(), count) } }
     }
 
     /// Calculates the offset from a pointer in bytes (convenience for `.byte_offset(count as isize)`).
@@ -591,7 +598,7 @@ impl<T: ?Sized> NonNull<T> {
         // Additionally safety contract of `add` guarantees that the resulting pointer is pointing
         // to an allocation, there can't be an allocation at null, thus it's safe to construct
         // `NonNull`.
-        unsafe { NonNull { pointer: self.pointer.byte_add(count) } }
+        unsafe { NonNull { pointer: self.as_ptr().byte_add(count) } }
     }
 
     /// Subtracts an offset from a pointer (convenience for
@@ -636,7 +643,6 @@ impl<T: ?Sized> NonNull<T> {
     #[must_use = "returns a new pointer rather than modifying its argument"]
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
     #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
-    #[cfg_attr(bootstrap, rustc_allow_const_fn_unstable(unchecked_neg))]
     pub const unsafe fn sub(self, count: usize) -> Self
     where
         T: Sized,
@@ -674,7 +680,7 @@ impl<T: ?Sized> NonNull<T> {
         // Additionally safety contract of `sub` guarantees that the resulting pointer is pointing
         // to an allocation, there can't be an allocation at null, thus it's safe to construct
         // `NonNull`.
-        unsafe { NonNull { pointer: self.pointer.byte_sub(count) } }
+        unsafe { NonNull { pointer: self.as_ptr().byte_sub(count) } }
     }
 
     /// Calculates the distance between two pointers within the same allocation. The returned value is in
@@ -771,7 +777,7 @@ impl<T: ?Sized> NonNull<T> {
         T: Sized,
     {
         // SAFETY: the caller must uphold the safety contract for `offset_from`.
-        unsafe { self.pointer.offset_from(origin.pointer) }
+        unsafe { self.as_ptr().offset_from(origin.as_ptr()) }
     }
 
     /// Calculates the distance between two pointers within the same allocation. The returned value is in
@@ -789,7 +795,7 @@ impl<T: ?Sized> NonNull<T> {
     #[rustc_const_stable(feature = "non_null_convenience", since = "1.80.0")]
     pub const unsafe fn byte_offset_from<U: ?Sized>(self, origin: NonNull<U>) -> isize {
         // SAFETY: the caller must uphold the safety contract for `byte_offset_from`.
-        unsafe { self.pointer.byte_offset_from(origin.pointer) }
+        unsafe { self.as_ptr().byte_offset_from(origin.as_ptr()) }
     }
 
     // N.B. `wrapping_offset``, `wrapping_add`, etc are not implemented because they can wrap to null
@@ -864,7 +870,7 @@ impl<T: ?Sized> NonNull<T> {
         T: Sized,
     {
         // SAFETY: the caller must uphold the safety contract for `sub_ptr`.
-        unsafe { self.pointer.sub_ptr(subtracted.pointer) }
+        unsafe { self.as_ptr().sub_ptr(subtracted.as_ptr()) }
     }
 
     /// Calculates the distance between two pointers within the same allocation, *where it's known that
@@ -883,7 +889,7 @@ impl<T: ?Sized> NonNull<T> {
     #[rustc_const_unstable(feature = "const_ptr_sub_ptr", issue = "95892")]
     pub const unsafe fn byte_sub_ptr<U: ?Sized>(self, origin: NonNull<U>) -> usize {
         // SAFETY: the caller must uphold the safety contract for `byte_sub_ptr`.
-        unsafe { self.pointer.byte_sub_ptr(origin.pointer) }
+        unsafe { self.as_ptr().byte_sub_ptr(origin.as_ptr()) }
     }
 
     /// Reads the value from `self` without moving it. This leaves the
@@ -901,7 +907,7 @@ impl<T: ?Sized> NonNull<T> {
         T: Sized,
     {
         // SAFETY: the caller must uphold the safety contract for `read`.
-        unsafe { ptr::read(self.pointer) }
+        unsafe { ptr::read(self.as_ptr()) }
     }
 
     /// Performs a volatile read of the value from `self` without moving it. This
@@ -922,7 +928,7 @@ impl<T: ?Sized> NonNull<T> {
         T: Sized,
     {
         // SAFETY: the caller must uphold the safety contract for `read_volatile`.
-        unsafe { ptr::read_volatile(self.pointer) }
+        unsafe { ptr::read_volatile(self.as_ptr()) }
     }
 
     /// Reads the value from `self` without moving it. This leaves the
@@ -942,7 +948,7 @@ impl<T: ?Sized> NonNull<T> {
         T: Sized,
     {
         // SAFETY: the caller must uphold the safety contract for `read_unaligned`.
-        unsafe { ptr::read_unaligned(self.pointer) }
+        unsafe { ptr::read_unaligned(self.as_ptr()) }
     }
 
     /// Copies `count * size_of<T>` bytes from `self` to `dest`. The source
@@ -962,7 +968,7 @@ impl<T: ?Sized> NonNull<T> {
         T: Sized,
     {
         // SAFETY: the caller must uphold the safety contract for `copy`.
-        unsafe { ptr::copy(self.pointer, dest.as_ptr(), count) }
+        unsafe { ptr::copy(self.as_ptr(), dest.as_ptr(), count) }
     }
 
     /// Copies `count * size_of<T>` bytes from `self` to `dest`. The source
@@ -982,7 +988,7 @@ impl<T: ?Sized> NonNull<T> {
         T: Sized,
     {
         // SAFETY: the caller must uphold the safety contract for `copy_nonoverlapping`.
-        unsafe { ptr::copy_nonoverlapping(self.pointer, dest.as_ptr(), count) }
+        unsafe { ptr::copy_nonoverlapping(self.as_ptr(), dest.as_ptr(), count) }
     }
 
     /// Copies `count * size_of<T>` bytes from `src` to `self`. The source
@@ -1002,7 +1008,7 @@ impl<T: ?Sized> NonNull<T> {
         T: Sized,
     {
         // SAFETY: the caller must uphold the safety contract for `copy`.
-        unsafe { ptr::copy(src.pointer, self.as_ptr(), count) }
+        unsafe { ptr::copy(src.as_ptr(), self.as_ptr(), count) }
     }
 
     /// Copies `count * size_of<T>` bytes from `src` to `self`. The source
@@ -1022,7 +1028,7 @@ impl<T: ?Sized> NonNull<T> {
         T: Sized,
     {
         // SAFETY: the caller must uphold the safety contract for `copy_nonoverlapping`.
-        unsafe { ptr::copy_nonoverlapping(src.pointer, self.as_ptr(), count) }
+        unsafe { ptr::copy_nonoverlapping(src.as_ptr(), self.as_ptr(), count) }
     }
 
     /// Executes the destructor (if any) of the pointed-to value.
@@ -1140,7 +1146,7 @@ impl<T: ?Sized> NonNull<T> {
     /// [`ptr::swap`]: crate::ptr::swap()
     #[inline(always)]
     #[stable(feature = "non_null_convenience", since = "1.80.0")]
-    #[rustc_const_unstable(feature = "const_swap", issue = "83163")]
+    #[rustc_const_stable(feature = "const_swap", since = "1.85.0")]
     pub const unsafe fn swap(self, with: NonNull<T>)
     where
         T: Sized,
@@ -1209,7 +1215,7 @@ impl<T: ?Sized> NonNull<T> {
 
         {
             // SAFETY: `align` has been checked to be a power of 2 above.
-            unsafe { ptr::align_offset(self.pointer, align) }
+            unsafe { ptr::align_offset(self.as_ptr(), align) }
         }
     }
 
@@ -1237,7 +1243,7 @@ impl<T: ?Sized> NonNull<T> {
     where
         T: Sized,
     {
-        self.pointer.is_aligned()
+        self.as_ptr().is_aligned()
     }
 
     /// Returns whether the pointer is aligned to `align`.
@@ -1274,7 +1280,7 @@ impl<T: ?Sized> NonNull<T> {
     #[must_use]
     #[unstable(feature = "pointer_is_aligned_to", issue = "96284")]
     pub fn is_aligned_to(self, align: usize) -> bool {
-        self.pointer.is_aligned_to(align)
+        self.as_ptr().is_aligned_to(align)
     }
 }
 
@@ -1548,6 +1554,10 @@ impl<T: ?Sized, U: ?Sized> DispatchFromDyn<NonNull<U>> for NonNull<T> where T: U
 
 #[stable(feature = "pin", since = "1.33.0")]
 unsafe impl<T: ?Sized> PinCoerceUnsized for NonNull<T> {}
+
+#[unstable(feature = "pointer_like_trait", issue = "none")]
+#[cfg(not(bootstrap))]
+impl<T> core::marker::PointerLike for NonNull<T> {}
 
 #[stable(feature = "nonnull", since = "1.25.0")]
 impl<T: ?Sized> fmt::Debug for NonNull<T> {

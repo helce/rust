@@ -5,6 +5,7 @@ use std::{
 };
 
 use ide::Cancelled;
+use ide_db::base_db::ra_salsa::Cycle;
 use lsp_server::{ExtractError, Response, ResponseError};
 use serde::{de::DeserializeOwned, Serialize};
 use stdx::thread::ThreadIntent;
@@ -126,7 +127,7 @@ impl RequestDispatcher<'_> {
 
     /// Dispatches a non-latency-sensitive request onto the thread pool. When the VFS is marked not
     /// ready this will return a `default` constructed [`R::Result`].
-    pub(crate) fn on_with<R>(
+    pub(crate) fn on_with_vfs_default<R>(
         &mut self,
         f: fn(GlobalStateSnapshot, R::Params) -> anyhow::Result<R::Result>,
         default: impl FnOnce() -> R::Result,
@@ -328,7 +329,13 @@ where
             if let Some(panic_message) = panic_message {
                 message.push_str(": ");
                 message.push_str(panic_message)
-            };
+            } else if let Some(cycle) = panic.downcast_ref::<Cycle>() {
+                tracing::error!("Cycle propagated out of salsa! This is a bug: {cycle:?}");
+                return Err(Cancelled::PropagatedPanic);
+            } else if let Ok(cancelled) = panic.downcast::<Cancelled>() {
+                tracing::error!("Cancellation propagated out of salsa! This is a bug");
+                return Err(*cancelled);
+            }
 
             Ok(lsp_server::Response::new_err(
                 id,

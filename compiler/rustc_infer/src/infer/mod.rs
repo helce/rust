@@ -17,7 +17,6 @@ pub use relate::StructurallyRelateAliases;
 pub use relate::combine::PredicateEmittingRelation;
 use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
-use rustc_data_structures::sync::Lrc;
 use rustc_data_structures::undo_log::{Rollback, UndoLogs};
 use rustc_data_structures::unify as ut;
 use rustc_errors::{DiagCtxtHandle, ErrorGuaranteed};
@@ -33,7 +32,7 @@ use rustc_middle::traits::select;
 pub use rustc_middle::ty::IntVarValue;
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
 use rustc_middle::ty::fold::{
-    BoundVarReplacerDelegate, TypeFoldable, TypeFolder, TypeSuperFoldable,
+    BoundVarReplacerDelegate, TypeFoldable, TypeFolder, TypeSuperFoldable, fold_regions,
 };
 use rustc_middle::ty::visit::TypeVisitableExt;
 use rustc_middle::ty::{
@@ -41,9 +40,7 @@ use rustc_middle::ty::{
     GenericParamDefKind, InferConst, IntVid, PseudoCanonicalInput, Ty, TyCtxt, TyVid,
     TypeVisitable, TypingEnv, TypingMode,
 };
-use rustc_span::Span;
-use rustc_span::symbol::Symbol;
-use rustc_type_ir::solve::Reveal;
+use rustc_span::{Span, Symbol};
 use snapshot::undo_log::InferCtxtUndoLogs;
 use tracing::{debug, instrument};
 use type_variable::TypeVariableOrigin;
@@ -265,11 +262,12 @@ pub struct InferCtxt<'tcx> {
     lexical_region_resolutions: RefCell<Option<LexicalRegionResolutions<'tcx>>>,
 
     /// Caches the results of trait selection. This cache is used
-    /// for things that have to do with the parameters in scope.
-    pub selection_cache: select::SelectionCache<'tcx>,
+    /// for things that depends on inference variables or placeholders.
+    pub selection_cache: select::SelectionCache<'tcx, ty::ParamEnv<'tcx>>,
 
-    /// Caches the results of trait evaluation.
-    pub evaluation_cache: select::EvaluationCache<'tcx>,
+    /// Caches the results of trait evaluation. This cache is used
+    /// for things that depends on inference variables or placeholders.
+    pub evaluation_cache: select::EvaluationCache<'tcx, ty::ParamEnv<'tcx>>,
 
     /// The set of predicates on which errors have been reported, to
     /// avoid reporting the same error twice.
@@ -624,22 +622,7 @@ impl<'tcx> InferCtxt<'tcx> {
     }
 
     #[inline(always)]
-    pub fn typing_mode(
-        &self,
-        param_env_for_debug_assertion: ty::ParamEnv<'tcx>,
-    ) -> TypingMode<'tcx> {
-        if cfg!(debug_assertions) {
-            match (param_env_for_debug_assertion.reveal(), self.typing_mode) {
-                (Reveal::All, TypingMode::PostAnalysis)
-                | (Reveal::UserFacing, TypingMode::Coherence | TypingMode::Analysis { .. }) => {}
-                (r, t) => unreachable!("TypingMode x Reveal mismatch: {r:?} {t:?}"),
-            }
-        }
-        self.typing_mode
-    }
-
-    #[inline(always)]
-    pub fn typing_mode_unchecked(&self) -> TypingMode<'tcx> {
+    pub fn typing_mode(&self) -> TypingMode<'tcx> {
         self.typing_mode
     }
 
@@ -699,26 +682,6 @@ impl<'tcx> InferCtxt<'tcx> {
         b: ty::Region<'tcx>,
     ) {
         self.inner.borrow_mut().unwrap_region_constraints().make_subregion(origin, a, b);
-    }
-
-    /// Require that the region `r` be equal to one of the regions in
-    /// the set `regions`.
-    #[instrument(skip(self), level = "debug")]
-    pub fn member_constraint(
-        &self,
-        key: ty::OpaqueTypeKey<'tcx>,
-        definition_span: Span,
-        hidden_ty: Ty<'tcx>,
-        region: ty::Region<'tcx>,
-        in_regions: Lrc<Vec<ty::Region<'tcx>>>,
-    ) {
-        self.inner.borrow_mut().unwrap_region_constraints().member_constraint(
-            key,
-            definition_span,
-            hidden_ty,
-            region,
-            in_regions,
-        );
     }
 
     /// Processes a `Coerce` predicate from the fulfillment context.
@@ -982,7 +945,7 @@ impl<'tcx> InferCtxt<'tcx> {
 
     /// Clone the list of variable regions. This is used only during NLL processing
     /// to put the set of region variables into the NLL region context.
-    pub fn get_region_var_origins(&self) -> VarInfos {
+    pub fn get_region_var_infos(&self) -> VarInfos {
         let inner = self.inner.borrow();
         assert!(!UndoLogs::<UndoLog<'_>>::in_snapshot(&inner.undo_log));
         let storage = inner.region_constraint_storage.as_ref().expect("regions already resolved");
@@ -1005,11 +968,17 @@ impl<'tcx> InferCtxt<'tcx> {
 
     #[inline(always)]
     pub fn can_define_opaque_ty(&self, id: impl Into<DefId>) -> bool {
-        match self.typing_mode_unchecked() {
+        debug_assert!(!self.next_trait_solver());
+        match self.typing_mode() {
             TypingMode::Analysis { defining_opaque_types } => {
                 id.into().as_local().is_some_and(|def_id| defining_opaque_types.contains(&def_id))
             }
-            TypingMode::Coherence | TypingMode::PostAnalysis => false,
+            // FIXME(#132279): This function is quite weird in post-analysis
+            // and post-borrowck analysis mode. We may need to modify its uses
+            // to support PostBorrowckAnalysis in the old solver as well.
+            TypingMode::Coherence
+            | TypingMode::PostBorrowckAnalysis { .. }
+            | TypingMode::PostAnalysis => false,
         }
     }
 
@@ -1180,7 +1149,7 @@ impl<'tcx> InferCtxt<'tcx> {
                 }
                 if value.has_infer_regions() {
                     let guar = self.dcx().delayed_bug(format!("`{value:?}` is not fully resolved"));
-                    Ok(self.tcx.fold_regions(value, |re, _| {
+                    Ok(fold_regions(self.tcx, value, |re, _| {
                         if re.is_var() { ty::Region::new_error(self.tcx, guar) } else { re }
                     }))
                 } else {
@@ -1290,8 +1259,7 @@ impl<'tcx> InferCtxt<'tcx> {
     /// which contains the necessary information to use the trait system without
     /// using canonicalization or carrying this inference context around.
     pub fn typing_env(&self, param_env: ty::ParamEnv<'tcx>) -> ty::TypingEnv<'tcx> {
-        let typing_mode = match self.typing_mode(param_env) {
-            ty::TypingMode::Coherence => ty::TypingMode::Coherence,
+        let typing_mode = match self.typing_mode() {
             // FIXME(#132279): This erases the `defining_opaque_types` as it isn't possible
             // to handle them without proper canonicalization. This means we may cause cycle
             // errors and fail to reveal opaques while inside of bodies. We should rename this
@@ -1299,7 +1267,9 @@ impl<'tcx> InferCtxt<'tcx> {
             ty::TypingMode::Analysis { defining_opaque_types: _ } => {
                 TypingMode::non_body_analysis()
             }
-            ty::TypingMode::PostAnalysis => ty::TypingMode::PostAnalysis,
+            mode @ (ty::TypingMode::Coherence
+            | ty::TypingMode::PostBorrowckAnalysis { .. }
+            | ty::TypingMode::PostAnalysis) => mode,
         };
         ty::TypingEnv { typing_mode, param_env }
     }
@@ -1478,39 +1448,29 @@ impl<'tcx> TypeTrace<'tcx> {
         self.cause.span
     }
 
-    pub fn types(
-        cause: &ObligationCause<'tcx>,
-        a_is_expected: bool,
-        a: Ty<'tcx>,
-        b: Ty<'tcx>,
-    ) -> TypeTrace<'tcx> {
+    pub fn types(cause: &ObligationCause<'tcx>, a: Ty<'tcx>, b: Ty<'tcx>) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: ValuePairs::Terms(ExpectedFound::new(a_is_expected, a.into(), b.into())),
+            values: ValuePairs::Terms(ExpectedFound::new(a.into(), b.into())),
         }
     }
 
     pub fn trait_refs(
         cause: &ObligationCause<'tcx>,
-        a_is_expected: bool,
         a: ty::TraitRef<'tcx>,
         b: ty::TraitRef<'tcx>,
     ) -> TypeTrace<'tcx> {
-        TypeTrace {
-            cause: cause.clone(),
-            values: ValuePairs::TraitRefs(ExpectedFound::new(a_is_expected, a, b)),
-        }
+        TypeTrace { cause: cause.clone(), values: ValuePairs::TraitRefs(ExpectedFound::new(a, b)) }
     }
 
     pub fn consts(
         cause: &ObligationCause<'tcx>,
-        a_is_expected: bool,
         a: ty::Const<'tcx>,
         b: ty::Const<'tcx>,
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: ValuePairs::Terms(ExpectedFound::new(a_is_expected, a.into(), b.into())),
+            values: ValuePairs::Terms(ExpectedFound::new(a.into(), b.into())),
         }
     }
 }
