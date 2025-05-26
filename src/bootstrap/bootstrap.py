@@ -397,7 +397,7 @@ def default_build_triple(verbose):
         "loongarch64": "loongarch64",
         "m68k": "m68k",
         "csky": "csky",
-        "e2k': 'e2k",
+        "e2k": "e2k",
         "powerpc": "powerpc",
         "powerpc64": "powerpc64",
         "powerpc64le": "powerpc64le",
