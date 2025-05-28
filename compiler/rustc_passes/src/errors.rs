@@ -689,6 +689,24 @@ pub(crate) struct RustcPubTransparent {
 }
 
 #[derive(Diagnostic)]
+#[diag(passes_rustc_force_inline)]
+pub(crate) struct RustcForceInline {
+    #[primary_span]
+    pub attr_span: Span,
+    #[label]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(passes_rustc_force_inline_coro)]
+pub(crate) struct RustcForceInlineCoro {
+    #[primary_span]
+    pub attr_span: Span,
+    #[label]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
 #[diag(passes_link_ordinal)]
 pub(crate) struct LinkOrdinal {
     #[primary_span]
@@ -784,6 +802,8 @@ pub(crate) enum UnusedNote {
     NoLints { name: Symbol },
     #[note(passes_unused_default_method_body_const_note)]
     DefaultMethodBodyConst,
+    #[note(passes_unused_linker_warnings_note)]
+    LinkerWarningsBinaryCrateOnly,
 }
 
 #[derive(LintDiagnostic)]
@@ -1296,17 +1316,6 @@ pub(crate) struct MultipleRustcMain {
 }
 
 #[derive(Diagnostic)]
-#[diag(passes_multiple_start_functions, code = E0138)]
-pub(crate) struct MultipleStartFunctions {
-    #[primary_span]
-    pub span: Span,
-    #[label]
-    pub labeled: Span,
-    #[label(passes_previous)]
-    pub previous: Span,
-}
-
-#[derive(Diagnostic)]
 #[diag(passes_extern_main)]
 pub(crate) struct ExternMain {
     #[primary_span]
@@ -1385,11 +1394,15 @@ pub(crate) struct DuplicateLangItem {
 impl<G: EmissionGuarantee> Diagnostic<'_, G> for DuplicateLangItem {
     #[track_caller]
     fn into_diag(self, dcx: DiagCtxtHandle<'_>, level: Level) -> Diag<'_, G> {
-        let mut diag = Diag::new(dcx, level, match self.duplicate {
-            Duplicate::Plain => fluent::passes_duplicate_lang_item,
-            Duplicate::Crate => fluent::passes_duplicate_lang_item_crate,
-            Duplicate::CrateDepends => fluent::passes_duplicate_lang_item_crate_depends,
-        });
+        let mut diag = Diag::new(
+            dcx,
+            level,
+            match self.duplicate {
+                Duplicate::Plain => fluent::passes_duplicate_lang_item,
+                Duplicate::Crate => fluent::passes_duplicate_lang_item_crate,
+                Duplicate::CrateDepends => fluent::passes_duplicate_lang_item_crate_depends,
+            },
+        );
         diag.code(E0152);
         diag.arg("lang_item_name", self.lang_item_name);
         diag.arg("crate_name", self.crate_name);
@@ -1769,9 +1782,26 @@ pub(crate) struct IneffectiveUnstableImpl;
 
 #[derive(LintDiagnostic)]
 #[diag(passes_unused_assign)]
-#[help]
 pub(crate) struct UnusedAssign {
     pub name: String,
+    #[subdiagnostic]
+    pub suggestion: Option<UnusedAssignSuggestion>,
+    #[help]
+    pub help: bool,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(passes_unused_assign_suggestion, applicability = "maybe-incorrect")]
+pub(crate) struct UnusedAssignSuggestion {
+    pub pre: &'static str,
+    #[suggestion_part(code = "{pre}mut ")]
+    pub ty_span: Option<Span>,
+    #[suggestion_part(code = "")]
+    pub ty_ref_span: Span,
+    #[suggestion_part(code = "*")]
+    pub ident_span: Span,
+    #[suggestion_part(code = "")]
+    pub expr_ref_span: Span,
 }
 
 #[derive(LintDiagnostic)]

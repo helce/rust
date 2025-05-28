@@ -2,7 +2,6 @@ use clippy_utils::msrvs::{self, Msrv};
 use rustc_errors::Diag;
 use rustc_hir as hir;
 use rustc_lint::{LateContext, LintContext};
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::{Span, sym};
 
@@ -20,7 +19,7 @@ fn result_err_ty<'tcx>(
     id: hir::def_id::LocalDefId,
     item_span: Span,
 ) -> Option<(&'tcx hir::Ty<'tcx>, Ty<'tcx>)> {
-    if !in_external_macro(cx.sess(), item_span)
+    if !item_span.in_external_macro(cx.sess().source_map())
         && let hir::FnRetTy::Return(hir_ty) = decl.output
         && let ty = cx
             .tcx
@@ -36,7 +35,7 @@ fn result_err_ty<'tcx>(
 }
 
 pub(super) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &hir::Item<'tcx>, large_err_threshold: u64, msrv: &Msrv) {
-    if let hir::ItemKind::Fn(ref sig, _generics, _) = item.kind
+    if let hir::ItemKind::Fn { ref sig, .. } = item.kind
         && let Some((hir_ty, err_ty)) = result_err_ty(cx, sig.decl, item.owner_id.def_id, item.span)
     {
         if cx.effective_visibilities.is_exported(item.owner_id.def_id) {

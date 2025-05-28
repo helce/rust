@@ -11,8 +11,8 @@ use ide::{
     Annotation, AnnotationKind, Assist, AssistKind, Cancellable, CompletionFieldsToResolve,
     CompletionItem, CompletionItemKind, CompletionRelevance, Documentation, FileId, FileRange,
     FileSystemEdit, Fold, FoldKind, Highlight, HlMod, HlOperator, HlPunct, HlRange, HlTag, Indel,
-    InlayFieldsToResolve, InlayHint, InlayHintLabel, InlayHintLabelPart, InlayKind, Markup,
-    NavigationTarget, ReferenceCategory, RenameError, Runnable, Severity, SignatureHelp,
+    InlayFieldsToResolve, InlayHint, InlayHintLabel, InlayHintLabelPart, InlayKind, LazyProperty,
+    Markup, NavigationTarget, ReferenceCategory, RenameError, Runnable, Severity, SignatureHelp,
     SnippetEdit, SourceChange, StructureNodeKind, SymbolKind, TextEdit, TextRange, TextSize,
 };
 use ide_db::{assists, rust_doc::format_docs, FxHasher};
@@ -20,6 +20,7 @@ use itertools::Itertools;
 use paths::{Utf8Component, Utf8Prefix};
 use semver::VersionReq;
 use serde_json::to_value;
+use syntax::SmolStr;
 use vfs::AbsPath;
 
 use crate::{
@@ -393,10 +394,7 @@ fn completion_item(
             item.import_to_add
                 .clone()
                 .into_iter()
-                .map(|(import_path, import_name)| lsp_ext::CompletionImport {
-                    full_import_path: import_path,
-                    imported_name: import_name,
-                })
+                .map(|import_path| lsp_ext::CompletionImport { full_import_path: import_path })
                 .collect()
         } else {
             Vec::new()
@@ -546,7 +544,17 @@ pub(crate) fn inlay_hint(
     file_id: FileId,
     mut inlay_hint: InlayHint,
 ) -> Cancellable<lsp_types::InlayHint> {
-    let resolve_range_and_hash = inlay_hint.needs_resolve().map(|range| {
+    let hint_needs_resolve = |hint: &InlayHint| -> Option<TextRange> {
+        hint.resolve_parent.filter(|_| {
+            hint.text_edit.as_ref().is_some_and(LazyProperty::is_lazy)
+                || hint.label.parts.iter().any(|part| {
+                    part.linked_location.as_ref().is_some_and(LazyProperty::is_lazy)
+                        || part.tooltip.as_ref().is_some_and(LazyProperty::is_lazy)
+                })
+        })
+    };
+
+    let resolve_range_and_hash = hint_needs_resolve(&inlay_hint).map(|range| {
         (
             range,
             std::hash::BuildHasher::hash_one(
@@ -557,19 +565,21 @@ pub(crate) fn inlay_hint(
     });
 
     let mut something_to_resolve = false;
-    let text_edits = if snap
-        .config
-        .visual_studio_code_version()
-        // https://github.com/microsoft/vscode/issues/193124
-        .map_or(true, |version| VersionReq::parse(">=1.86.0").unwrap().matches(version))
-        && resolve_range_and_hash.is_some()
-        && fields_to_resolve.resolve_text_edits
-    {
-        something_to_resolve |= inlay_hint.text_edit.is_some();
-        None
-    } else {
-        inlay_hint.text_edit.take().map(|it| text_edit_vec(line_index, it))
-    };
+    let text_edits = inlay_hint
+        .text_edit
+        .take()
+        .and_then(|it| match it {
+            LazyProperty::Computed(it) => Some(it),
+            LazyProperty::Lazy => {
+                something_to_resolve |=
+                    snap.config.visual_studio_code_version().is_none_or(|version| {
+                        VersionReq::parse(">=1.86.0").unwrap().matches(version)
+                    }) && resolve_range_and_hash.is_some()
+                        && fields_to_resolve.resolve_text_edits;
+                None
+            }
+        })
+        .map(|it| text_edit_vec(line_index, it));
     let (label, tooltip) = inlay_hint_label(
         snap,
         fields_to_resolve,
@@ -622,22 +632,23 @@ fn inlay_hint_label(
     let (label, tooltip) = match &*label.parts {
         [InlayHintLabelPart { linked_location: None, .. }] => {
             let InlayHintLabelPart { text, tooltip, .. } = label.parts.pop().unwrap();
-            let hint_tooltip = if needs_resolve && fields_to_resolve.resolve_hint_tooltip {
-                *something_to_resolve |= tooltip.is_some();
-                None
-            } else {
-                match tooltip {
-                    Some(ide::InlayTooltip::String(s)) => {
-                        Some(lsp_types::InlayHintTooltip::String(s))
-                    }
-                    Some(ide::InlayTooltip::Markdown(s)) => {
-                        Some(lsp_types::InlayHintTooltip::MarkupContent(lsp_types::MarkupContent {
-                            kind: lsp_types::MarkupKind::Markdown,
-                            value: s,
-                        }))
-                    }
-                    None => None,
+            let tooltip = tooltip.and_then(|it| match it {
+                LazyProperty::Computed(it) => Some(it),
+                LazyProperty::Lazy => {
+                    *something_to_resolve |=
+                        needs_resolve && fields_to_resolve.resolve_hint_tooltip;
+                    None
                 }
+            });
+            let hint_tooltip = match tooltip {
+                Some(ide::InlayTooltip::String(s)) => Some(lsp_types::InlayHintTooltip::String(s)),
+                Some(ide::InlayTooltip::Markdown(s)) => {
+                    Some(lsp_types::InlayHintTooltip::MarkupContent(lsp_types::MarkupContent {
+                        kind: lsp_types::MarkupKind::Markdown,
+                        value: s,
+                    }))
+                }
+                None => None,
             };
             (lsp_types::InlayHintLabel::String(text), hint_tooltip)
         }
@@ -646,31 +657,38 @@ fn inlay_hint_label(
                 .parts
                 .into_iter()
                 .map(|part| {
-                    let tooltip = if needs_resolve && fields_to_resolve.resolve_label_tooltip {
-                        *something_to_resolve |= part.tooltip.is_some();
-                        None
-                    } else {
-                        match part.tooltip {
-                            Some(ide::InlayTooltip::String(s)) => {
-                                Some(lsp_types::InlayHintLabelPartTooltip::String(s))
-                            }
-                            Some(ide::InlayTooltip::Markdown(s)) => {
-                                Some(lsp_types::InlayHintLabelPartTooltip::MarkupContent(
-                                    lsp_types::MarkupContent {
-                                        kind: lsp_types::MarkupKind::Markdown,
-                                        value: s,
-                                    },
-                                ))
-                            }
-                            None => None,
+                    let tooltip = part.tooltip.and_then(|it| match it {
+                        LazyProperty::Computed(it) => Some(it),
+                        LazyProperty::Lazy => {
+                            *something_to_resolve |= fields_to_resolve.resolve_label_tooltip;
+                            None
                         }
+                    });
+                    let tooltip = match tooltip {
+                        Some(ide::InlayTooltip::String(s)) => {
+                            Some(lsp_types::InlayHintLabelPartTooltip::String(s))
+                        }
+                        Some(ide::InlayTooltip::Markdown(s)) => {
+                            Some(lsp_types::InlayHintLabelPartTooltip::MarkupContent(
+                                lsp_types::MarkupContent {
+                                    kind: lsp_types::MarkupKind::Markdown,
+                                    value: s,
+                                },
+                            ))
+                        }
+                        None => None,
                     };
-                    let location = if needs_resolve && fields_to_resolve.resolve_label_location {
-                        *something_to_resolve |= part.linked_location.is_some();
-                        None
-                    } else {
-                        part.linked_location.map(|range| location(snap, range)).transpose()?
-                    };
+                    let location = part
+                        .linked_location
+                        .and_then(|it| match it {
+                            LazyProperty::Computed(it) => Some(it),
+                            LazyProperty::Lazy => {
+                                *something_to_resolve |= fields_to_resolve.resolve_label_location;
+                                None
+                            }
+                        })
+                        .map(|range| location(snap, range))
+                        .transpose()?;
                     Ok(lsp_types::InlayHintLabelPart {
                         value: part.text,
                         tooltip,
@@ -1567,6 +1585,7 @@ pub(crate) fn code_lens(
             let line_index = snap.file_line_index(run.nav.file_id)?;
             let annotation_range = range(&line_index, annotation.range);
 
+            let update_test = run.update_test;
             let title = run.title();
             let can_debug = match run.kind {
                 ide::RunnableKind::DocTest { .. } => false,
@@ -1601,6 +1620,18 @@ pub(crate) fn code_lens(
                             command: Some(command),
                             data: None,
                         })
+                    }
+                    if lens_config.update_test && client_commands_config.run_single {
+                        let label = update_test.label();
+                        let env = update_test.env();
+                        if let Some(r) = make_update_runnable(&r, &label, &env) {
+                            let command = command::run_single(&r, label.unwrap().as_str());
+                            acc.push(lsp_types::CodeLens {
+                                range: annotation_range,
+                                command: Some(command),
+                                data: None,
+                            })
+                        }
                     }
                 }
 
@@ -1786,7 +1817,7 @@ pub(crate) mod command {
 
     pub(crate) fn debug_single(runnable: &lsp_ext::Runnable) -> lsp_types::Command {
         lsp_types::Command {
-            title: "Debug".into(),
+            title: "⚙\u{fe0e} Debug".into(),
             command: "rust-analyzer.debugSingle".into(),
             arguments: Some(vec![to_value(runnable).unwrap()]),
         }
@@ -1836,6 +1867,28 @@ pub(crate) mod command {
             arguments: None,
         }
     }
+}
+
+pub(crate) fn make_update_runnable(
+    runnable: &lsp_ext::Runnable,
+    label: &Option<SmolStr>,
+    env: &[(&str, &str)],
+) -> Option<lsp_ext::Runnable> {
+    if !matches!(runnable.args, lsp_ext::RunnableArgs::Cargo(_)) {
+        return None;
+    }
+    let label = label.as_ref()?;
+
+    let mut runnable = runnable.clone();
+    runnable.label = format!("{} + {}", runnable.label, label);
+
+    let lsp_ext::RunnableArgs::Cargo(r) = &mut runnable.args else {
+        unreachable!();
+    };
+
+    r.environment.extend(env.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+
+    Some(runnable)
 }
 
 pub(crate) fn implementation_title(count: usize) -> String {
@@ -1958,7 +2011,7 @@ fn bar(_: usize) {}
 
     #[track_caller]
     fn check_rendered_snippets_in_source(
-        ra_fixture: &str,
+        #[rust_analyzer::rust_fixture] ra_fixture: &str,
         edit: TextEdit,
         snippets: SnippetEdit,
         expect: Expect,

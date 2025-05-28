@@ -1587,9 +1587,7 @@ fn extract_if_complex() {
     }
 }
 
-// FIXME: re-enable emscripten once it can unwind again
 #[test]
-#[cfg(not(target_os = "emscripten"))]
 #[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn extract_if_consumed_panic() {
     use std::rc::Rc;
@@ -1640,9 +1638,7 @@ fn extract_if_consumed_panic() {
     }
 }
 
-// FIXME: Re-enable emscripten once it can catch panics
 #[test]
-#[cfg(not(target_os = "emscripten"))]
 #[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
 fn extract_if_unconsumed_panic() {
     use std::rc::Rc;
@@ -2741,4 +2737,14 @@ fn max_splice() {
 fn max_swap_remove() {
     let mut v = vec![0];
     v.swap_remove(usize::MAX);
+}
+
+// Regression test for #135338
+#[test]
+fn vec_null_ptr_roundtrip() {
+    let ptr = std::ptr::from_ref(&42);
+    let zero = ptr.with_addr(0);
+    let roundtripped = vec![zero; 1].pop().unwrap();
+    let new = roundtripped.with_addr(ptr.addr());
+    unsafe { new.read() };
 }

@@ -165,6 +165,8 @@ hir_typeck_remove_semi_for_coerce_ret = the `match` arms can conform to this ret
 hir_typeck_remove_semi_for_coerce_semi = the `match` is a statement because of this semicolon, consider removing it
 hir_typeck_remove_semi_for_coerce_suggestion = remove this semicolon
 
+hir_typeck_replace_comma_with_semicolon = replace the comma with a semicolon to create {$descr}
+
 hir_typeck_return_stmt_outside_of_fn_body =
     {$statement_kind} statement outside of function body
     .encl_body_label = the {$statement_kind} is part of this body...
@@ -189,6 +191,14 @@ hir_typeck_suggest_boxing_note = for more on the distinction between the stack a
 hir_typeck_suggest_boxing_when_appropriate = store this in the heap by calling `Box::new`
 
 hir_typeck_suggest_ptr_null_mut = consider using `core::ptr::null_mut` instead
+
+hir_typeck_supertrait_item_multiple_shadowee = items from several supertraits are shadowed: {$traits}
+
+hir_typeck_supertrait_item_shadowee = item from `{$supertrait}` is shadowed by a subtrait item
+
+hir_typeck_supertrait_item_shadower = item from `{$subtrait}` shadows a supertrait item
+
+hir_typeck_supertrait_item_shadowing = trait item `{$item}` from `{$subtrait}` shadows identically named item from supertrait
 
 hir_typeck_trivial_cast = trivial {$numeric ->
     [true] numeric cast

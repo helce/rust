@@ -882,14 +882,6 @@ fn iter_header(
         }
         let ln = ln.trim();
 
-        // Assume that any directives will be found before the first module or function. This
-        // doesn't seem to be an optimization with a warm page cache. Maybe with a cold one.
-        // FIXME(jieyouxu): this will cause `//@` directives in the rest of the test file to
-        // not be checked.
-        if ln.starts_with("fn") || ln.starts_with("mod") {
-            return;
-        }
-
         let Some(directive_line) = line_directive(line_number, comment, ln) else {
             continue;
         };
@@ -934,6 +926,9 @@ fn iter_header(
 
 impl Config {
     fn parse_and_update_revisions(&self, testfile: &Path, line: &str, existing: &mut Vec<String>) {
+        const FORBIDDEN_REVISION_NAMES: [&str; 9] =
+            ["CHECK", "COM", "NEXT", "SAME", "EMPTY", "NOT", "COUNT", "DAG", "LABEL"];
+
         if let Some(raw) = self.parse_name_value_directive(line, "revisions") {
             if self.mode == Mode::RunMake {
                 panic!("`run-make` tests do not support revisions: {}", testfile.display());
@@ -945,6 +940,15 @@ impl Config {
                     panic!(
                         "duplicate revision: `{}` in line `{}`: {}",
                         revision,
+                        raw,
+                        testfile.display()
+                    );
+                } else if matches!(self.mode, Mode::Assembly | Mode::Codegen | Mode::MirOpt)
+                    && FORBIDDEN_REVISION_NAMES.contains(&revision.as_str())
+                {
+                    panic!(
+                        "revision name `{revision}` is not permitted in a test suite that uses `FileCheck` annotations\n\
+                         as it is confusing when used as custom `FileCheck` prefix: `{revision}` in line `{}`: {}",
                         raw,
                         testfile.display()
                     );

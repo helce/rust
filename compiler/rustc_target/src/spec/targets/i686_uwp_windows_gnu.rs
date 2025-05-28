@@ -1,18 +1,18 @@
-use crate::spec::{Cc, FramePointer, LinkerFlavor, Lld, Target, base};
+use crate::spec::{Cc, FramePointer, LinkerFlavor, Lld, RustcAbi, Target, base};
 
 pub(crate) fn target() -> Target {
     let mut base = base::windows_uwp_gnu::opts();
+    base.rustc_abi = Some(RustcAbi::X86Sse2);
     base.cpu = "pentium4".into();
     base.max_atomic_width = Some(64);
     base.frame_pointer = FramePointer::Always; // Required for backtraces
 
     // Mark all dynamic libraries and executables as compatible with the larger 4GiB address
     // space available to x86 Windows binaries on x86_64.
-    base.add_pre_link_args(LinkerFlavor::Gnu(Cc::No, Lld::No), &[
-        "-m",
-        "i386pe",
-        "--large-address-aware",
-    ]);
+    base.add_pre_link_args(
+        LinkerFlavor::Gnu(Cc::No, Lld::No),
+        &["-m", "i386pe", "--large-address-aware"],
+    );
     base.add_pre_link_args(LinkerFlavor::Gnu(Cc::Yes, Lld::No), &["-Wl,--large-address-aware"]);
 
     Target {

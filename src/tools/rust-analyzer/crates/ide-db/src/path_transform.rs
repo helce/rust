@@ -285,7 +285,7 @@ impl Ctx<'_> {
         if path.qualifier().is_some() {
             return None;
         }
-        if path.segment().map_or(false, |s| {
+        if path.segment().is_some_and(|s| {
             s.parenthesized_arg_list().is_some()
                 || (s.self_token().is_some() && path.parent_path().is_none())
         }) {
@@ -319,6 +319,7 @@ impl Ctx<'_> {
                                 prefer_no_std: false,
                                 prefer_prelude: true,
                                 prefer_absolute: false,
+                                allow_unstable: true,
                             };
                             let found_path = self.target_module.find_path(
                                 self.source_scope.db.upcast(),
@@ -378,6 +379,7 @@ impl Ctx<'_> {
                     prefer_no_std: false,
                     prefer_prelude: true,
                     prefer_absolute: false,
+                    allow_unstable: true,
                 };
                 let found_path =
                     self.target_module.find_path(self.source_scope.db.upcast(), def, cfg)?;
@@ -417,6 +419,7 @@ impl Ctx<'_> {
                             prefer_no_std: false,
                             prefer_prelude: true,
                             prefer_absolute: false,
+                            allow_unstable: true,
                         };
                         let found_path = self.target_module.find_path(
                             self.source_scope.db.upcast(),

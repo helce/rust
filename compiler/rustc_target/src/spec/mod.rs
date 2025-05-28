@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fmt, io};
 
+use rustc_abi::{Endian, ExternAbi, Integer, Size, TargetDataLayout, TargetDataLayoutErrors};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_fs_util::try_canonicalize;
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
@@ -50,20 +51,11 @@ use rustc_span::{Symbol, kw, sym};
 use serde_json::Value;
 use tracing::debug;
 
-use crate::abi::call::Conv;
-use crate::abi::{Endian, Integer, Size, TargetDataLayout, TargetDataLayoutErrors};
+use crate::callconv::Conv;
 use crate::json::{Json, ToJson};
-use crate::spec::abi::Abi;
 use crate::spec::crt_objects::CrtObjects;
 
 pub mod crt_objects;
-
-pub mod abi {
-    pub use rustc_abi::{
-        AbiDisabled, AbiUnsupported, ExternAbi as Abi, all_names, enabled_names, is_enabled,
-        is_stable, lookup,
-    };
-}
 
 mod base;
 mod json;
@@ -1114,6 +1106,37 @@ impl ToJson for FloatAbi {
     }
 }
 
+/// The Rustc-specific variant of the ABI used for this target.
+#[derive(Clone, Copy, PartialEq, Hash, Debug)]
+pub enum RustcAbi {
+    /// On x86-32 only: make use of SSE and SSE2 for ABI purposes.
+    X86Sse2,
+    /// On x86-32/64 only: do not use any FPU or SIMD registers for the ABI.
+    X86Softfloat,
+}
+
+impl FromStr for RustcAbi {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<RustcAbi, ()> {
+        Ok(match s {
+            "x86-sse2" => RustcAbi::X86Sse2,
+            "x86-softfloat" => RustcAbi::X86Softfloat,
+            _ => return Err(()),
+        })
+    }
+}
+
+impl ToJson for RustcAbi {
+    fn to_json(&self) -> Json {
+        match *self {
+            RustcAbi::X86Sse2 => "x86-sse2",
+            RustcAbi::X86Softfloat => "x86-softfloat",
+        }
+        .to_json()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
 pub enum TlsModel {
     GeneralDynamic,
@@ -1624,7 +1647,7 @@ macro_rules! supported_targets {
         }
 
         /// List of supported targets
-        pub const TARGETS: &[&str] = &[$($tuple),+];
+        pub static TARGETS: &[&str] = &[$($tuple),+];
 
         fn load_builtin(target: &str) -> Option<Target> {
             let t = match target {
@@ -1656,6 +1679,7 @@ supported_targets! {
     ("loongarch64-unknown-linux-gnu", loongarch64_unknown_linux_gnu),
     ("loongarch64-unknown-linux-musl", loongarch64_unknown_linux_musl),
     ("m68k-unknown-linux-gnu", m68k_unknown_linux_gnu),
+    ("m68k-unknown-none-elf", m68k_unknown_none_elf),
     ("csky-unknown-linux-gnuabiv2", csky_unknown_linux_gnuabiv2),
     ("csky-unknown-linux-gnuabiv2hf", csky_unknown_linux_gnuabiv2hf),
     ("mips-unknown-linux-gnu", mips_unknown_linux_gnu),
@@ -1770,7 +1794,7 @@ supported_targets! {
     ("x86_64-unknown-l4re-uclibc", x86_64_unknown_l4re_uclibc),
 
     ("aarch64-unknown-redox", aarch64_unknown_redox),
-    ("i686-unknown-redox", i686_unknown_redox),
+    ("i586-unknown-redox", i586_unknown_redox),
     ("x86_64-unknown-redox", x86_64_unknown_redox),
 
     ("i386-apple-ios", i386_apple_ios),
@@ -1811,9 +1835,11 @@ supported_targets! {
     ("aarch64-unknown-illumos", aarch64_unknown_illumos),
 
     ("x86_64-pc-windows-gnu", x86_64_pc_windows_gnu),
+    ("x86_64-uwp-windows-gnu", x86_64_uwp_windows_gnu),
+    ("x86_64-win7-windows-gnu", x86_64_win7_windows_gnu),
     ("i686-pc-windows-gnu", i686_pc_windows_gnu),
     ("i686-uwp-windows-gnu", i686_uwp_windows_gnu),
-    ("x86_64-uwp-windows-gnu", x86_64_uwp_windows_gnu),
+    ("i686-win7-windows-gnu", i686_win7_windows_gnu),
 
     ("aarch64-pc-windows-gnullvm", aarch64_pc_windows_gnullvm),
     ("i686-pc-windows-gnullvm", i686_pc_windows_gnullvm),
@@ -1850,6 +1876,8 @@ supported_targets! {
 
     ("armv7a-none-eabi", armv7a_none_eabi),
     ("armv7a-none-eabihf", armv7a_none_eabihf),
+    ("armv7a-nuttx-eabi", armv7a_nuttx_eabi),
+    ("armv7a-nuttx-eabihf", armv7a_nuttx_eabihf),
 
     ("msp430-none-elf", msp430_none_elf),
 
@@ -1893,6 +1921,7 @@ supported_targets! {
 
     ("aarch64-unknown-none", aarch64_unknown_none),
     ("aarch64-unknown-none-softfloat", aarch64_unknown_none_softfloat),
+    ("aarch64-unknown-nuttx", aarch64_unknown_nuttx),
 
     ("x86_64-fortanix-unknown-sgx", x86_64_fortanix_unknown_sgx),
 
@@ -1901,6 +1930,8 @@ supported_targets! {
     ("aarch64-unknown-uefi", aarch64_unknown_uefi),
 
     ("nvptx64-nvidia-cuda", nvptx64_nvidia_cuda),
+
+    ("amdgcn-amd-amdhsa", amdgcn_amd_amdhsa),
 
     ("xtensa-esp32-none-elf", xtensa_esp32_none_elf),
     ("xtensa-esp32-espidf", xtensa_esp32_espidf),
@@ -1926,6 +1957,8 @@ supported_targets! {
     ("mipsel-sony-psp", mipsel_sony_psp),
     ("mipsel-sony-psx", mipsel_sony_psx),
     ("mipsel-unknown-none", mipsel_unknown_none),
+    ("mips-mti-none-elf", mips_mti_none_elf),
+    ("mipsel-mti-none-elf", mipsel_mti_none_elf),
     ("thumbv4t-none-eabi", thumbv4t_none_eabi),
     ("armv4t-none-eabi", armv4t_none_eabi),
     ("thumbv5te-none-eabi", thumbv5te_none_eabi),
@@ -1971,7 +2004,11 @@ supported_targets! {
 
     ("aarch64-unknown-nto-qnx700", aarch64_unknown_nto_qnx700),
     ("aarch64-unknown-nto-qnx710", aarch64_unknown_nto_qnx710),
+    ("aarch64-unknown-nto-qnx710_iosock", aarch64_unknown_nto_qnx710_iosock),
+    ("aarch64-unknown-nto-qnx800", aarch64_unknown_nto_qnx800),
     ("x86_64-pc-nto-qnx710", x86_64_pc_nto_qnx710),
+    ("x86_64-pc-nto-qnx710_iosock", x86_64_pc_nto_qnx710_iosock),
+    ("x86_64-pc-nto-qnx800", x86_64_pc_nto_qnx800),
     ("i586-pc-nto-qnx700", i586_pc_nto_qnx700),
 
     ("aarch64-unknown-linux-ohos", aarch64_unknown_linux_ohos),
@@ -1982,6 +2019,8 @@ supported_targets! {
     ("x86_64-unknown-linux-none", x86_64_unknown_linux_none),
 
     ("thumbv6m-nuttx-eabi", thumbv6m_nuttx_eabi),
+    ("thumbv7a-nuttx-eabi", thumbv7a_nuttx_eabi),
+    ("thumbv7a-nuttx-eabihf", thumbv7a_nuttx_eabihf),
     ("thumbv7m-nuttx-eabi", thumbv7m_nuttx_eabi),
     ("thumbv7em-nuttx-eabi", thumbv7em_nuttx_eabi),
     ("thumbv7em-nuttx-eabihf", thumbv7em_nuttx_eabihf),
@@ -1994,6 +2033,7 @@ supported_targets! {
     ("riscv64imac-unknown-nuttx-elf", riscv64imac_unknown_nuttx_elf),
     ("riscv64gc-unknown-nuttx-elf", riscv64gc_unknown_nuttx_elf),
 
+    ("x86_64-pc-cygwin", x86_64_pc_cygwin),
 }
 
 /// Cow-Vec-Str: Cow<'static, [Cow<'static, str>]>
@@ -2256,6 +2296,9 @@ pub struct TargetOptions {
     /// Default CPU to pass to LLVM. Corresponds to `llc -mcpu=$cpu`. Defaults
     /// to "generic".
     pub cpu: StaticCow<str>,
+    /// Whether a cpu needs to be explicitly set.
+    /// Set to true if there is no default cpu. Defaults to false.
+    pub need_explicit_cpu: bool,
     /// Default target features to pass to LLVM. These features overwrite
     /// `-Ctarget-cpu` but can be overwritten with `-Ctarget-features`.
     /// Corresponds to `llc -mattr=$features`.
@@ -2504,6 +2547,12 @@ pub struct TargetOptions {
     /// If not provided, LLVM will infer the float ABI from the target triple (`llvm_target`).
     pub llvm_floatabi: Option<FloatAbi>,
 
+    /// Picks a specific ABI for this target. This is *not* just for "Rust" ABI functions,
+    /// it can also affect "C" ABI functions; the point is that this flag is interpreted by
+    /// rustc and not forwarded to LLVM.
+    /// So far, this is only used on x86.
+    pub rustc_abi: Option<RustcAbi>,
+
     /// Whether or not RelaxElfRelocation flag will be passed to the linker
     pub relax_elf_relocations: bool,
 
@@ -2663,14 +2712,6 @@ impl TargetOptions {
                 .collect();
         }
     }
-
-    pub(crate) fn has_feature(&self, search_feature: &str) -> bool {
-        self.features.split(',').any(|f| f.strip_prefix('+').is_some_and(|f| f == search_feature))
-    }
-
-    pub(crate) fn has_neg_feature(&self, search_feature: &str) -> bool {
-        self.features.split(',').any(|f| f.strip_prefix('-').is_some_and(|f| f == search_feature))
-    }
 }
 
 impl Default for TargetOptions {
@@ -2692,6 +2733,7 @@ impl Default for TargetOptions {
             link_script: None,
             asm_args: cvs![],
             cpu: "generic".into(),
+            need_explicit_cpu: false,
             features: "".into(),
             direct_access_external_data: None,
             dynamic_linking: false,
@@ -2776,6 +2818,7 @@ impl Default for TargetOptions {
             llvm_mcount_intrinsic: None,
             llvm_abiname: "".into(),
             llvm_floatabi: None,
+            rustc_abi: None,
             relax_elf_relocations: false,
             llvm_args: cvs![],
             use_ctors_section: false,
@@ -2817,39 +2860,40 @@ impl DerefMut for Target {
 
 impl Target {
     /// Given a function ABI, turn it into the correct ABI for this target.
-    pub fn adjust_abi(&self, abi: Abi, c_variadic: bool) -> Abi {
+    pub fn adjust_abi(&self, abi: ExternAbi, c_variadic: bool) -> ExternAbi {
+        use ExternAbi::*;
         match abi {
             // On Windows, `extern "system"` behaves like msvc's `__stdcall`.
             // `__stdcall` only applies on x86 and on non-variadic functions:
             // https://learn.microsoft.com/en-us/cpp/cpp/stdcall?view=msvc-170
-            Abi::System { unwind } if self.is_like_windows && self.arch == "x86" && !c_variadic => {
-                Abi::Stdcall { unwind }
+            System { unwind } if self.is_like_windows && self.arch == "x86" && !c_variadic => {
+                Stdcall { unwind }
             }
-            Abi::System { unwind } => Abi::C { unwind },
-            Abi::EfiApi if self.arch == "arm" => Abi::Aapcs { unwind: false },
-            Abi::EfiApi if self.arch == "x86_64" => Abi::Win64 { unwind: false },
-            Abi::EfiApi => Abi::C { unwind: false },
+            System { unwind } => C { unwind },
+            EfiApi if self.arch == "arm" => Aapcs { unwind: false },
+            EfiApi if self.arch == "x86_64" => Win64 { unwind: false },
+            EfiApi => C { unwind: false },
 
             // See commentary in `is_abi_supported`.
-            Abi::Stdcall { .. } | Abi::Thiscall { .. } if self.arch == "x86" => abi,
-            Abi::Stdcall { unwind } | Abi::Thiscall { unwind } => Abi::C { unwind },
-            Abi::Fastcall { .. } if self.arch == "x86" => abi,
-            Abi::Vectorcall { .. } if ["x86", "x86_64"].contains(&&self.arch[..]) => abi,
-            Abi::Fastcall { unwind } | Abi::Vectorcall { unwind } => Abi::C { unwind },
+            Stdcall { .. } | Thiscall { .. } if self.arch == "x86" => abi,
+            Stdcall { unwind } | Thiscall { unwind } => C { unwind },
+            Fastcall { .. } if self.arch == "x86" => abi,
+            Vectorcall { .. } if ["x86", "x86_64"].contains(&&self.arch[..]) => abi,
+            Fastcall { unwind } | Vectorcall { unwind } => C { unwind },
 
             // The Windows x64 calling convention we use for `extern "Rust"`
             // <https://learn.microsoft.com/en-us/cpp/build/x64-software-conventions#register-volatility-and-preservation>
             // expects the callee to save `xmm6` through `xmm15`, but `PreserveMost`
             // (that we use by default for `extern "rust-cold"`) doesn't save any of those.
             // So to avoid bloating callers, just use the Rust convention here.
-            Abi::RustCold if self.is_like_windows && self.arch == "x86_64" => Abi::Rust,
+            RustCold if self.is_like_windows && self.arch == "x86_64" => Rust,
 
             abi => abi,
         }
     }
 
-    pub fn is_abi_supported(&self, abi: Abi) -> bool {
-        use Abi::*;
+    pub fn is_abi_supported(&self, abi: ExternAbi) -> bool {
+        use ExternAbi::*;
         match abi {
             Rust
             | C { .. }
@@ -2870,6 +2914,7 @@ impl Target {
             }
             Win64 { .. } | SysV64 { .. } => self.arch == "x86_64",
             PtxKernel => self.arch == "nvptx64",
+            GpuKernel => ["amdgpu", "nvptx64"].contains(&&self.arch[..]),
             Msp430Interrupt => self.arch == "msp430",
             RiscvInterruptM | RiscvInterruptS => ["riscv32", "riscv64"].contains(&&self.arch[..]),
             AvrInterrupt | AvrNonBlockingInterrupt => self.arch == "avr",
@@ -2970,8 +3015,8 @@ impl Target {
         );
         check_eq!(
             self.is_like_windows,
-            self.os == "windows" || self.os == "uefi",
-            "`is_like_windows` must be set if and only if `os` is `windows` or `uefi`"
+            self.os == "windows" || self.os == "uefi" || self.os == "cygwin",
+            "`is_like_windows` must be set if and only if `os` is `windows`, `uefi` or `cygwin`"
         );
         check_eq!(
             self.is_like_wasm,
@@ -3217,7 +3262,8 @@ impl Target {
                 check_matches!(
                     &*self.llvm_abiname,
                     "ilp32" | "ilp32f" | "ilp32d" | "ilp32e",
-                    "invalid RISC-V ABI name"
+                    "invalid RISC-V ABI name: {}",
+                    self.llvm_abiname,
                 );
             }
             "riscv64" => {
@@ -3225,13 +3271,30 @@ impl Target {
                 check_matches!(
                     &*self.llvm_abiname,
                     "lp64" | "lp64f" | "lp64d" | "lp64e",
-                    "invalid RISC-V ABI name"
+                    "invalid RISC-V ABI name: {}",
+                    self.llvm_abiname,
                 );
             }
             "arm" => {
                 check!(self.llvm_floatabi.is_some(), "ARM targets must specify their float ABI",)
             }
             _ => {}
+        }
+
+        // Check consistency of Rust ABI declaration.
+        if let Some(rust_abi) = self.rustc_abi {
+            match rust_abi {
+                RustcAbi::X86Sse2 => check_matches!(
+                    &*self.arch,
+                    "x86",
+                    "`x86-sse2` ABI is only valid for x86-32 targets"
+                ),
+                RustcAbi::X86Softfloat => check_matches!(
+                    &*self.arch,
+                    "x86" | "x86_64",
+                    "`x86-softfloat` ABI is only valid for x86 targets"
+                ),
+            }
         }
 
         // Check that the given target-features string makes some basic sense.
@@ -3256,6 +3319,26 @@ impl Target {
                 } else {
                     return Err(format!(
                         "target feature `{feat}` is invalid, must start with `+` or `-`"
+                    ));
+                }
+            }
+            // Check that we don't mis-set any of the ABI-relevant features.
+            let abi_feature_constraints = self.abi_required_features();
+            for feat in abi_feature_constraints.required {
+                // The feature might be enabled by default so we can't *require* it to show up.
+                // But it must not be *disabled*.
+                if features_disabled.contains(feat) {
+                    return Err(format!(
+                        "target feature `{feat}` is required by the ABI but gets disabled in target spec"
+                    ));
+                }
+            }
+            for feat in abi_feature_constraints.incompatible {
+                // The feature might be disabled by default so we can't *require* it to show up.
+                // But it must not be *enabled*.
+                if features_enabled.contains(feat) {
+                    return Err(format!(
+                        "target feature `{feat}` is incompatible with the ABI but gets enabled in target spec"
                     ));
                 }
             }

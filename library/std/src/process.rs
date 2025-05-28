@@ -868,13 +868,17 @@ impl Command {
     ///
     /// # Examples
     ///
+    /// Prevent any inherited `GIT_DIR` variable from changing the target of the `git` command,
+    /// while allowing all other variables, like `GIT_AUTHOR_NAME`.
+    ///
     /// ```no_run
     /// use std::process::Command;
     ///
-    /// Command::new("ls")
-    ///     .env_remove("PATH")
-    ///     .spawn()
-    ///     .expect("ls command failed to start");
+    /// Command::new("git")
+    ///     .arg("commit")
+    ///     .env_remove("GIT_DIR")
+    ///     .spawn()?;
+    /// # std::io::Result::Ok(())
     /// ```
     #[stable(feature = "process", since = "1.0.0")]
     pub fn env_remove<K: AsRef<OsStr>>(&mut self, key: K) -> &mut Command {
@@ -896,13 +900,17 @@ impl Command {
     ///
     /// # Examples
     ///
+    /// The behavior of `sort` is affected by `LANG` and `LC_*` environment variables.
+    /// Clearing the environment makes `sort`'s behavior independent of the parent processes' language.
+    ///
     /// ```no_run
     /// use std::process::Command;
     ///
-    /// Command::new("ls")
+    /// Command::new("sort")
+    ///     .arg("file.txt")
     ///     .env_clear()
-    ///     .spawn()
-    ///     .expect("ls command failed to start");
+    ///     .spawn()?;
+    /// # std::io::Result::Ok(())
     /// ```
     #[stable(feature = "process", since = "1.0.0")]
     pub fn env_clear(&mut self) -> &mut Command {
@@ -1283,13 +1291,13 @@ impl fmt::Debug for Output {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         let stdout_utf8 = str::from_utf8(&self.stdout);
         let stdout_debug: &dyn fmt::Debug = match stdout_utf8 {
-            Ok(ref str) => str,
+            Ok(ref s) => s,
             Err(_) => &self.stdout,
         };
 
         let stderr_utf8 = str::from_utf8(&self.stderr);
         let stderr_debug: &dyn fmt::Debug = match stderr_utf8 {
-            Ok(ref str) => str,
+            Ok(ref s) => s,
             Err(_) => &self.stderr,
         };
 
@@ -2310,14 +2318,10 @@ pub fn exit(code: i32) -> ! {
 /// Terminates the process in an abnormal fashion.
 ///
 /// The function will never return and will immediately terminate the current
-/// process in a platform specific "abnormal" manner.
-///
-/// Note that because this function never returns, and that it terminates the
-/// process, no destructors on the current stack or any other thread's stack
-/// will be run.
-///
-/// Rust IO buffers (eg, from `BufWriter`) will not be flushed.
-/// Likewise, C stdio buffers will (on most platforms) not be flushed.
+/// process in a platform specific "abnormal" manner. As a consequence,
+/// no destructors on the current stack or any other thread's stack
+/// will be run, Rust IO buffers (eg, from `BufWriter`) will not be flushed,
+/// and C stdio buffers will (on most platforms) not be flushed.
 ///
 /// This is in contrast to the default behavior of [`panic!`] which unwinds
 /// the current thread's stack and calls all destructors.

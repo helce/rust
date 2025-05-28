@@ -192,7 +192,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingDoc {
 
     fn check_item(&mut self, cx: &LateContext<'tcx>, it: &'tcx hir::Item<'_>) {
         match it.kind {
-            hir::ItemKind::Fn(..) => {
+            hir::ItemKind::Fn { .. } => {
                 // ignore main()
                 if it.ident.name == sym::main {
                     let at_root = cx.tcx.local_parent(it.owner_id.def_id) == CRATE_DEF_ID;
@@ -220,7 +220,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingDoc {
             | hir::ItemKind::GlobalAsm(..)
             | hir::ItemKind::Impl { .. }
             | hir::ItemKind::Use(..) => note_prev_span_then_ret!(self.prev_span, it.span),
-        };
+        }
 
         let (article, desc) = cx.tcx.article_and_description(it.owner_id.to_def_id());
 

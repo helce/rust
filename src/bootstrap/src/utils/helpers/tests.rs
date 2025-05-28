@@ -1,10 +1,10 @@
-use std::fs::{self, File, remove_file};
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 
 use crate::utils::helpers::{
-    check_cfg_arg, extract_beta_rev, hex_encode, is_path_in_submodule, make, program_out_of_date,
-    set_file_times, symlink_dir,
+    check_cfg_arg, extract_beta_rev, hex_encode, make, set_file_times, submodule_path_of,
+    symlink_dir,
 };
 use crate::{Config, Flags};
 
@@ -58,22 +58,6 @@ fn test_check_cfg_arg() {
 }
 
 #[test]
-fn test_program_out_of_date() {
-    let config =
-        Config::parse(Flags::parse(&["check".to_owned(), "--config=/does/not/exist".to_owned()]));
-    let tempfile = config.tempdir().join(".tmp-stamp-file");
-    File::create(&tempfile).unwrap().write_all(b"dummy value").unwrap();
-    assert!(tempfile.exists());
-
-    // up-to-date
-    assert!(!program_out_of_date(&tempfile, "dummy value"));
-    // out-of-date
-    assert!(program_out_of_date(&tempfile, ""));
-
-    remove_file(tempfile).unwrap();
-}
-
-#[test]
 fn test_symlink_dir() {
     let config =
         Config::parse(Flags::parse(&["check".to_owned(), "--config=/does/not/exist".to_owned()]));
@@ -117,16 +101,22 @@ fn test_set_file_times_sanity_check() {
 }
 
 #[test]
-fn test_is_path_in_submodule() {
+fn test_submodule_path_of() {
     let config = Config::parse_inner(Flags::parse(&["build".into(), "--dry-run".into()]), |&_| {
         Ok(Default::default())
     });
 
     let build = crate::Build::new(config.clone());
     let builder = crate::core::builder::Builder::new(&build);
-    assert!(!is_path_in_submodule(&builder, "invalid/path"));
-    assert!(is_path_in_submodule(&builder, "src/tools/cargo"));
-    assert!(is_path_in_submodule(&builder, "src/llvm-project"));
+    assert_eq!(submodule_path_of(&builder, "invalid/path"), None);
+    assert_eq!(submodule_path_of(&builder, "src/tools/cargo"), Some("src/tools/cargo".to_string()));
+    assert_eq!(
+        submodule_path_of(&builder, "src/llvm-project"),
+        Some("src/llvm-project".to_string())
+    );
     // Make sure subdirs are handled properly
-    assert!(is_path_in_submodule(&builder, "src/tools/cargo/random-subdir"));
+    assert_eq!(
+        submodule_path_of(&builder, "src/tools/cargo/random-subdir"),
+        Some("src/tools/cargo".to_string())
+    );
 }

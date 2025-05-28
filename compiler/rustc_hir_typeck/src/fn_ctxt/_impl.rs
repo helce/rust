@@ -3,12 +3,12 @@ use std::slice;
 
 use rustc_abi::FieldIdx;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_errors::{Applicability, Diag, ErrorGuaranteed, MultiSpan, StashKey};
+use rustc_errors::{Applicability, Diag, ErrorGuaranteed, MultiSpan};
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::DefId;
-use rustc_hir::intravisit::Visitor;
+use rustc_hir::intravisit::VisitorExt;
 use rustc_hir::lang_items::LangItem;
-use rustc_hir::{self as hir, ExprKind, GenericArg, HirId, Node, QPath, intravisit};
+use rustc_hir::{self as hir, AmbigArg, ExprKind, GenericArg, HirId, Node, QPath, intravisit};
 use rustc_hir_analysis::hir_ty_lowering::errors::GenericsArgsErrExtend;
 use rustc_hir_analysis::hir_ty_lowering::generics::{
     check_generic_arg_count_for_call, lower_generic_args,
@@ -253,6 +253,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return;
         }
 
+        let mut expr_ty = self.typeck_results.borrow().expr_ty_adjusted(expr);
+
         for a in &adj {
             match a.kind {
                 Adjust::NeverToAny => {
@@ -266,7 +268,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         None,
                         expr.span,
                         overloaded_deref.method_call(self.tcx),
-                        self.tcx.mk_args(&[a.target.into()]),
+                        self.tcx.mk_args(&[expr_ty.into()]),
                     );
                 }
                 Adjust::Deref(None) => {
@@ -283,13 +285,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     // No effects to enforce here.
                 }
             }
+
+            expr_ty = a.target;
         }
 
         let autoborrow_mut = adj.iter().any(|adj| {
-            matches!(adj, &Adjustment {
-                kind: Adjust::Borrow(AutoBorrow::Ref(AutoBorrowMutability::Mut { .. })),
-                ..
-            })
+            matches!(
+                adj,
+                &Adjustment {
+                    kind: Adjust::Borrow(AutoBorrow::Ref(AutoBorrowMutability::Mut { .. })),
+                    ..
+                }
+            )
         });
 
         match self.typeck_results.borrow_mut().adjustments_mut().entry(expr.hir_id) {
@@ -470,7 +477,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
 
         impl<'tcx> intravisit::Visitor<'tcx> for CollectClauses<'_, 'tcx> {
-            fn visit_ty(&mut self, ty: &'tcx hir::Ty<'tcx>) {
+            fn visit_ty(&mut self, ty: &'tcx hir::Ty<'tcx, AmbigArg>) {
                 if let Some(clauses) = self.fcx.trait_ascriptions.borrow().get(&ty.hir_id.local_id)
                 {
                     self.clauses.extend(clauses.iter().cloned());
@@ -480,7 +487,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
 
         let mut clauses = CollectClauses { clauses: vec![], fcx: self };
-        clauses.visit_ty(hir_ty);
+        clauses.visit_ty_unambig(hir_ty);
         self.tcx.mk_clauses(&clauses.clauses)
     }
 
@@ -577,11 +584,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     /// Registers obligations that all `args` are well-formed.
-    pub(crate) fn add_wf_bounds(&self, args: GenericArgsRef<'tcx>, expr: &hir::Expr<'_>) {
+    pub(crate) fn add_wf_bounds(&self, args: GenericArgsRef<'tcx>, span: Span) {
         for arg in args.iter().filter(|arg| {
             matches!(arg.unpack(), GenericArgKind::Type(..) | GenericArgKind::Const(..))
         }) {
-            self.register_wf_obligation(arg, expr.span, ObligationCauseCode::WellFormed(None));
+            self.register_wf_obligation(arg, span, ObligationCauseCode::WellFormed(None));
         }
     }
 
@@ -791,13 +798,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 bug!("`resolve_ty_and_res_fully_qualified_call` called on `LangItem`")
             }
         };
+
+        self.register_wf_obligation(
+            ty.raw.into(),
+            qself.span,
+            ObligationCauseCode::WellFormed(None),
+        );
+        self.select_obligations_where_possible(|_| {});
+
         if let Some(&cached_result) = self.typeck_results.borrow().type_dependent_defs().get(hir_id)
         {
-            self.register_wf_obligation(
-                ty.raw.into(),
-                qself.span,
-                ObligationCauseCode::WellFormed(None),
-            );
             // Return directly on cache hit. This is useful to avoid doubly reporting
             // errors with default match binding modes. See #44614.
             let def = cached_result.map_or(Res::Err, |(kind, def_id)| Res::Def(kind, def_id));
@@ -806,17 +816,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let item_name = item_segment.ident;
         let result = self
             .resolve_fully_qualified_call(span, item_name, ty.normalized, qself.span, hir_id)
-            .map(|r| {
-                // lint bare trait if the method is found in the trait
-                if span.edition().at_least_rust_2021() {
-                    self.dcx().try_steal_modify_and_emit_err(
-                        qself.span,
-                        StashKey::TraitMissingMethod,
-                        |_err| {},
-                    );
-                }
-                r
-            })
             .or_else(|error| {
                 let guar = self
                     .dcx()
@@ -828,29 +827,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                 let trait_missing_method =
                     matches!(error, method::MethodError::NoMatch(_)) && ty.normalized.is_trait();
-                // If we have a path like `MyTrait::missing_method`, then don't register
-                // a WF obligation for `dyn MyTrait` when method lookup fails. Otherwise,
-                // register a WF obligation so that we can detect any additional
-                // errors in the self type.
-                if !trait_missing_method {
-                    self.register_wf_obligation(
-                        ty.raw.into(),
-                        qself.span,
-                        ObligationCauseCode::WellFormed(None),
-                    );
-                }
-
-                // Emit the diagnostic for bare traits. (We used to cancel for slightly better
-                // error messages, but cancelling stashed diagnostics is no longer allowed because
-                // it causes problems when tracking whether errors have actually occurred.)
-                if span.edition().at_least_rust_2021() {
-                    self.dcx().try_steal_modify_and_emit_err(
-                        qself.span,
-                        StashKey::TraitMissingMethod,
-                        |_err| {},
-                    );
-                }
-
                 if item_name.name != kw::Empty {
                     self.report_method_error(
                         hir_id,
@@ -863,14 +839,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                 result
             });
-
-        if result.is_ok() {
-            self.register_wf_obligation(
-                ty.raw.into(),
-                qself.span,
-                ObligationCauseCode::WellFormed(None),
-            );
-        }
 
         // Write back the new resolution.
         self.write_resolution(hir_id, result);
@@ -891,7 +859,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         self.tcx.hir().get_fn_id_for_return_block(blk_id).and_then(|item_id| {
             match self.tcx.hir_node(item_id) {
                 Node::Item(&hir::Item {
-                    kind: hir::ItemKind::Fn(ref sig, ..), owner_id, ..
+                    kind: hir::ItemKind::Fn { sig, .. }, owner_id, ..
                 }) => Some((owner_id.def_id, sig.decl)),
                 Node::TraitItem(&hir::TraitItem {
                     kind: hir::TraitItemKind::Fn(ref sig, ..),
@@ -920,7 +888,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         )) => {
                             let (sig, owner_id) = match self.tcx.parent_hir_node(hir_id) {
                                 Node::Item(&hir::Item {
-                                    kind: hir::ItemKind::Fn(ref sig, ..),
+                                    kind: hir::ItemKind::Fn { ref sig, .. },
                                     owner_id,
                                     ..
                                 }) => (sig, owner_id),
@@ -990,11 +958,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let mut sp = MultiSpan::from_span(path_segment.ident.span);
         sp.push_span_label(
             path_segment.ident.span,
-            format!("this call modifies {} in-place", match rcvr.kind {
-                ExprKind::Path(QPath::Resolved(None, hir::Path { segments: [segment], .. })) =>
-                    format!("`{}`", segment.ident),
-                _ => "its receiver".to_string(),
-            }),
+            format!(
+                "this call modifies {} in-place",
+                match rcvr.kind {
+                    ExprKind::Path(QPath::Resolved(
+                        None,
+                        hir::Path { segments: [segment], .. },
+                    )) => format!("`{}`", segment.ident),
+                    _ => "its receiver".to_string(),
+                }
+            ),
         );
 
         let modifies_rcvr_note =
@@ -1039,17 +1012,31 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 def_id,
                 span,
             ),
+            Res::Err => {
+                return (
+                    Ty::new_error(
+                        tcx,
+                        tcx.dcx().span_delayed_bug(span, "could not resolve path {:?}"),
+                    ),
+                    res,
+                );
+            }
             _ => bug!("instantiate_value_path on {:?}", res),
         };
 
         let mut user_self_ty = None;
         let mut is_alias_variant_ctor = false;
+        let mut err_extend = GenericsArgsErrExtend::None;
         match res {
             Res::Def(DefKind::Ctor(CtorOf::Variant, _), _) if let Some(self_ty) = self_ty => {
                 let adt_def = self_ty.normalized.ty_adt_def().unwrap();
                 user_self_ty =
                     Some(UserSelfTy { impl_def_id: adt_def.did(), self_ty: self_ty.raw });
                 is_alias_variant_ctor = true;
+                err_extend = GenericsArgsErrExtend::DefVariant(segments);
+            }
+            Res::Def(DefKind::Ctor(CtorOf::Variant, _), _) => {
+                err_extend = GenericsArgsErrExtend::DefVariant(segments);
             }
             Res::Def(DefKind::AssocFn | DefKind::AssocConst, def_id) => {
                 let assoc_item = tcx.associated_item(def_id);
@@ -1096,7 +1083,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             segments.iter().enumerate().filter_map(|(index, seg)| {
                 if !indices.contains(&index) || is_alias_variant_ctor { Some(seg) } else { None }
             }),
-            GenericsArgsErrExtend::None,
+            err_extend,
         );
 
         if let Res::Local(hid) = res {
@@ -1274,7 +1261,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
             fn provided_kind(
                 &mut self,
-                _preceding_args: &[ty::GenericArg<'tcx>],
                 param: &ty::GenericParamDef,
                 arg: &GenericArg<'tcx>,
             ) -> ty::GenericArg<'tcx> {
@@ -1285,14 +1271,17 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         .lower_lifetime(lt, RegionInferReason::Param(param))
                         .into(),
                     (GenericParamDefKind::Type { .. }, GenericArg::Type(ty)) => {
-                        self.fcx.lower_ty(ty).raw.into()
-                    }
-                    (GenericParamDefKind::Const { .. }, GenericArg::Const(ct)) => {
-                        self.fcx.lower_const_arg(ct, FeedConstTy::Param(param.def_id)).into()
+                        // We handle the ambig portions of `Ty` in match arm below
+                        self.fcx.lower_ty(ty.as_unambig_ty()).raw.into()
                     }
                     (GenericParamDefKind::Type { .. }, GenericArg::Infer(inf)) => {
-                        self.fcx.ty_infer(Some(param), inf.span).into()
+                        self.fcx.lower_ty(&inf.to_ty()).raw.into()
                     }
+                    (GenericParamDefKind::Const { .. }, GenericArg::Const(ct)) => self
+                        .fcx
+                        // Ambiguous parts of `ConstArg` are handled in the match arms below
+                        .lower_const_arg(ct.as_unambig_ct(), FeedConstTy::Param(param.def_id))
+                        .into(),
                     (&GenericParamDefKind::Const { .. }, GenericArg::Infer(inf)) => {
                         self.fcx.ct_infer(Some(param), inf.span).into()
                     }
@@ -1446,7 +1435,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // in a reentrant borrow, causing an ICE.
             let result = self
                 .at(&self.misc(sp), self.param_env)
-                .structurally_normalize(ty, &mut **self.fulfillment_cx.borrow_mut());
+                .structurally_normalize_ty(ty, &mut **self.fulfillment_cx.borrow_mut());
             match result {
                 Ok(normalized_ty) => normalized_ty,
                 Err(errors) => {

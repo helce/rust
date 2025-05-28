@@ -18,6 +18,8 @@ use build_helper::exit;
 use build_helper::git::{GitConfig, get_closest_merge_commit, output_result};
 use serde::{Deserialize, Deserializer};
 use serde_derive::Deserialize;
+#[cfg(feature = "tracing")]
+use tracing::{instrument, span};
 
 use crate::core::build_steps::compile::CODEGEN_BACKEND_PREFIX;
 use crate::core::build_steps::llvm;
@@ -42,6 +44,8 @@ use crate::utils::helpers::{self, exe, output, t};
 #[rustfmt::skip] // We don't want rustfmt to oneline this list
 pub(crate) const RUSTC_IF_UNCHANGED_ALLOWED_PATHS: &[&str] = &[
     ":!src/tools",
+    ":!src/librustdoc",
+    ":!src/rustdoc-json-types",
     ":!tests",
     ":!triagebot.toml",
 ];
@@ -571,6 +575,10 @@ impl TargetSelection {
         env::var("OSTYPE").is_ok_and(|v| v.to_lowercase().contains("cygwin"))
     }
 
+    pub fn needs_crt_begin_end(&self) -> bool {
+        self.contains("musl") && !self.contains("unikraft")
+    }
+
     /// Path to the file defining the custom target, if any.
     pub fn filepath(&self) -> Option<&Path> {
         self.file.as_ref().map(Path::new)
@@ -634,6 +642,7 @@ pub struct Target {
     pub runner: Option<String>,
     pub no_std: bool,
     pub codegen_backends: Option<Vec<String>>,
+    pub optimized_compiler_builtins: Option<bool>,
 }
 
 impl Target {
@@ -695,7 +704,7 @@ trait Merge {
 impl Merge for TomlConfig {
     fn merge(
         &mut self,
-        TomlConfig { build, install, llvm, rust, dist, target, profile: _, change_id }: Self,
+        TomlConfig { build, install, llvm, rust, dist, target, profile, change_id }: Self,
         replace: ReplaceOpt,
     ) {
         fn do_merge<T: Merge>(x: &mut Option<T>, y: Option<T>, replace: ReplaceOpt) {
@@ -707,7 +716,10 @@ impl Merge for TomlConfig {
                 }
             }
         }
+
         self.change_id.inner.merge(change_id.inner, replace);
+        self.profile.merge(profile, replace);
+
         do_merge(&mut self.build, build, replace);
         do_merge(&mut self.install, install, replace);
         do_merge(&mut self.llvm, llvm, replace);
@@ -923,6 +935,7 @@ define_config! {
         optimized_compiler_builtins: Option<bool> = "optimized-compiler-builtins",
         jobs: Option<u32> = "jobs",
         compiletest_diff_tool: Option<String> = "compiletest-diff-tool",
+        ccache: Option<StringOrBool> = "ccache",
     }
 }
 
@@ -949,6 +962,7 @@ define_config! {
         tests: Option<bool> = "tests",
         enzyme: Option<bool> = "enzyme",
         plugins: Option<bool> = "plugins",
+        // FIXME: Remove this field at Q2 2025, it has been replaced by build.ccache
         ccache: Option<StringOrBool> = "ccache",
         static_libstdcpp: Option<bool> = "static-libstdcpp",
         libzstd: Option<bool> = "libzstd",
@@ -1125,7 +1139,7 @@ impl<'de> Deserialize<'de> for LldMode {
                 match v {
                     "external" => Ok(LldMode::External),
                     "self-contained" => Ok(LldMode::SelfContained),
-                    _ => Err(E::custom("unknown mode {v}")),
+                    _ => Err(E::custom(format!("unknown mode {v}"))),
                 }
             }
         }
@@ -1219,11 +1233,19 @@ define_config! {
         no_std: Option<bool> = "no-std",
         codegen_backends: Option<Vec<String>> = "codegen-backends",
         runner: Option<String> = "runner",
+        optimized_compiler_builtins: Option<bool> = "optimized-compiler-builtins",
     }
 }
 
 impl Config {
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(target = "CONFIG_HANDLING", level = "trace", name = "Config::default_opts")
+    )]
     pub fn default_opts() -> Config {
+        #[cfg(feature = "tracing")]
+        span!(target: "CONFIG_HANDLING", tracing::Level::TRACE, "constructing default config");
+
         Config {
             bypass_bootstrap_lock: false,
             llvm_optimize: true,
@@ -1307,10 +1329,23 @@ impl Config {
             })
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(target = "CONFIG_HANDLING", level = "trace", name = "Config::parse", skip_all)
+    )]
     pub fn parse(flags: Flags) -> Config {
         Self::parse_inner(flags, Self::get_toml)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(
+            target = "CONFIG_HANDLING",
+            level = "trace",
+            name = "Config::parse_inner",
+            skip_all
+        )
+    )]
     pub(crate) fn parse_inner(
         mut flags: Flags,
         get_toml: impl Fn(&Path) -> Result<TomlConfig, toml::de::Error>,
@@ -1319,6 +1354,17 @@ impl Config {
 
         // Set flags.
         config.paths = std::mem::take(&mut flags.paths);
+
+        #[cfg(feature = "tracing")]
+        span!(
+            target: "CONFIG_HANDLING",
+            tracing::Level::TRACE,
+            "collecting paths and path exclusions",
+            "flags.paths" = ?flags.paths,
+            "flags.skip" = ?flags.skip,
+            "flags.exclude" = ?flags.exclude
+        );
+
         config.skip = flags
             .skip
             .into_iter()
@@ -1334,6 +1380,14 @@ impl Config {
                 }
             })
             .collect();
+
+        #[cfg(feature = "tracing")]
+        span!(
+            target: "CONFIG_HANDLING",
+            tracing::Level::TRACE,
+            "normalizing and combining `flag.skip`/`flag.exclude` paths",
+            "config.skip" = ?config.skip,
+        );
 
         config.include_default_paths = flags.include_default_paths;
         config.rustc_error_format = flags.rustc_error_format;
@@ -1414,7 +1468,11 @@ impl Config {
 
         config.stage0_metadata = build_helper::stage0_parser::parse_stage0_file();
 
-        // Read from `--config`, then `RUST_BOOTSTRAP_CONFIG`, then `./config.toml`, then `config.toml` in the root directory.
+        // Find configuration file, with the following cascading fallback (first match wins):
+        // - `--config <path>`
+        // - `RUST_BOOTSTRAP_CONFIG`
+        // - `./config.toml`
+        // - `config.toml` in the root directory.
         let toml_path = flags
             .config
             .clone()
@@ -1454,6 +1512,10 @@ impl Config {
             let build = toml.build.get_or_insert_with(Default::default);
             build.rustc = build.rustc.take().or(std::env::var_os("RUSTC").map(|p| p.into()));
             build.cargo = build.cargo.take().or(std::env::var_os("CARGO").map(|p| p.into()));
+        }
+
+        if GitInfo::new(false, &config.src).is_from_tarball() && toml.profile.is_none() {
+            toml.profile = Some("dist".into());
         }
 
         if let Some(include) = &toml.profile {
@@ -1562,6 +1624,7 @@ impl Config {
             optimized_compiler_builtins,
             jobs,
             compiletest_diff_tool,
+            mut ccache,
         } = toml.build.unwrap_or_default();
 
         config.jobs = Some(threads_from_config(flags.jobs.unwrap_or(jobs.unwrap_or(0))));
@@ -1868,11 +1931,14 @@ impl Config {
             config.rustc_default_linker = default_linker;
             config.musl_root = musl_root.map(PathBuf::from);
             config.save_toolstates = save_toolstates.map(PathBuf::from);
-            set(&mut config.deny_warnings, match flags.warnings {
-                Warnings::Deny => Some(true),
-                Warnings::Warn => Some(false),
-                Warnings::Default => deny_warnings,
-            });
+            set(
+                &mut config.deny_warnings,
+                match flags.warnings {
+                    Warnings::Deny => Some(true),
+                    Warnings::Warn => Some(false),
+                    Warnings::Default => deny_warnings,
+                },
+            );
             set(&mut config.backtrace_on_ice, backtrace_on_ice);
             set(&mut config.rust_verify_llvm_ir, verify_llvm_ir);
             config.rust_thin_lto_import_instr_limit = thin_lto_import_instr_limit;
@@ -1943,7 +2009,7 @@ impl Config {
                 tests,
                 enzyme,
                 plugins,
-                ccache,
+                ccache: llvm_ccache,
                 static_libstdcpp,
                 libzstd,
                 ninja,
@@ -1966,13 +2032,11 @@ impl Config {
                 download_ci_llvm,
                 build_config,
             } = llvm;
-            match ccache {
-                Some(StringOrBool::String(ref s)) => config.ccache = Some(s.to_string()),
-                Some(StringOrBool::Bool(true)) => {
-                    config.ccache = Some("ccache".to_string());
-                }
-                Some(StringOrBool::Bool(false)) | None => {}
+            if llvm_ccache.is_some() {
+                eprintln!("Warning: llvm.ccache is deprecated. Use build.ccache instead.");
             }
+
+            ccache = ccache.or(llvm_ccache);
             set(&mut config.ninja_in_file, ninja);
             llvm_tests = tests;
             llvm_enzyme = enzyme;
@@ -2096,6 +2160,7 @@ impl Config {
                 target.sanitizers = cfg.sanitizers;
                 target.profiler = cfg.profiler;
                 target.rpath = cfg.rpath;
+                target.optimized_compiler_builtins = cfg.optimized_compiler_builtins;
 
                 if let Some(ref backends) = cfg.codegen_backends {
                     let available_backends = ["llvm", "cranelift", "gcc"];
@@ -2123,6 +2188,14 @@ impl Config {
 
                 config.target_config.insert(TargetSelection::from_user(&triple), target);
             }
+        }
+
+        match ccache {
+            Some(StringOrBool::String(ref s)) => config.ccache = Some(s.to_string()),
+            Some(StringOrBool::Bool(true)) => {
+                config.ccache = Some("ccache".to_string());
+            }
+            Some(StringOrBool::Bool(false)) | None => {}
         }
 
         if config.llvm_from_ci {
@@ -2607,6 +2680,13 @@ impl Config {
 
     pub fn rpath_enabled(&self, target: TargetSelection) -> bool {
         self.target_config.get(&target).and_then(|t| t.rpath).unwrap_or(self.rust_rpath)
+    }
+
+    pub fn optimized_compiler_builtins(&self, target: TargetSelection) -> bool {
+        self.target_config
+            .get(&target)
+            .and_then(|t| t.optimized_compiler_builtins)
+            .unwrap_or(self.optimized_compiler_builtins)
     }
 
     pub fn llvm_enabled(&self, target: TargetSelection) -> bool {
@@ -3170,6 +3250,9 @@ fn check_incompatible_options_for_ci_rustc(
 
             let profiler = &ci_cfg.profiler;
             err!(current_cfg.profiler, profiler, "build");
+
+            let optimized_compiler_builtins = &ci_cfg.optimized_compiler_builtins;
+            err!(current_cfg.optimized_compiler_builtins, optimized_compiler_builtins, "build");
         }
     }
 

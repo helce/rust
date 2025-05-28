@@ -288,7 +288,7 @@ pub enum DebugAsHex {
 ///
 /// `FormattingOptions` is a [`Formatter`] without an attached [`Write`] trait.
 /// It is mainly used to construct `Formatter` instances.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[unstable(feature = "formatting_options", issue = "118117")]
 pub struct FormattingOptions {
     flags: u32,
@@ -508,6 +508,15 @@ impl FormattingOptions {
     }
 }
 
+#[unstable(feature = "formatting_options", issue = "118117")]
+impl Default for FormattingOptions {
+    /// Same as [`FormattingOptions::new()`].
+    fn default() -> Self {
+        // The `#[derive(Default)]` implementation would set `fill` to `\0` instead of space.
+        Self::new()
+    }
+}
+
 /// Configuration for formatting.
 ///
 /// A `Formatter` represents various options related to formatting. Users do not
@@ -596,7 +605,7 @@ impl<'a> Arguments<'a> {
     /// When using the format_args!() macro, this function is used to generate the
     /// Arguments structure.
     #[inline]
-    pub fn new_v1<const P: usize, const A: usize>(
+    pub const fn new_v1<const P: usize, const A: usize>(
         pieces: &'a [&'static str; P],
         args: &'a [rt::Argument<'a>; A],
     ) -> Arguments<'a> {
@@ -612,7 +621,7 @@ impl<'a> Arguments<'a> {
     /// 2. Every `rt::Placeholder::position` value within `fmt` must be a valid index of `args`.
     /// 3. Every `rt::Count::Param` within `fmt` must contain a valid index of `args`.
     #[inline]
-    pub fn new_v1_formatted(
+    pub const fn new_v1_formatted(
         pieces: &'a [&'static str],
         args: &'a [rt::Argument<'a>],
         fmt: &'a [rt::Placeholder],

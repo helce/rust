@@ -14,13 +14,13 @@ use rustc_hir::{
 };
 use rustc_index::IndexVec;
 use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
-use rustc_middle::mir::FakeReadCause;
 use rustc_session::Session;
 use rustc_span::Span;
 
 use super::RvalueScopes;
 use crate::hir::place::Place as HirPlace;
 use crate::infer::canonical::Canonical;
+use crate::mir::FakeReadCause;
 use crate::traits::ObligationCause;
 use crate::ty::{
     self, BoundVar, CanonicalPolyFnSig, ClosureSizeProfileData, GenericArgKind, GenericArgs,
@@ -148,7 +148,7 @@ pub struct TypeckResults<'tcx> {
 
     /// Set of trait imports actually used in the method resolution.
     /// This is used for warning unused imports. During type
-    /// checking, this `Lrc` should not be cloned: it must have a ref-count
+    /// checking, this `Arc` should not be cloned: it must have a ref-count
     /// of 1 so that we can insert things into the set mutably.
     pub used_trait_imports: UnordSet<LocalDefId>,
 

@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::ci::CiEnv;
+
 pub struct GitConfig<'a> {
     pub git_repository: &'a str,
     pub nightly_branch: &'a str,
@@ -28,8 +30,8 @@ pub fn output_result(cmd: &mut Command) -> Result<String, String> {
 /// Finds the remote for rust-lang/rust.
 /// For example for these remotes it will return `upstream`.
 /// ```text
-/// origin  https://github.com/Nilstrieb/rust.git (fetch)
-/// origin  https://github.com/Nilstrieb/rust.git (push)
+/// origin  https://github.com/pietroalbani/rust.git (fetch)
+/// origin  https://github.com/pietroalbani/rust.git (push)
 /// upstream        https://github.com/rust-lang/rust (fetch)
 /// upstream        https://github.com/rust-lang/rust (push)
 /// ```
@@ -114,8 +116,8 @@ fn git_upstream_merge_base(
 
 /// Searches for the nearest merge commit in the repository that also exists upstream.
 ///
-/// If it fails to find the upstream remote, it then looks for the most recent commit made
-/// by the merge bot by matching the author's email address with the merge bot's email.
+/// It looks for the most recent commit made by the merge bot by matching the author's email
+/// address with the merge bot's email.
 pub fn get_closest_merge_commit(
     git_dir: Option<&Path>,
     config: &GitConfig<'_>,
@@ -127,7 +129,26 @@ pub fn get_closest_merge_commit(
         git.current_dir(git_dir);
     }
 
-    let merge_base = git_upstream_merge_base(config, git_dir).unwrap_or_else(|_| "HEAD".into());
+    let channel = include_str!("../../ci/channel");
+
+    let merge_base = {
+        if CiEnv::is_ci() &&
+            // FIXME: When running on rust-lang managed CI and it's not a nightly build,
+            // `git_upstream_merge_base` fails with an error message similar to this:
+            // ```
+            //    called `Result::unwrap()` on an `Err` value: "command did not execute successfully:
+            //    cd \"/checkout\" && \"git\" \"merge-base\" \"origin/master\" \"HEAD\"\nexpected success, got: exit status: 1\n"
+            // ```
+            // Investigate and resolve this issue instead of skipping it like this.
+            (channel == "nightly" || !CiEnv::is_rust_lang_managed_ci_job())
+        {
+            git_upstream_merge_base(config, git_dir).unwrap()
+        } else {
+            // For non-CI environments, ignore rust-lang/rust upstream as it usually gets
+            // outdated very quickly.
+            "HEAD".to_string()
+        }
+    };
 
     git.args([
         "rev-list",

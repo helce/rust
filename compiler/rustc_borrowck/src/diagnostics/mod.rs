@@ -4,36 +4,40 @@ use std::collections::BTreeMap;
 
 use rustc_abi::{FieldIdx, VariantIdx};
 use rustc_data_structures::fx::FxIndexMap;
-use rustc_errors::{Applicability, Diag, MultiSpan};
+use rustc_errors::{Applicability, Diag, EmissionGuarantee, MultiSpan, listify};
 use rustc_hir::def::{CtorKind, Namespace};
 use rustc_hir::{self as hir, CoroutineKind, LangItem};
 use rustc_index::IndexSlice;
-use rustc_infer::infer::BoundRegionConversionTime;
+use rustc_infer::infer::{
+    BoundRegionConversionTime, NllRegionVariableOrigin, RegionVariableOrigin,
+};
 use rustc_infer::traits::SelectionError;
 use rustc_middle::bug;
 use rustc_middle::mir::tcx::PlaceTy;
 use rustc_middle::mir::{
-    AggregateKind, CallSource, ConstOperand, FakeReadCause, Local, LocalInfo, LocalKind, Location,
-    Operand, Place, PlaceRef, ProjectionElem, Rvalue, Statement, StatementKind, Terminator,
-    TerminatorKind,
+    AggregateKind, CallSource, ConstOperand, ConstraintCategory, FakeReadCause, Local, LocalInfo,
+    LocalKind, Location, Operand, Place, PlaceRef, ProjectionElem, Rvalue, Statement,
+    StatementKind, Terminator, TerminatorKind, find_self_call,
 };
 use rustc_middle::ty::print::Print;
-use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
-use rustc_middle::util::{CallDesugaringKind, call_kind};
+use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_mir_dataflow::move_paths::{InitLocation, LookupResult, MoveOutIndex};
 use rustc_span::def_id::LocalDefId;
 use rustc_span::source_map::Spanned;
 use rustc_span::{DUMMY_SP, ErrorGuaranteed, Span, Symbol, sym};
 use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
+use rustc_trait_selection::error_reporting::traits::call_kind::{CallDesugaringKind, call_kind};
 use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::traits::{
-    FulfillmentErrorCode, type_known_to_meet_bound_modulo_regions,
+    FulfillmentError, FulfillmentErrorCode, type_known_to_meet_bound_modulo_regions,
 };
 use tracing::debug;
 
 use super::MirBorrowckCtxt;
 use super::borrow_set::BorrowData;
+use crate::constraints::OutlivesConstraint;
 use crate::fluent_generated as fluent;
+use crate::nll::ConstraintDescription;
 use crate::session_diagnostics::{
     CaptureArgLabel, CaptureReasonLabel, CaptureReasonNote, CaptureReasonSuggest, CaptureVarCause,
     CaptureVarKind, CaptureVarPathUseCause, OnClosureNote,
@@ -59,7 +63,7 @@ pub(crate) use mutability_errors::AccessKind;
 pub(crate) use outlives_suggestion::OutlivesSuggestionBuilder;
 pub(crate) use region_errors::{ErrorConstraintInfo, RegionErrorKind, RegionErrors};
 pub(crate) use region_name::{RegionName, RegionNameSource};
-pub(crate) use rustc_middle::util::CallKind;
+pub(crate) use rustc_trait_selection::error_reporting::traits::call_kind::CallKind;
 
 pub(super) struct DescribePlaceOpt {
     including_downcast: bool,
@@ -300,10 +304,10 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
     /// End-user visible description of `place` if one can be found.
     /// If the place is a temporary for instance, `None` will be returned.
     pub(super) fn describe_place(&self, place_ref: PlaceRef<'tcx>) -> Option<String> {
-        self.describe_place_with_options(place_ref, DescribePlaceOpt {
-            including_downcast: false,
-            including_tuple_field: true,
-        })
+        self.describe_place_with_options(
+            place_ref,
+            DescribePlaceOpt { including_downcast: false, including_tuple_field: true },
+        )
     }
 
     /// End-user visible description of `place` if one can be found. If the place is a temporary
@@ -366,6 +370,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 ProjectionElem::Downcast(..) => (),
                 ProjectionElem::OpaqueCast(..) => (),
                 ProjectionElem::Subtype(..) => (),
+                ProjectionElem::UnwrapUnsafeBinder(_) => (),
                 ProjectionElem::Field(field, _ty) => {
                     // FIXME(project-rfc_2229#36): print capture precisely here.
                     if let Some(field) = self.is_upvar_field_projection(PlaceRef {
@@ -446,9 +451,9 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     PlaceRef { local, projection: proj_base }.ty(self.body, self.infcx.tcx)
                 }
                 ProjectionElem::Downcast(..) => place.ty(self.body, self.infcx.tcx),
-                ProjectionElem::Subtype(ty) | ProjectionElem::OpaqueCast(ty) => {
-                    PlaceTy::from_ty(*ty)
-                }
+                ProjectionElem::Subtype(ty)
+                | ProjectionElem::OpaqueCast(ty)
+                | ProjectionElem::UnwrapUnsafeBinder(ty) => PlaceTy::from_ty(*ty),
                 ProjectionElem::Field(_, field_type) => PlaceTy::from_ty(*field_type),
             },
         };
@@ -565,7 +570,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         // If we didn't find an overloaded deref or index, then assume it's a
         // built in deref and check the type of the base.
         let base_ty = deref_base.ty(self.body, tcx).ty;
-        if base_ty.is_unsafe_ptr() {
+        if base_ty.is_raw_ptr() {
             BorrowedContentSource::DerefRawPointer
         } else if base_ty.is_mutable_ptr() {
             BorrowedContentSource::DerefMutableRef
@@ -619,6 +624,52 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         region.print(&mut printer).unwrap();
         printer.into_buffer()
     }
+
+    /// Add a note to region errors and borrow explanations when higher-ranked regions in predicates
+    /// implicitly introduce an "outlives `'static`" constraint.
+    fn add_placeholder_from_predicate_note<G: EmissionGuarantee>(
+        &self,
+        err: &mut Diag<'_, G>,
+        path: &[OutlivesConstraint<'tcx>],
+    ) {
+        let predicate_span = path.iter().find_map(|constraint| {
+            let outlived = constraint.sub;
+            if let Some(origin) = self.regioncx.var_infos.get(outlived)
+                && let RegionVariableOrigin::Nll(NllRegionVariableOrigin::Placeholder(_)) =
+                    origin.origin
+                && let ConstraintCategory::Predicate(span) = constraint.category
+            {
+                Some(span)
+            } else {
+                None
+            }
+        });
+
+        if let Some(span) = predicate_span {
+            err.span_note(span, "due to current limitations in the borrow checker, this implies a `'static` lifetime");
+        }
+    }
+
+    /// Add a label to region errors and borrow explanations when outlives constraints arise from
+    /// proving a type implements `Sized` or `Copy`.
+    fn add_sized_or_copy_bound_info<G: EmissionGuarantee>(
+        &self,
+        err: &mut Diag<'_, G>,
+        blamed_category: ConstraintCategory<'tcx>,
+        path: &[OutlivesConstraint<'tcx>],
+    ) {
+        for sought_category in [ConstraintCategory::SizedBound, ConstraintCategory::CopyBound] {
+            if sought_category != blamed_category
+                && let Some(sought_constraint) = path.iter().find(|c| c.category == sought_category)
+            {
+                let label = format!(
+                    "requirement occurs due to {}",
+                    sought_category.description().trim_end()
+                );
+                err.span_label(sought_constraint.span, label);
+            }
+        }
+    }
 }
 
 /// The span(s) associated to a use of a place.
@@ -661,9 +712,6 @@ impl UseSpans<'_> {
             UseSpans::ClosureUse { args_span: span, .. }
             | UseSpans::PatUse(span)
             | UseSpans::OtherUse(span) => span,
-            UseSpans::FnSelfUse { fn_call_span, kind: CallKind::DerefCoercion { .. }, .. } => {
-                fn_call_span
-            }
             UseSpans::FnSelfUse { var_span, .. } => var_span,
         }
     }
@@ -674,9 +722,6 @@ impl UseSpans<'_> {
             UseSpans::ClosureUse { path_span: span, .. }
             | UseSpans::PatUse(span)
             | UseSpans::OtherUse(span) => span,
-            UseSpans::FnSelfUse { fn_call_span, kind: CallKind::DerefCoercion { .. }, .. } => {
-                fn_call_span
-            }
             UseSpans::FnSelfUse { var_span, .. } => var_span,
         }
     }
@@ -687,9 +732,6 @@ impl UseSpans<'_> {
             UseSpans::ClosureUse { capture_kind_span: span, .. }
             | UseSpans::PatUse(span)
             | UseSpans::OtherUse(span) => span,
-            UseSpans::FnSelfUse { fn_call_span, kind: CallKind::DerefCoercion { .. }, .. } => {
-                fn_call_span
-            }
             UseSpans::FnSelfUse { var_span, .. } => var_span,
         }
     }
@@ -975,12 +1017,9 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             kind: TerminatorKind::Call { fn_span, call_source, .. }, ..
         }) = &self.body[location.block].terminator
         {
-            let Some((method_did, method_args)) = rustc_middle::util::find_self_call(
-                self.infcx.tcx,
-                self.body,
-                target_temp,
-                location.block,
-            ) else {
+            let Some((method_did, method_args)) =
+                find_self_call(self.infcx.tcx, self.body, target_temp, location.block)
+            else {
                 return normal_ret;
             };
 
@@ -1395,17 +1434,15 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                                             error.obligation.predicate,
                                         )
                                     }
-                                    [errors @ .., last] => {
+                                    _ => {
                                         format!(
                                             "you could `clone` the value and consume it, if the \
-                                             following trait bounds could be satisfied: \
-                                             {} and `{}`",
-                                            errors
-                                                .iter()
-                                                .map(|e| format!("`{}`", e.obligation.predicate))
-                                                .collect::<Vec<_>>()
-                                                .join(", "),
-                                            last.obligation.predicate,
+                                             following trait bounds could be satisfied: {}",
+                                            listify(&errors, |e: &FulfillmentError<'tcx>| format!(
+                                                "`{}`",
+                                                e.obligation.predicate
+                                            ))
+                                            .unwrap(),
                                         )
                                     }
                                 };

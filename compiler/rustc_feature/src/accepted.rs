@@ -9,7 +9,7 @@ macro_rules! declare_features {
         $(#[doc = $doc:tt])* (accepted, $feature:ident, $ver:expr, $issue:expr),
     )+) => {
         /// Formerly unstable features that have now been accepted (stabilized).
-        pub const ACCEPTED_LANG_FEATURES: &[Feature] = &[
+        pub static ACCEPTED_LANG_FEATURES: &[Feature] = &[
             $(Feature {
                 name: sym::$feature,
                 since: $ver,
@@ -386,6 +386,8 @@ declare_features! (
     (accepted, struct_variant, "1.0.0", None),
     /// Allows `#[target_feature(...)]`.
     (accepted, target_feature, "1.27.0", None),
+    /// Allows the use of `#[target_feature]` on safe functions.
+    (accepted, target_feature_11, "1.86.0", Some(69098)),
     /// Allows `fn main()` with return types which implements `Termination` (RFC 1937).
     (accepted, termination_trait, "1.26.0", Some(43301)),
     /// Allows `#[test]` functions where the return type implements `Termination` (RFC 1937).
@@ -397,6 +399,9 @@ declare_features! (
     /// Allows `#[track_caller]` to be used which provides
     /// accurate caller location reporting during panic (RFC 2091).
     (accepted, track_caller, "1.46.0", Some(47809)),
+    /// Allows dyn upcasting trait objects via supertraits.
+    /// Dyn upcasting is casting, e.g., `dyn Foo -> dyn Bar` where `Foo: Bar`.
+    (accepted, trait_upcasting, "1.86.0", Some(65991)),
     /// Allows #[repr(transparent)] on univariant enums (RFC 2645).
     (accepted, transparent_enums, "1.42.0", Some(60405)),
     /// Allows indexing tuples.

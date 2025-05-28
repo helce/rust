@@ -9,6 +9,7 @@ use crate::Mode;
 use crate::core::build_steps::dist::distdir;
 use crate::core::build_steps::test;
 use crate::core::build_steps::tool::{self, SourceType, Tool};
+use crate::core::build_steps::vendor::{Vendor, default_paths_to_vendor};
 use crate::core::builder::{Builder, Kind, RunConfig, ShouldRun, Step};
 use crate::core::config::TargetSelection;
 use crate::core::config::flags::get_completion;
@@ -196,7 +197,7 @@ impl Step for CollectLicenseMetadata {
 pub struct GenerateCopyright;
 
 impl Step for GenerateCopyright {
-    type Output = PathBuf;
+    type Output = Vec<PathBuf>;
     const ONLY_HOSTS: bool = true;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
@@ -212,15 +213,46 @@ impl Step for GenerateCopyright {
         let dest = builder.out.join("COPYRIGHT.html");
         let dest_libstd = builder.out.join("COPYRIGHT-library.html");
 
+        let paths_to_vendor = default_paths_to_vendor(builder);
+        for (_, submodules) in &paths_to_vendor {
+            for submodule in submodules {
+                builder.build.require_submodule(submodule, None);
+            }
+        }
+        let cargo_manifests = paths_to_vendor
+            .into_iter()
+            .map(|(path, _submodules)| path.to_str().unwrap().to_string())
+            .inspect(|path| assert!(!path.contains(','), "{path} contains a comma in its name"))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let vendored_sources = if let Some(path) = builder.vendored_crates_path() {
+            path
+        } else {
+            let cache_dir = builder.out.join("tmp").join("generate-copyright-vendor");
+            builder.ensure(Vendor {
+                sync_args: Vec::new(),
+                versioned_dirs: true,
+                root_dir: builder.src.clone(),
+                output_dir: cache_dir.clone(),
+            });
+            cache_dir
+        };
+
         let mut cmd = builder.tool_cmd(Tool::GenerateCopyright);
+        cmd.env("CARGO_MANIFESTS", &cargo_manifests);
         cmd.env("LICENSE_METADATA", &license_metadata);
         cmd.env("DEST", &dest);
         cmd.env("DEST_LIBSTD", &dest_libstd);
-        cmd.env("OUT_DIR", &builder.out);
+        cmd.env("SRC_DIR", &builder.src);
+        cmd.env("VENDOR_DIR", &vendored_sources);
         cmd.env("CARGO", &builder.initial_cargo);
+        // it is important that generate-copyright runs from the root of the
+        // source tree, because it uses relative paths
+        cmd.current_dir(&builder.src);
         cmd.run(builder);
 
-        dest
+        vec![dest, dest_libstd]
     }
 }
 
@@ -305,6 +337,37 @@ impl Step for UnicodeTableGenerator {
     fn run(self, builder: &Builder<'_>) {
         let mut cmd = builder.tool_cmd(Tool::UnicodeTableGenerator);
         cmd.arg(builder.src.join("library/core/src/unicode/unicode_data.rs"));
+        cmd.run(builder);
+    }
+}
+
+#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+pub struct FeaturesStatusDump;
+
+impl Step for FeaturesStatusDump {
+    type Output = ();
+    const ONLY_HOSTS: bool = true;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        run.path("src/tools/features-status-dump")
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(FeaturesStatusDump);
+    }
+
+    fn run(self, builder: &Builder<'_>) {
+        let mut cmd = builder.tool_cmd(Tool::FeaturesStatusDump);
+
+        cmd.arg("--library-path");
+        cmd.arg(builder.src.join("library"));
+
+        cmd.arg("--compiler-path");
+        cmd.arg(builder.src.join("compiler"));
+
+        cmd.arg("--output-path");
+        cmd.arg(builder.out.join("features-status-dump.json"));
+
         cmd.run(builder);
     }
 }

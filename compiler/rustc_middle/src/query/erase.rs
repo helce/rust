@@ -101,9 +101,9 @@ impl<T> EraseType for Result<&'_ T, &'_ ty::layout::FnAbiError<'_>> {
     type Result = [u8; size_of::<Result<&'static (), &'static ty::layout::FnAbiError<'static>>>()];
 }
 
-impl<T> EraseType for Result<(&'_ T, rustc_middle::thir::ExprId), rustc_errors::ErrorGuaranteed> {
+impl<T> EraseType for Result<(&'_ T, crate::thir::ExprId), rustc_errors::ErrorGuaranteed> {
     type Result = [u8; size_of::<
-        Result<(&'static (), rustc_middle::thir::ExprId), rustc_errors::ErrorGuaranteed>,
+        Result<(&'static (), crate::thir::ExprId), rustc_errors::ErrorGuaranteed>,
     >()];
 }
 
@@ -139,14 +139,6 @@ impl EraseType for Result<rustc_abi::TyAndLayout<'_, Ty<'_>>, &ty::layout::Layou
             &'static ty::layout::LayoutError<'static>,
         >,
     >()];
-}
-
-impl EraseType for Result<ty::Const<'_>, mir::interpret::LitToConstError> {
-    type Result = [u8; size_of::<Result<ty::Const<'static>, mir::interpret::LitToConstError>>()];
-}
-
-impl EraseType for Result<mir::Const<'_>, mir::interpret::LitToConstError> {
-    type Result = [u8; size_of::<Result<mir::Const<'static>, mir::interpret::LitToConstError>>()];
 }
 
 impl EraseType for Result<mir::ConstAlloc<'_>, mir::interpret::ErrorHandled> {
@@ -296,7 +288,6 @@ trivial! {
     rustc_middle::mir::interpret::AllocId,
     rustc_middle::mir::interpret::CtfeProvenance,
     rustc_middle::mir::interpret::ErrorHandled,
-    rustc_middle::mir::interpret::LitToConstError,
     rustc_middle::thir::ExprId,
     rustc_middle::traits::CodegenObligationError,
     rustc_middle::traits::EvaluationResult,
@@ -358,6 +349,7 @@ tcx_lifetime! {
     rustc_middle::mir::interpret::GlobalId,
     rustc_middle::mir::interpret::LitToConstInput,
     rustc_middle::mir::interpret::EvalStaticInitializerRawResult,
+    rustc_middle::mir::mono::MonoItemPartitions,
     rustc_middle::traits::query::MethodAutoderefStepsResult,
     rustc_middle::traits::query::type_op::AscribeUserType,
     rustc_middle::traits::query::type_op::Eq,

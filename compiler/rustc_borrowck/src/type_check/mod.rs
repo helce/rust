@@ -48,8 +48,8 @@ use crate::borrow_set::BorrowSet;
 use crate::constraints::{OutlivesConstraint, OutlivesConstraintSet};
 use crate::diagnostics::UniverseInfo;
 use crate::member_constraints::MemberConstraintSet;
-use crate::polonius::PoloniusContext;
-use crate::polonius::legacy::{AllFacts, LocationTable};
+use crate::polonius::legacy::{PoloniusFacts, PoloniusLocationTable};
+use crate::polonius::{PoloniusContext, PoloniusLivenessContext};
 use crate::region_infer::TypeTest;
 use crate::region_infer::values::{LivenessValues, PlaceholderIndex, PlaceholderIndices};
 use crate::renumber::RegionCtxt;
@@ -98,29 +98,29 @@ mod relate_tys;
 /// - `body` -- MIR body to type-check
 /// - `promoted` -- map of promoted constants within `body`
 /// - `universal_regions` -- the universal regions from `body`s function signature
-/// - `location_table` -- MIR location map of `body`
+/// - `location_table` -- for datalog polonius, the map between `Location`s and `RichLocation`s
 /// - `borrow_set` -- information about borrows occurring in `body`
-/// - `all_facts` -- when using Polonius, this is the generated set of Polonius facts
+/// - `polonius_facts` -- when using Polonius, this is the generated set of Polonius facts
 /// - `flow_inits` -- results of a maybe-init dataflow analysis
 /// - `move_data` -- move-data constructed when performing the maybe-init dataflow analysis
-/// - `elements` -- MIR region map
+/// - `location_map` -- map between MIR `Location` and `PointIndex`
 pub(crate) fn type_check<'a, 'tcx>(
     infcx: &BorrowckInferCtxt<'tcx>,
     body: &Body<'tcx>,
     promoted: &IndexSlice<Promoted, Body<'tcx>>,
     universal_regions: UniversalRegions<'tcx>,
-    location_table: &LocationTable,
+    location_table: &PoloniusLocationTable,
     borrow_set: &BorrowSet<'tcx>,
-    all_facts: &mut Option<AllFacts>,
+    polonius_facts: &mut Option<PoloniusFacts>,
     flow_inits: ResultsCursor<'a, 'tcx, MaybeInitializedPlaces<'a, 'tcx>>,
     move_data: &MoveData<'tcx>,
-    elements: Rc<DenseLocationMap>,
+    location_map: Rc<DenseLocationMap>,
 ) -> MirTypeckResults<'tcx> {
     let implicit_region_bound = ty::Region::new_var(infcx.tcx, universal_regions.fr_fn_body);
     let mut constraints = MirTypeckRegionConstraints {
         placeholder_indices: PlaceholderIndices::default(),
         placeholder_index_to_region: IndexVec::default(),
-        liveness_constraints: LivenessValues::with_specific_points(Rc::clone(&elements)),
+        liveness_constraints: LivenessValues::with_specific_points(Rc::clone(&location_map)),
         outlives_constraints: OutlivesConstraintSet::default(),
         member_constraints: MemberConstraintSet::default(),
         type_tests: Vec::default(),
@@ -148,8 +148,8 @@ pub(crate) fn type_check<'a, 'tcx>(
 
     debug!(?normalized_inputs_and_output);
 
-    let mut polonius_context = if infcx.tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
-        Some(PoloniusContext::new())
+    let polonius_liveness = if infcx.tcx.sess.opts.unstable_opts.polonius.is_next_enabled() {
+        Some(PoloniusLivenessContext::default())
     } else {
         None
     };
@@ -165,10 +165,10 @@ pub(crate) fn type_check<'a, 'tcx>(
         reported_errors: Default::default(),
         universal_regions: &universal_region_relations.universal_regions,
         location_table,
-        all_facts,
+        polonius_facts,
         borrow_set,
         constraints: &mut constraints,
-        polonius_context: &mut polonius_context,
+        polonius_liveness,
     };
 
     typeck.check_user_type_annotations();
@@ -180,16 +180,19 @@ pub(crate) fn type_check<'a, 'tcx>(
     typeck.equate_inputs_and_outputs(body, &normalized_inputs_and_output);
     typeck.check_signature_annotation(body);
 
-    liveness::generate(&mut typeck, body, &elements, flow_inits, move_data);
+    liveness::generate(&mut typeck, body, &location_map, flow_inits, move_data);
 
     let opaque_type_values =
         opaque_types::take_opaques_and_register_member_constraints(&mut typeck);
 
-    if let Some(polonius_context) = typeck.polonius_context.as_mut() {
-        let num_regions = infcx.num_region_vars();
-        let points_per_live_region = typeck.constraints.liveness_constraints.points();
-        polonius_context.record_live_regions_per_point(num_regions, points_per_live_region);
-    }
+    // We're done with typeck, we can finalize the polonius liveness context for region inference.
+    let polonius_context = typeck.polonius_liveness.take().map(|liveness_context| {
+        PoloniusContext::create_from_liveness(
+            liveness_context,
+            infcx.num_region_vars(),
+            typeck.constraints.liveness_constraints.points(),
+        )
+    });
 
     MirTypeckResults {
         constraints,
@@ -298,7 +301,26 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'tcx> {
                         context.ambient_variance(),
                         base_ty.ty,
                         location.to_locations(),
-                        ConstraintCategory::TypeAnnotation,
+                        ConstraintCategory::TypeAnnotation(AnnotationSource::OpaqueCast),
+                    )
+                    .unwrap();
+            }
+            ProjectionElem::UnwrapUnsafeBinder(ty) => {
+                let ty::UnsafeBinder(binder_ty) = *base_ty.ty.kind() else {
+                    unreachable!();
+                };
+                let found_ty = self.typeck.infcx.instantiate_binder_with_fresh_vars(
+                    self.body().source_info(location).span,
+                    BoundRegionConversionTime::HigherRankedType,
+                    binder_ty.into(),
+                );
+                self.typeck
+                    .relate_types(
+                        ty,
+                        context.ambient_variance(),
+                        found_ty,
+                        location.to_locations(),
+                        ConstraintCategory::Boring,
                     )
                     .unwrap();
             }
@@ -333,7 +355,7 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'tcx> {
                 ty::Invariant,
                 &UserTypeProjection { base: annotation_index, projs: vec![] },
                 locations,
-                ConstraintCategory::Boring,
+                ConstraintCategory::TypeAnnotation(AnnotationSource::GenericArg),
             ) {
                 let annotation = &self.typeck.user_type_annotations[annotation_index];
                 span_mirbug!(
@@ -349,8 +371,8 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'tcx> {
             let tcx = self.tcx();
             let maybe_uneval = match constant.const_ {
                 Const::Ty(_, ct) => match ct.kind() {
-                    ty::ConstKind::Unevaluated(_) => {
-                        bug!("should not encounter unevaluated Const::Ty here, got {:?}", ct)
+                    ty::ConstKind::Unevaluated(uv) => {
+                        Some(UnevaluatedConst { def: uv.def, args: uv.args, promoted: None })
                     }
                     _ => None,
                 },
@@ -389,10 +411,10 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'tcx> {
                 } else {
                     self.typeck.ascribe_user_type(
                         constant.const_.ty(),
-                        ty::UserType::new(ty::UserTypeKind::TypeOf(uv.def, UserArgs {
-                            args: uv.args,
-                            user_self_ty: None,
-                        })),
+                        ty::UserType::new(ty::UserTypeKind::TypeOf(
+                            uv.def,
+                            UserArgs { args: uv.args, user_self_ty: None },
+                        )),
                         locations.span(self.typeck.body),
                     );
                 }
@@ -455,7 +477,7 @@ impl<'a, 'b, 'tcx> Visitor<'tcx> for TypeVerifier<'a, 'b, 'tcx> {
                     ty::Invariant,
                     user_ty,
                     Locations::All(*span),
-                    ConstraintCategory::TypeAnnotation,
+                    ConstraintCategory::TypeAnnotation(AnnotationSource::Declaration),
                 ) {
                     span_mirbug!(
                         self,
@@ -495,14 +517,14 @@ impl<'a, 'b, 'tcx> TypeVerifier<'a, 'b, 'tcx> {
 
         // Use new sets of constraints and closure bounds so that we can
         // modify their locations.
-        let all_facts = &mut None;
+        let polonius_facts = &mut None;
         let mut constraints = Default::default();
         let mut liveness_constraints =
             LivenessValues::without_specific_points(Rc::new(DenseLocationMap::new(promoted_body)));
         // Don't try to add borrow_region facts for the promoted MIR
 
         let mut swap_constraints = |this: &mut Self| {
-            mem::swap(this.typeck.all_facts, all_facts);
+            mem::swap(this.typeck.polonius_facts, polonius_facts);
             mem::swap(&mut this.typeck.constraints.outlives_constraints, &mut constraints);
             mem::swap(&mut this.typeck.constraints.liveness_constraints, &mut liveness_constraints);
         };
@@ -560,12 +582,12 @@ struct TypeChecker<'a, 'tcx> {
     implicit_region_bound: ty::Region<'tcx>,
     reported_errors: FxIndexSet<(Ty<'tcx>, Span)>,
     universal_regions: &'a UniversalRegions<'tcx>,
-    location_table: &'a LocationTable,
-    all_facts: &'a mut Option<AllFacts>,
+    location_table: &'a PoloniusLocationTable,
+    polonius_facts: &'a mut Option<PoloniusFacts>,
     borrow_set: &'a BorrowSet<'tcx>,
     constraints: &'a mut MirTypeckRegionConstraints<'tcx>,
-    /// When using `-Zpolonius=next`, the helper data used to create polonius constraints.
-    polonius_context: &'a mut Option<PoloniusContext>,
+    /// When using `-Zpolonius=next`, the liveness helper data used to create polonius constraints.
+    polonius_liveness: Option<PoloniusLivenessContext>,
 }
 
 /// Holder struct for passing results from MIR typeck to the rest of the non-lexical regions
@@ -927,7 +949,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                         ty::Invariant,
                         &UserTypeProjection { base: annotation_index, projs: vec![] },
                         location.to_locations(),
-                        ConstraintCategory::Boring,
+                        ConstraintCategory::TypeAnnotation(AnnotationSource::GenericArg),
                     ) {
                         let annotation = &self.user_type_annotations[annotation_index];
                         span_mirbug!(
@@ -962,7 +984,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     *variance,
                     projection,
                     Locations::All(stmt.source_info.span),
-                    ConstraintCategory::TypeAnnotation,
+                    ConstraintCategory::TypeAnnotation(AnnotationSource::Ascription),
                 ) {
                     let annotation = &self.user_type_annotations[projection.base];
                     span_mirbug!(
@@ -1094,7 +1116,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     ConstraintCategory::Boring,
                 );
 
-                let sig = self.normalize(unnormalized_sig, term_location);
+                let sig = self.deeply_normalize(unnormalized_sig, term_location);
                 // HACK(#114936): `WF(sig)` does not imply `WF(normalized(sig))`
                 // with built-in `Fn` implementations, since the impl may not be
                 // well-formed itself.
@@ -1226,6 +1248,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     Some(l) if !body.local_decls[l].is_user_variable() => {
                         ConstraintCategory::Boring
                     }
+                    // The return type of a call is interesting for diagnostics.
                     _ => ConstraintCategory::Assignment,
                 };
 
@@ -1619,10 +1642,11 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             }
 
             &Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf, ty) => {
-                let trait_ref =
-                    ty::TraitRef::new(tcx, tcx.require_lang_item(LangItem::Sized, Some(span)), [
-                        ty,
-                    ]);
+                let trait_ref = ty::TraitRef::new(
+                    tcx,
+                    tcx.require_lang_item(LangItem::Sized, Some(span)),
+                    [ty],
+                );
 
                 self.prove_trait_ref(
                     trait_ref,
@@ -1630,15 +1654,17 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                     ConstraintCategory::SizedBound,
                 );
             }
+            &Rvalue::NullaryOp(NullOp::ContractChecks, _) => {}
             &Rvalue::NullaryOp(NullOp::UbChecks, _) => {}
 
             Rvalue::ShallowInitBox(operand, ty) => {
                 self.check_operand(operand, location);
 
-                let trait_ref =
-                    ty::TraitRef::new(tcx, tcx.require_lang_item(LangItem::Sized, Some(span)), [
-                        *ty,
-                    ]);
+                let trait_ref = ty::TraitRef::new(
+                    tcx,
+                    tcx.require_lang_item(LangItem::Sized, Some(span)),
+                    [*ty],
+                );
 
                 self.prove_trait_ref(
                     trait_ref,
@@ -1653,7 +1679,20 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 match *cast_kind {
                     CastKind::PointerCoercion(PointerCoercion::ReifyFnPointer, coercion_source) => {
                         let is_implicit_coercion = coercion_source == CoercionSource::Implicit;
-                        let src_sig = op.ty(body, tcx).fn_sig(tcx);
+                        let src_ty = op.ty(body, tcx);
+                        let mut src_sig = src_ty.fn_sig(tcx);
+                        if let ty::FnDef(def_id, _) = src_ty.kind()
+                            && let ty::FnPtr(_, target_hdr) = *ty.kind()
+                            && tcx.codegen_fn_attrs(def_id).safe_target_features
+                            && target_hdr.safety.is_safe()
+                            && let Some(safe_sig) = tcx.adjust_target_feature_sig(
+                                *def_id,
+                                src_sig,
+                                body.source.def_id(),
+                            )
+                        {
+                            src_sig = safe_sig;
+                        }
 
                         // HACK: This shouldn't be necessary... We can remove this when we actually
                         // get binders with where clauses, then elaborate implied bounds into that
@@ -2169,7 +2208,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                             ty_left,
                             common_ty,
                             location.to_locations(),
-                            ConstraintCategory::Boring,
+                            ConstraintCategory::CallArgument(None),
                         )
                         .unwrap_or_else(|err| {
                             bug!("Could not equate type variable with {:?}: {:?}", ty_left, err)
@@ -2178,7 +2217,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                             ty_right,
                             common_ty,
                             location.to_locations(),
-                            ConstraintCategory::Boring,
+                            ConstraintCategory::CallArgument(None),
                         ) {
                             span_mirbug!(
                                 self,
@@ -2219,6 +2258,27 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 self.check_operand(right, location);
             }
 
+            Rvalue::WrapUnsafeBinder(op, ty) => {
+                self.check_operand(op, location);
+                let operand_ty = op.ty(self.body, self.tcx());
+
+                let ty::UnsafeBinder(binder_ty) = *ty.kind() else {
+                    unreachable!();
+                };
+                let expected_ty = self.infcx.instantiate_binder_with_fresh_vars(
+                    self.body().source_info(location).span,
+                    BoundRegionConversionTime::HigherRankedType,
+                    binder_ty.into(),
+                );
+                self.sub_types(
+                    operand_ty,
+                    expected_ty,
+                    location.to_locations(),
+                    ConstraintCategory::Boring,
+                )
+                .unwrap();
+            }
+
             Rvalue::RawPtr(..)
             | Rvalue::ThreadLocalRef(..)
             | Rvalue::Len(..)
@@ -2244,7 +2304,8 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             | Rvalue::NullaryOp(..)
             | Rvalue::CopyForDeref(..)
             | Rvalue::UnaryOp(..)
-            | Rvalue::Discriminant(..) => None,
+            | Rvalue::Discriminant(..)
+            | Rvalue::WrapUnsafeBinder(..) => None,
 
             Rvalue::Aggregate(aggregate, _) => match **aggregate {
                 AggregateKind::Adt(_, _, _, user_ty, _) => user_ty,
@@ -2329,18 +2390,18 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         borrowed_place: &Place<'tcx>,
     ) {
         // These constraints are only meaningful during borrowck:
-        let Self { borrow_set, location_table, all_facts, constraints, .. } = self;
+        let Self { borrow_set, location_table, polonius_facts, constraints, .. } = self;
 
         // In Polonius mode, we also push a `loan_issued_at` fact
         // linking the loan to the region (in some cases, though,
         // there is no loan associated with this borrow expression --
         // that occurs when we are borrowing an unsafe place, for
         // example).
-        if let Some(all_facts) = all_facts {
+        if let Some(polonius_facts) = polonius_facts {
             let _prof_timer = self.infcx.tcx.prof.generic_activity("polonius_fact_generation");
             if let Some(borrow_index) = borrow_set.get_index_of(&location) {
                 let region_vid = borrow_region.as_var();
-                all_facts.loan_issued_at.push((
+                polonius_facts.loan_issued_at.push((
                     region_vid.into(),
                     borrow_index,
                     location_table.mid_index(location),
@@ -2436,7 +2497,8 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 | ProjectionElem::OpaqueCast(..)
                 | ProjectionElem::Index(..)
                 | ProjectionElem::ConstantIndex { .. }
-                | ProjectionElem::Subslice { .. } => {
+                | ProjectionElem::Subslice { .. }
+                | ProjectionElem::UnwrapUnsafeBinder(_) => {
                     // other field access
                 }
                 ProjectionElem::Subtype(_) => {

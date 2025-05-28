@@ -1130,6 +1130,10 @@ class RustBuild(object):
             "-Zroot-dir=" + self.rust_root,
         ]
         args.extend("--verbose" for _ in range(self.verbose))
+
+        if "BOOTSTRAP_TRACING" in env:
+            args.append("--features=tracing")
+
         if self.use_locked_deps:
             args.append("--locked")
         if self.use_vendored_sources:
@@ -1307,9 +1311,6 @@ def bootstrap(args):
     args = [build.bootstrap_binary()]
     args.extend(sys.argv[1:])
     env = os.environ.copy()
-    # The Python process ID is used when creating a Windows job object
-    # (see src\bootstrap\src\utils\job.rs)
-    env["BOOTSTRAP_PARENT_ID"] = str(os.getpid())
     env["BOOTSTRAP_PYTHON"] = sys.executable
     run(args, env=env, verbose=build.verbose, is_bootstrap=True)
 

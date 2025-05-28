@@ -147,14 +147,15 @@ impl<'a, 'tcx> Visitor<'tcx> for InferBorrowKindVisitor<'a, 'tcx> {
                 self.visit_body(body);
                 self.fcx.analyze_closure(expr.hir_id, expr.span, body_id, body, capture_clause);
             }
-            hir::ExprKind::ConstBlock(anon_const) => {
-                let body = self.fcx.tcx.hir().body(anon_const.body);
-                self.visit_body(body);
-            }
             _ => {}
         }
 
         intravisit::walk_expr(self, expr);
+    }
+
+    fn visit_inline_const(&mut self, c: &'tcx hir::ConstBlock) {
+        let body = self.fcx.tcx.hir().body(c.body);
+        self.visit_body(body);
     }
 }
 
@@ -287,11 +288,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     bug!();
                 };
                 let place = self.place_for_root_variable(closure_def_id, local_id);
-                delegate.capture_information.push((place, ty::CaptureInfo {
-                    capture_kind_expr_id: Some(init.hir_id),
-                    path_expr_id: Some(init.hir_id),
-                    capture_kind: UpvarCapture::ByValue,
-                }));
+                delegate.capture_information.push((
+                    place,
+                    ty::CaptureInfo {
+                        capture_kind_expr_id: Some(init.hir_id),
+                        path_expr_id: Some(init.hir_id),
+                        capture_kind: UpvarCapture::ByValue,
+                    },
+                ));
             }
         }
 
@@ -378,11 +382,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if let UpvarArgs::CoroutineClosure(args) = args
             && !args.references_error()
         {
-            let closure_env_region: ty::Region<'_> =
-                ty::Region::new_bound(self.tcx, ty::INNERMOST, ty::BoundRegion {
-                    var: ty::BoundVar::ZERO,
-                    kind: ty::BoundRegionKind::ClosureEnv,
-                });
+            let closure_env_region: ty::Region<'_> = ty::Region::new_bound(
+                self.tcx,
+                ty::INNERMOST,
+                ty::BoundRegion { var: ty::BoundVar::ZERO, kind: ty::BoundRegionKind::ClosureEnv },
+            );
 
             let num_args = args
                 .as_coroutine_closure()
@@ -1935,7 +1939,7 @@ fn drop_location_span(tcx: TyCtxt<'_>, hir_id: HirId) -> Span {
     let owner_node = tcx.hir_node(owner_id);
     let owner_span = match owner_node {
         hir::Node::Item(item) => match item.kind {
-            hir::ItemKind::Fn(_, _, owner_id) => tcx.hir().span(owner_id.hir_id),
+            hir::ItemKind::Fn { body: owner_id, .. } => tcx.hir().span(owner_id.hir_id),
             _ => {
                 bug!("Drop location span error: need to handle more ItemKind '{:?}'", item.kind);
             }
@@ -1987,17 +1991,18 @@ struct InferBorrowKind<'tcx> {
 impl<'tcx> euv::Delegate<'tcx> for InferBorrowKind<'tcx> {
     fn fake_read(
         &mut self,
-        place: &PlaceWithHirId<'tcx>,
+        place_with_id: &PlaceWithHirId<'tcx>,
         cause: FakeReadCause,
         diag_expr_id: HirId,
     ) {
-        let PlaceBase::Upvar(_) = place.place.base else { return };
+        let PlaceBase::Upvar(_) = place_with_id.place.base else { return };
 
         // We need to restrict Fake Read precision to avoid fake reading unsafe code,
         // such as deref of a raw pointer.
         let dummy_capture_kind = ty::UpvarCapture::ByRef(ty::BorrowKind::Immutable);
 
-        let (place, _) = restrict_capture_precision(place.place.clone(), dummy_capture_kind);
+        let (place, _) =
+            restrict_capture_precision(place_with_id.place.clone(), dummy_capture_kind);
 
         let (place, _) = restrict_repr_packed_field_ref_capture(place, dummy_capture_kind);
         self.fake_reads.push((place, cause, diag_expr_id));
@@ -2008,11 +2013,14 @@ impl<'tcx> euv::Delegate<'tcx> for InferBorrowKind<'tcx> {
         let PlaceBase::Upvar(upvar_id) = place_with_id.place.base else { return };
         assert_eq!(self.closure_def_id, upvar_id.closure_expr_id);
 
-        self.capture_information.push((place_with_id.place.clone(), ty::CaptureInfo {
-            capture_kind_expr_id: Some(diag_expr_id),
-            path_expr_id: Some(diag_expr_id),
-            capture_kind: ty::UpvarCapture::ByValue,
-        }));
+        self.capture_information.push((
+            place_with_id.place.clone(),
+            ty::CaptureInfo {
+                capture_kind_expr_id: Some(diag_expr_id),
+                path_expr_id: Some(diag_expr_id),
+                capture_kind: ty::UpvarCapture::ByValue,
+            },
+        ));
     }
 
     #[instrument(skip(self), level = "debug")]
@@ -2035,15 +2043,18 @@ impl<'tcx> euv::Delegate<'tcx> for InferBorrowKind<'tcx> {
             restrict_repr_packed_field_ref_capture(place_with_id.place.clone(), capture_kind);
 
         // Raw pointers don't inherit mutability
-        if place_with_id.place.deref_tys().any(Ty::is_unsafe_ptr) {
+        if place_with_id.place.deref_tys().any(Ty::is_raw_ptr) {
             capture_kind = ty::UpvarCapture::ByRef(ty::BorrowKind::Immutable);
         }
 
-        self.capture_information.push((place, ty::CaptureInfo {
-            capture_kind_expr_id: Some(diag_expr_id),
-            path_expr_id: Some(diag_expr_id),
-            capture_kind,
-        }));
+        self.capture_information.push((
+            place,
+            ty::CaptureInfo {
+                capture_kind_expr_id: Some(diag_expr_id),
+                path_expr_id: Some(diag_expr_id),
+                capture_kind,
+            },
+        ));
     }
 
     #[instrument(skip(self), level = "debug")]
@@ -2083,7 +2094,7 @@ fn restrict_precision_for_unsafe(
     mut place: Place<'_>,
     mut curr_mode: ty::UpvarCapture,
 ) -> (Place<'_>, ty::UpvarCapture) {
-    if place.base_ty.is_unsafe_ptr() {
+    if place.base_ty.is_raw_ptr() {
         truncate_place_to_len_and_update_capture_kind(&mut place, &mut curr_mode, 0);
     }
 
@@ -2092,8 +2103,8 @@ fn restrict_precision_for_unsafe(
     }
 
     for (i, proj) in place.projections.iter().enumerate() {
-        if proj.ty.is_unsafe_ptr() {
-            // Don't apply any projections on top of an unsafe ptr.
+        if proj.ty.is_raw_ptr() {
+            // Don't apply any projections on top of a raw ptr.
             truncate_place_to_len_and_update_capture_kind(&mut place, &mut curr_mode, i + 1);
             break;
         }

@@ -18,7 +18,7 @@ use crate::core::builder::{
     self, Alias, Builder, Compiler, Kind, RunConfig, ShouldRun, Step, crate_description,
 };
 use crate::core::config::{Config, TargetSelection};
-use crate::helpers::{is_path_in_submodule, symlink_dir, t, up_to_date};
+use crate::helpers::{submodule_path_of, symlink_dir, t, up_to_date};
 
 macro_rules! book {
     ($($name:ident, $path:expr, $book_name:expr, $lang:expr ;)+) => {
@@ -44,8 +44,8 @@ macro_rules! book {
             }
 
             fn run(self, builder: &Builder<'_>) {
-                if is_path_in_submodule(&builder, $path) {
-                    builder.require_submodule($path, None);
+                if let Some(submodule_path) = submodule_path_of(&builder, $path) {
+                    builder.require_submodule(&submodule_path, None)
                 }
 
                 builder.ensure(RustbookSrc {
@@ -65,8 +65,6 @@ macro_rules! book {
 // NOTE: When adding a book here, make sure to ALSO build the book by
 // adding a build step in `src/bootstrap/code/builder/mod.rs`!
 // NOTE: Make sure to add the corresponding submodule when adding a new book.
-// FIXME: Make checking for a submodule automatic somehow (maybe by having a list of all submodules
-// and checking against it?).
 book!(
     CargoBook, "src/tools/cargo/src/doc", "cargo", &[];
     ClippyBook, "src/tools/clippy/book", "clippy", &[];
@@ -574,7 +572,10 @@ impl Step for Std {
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         let builder = run.builder;
-        run.crate_or_deps("sysroot").path("library").default_condition(builder.config.docs)
+        run.crate_or_deps("sysroot")
+            .path("library")
+            .alias("core")
+            .default_condition(builder.config.docs)
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -829,7 +830,8 @@ impl Step for Rustc {
         cargo.rustdocflag("--show-type-layout");
         // FIXME: `--generate-link-to-definition` tries to resolve cfged out code
         // see https://github.com/rust-lang/rust/pull/122066#issuecomment-1983049222
-        // cargo.rustdocflag("--generate-link-to-definition");
+        // If there is any bug, please comment out the next line.
+        cargo.rustdocflag("--generate-link-to-definition");
 
         compile::rustc_cargo(builder, &mut cargo, target, &compiler, &self.crates);
         cargo.arg("-Zskip-rustdoc-fingerprint");
@@ -930,9 +932,9 @@ macro_rules! tool_doc {
             fn run(self, builder: &Builder<'_>) {
                 let mut source_type = SourceType::InTree;
 
-                if is_path_in_submodule(&builder, $path) {
+                if let Some(submodule_path) = submodule_path_of(&builder, $path) {
                     source_type = SourceType::Submodule;
-                    builder.require_submodule($path, None);
+                    builder.require_submodule(&submodule_path, None);
                 }
 
                 let stage = builder.top_stage;

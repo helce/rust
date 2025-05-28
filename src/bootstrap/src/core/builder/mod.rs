@@ -1,9 +1,7 @@
-mod cargo;
-
 use std::any::{Any, type_name};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
-use std::fmt::{Debug, Write};
+use std::fmt::{self, Debug, Write};
 use std::hash::Hash;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -13,7 +11,7 @@ use std::{env, fs};
 
 use clap::ValueEnum;
 
-pub use self::cargo::Cargo;
+pub use self::cargo::{Cargo, cargo_profile_var};
 pub use crate::Compiler;
 use crate::core::build_steps::{
     check, clean, clippy, compile, dist, doc, gcc, install, llvm, run, setup, test, tool, vendor,
@@ -24,6 +22,8 @@ use crate::utils::cache::Cache;
 use crate::utils::exec::{BootstrapCommand, command};
 use crate::utils::helpers::{self, LldThreads, add_dylib_path, exe, libdir, linker_args, t};
 use crate::{Build, Crate};
+
+mod cargo;
 
 #[cfg(test)]
 mod tests;
@@ -271,16 +271,17 @@ impl PathSet {
     /// This is used for `StepDescription::krate`, which passes all matching crates at once to
     /// `Step::make_run`, rather than calling it many times with a single crate.
     /// See `tests.rs` for examples.
-    fn intersection_removing_matches(&self, needles: &mut Vec<PathBuf>, module: Kind) -> PathSet {
+    fn intersection_removing_matches(&self, needles: &mut [CLIStepPath], module: Kind) -> PathSet {
         let mut check = |p| {
-            for (i, n) in needles.iter().enumerate() {
-                let matched = Self::check(p, n, module);
+            let mut result = false;
+            for n in needles.iter_mut() {
+                let matched = Self::check(p, &n.path, module);
                 if matched {
-                    needles.remove(i);
-                    return true;
+                    n.will_be_executed = true;
+                    result = true;
                 }
             }
-            false
+            result
         };
         match self {
             PathSet::Set(set) => PathSet::Set(set.iter().filter(|&p| check(p)).cloned().collect()),
@@ -314,29 +315,32 @@ const PATH_REMAP: &[(&str, &[&str])] = &[
     // actual path is `proc-macro-srv-cli`
     ("rust-analyzer-proc-macro-srv", &["src/tools/rust-analyzer/crates/proc-macro-srv-cli"]),
     // Make `x test tests` function the same as `x t tests/*`
-    ("tests", &[
-        // tidy-alphabetical-start
-        "tests/assembly",
-        "tests/codegen",
-        "tests/codegen-units",
-        "tests/coverage",
-        "tests/coverage-run-rustdoc",
-        "tests/crashes",
-        "tests/debuginfo",
-        "tests/incremental",
-        "tests/mir-opt",
-        "tests/pretty",
-        "tests/run-make",
-        "tests/rustdoc",
-        "tests/rustdoc-gui",
-        "tests/rustdoc-js",
-        "tests/rustdoc-js-std",
-        "tests/rustdoc-json",
-        "tests/rustdoc-ui",
-        "tests/ui",
-        "tests/ui-fulldeps",
-        // tidy-alphabetical-end
-    ]),
+    (
+        "tests",
+        &[
+            // tidy-alphabetical-start
+            "tests/assembly",
+            "tests/codegen",
+            "tests/codegen-units",
+            "tests/coverage",
+            "tests/coverage-run-rustdoc",
+            "tests/crashes",
+            "tests/debuginfo",
+            "tests/incremental",
+            "tests/mir-opt",
+            "tests/pretty",
+            "tests/run-make",
+            "tests/rustdoc",
+            "tests/rustdoc-gui",
+            "tests/rustdoc-js",
+            "tests/rustdoc-js-std",
+            "tests/rustdoc-json",
+            "tests/rustdoc-ui",
+            "tests/ui",
+            "tests/ui-fulldeps",
+            // tidy-alphabetical-end
+        ],
+    ),
 ];
 
 fn remap_paths(paths: &mut Vec<PathBuf>) {
@@ -359,6 +363,32 @@ fn remap_paths(paths: &mut Vec<PathBuf>) {
         paths.remove(idx);
     }
     paths.append(&mut add);
+}
+
+#[derive(Clone, PartialEq)]
+struct CLIStepPath {
+    path: PathBuf,
+    will_be_executed: bool,
+}
+
+#[cfg(test)]
+impl CLIStepPath {
+    fn will_be_executed(mut self, will_be_executed: bool) -> Self {
+        self.will_be_executed = will_be_executed;
+        self
+    }
+}
+
+impl Debug for CLIStepPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.path.display())
+    }
+}
+
+impl From<PathBuf> for CLIStepPath {
+    fn from(path: PathBuf) -> Self {
+        Self { path, will_be_executed: false }
+    }
 }
 
 impl StepDescription {
@@ -478,7 +508,8 @@ impl StepDescription {
             return;
         }
 
-        let mut path_lookup: Vec<(PathBuf, bool)> =
+        let mut paths: Vec<CLIStepPath> = paths.into_iter().map(|p| p.into()).collect();
+        let mut path_lookup: Vec<(CLIStepPath, bool)> =
             paths.clone().into_iter().map(|p| (p, false)).collect();
 
         // List of `(usize, &StepDescription, Vec<PathSet>)` where `usize` is the closest index of a path
@@ -518,8 +549,10 @@ impl StepDescription {
             }
         }
 
+        paths.retain(|p| !p.will_be_executed);
+
         if !paths.is_empty() {
-            eprintln!("ERROR: no `{}` rules matched {:?}", builder.kind.as_str(), paths,);
+            eprintln!("ERROR: no `{}` rules matched {:?}", builder.kind.as_str(), paths);
             eprintln!(
                 "HELP: run `x.py {} --help --verbose` to show a list of available paths",
                 builder.kind.as_str()
@@ -682,7 +715,7 @@ impl<'a> ShouldRun<'a> {
     /// (for now, just `all_krates` and `paths`, but we may want to add an `aliases` function in the future?)
     fn pathset_for_paths_removing_matches(
         &self,
-        paths: &mut Vec<PathBuf>,
+        paths: &mut [CLIStepPath],
         kind: Kind,
     ) -> Vec<PathSet> {
         let mut sets = vec![];
@@ -825,12 +858,8 @@ impl<'a> Builder<'a> {
         match kind {
             Kind::Build => describe!(
                 compile::Std,
-                // FIXME(#135022): `compile::Assemble` **must** come before `compile::Rustc` after
-                // `PathSet` also permits prefix-matching, because `compile::Rustc` can consume the
-                // `"compiler"` path filter first, causing `compile::Assemble` to no longer run when
-                // the user writes `./x build compiler --stage 0`.
-                compile::Assemble,
                 compile::Rustc,
+                compile::Assemble,
                 compile::CodegenBackend,
                 compile::StartupObjects,
                 tool::BuildManifest,
@@ -874,6 +903,7 @@ impl<'a> Builder<'a> {
                 clippy::BuildManifest,
                 clippy::CargoMiri,
                 clippy::Clippy,
+                clippy::CodegenGcc,
                 clippy::CollectLicenseMetadata,
                 clippy::Compiletest,
                 clippy::CoverageDump,
@@ -909,7 +939,9 @@ impl<'a> Builder<'a> {
                 check::RustAnalyzer,
                 check::TestFloatParse,
                 check::Bootstrap,
+                check::RunMakeSupport,
                 check::Compiletest,
+                check::FeaturesStatusDump,
             ),
             Kind::Test => describe!(
                 crate::core::build_steps::toolstate::ToolStateCheck,
@@ -917,8 +949,6 @@ impl<'a> Builder<'a> {
                 test::Ui,
                 test::Crashes,
                 test::Coverage,
-                test::CoverageMap,
-                test::CoverageRun,
                 test::MirOpt,
                 test::Codegen,
                 test::CodegenUnits,
@@ -929,14 +959,10 @@ impl<'a> Builder<'a> {
                 test::Rustdoc,
                 test::CoverageRunRustdoc,
                 test::Pretty,
-                test::Crate,
-                test::CrateLibrustc,
-                // The cranelift and gcc tests need to be listed after the
-                // compiler unit tests (CrateLibrustc) so that they don't
-                // hijack the whole `compiler` directory during path matching.
-                // <https://github.com/rust-lang/rust/pull/134919>
                 test::CodegenCranelift,
                 test::CodegenGCC,
+                test::Crate,
+                test::CrateLibrustc,
                 test::CrateRustdoc,
                 test::CrateRustdocJsonTypes,
                 test::CrateBootstrap,
@@ -1067,6 +1093,7 @@ impl<'a> Builder<'a> {
                 run::GenerateWindowsSys,
                 run::GenerateCompletions,
                 run::UnicodeTableGenerator,
+                run::FeaturesStatusDump,
             ),
             Kind::Setup => {
                 describe!(setup::Profile, setup::Hook, setup::Link, setup::Editor)
@@ -1404,7 +1431,7 @@ impl<'a> Builder<'a> {
     ///
     /// Note that this returns `None` if LLVM is disabled, or if we're in a
     /// check build or dry-run, where there's no need to build all of LLVM.
-    fn llvm_config(&self, target: TargetSelection) -> Option<PathBuf> {
+    pub fn llvm_config(&self, target: TargetSelection) -> Option<PathBuf> {
         if self.config.llvm_enabled(target) && self.kind != Kind::Check && !self.config.dry_run() {
             let llvm::LlvmResult { llvm_config, .. } = self.ensure(llvm::Llvm { target });
             if llvm_config.is_file() {
@@ -1422,7 +1449,7 @@ impl<'a> Builder<'a> {
             let mut stack = self.stack.borrow_mut();
             for stack_step in stack.iter() {
                 // should skip
-                if stack_step.downcast_ref::<S>().map_or(true, |stack_step| *stack_step != step) {
+                if stack_step.downcast_ref::<S>().is_none_or(|stack_step| *stack_step != step) {
                     continue;
                 }
                 let mut out = String::new();

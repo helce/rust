@@ -102,8 +102,8 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 seen_sized_unbound = true;
                 continue;
             }
-            // There was a `?Trait` bound, but it was not `?Sized`; warn.
-            self.dcx().span_warn(
+            // There was a `?Trait` bound, but it was not `?Sized`
+            self.dcx().span_err(
                 unbound.span,
                 "relaxing a default bound only does something for `?Sized`; \
                 all other traits are not bound by default",
@@ -640,13 +640,15 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         let mut num_bound_vars = candidate.bound_vars().len();
         let args = candidate.skip_binder().args.extend_to(tcx, item_def_id, |param, _| {
             let arg = match param.kind {
-                ty::GenericParamDefKind::Lifetime => {
-                    ty::Region::new_bound(tcx, ty::INNERMOST, ty::BoundRegion {
+                ty::GenericParamDefKind::Lifetime => ty::Region::new_bound(
+                    tcx,
+                    ty::INNERMOST,
+                    ty::BoundRegion {
                         var: ty::BoundVar::from_usize(num_bound_vars),
                         kind: ty::BoundRegionKind::Named(param.def_id, param.name),
-                    })
-                    .into()
-                }
+                    },
+                )
+                .into(),
                 ty::GenericParamDefKind::Type { .. } => {
                     let guar = *emitted_bad_param_err.get_or_insert_with(|| {
                         self.dcx().emit_err(crate::errors::ReturnTypeNotationIllegalParam::Type {

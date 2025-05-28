@@ -63,6 +63,7 @@ This API is completely unstable and subject to change.
 #![doc(rust_logo)]
 #![feature(assert_matches)]
 #![feature(coroutines)]
+#![feature(debug_closure_helpers)]
 #![feature(if_let_guard)]
 #![feature(iter_from_coroutine)]
 #![feature(iter_intersperse)]
@@ -82,12 +83,11 @@ pub mod autoderef;
 mod bounds;
 mod check_unused;
 mod coherence;
-mod delegation;
-pub mod hir_ty_lowering;
-// FIXME: This module shouldn't be public.
-pub mod collect;
+mod collect;
 mod constrained_generic_params;
+mod delegation;
 mod errors;
+pub mod hir_ty_lowering;
 pub mod hir_wf_check;
 mod impl_wf_check;
 mod outlives;
@@ -102,10 +102,11 @@ use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, Const, Ty, TyCtxt};
 use rustc_session::parse::feature_err;
 use rustc_span::symbol::sym;
-use rustc_span::Span;
+use rustc_span::{ErrorGuaranteed, Span};
 use rustc_trait_selection::traits;
 
-use self::hir_ty_lowering::{FeedConstTy, HirTyLowerer};
+pub use crate::collect::suggest_impl_trait;
+use crate::hir_ty_lowering::{FeedConstTy, HirTyLowerer};
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
@@ -121,28 +122,42 @@ fn require_c_abi_if_c_variadic(
     const UNSTABLE_EXPLAIN: &str =
         "using calling conventions other than `C` or `cdecl` for varargs functions is unstable";
 
+    // ABIs which can stably use varargs
     if !decl.c_variadic || matches!(abi, ExternAbi::C { .. } | ExternAbi::Cdecl { .. }) {
         return;
     }
 
+    // ABIs with feature-gated stability
     let extended_abi_support = tcx.features().extended_varargs_abi_support();
-    let conventions = match (extended_abi_support, abi.supports_varargs()) {
-        // User enabled additional ABI support for varargs and function ABI matches those ones.
-        (true, true) => return,
+    let extern_system_varargs = tcx.features().extern_system_varargs();
 
-        // Using this ABI would be ok, if the feature for additional ABI support was enabled.
-        // Return CONVENTIONS_STABLE, because we want the other error to look the same.
-        (false, true) => {
-            feature_err(&tcx.sess, sym::extended_varargs_abi_support, span, UNSTABLE_EXPLAIN)
-                .emit();
-            CONVENTIONS_STABLE
-        }
-
-        (false, false) => CONVENTIONS_STABLE,
-        (true, false) => CONVENTIONS_UNSTABLE,
+    // If the feature gate has been enabled, we can stop here
+    if extern_system_varargs && let ExternAbi::System { .. } = abi {
+        return;
+    };
+    if extended_abi_support && abi.supports_varargs() {
+        return;
     };
 
-    tcx.dcx().emit_err(errors::VariadicFunctionCompatibleConvention { span, conventions });
+    // Looks like we need to pick an error to emit.
+    // Is there any feature which we could have enabled to make this work?
+    match abi {
+        ExternAbi::System { .. } => {
+            feature_err(&tcx.sess, sym::extern_system_varargs, span, UNSTABLE_EXPLAIN)
+        }
+        abi if abi.supports_varargs() => {
+            feature_err(&tcx.sess, sym::extended_varargs_abi_support, span, UNSTABLE_EXPLAIN)
+        }
+        _ => tcx.dcx().create_err(errors::VariadicFunctionCompatibleConvention {
+            span,
+            conventions: if tcx.sess.opts.unstable_features.is_nightly_build() {
+                CONVENTIONS_UNSTABLE
+            } else {
+                CONVENTIONS_STABLE
+            },
+        }),
+    }
+    .emit();
 }
 
 pub fn provide(providers: &mut Providers) {
@@ -155,6 +170,8 @@ pub fn provide(providers: &mut Providers) {
     hir_wf_check::provide(providers);
     *providers = Providers {
         inherit_sig_for_delegation_item: delegation::inherit_sig_for_delegation_item,
+        enforce_impl_non_lifetime_params_are_constrained:
+            impl_wf_check::enforce_impl_non_lifetime_params_are_constrained,
         ..*providers
     };
 }
@@ -163,24 +180,31 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     let _prof_timer = tcx.sess.timer("type_check_crate");
 
     tcx.sess.time("coherence_checking", || {
+        // When discarding query call results, use an explicit type to indicate
+        // what we are intending to discard, to help future type-based refactoring.
+        type R = Result<(), ErrorGuaranteed>;
+
         tcx.hir().par_for_each_module(|module| {
-            let _ = tcx.ensure().check_mod_type_wf(module);
+            let _: R = tcx.ensure_ok().check_mod_type_wf(module);
         });
 
         for &trait_def_id in tcx.all_local_trait_impls(()).keys() {
-            let _ = tcx.ensure().coherent_trait(trait_def_id);
+            let _: R = tcx.ensure_ok().coherent_trait(trait_def_id);
         }
         // these queries are executed for side-effects (error reporting):
-        let _ = tcx.ensure().crate_inherent_impls_validity_check(());
-        let _ = tcx.ensure().crate_inherent_impls_overlap_check(());
+        let _: R = tcx.ensure_ok().crate_inherent_impls_validity_check(());
+        let _: R = tcx.ensure_ok().crate_inherent_impls_overlap_check(());
     });
 
     if tcx.features().rustc_attrs() {
-        tcx.sess.time("outlives_dumping", || outlives::dump::inferred_outlives(tcx));
-        tcx.sess.time("variance_dumping", || variance::dump::variances(tcx));
-        collect::dump::opaque_hidden_types(tcx);
-        collect::dump::predicates_and_item_bounds(tcx);
-        collect::dump::def_parents(tcx);
+        tcx.sess.time("dumping_rustc_attr_data", || {
+            outlives::dump::inferred_outlives(tcx);
+            variance::dump::variances(tcx);
+            collect::dump::opaque_hidden_types(tcx);
+            collect::dump::predicates_and_item_bounds(tcx);
+            collect::dump::def_parents(tcx);
+            collect::dump::vtables(tcx);
+        });
     }
 
     // Make sure we evaluate all static and (non-associated) const items, even if unused.
@@ -188,12 +212,12 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     tcx.hir().par_body_owners(|item_def_id| {
         let def_kind = tcx.def_kind(item_def_id);
         match def_kind {
-            DefKind::Static { .. } => tcx.ensure().eval_static_initializer(item_def_id),
+            DefKind::Static { .. } => tcx.ensure_ok().eval_static_initializer(item_def_id),
             DefKind::Const if tcx.generics_of(item_def_id).is_empty() => {
                 let instance = ty::Instance::new(item_def_id.into(), ty::GenericArgs::empty());
                 let cid = GlobalId { instance, promoted: None };
                 let typing_env = ty::TypingEnv::fully_monomorphized();
-                tcx.ensure().eval_to_const_value_raw(typing_env.as_query_input(cid));
+                tcx.ensure_ok().eval_to_const_value_raw(typing_env.as_query_input(cid));
             }
             _ => (),
         }
@@ -206,11 +230,11 @@ pub fn check_crate(tcx: TyCtxt<'_>) {
     tcx.hir().par_body_owners(|item_def_id| {
         let def_kind = tcx.def_kind(item_def_id);
         if !matches!(def_kind, DefKind::AnonConst) {
-            tcx.ensure().typeck(item_def_id);
+            tcx.ensure_ok().typeck(item_def_id);
         }
     });
 
-    tcx.ensure().check_unused_traits(());
+    tcx.ensure_ok().check_unused_traits(());
 }
 
 /// Lower a [`hir::Ty`] to a [`Ty`].

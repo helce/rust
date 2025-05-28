@@ -2,7 +2,9 @@
 
 <!-- toc -->
 
-> **FIXME(jieyouxu)** completely revise this chapter.
+<!--
+FIXME(jieyouxu) completely revise this chapter.
+-->
 
 Directives are special comments that tell compiletest how to build and interpret
 a test. They must appear before the Rust source in the test. They may also
@@ -92,7 +94,8 @@ for more details.
 | Directive                         | Explanation                                                                                                              | Supported test suites                        | Possible values                                                                         |
 |-----------------------------------|--------------------------------------------------------------------------------------------------------------------------|----------------------------------------------|-----------------------------------------------------------------------------------------|
 | `check-run-results`               | Check run test binary `run-{pass,fail}` output snapshot                                                                  | `ui`, `crashes`, `incremental` if `run-pass` | N/A                                                                                     |
-| `error-pattern`                   | Check that output contains a regex pattern                                                                               | `ui`, `crashes`, `incremental` if `run-pass` | Regex                                                                                   |
+| `error-pattern`                   | Check that output contains a specific string                                                                             | `ui`, `crashes`, `incremental` if `run-pass` | String                                                                                  |
+| `regex-error-pattern`             | Check that output contains a regex pattern                                                                               | `ui`, `crashes`, `incremental` if `run-pass` | Regex                                                                                   |
 | `check-stdout`                    | Check `stdout` against `error-pattern`s from running test binary[^check_stdout]                                          | `ui`, `crashes`, `incremental`               | N/A                                                                                     |
 | `normalize-stderr-32bit`          | Normalize actual stderr (for 32-bit platforms) with a rule `"<raw>" -> "<normalized>"` before comparing against snapshot | `ui`, `incremental`                          | `"<RAW>" -> "<NORMALIZED>"`, `<RAW>`/`<NORMALIZED>` is regex capture and replace syntax |
 | `normalize-stderr-64bit`          | Normalize actual stderr (for 64-bit platforms) with a rule `"<raw>" -> "<normalized>"` before comparing against snapshot | `ui`, `incremental`                          | `"<RAW>" -> "<NORMALIZED>"`, `<RAW>`/`<NORMALIZED>` is regex capture and replace syntax |
@@ -149,6 +152,8 @@ Some examples of `X` in `ignore-X` or `only-X`:
   `compare-mode-split-dwarf`, `compare-mode-split-dwarf-single`
 - The two different test modes used by coverage tests:
   `ignore-coverage-map`, `ignore-coverage-run`
+- When testing a dist toolchain: `dist`
+  - This needs to be enabled with `COMPILETEST_ENABLE_DIST_TESTS=1`
 
 The following directives will check rustc build settings and target
 settings:
@@ -171,6 +176,7 @@ settings:
 - `needs-rust-lld` — ignores if the rust lld support is not enabled (`rust.lld =
   true` in `config.toml`)
 - `needs-threads` — ignores if the target does not have threading support
+- `needs-subprocess`  — ignores if the target does not have subprocess support
 - `needs-symlink` — ignores if the target does not support symlinks. This can be
   the case on Windows if the developer did not enable privileged symlink
   permissions.
@@ -186,6 +192,8 @@ settings:
   specified atomic widths, e.g. the test with `//@ needs-target-has-atomic: 8,
   16, ptr` will only run if it supports the comma-separated list of atomic
   widths.
+- `needs-dynamic-linking` - ignores if target does not support dynamic linking
+  (which is orthogonal to it being unable to create `dylib` and `cdylib` crate types)
 
 The following directives will check LLVM support:
 
@@ -246,12 +254,13 @@ Consider writing the test as a proper incremental test instead.
 
 | Directive   | Explanation                                                  | Supported test suites                    | Possible values           |
 |-------------|--------------------------------------------------------------|------------------------------------------|---------------------------|
-| `doc-flags` | Flags passed to `rustdoc` when building the test or aux file | `rustdoc`, `js-doc-test`, `rustdoc-json` | Any valid `rustdoc` flags |
+| `doc-flags` | Flags passed to `rustdoc` when building the test or aux file | `rustdoc`, `rustdoc-js`, `rustdoc-json` | Any valid `rustdoc` flags |
 
-> **FIXME(rustdoc)**: what does `check-test-line-numbers-match` do?
->
-> Asked in
-> <https://rust-lang.zulipchat.com/#narrow/stream/266220-t-rustdoc/topic/What.20is.20the.20.60check-test-line-numbers-match.60.20directive.3F>.
+<!--
+**FIXME(rustdoc)**: what does `check-test-line-numbers-match` do?
+Asked in
+<https://rust-lang.zulipchat.com/#narrow/stream/266220-t-rustdoc/topic/What.20is.20the.20.60check-test-line-numbers-match.60.20directive.3F>.
+-->
 
 ### Pretty printing
 

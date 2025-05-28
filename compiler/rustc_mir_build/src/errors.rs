@@ -8,19 +8,9 @@ use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::ty::{self, Ty};
 use rustc_pattern_analysis::errors::Uncovered;
 use rustc_pattern_analysis::rustc::RustcPatCtxt;
-use rustc_span::{Span, Symbol};
+use rustc_span::{Ident, Span, Symbol};
 
 use crate::fluent_generated as fluent;
-
-#[derive(LintDiagnostic)]
-#[diag(mir_build_unconditional_recursion)]
-#[help]
-pub(crate) struct UnconditionalRecursion {
-    #[label]
-    pub(crate) span: Span,
-    #[label(mir_build_unconditional_recursion_call_site_label)]
-    pub(crate) call_sites: Vec<Span>,
-}
 
 #[derive(LintDiagnostic)]
 #[diag(mir_build_call_to_deprecated_safe_fn_requires_unsafe)]
@@ -165,6 +155,18 @@ pub(crate) struct UnsafeOpInUnsafeFnMutationOfLayoutConstrainedFieldRequiresUnsa
     code = E0133,
 )]
 pub(crate) struct UnsafeOpInUnsafeFnBorrowOfLayoutConstrainedFieldRequiresUnsafe {
+    #[label]
+    pub(crate) span: Span,
+    #[subdiagnostic]
+    pub(crate) unsafe_not_inherited_note: Option<UnsafeNotInheritedLintNote>,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(
+    mir_build_unsafe_binder_cast_requires_unsafe,
+    code = E0133,
+)]
+pub(crate) struct UnsafeOpInUnsafeFnUnsafeBinderCastRequiresUnsafe {
     #[label]
     pub(crate) span: Span,
     #[subdiagnostic]
@@ -505,6 +507,32 @@ pub(crate) struct CallToFunctionWithRequiresUnsafeUnsafeOpInUnsafeFnAllowed {
     pub(crate) unsafe_not_inherited_note: Option<UnsafeNotInheritedNote>,
 }
 
+#[derive(Diagnostic)]
+#[diag(
+    mir_build_unsafe_binder_cast_requires_unsafe,
+    code = E0133,
+)]
+pub(crate) struct UnsafeBinderCastRequiresUnsafe {
+    #[primary_span]
+    #[label]
+    pub(crate) span: Span,
+    #[subdiagnostic]
+    pub(crate) unsafe_not_inherited_note: Option<UnsafeNotInheritedNote>,
+}
+
+#[derive(Diagnostic)]
+#[diag(
+    mir_build_unsafe_binder_cast_requires_unsafe_unsafe_op_in_unsafe_fn_allowed,
+    code = E0133,
+)]
+pub(crate) struct UnsafeBinderCastRequiresUnsafeUnsafeOpInUnsafeFnAllowed {
+    #[primary_span]
+    #[label]
+    pub(crate) span: Span,
+    #[subdiagnostic]
+    pub(crate) unsafe_not_inherited_note: Option<UnsafeNotInheritedNote>,
+}
+
 #[derive(Subdiagnostic)]
 #[label(mir_build_unsafe_not_inherited)]
 pub(crate) struct UnsafeNotInheritedNote {
@@ -764,7 +792,7 @@ pub(crate) struct BindingsWithVariantName {
     #[suggestion(code = "{ty_path}::{name}", applicability = "machine-applicable")]
     pub(crate) suggestion: Option<Span>,
     pub(crate) ty_path: String,
-    pub(crate) name: Symbol,
+    pub(crate) name: Ident,
 }
 
 #[derive(LintDiagnostic)]
@@ -801,15 +829,15 @@ pub(crate) struct IrrefutableLetPatternsWhileLet {
 
 #[derive(Diagnostic)]
 #[diag(mir_build_borrow_of_moved_value)]
-pub(crate) struct BorrowOfMovedValue<'tcx> {
+pub(crate) struct BorrowOfMovedValue {
     #[primary_span]
     #[label]
     #[label(mir_build_occurs_because_label)]
     pub(crate) binding_span: Span,
     #[label(mir_build_value_borrowed_label)]
     pub(crate) conflicts_ref: Vec<Span>,
-    pub(crate) name: Symbol,
-    pub(crate) ty: Ty<'tcx>,
+    pub(crate) name: Ident,
+    pub(crate) ty: String,
     #[suggestion(code = "ref ", applicability = "machine-applicable")]
     pub(crate) suggest_borrowing: Option<Span>,
 }
@@ -1066,25 +1094,6 @@ pub(crate) enum MiscPatternSuggestion {
         #[primary_span]
         start_span: Span,
     },
-}
-
-#[derive(Diagnostic)]
-#[diag(mir_build_rustc_box_attribute_error)]
-pub(crate) struct RustcBoxAttributeError {
-    #[primary_span]
-    pub(crate) span: Span,
-    #[subdiagnostic]
-    pub(crate) reason: RustcBoxAttrReason,
-}
-
-#[derive(Subdiagnostic)]
-pub(crate) enum RustcBoxAttrReason {
-    #[note(mir_build_attributes)]
-    Attributes,
-    #[note(mir_build_not_box)]
-    NotBoxNew,
-    #[note(mir_build_missing_box)]
-    MissingBox,
 }
 
 #[derive(LintDiagnostic)]

@@ -50,8 +50,7 @@ pub(crate) fn get_linker<'a>(
     self_contained: bool,
     target_cpu: &'a str,
 ) -> Box<dyn Linker + 'a> {
-    // FIXME(cc-rs#1265) pass only target arch to find_tool()
-    let msvc_tool = windows_registry::find_tool(sess.opts.target_triple.tuple(), "link.exe");
+    let msvc_tool = windows_registry::find_tool(&sess.target.arch, "link.exe");
 
     // If our linker looks like a batch script on Windows then to execute this
     // we'll need to spawn `cmd` explicitly. This is primarily done to handle
@@ -411,7 +410,7 @@ impl<'a> GccLinker<'a> {
         let opt_level = match self.sess.opts.optimize {
             config::OptLevel::No => "O0",
             config::OptLevel::Less => "O1",
-            config::OptLevel::Default | config::OptLevel::Size | config::OptLevel::SizeMin => "O2",
+            config::OptLevel::More | config::OptLevel::Size | config::OptLevel::SizeMin => "O2",
             config::OptLevel::Aggressive => "O3",
         };
 
@@ -686,7 +685,7 @@ impl<'a> Linker for GccLinker<'a> {
 
         // GNU-style linkers support optimization with -O. GNU ld doesn't
         // need a numeric argument, but other linkers do.
-        if self.sess.opts.optimize == config::OptLevel::Default
+        if self.sess.opts.optimize == config::OptLevel::More
             || self.sess.opts.optimize == config::OptLevel::Aggressive
         {
             self.link_arg("-O1");
@@ -1214,7 +1213,7 @@ impl<'a> Linker for EmLinker<'a> {
         self.cc_arg(match self.sess.opts.optimize {
             OptLevel::No => "-O0",
             OptLevel::Less => "-O1",
-            OptLevel::Default => "-O2",
+            OptLevel::More => "-O2",
             OptLevel::Aggressive => "-O3",
             OptLevel::Size => "-Os",
             OptLevel::SizeMin => "-Oz",
@@ -1385,7 +1384,7 @@ impl<'a> Linker for WasmLd<'a> {
         self.link_arg(match self.sess.opts.optimize {
             OptLevel::No => "-O0",
             OptLevel::Less => "-O1",
-            OptLevel::Default => "-O2",
+            OptLevel::More => "-O2",
             OptLevel::Aggressive => "-O3",
             // Currently LLD doesn't support `Os` and `Oz`, so pass through `O2`
             // instead.
@@ -1452,7 +1451,7 @@ impl<'a> WasmLd<'a> {
         let opt_level = match self.sess.opts.optimize {
             config::OptLevel::No => "O0",
             config::OptLevel::Less => "O1",
-            config::OptLevel::Default => "O2",
+            config::OptLevel::More => "O2",
             config::OptLevel::Aggressive => "O3",
             // wasm-ld only handles integer LTO opt levels. Use O2
             config::OptLevel::Size | config::OptLevel::SizeMin => "O2",
@@ -1526,7 +1525,7 @@ impl<'a> Linker for L4Bender<'a> {
     fn optimize(&mut self) {
         // GNU-style linkers support optimization with -O. GNU ld doesn't
         // need a numeric argument, but other linkers do.
-        if self.sess.opts.optimize == config::OptLevel::Default
+        if self.sess.opts.optimize == config::OptLevel::More
             || self.sess.opts.optimize == config::OptLevel::Aggressive
         {
             self.link_arg("-O1");
@@ -1930,7 +1929,7 @@ impl<'a> Linker for LlbcLinker<'a> {
         match self.sess.opts.optimize {
             OptLevel::No => "-O0",
             OptLevel::Less => "-O1",
-            OptLevel::Default => "-O2",
+            OptLevel::More => "-O2",
             OptLevel::Aggressive => "-O3",
             OptLevel::Size => "-Os",
             OptLevel::SizeMin => "-Oz",
@@ -2007,7 +2006,7 @@ impl<'a> Linker for BpfLinker<'a> {
         self.link_arg(match self.sess.opts.optimize {
             OptLevel::No => "-O0",
             OptLevel::Less => "-O1",
-            OptLevel::Default => "-O2",
+            OptLevel::More => "-O2",
             OptLevel::Aggressive => "-O3",
             OptLevel::Size => "-Os",
             OptLevel::SizeMin => "-Oz",

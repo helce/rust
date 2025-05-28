@@ -17,7 +17,7 @@ use parking_lot::{
     MappedRwLockReadGuard, Mutex, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard,
     RwLockWriteGuard,
 };
-use proc_macro_api::ProcMacroServer;
+use proc_macro_api::ProcMacroClient;
 use project_model::{ManifestPath, ProjectWorkspace, ProjectWorkspaceKind, WorkspaceBuildScripts};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::{span, trace, Level};
@@ -95,7 +95,7 @@ pub(crate) struct GlobalState {
     pub(crate) last_reported_status: lsp_ext::ServerStatusParams,
 
     // proc macros
-    pub(crate) proc_macro_clients: Arc<[anyhow::Result<ProcMacroServer>]>,
+    pub(crate) proc_macro_clients: Arc<[anyhow::Result<ProcMacroClient>]>,
     pub(crate) build_deps_changed: bool,
 
     // Flycheck
@@ -396,6 +396,7 @@ impl GlobalState {
             || !self.config.same_source_root_parent_map(&self.local_roots_parent_map)
         {
             let config_change = {
+                let _p = span!(Level::INFO, "GlobalState::process_changes/config_change").entered();
                 let user_config_path = (|| {
                     let mut p = Config::user_config_dir_path()?;
                     p.push("rust-analyzer.toml");
@@ -569,12 +570,12 @@ impl GlobalState {
         if let Some((method, start)) = self.req_queue.incoming.complete(&response.id) {
             if let Some(err) = &response.error {
                 if err.message.starts_with("server panicked") {
-                    self.poke_rust_analyzer_developer(format!("{}, check the log", err.message))
+                    self.poke_rust_analyzer_developer(format!("{}, check the log", err.message));
                 }
             }
 
             let duration = start.elapsed();
-            tracing::debug!("handled {} - ({}) in {:0.2?}", method, response.id, duration);
+            tracing::debug!(name: "message response", method, %response.id, duration = format_args!("{:0.2?}", duration));
             self.send(response.into());
         }
     }
@@ -726,7 +727,6 @@ impl GlobalStateSnapshot {
                     };
 
                     return Some(TargetSpec::ProjectJson(ProjectJsonTargetSpec {
-                        crate_id,
                         label: build.label,
                         target_kind: build.target_kind,
                         shell_runnables: project.runnables().to_owned(),

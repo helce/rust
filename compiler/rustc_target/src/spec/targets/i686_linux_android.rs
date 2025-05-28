@@ -1,4 +1,4 @@
-use crate::spec::{SanitizerSet, StackProbeType, Target, TargetOptions, base};
+use crate::spec::{RustcAbi, SanitizerSet, StackProbeType, Target, TargetOptions, base};
 
 // See https://developer.android.com/ndk/guides/abis.html#x86
 // for target ABI requirements.
@@ -8,8 +8,9 @@ pub(crate) fn target() -> Target {
 
     base.max_atomic_width = Some(64);
 
+    base.rustc_abi = Some(RustcAbi::X86Sse2);
     // https://developer.android.com/ndk/guides/abis.html#x86
-    base.cpu = "pentiumpro".into();
+    base.cpu = "pentium4".into();
     base.features = "+mmx,+sse,+sse2,+sse3,+ssse3".into();
     base.stack_probes = StackProbeType::Inline;
 

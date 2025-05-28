@@ -19,10 +19,11 @@ use object::read::archive::ArchiveFile;
 
 use crate::core::build_steps::doc::DocumentationFormat;
 use crate::core::build_steps::tool::{self, Tool};
-use crate::core::build_steps::vendor::default_paths_to_vendor;
+use crate::core::build_steps::vendor::{VENDOR_DIR, Vendor};
 use crate::core::build_steps::{compile, llvm};
 use crate::core::builder::{Builder, Kind, RunConfig, ShouldRun, Step};
 use crate::core::config::TargetSelection;
+use crate::utils::build_stamp::{self, BuildStamp};
 use crate::utils::channel::{self, Info};
 use crate::utils::exec::{BootstrapCommand, command};
 use crate::utils::helpers::{
@@ -47,7 +48,7 @@ fn should_build_extended_tool(builder: &Builder<'_>, tool: &str) -> bool {
     if !builder.config.extended {
         return false;
     }
-    builder.config.tools.as_ref().map_or(true, |tools| tools.contains(tool))
+    builder.config.tools.as_ref().is_none_or(|tools| tools.contains(tool))
 }
 
 #[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
@@ -410,7 +411,7 @@ impl Step for Rustc {
                 .config
                 .tools
                 .as_ref()
-                .map_or(true, |tools| tools.iter().any(|tool| tool == "rustdoc"))
+                .is_none_or(|tools| tools.iter().any(|tool| tool == "rustdoc"))
             {
                 let rustdoc = builder.rustdoc(compiler);
                 builder.install(&rustdoc, &image.join("bin"), 0o755);
@@ -503,14 +504,22 @@ impl Step for Rustc {
             // Debugger scripts
             builder.ensure(DebuggerScripts { sysroot: image.to_owned(), host });
 
-            // Misc license info
-            let cp = |file: &str| {
-                builder.install(&builder.src.join(file), &image.join("share/doc/rust"), 0o644);
+            // HTML copyright files
+            let file_list = builder.ensure(super::run::GenerateCopyright);
+            for file in file_list {
+                builder.install(&file, &image.join("share/doc/rust"), 0o644);
+            }
+
+            // README
+            builder.install(&builder.src.join("README.md"), &image.join("share/doc/rust"), 0o644);
+
+            // The REUSE-managed license files
+            let license = |path: &Path| {
+                builder.install(path, &image.join("share/doc/rust/licenses"), 0o644);
             };
-            cp("COPYRIGHT");
-            cp("LICENSE-APACHE");
-            cp("LICENSE-MIT");
-            cp("README.md");
+            for entry in t!(std::fs::read_dir(builder.src.join("LICENSES"))).flatten() {
+                license(&entry.path());
+            }
         }
     }
 }
@@ -573,7 +582,7 @@ impl Step for DebuggerScripts {
 fn skip_host_target_lib(builder: &Builder<'_>, compiler: Compiler) -> bool {
     // The only true set of target libraries came from the build triple, so
     // let's reduce redundant work by only producing archives from that host.
-    if compiler.host != builder.config.build {
+    if !builder.is_builder_target(&compiler.host) {
         builder.info("\tskipping, not a build host");
         true
     } else {
@@ -584,7 +593,7 @@ fn skip_host_target_lib(builder: &Builder<'_>, compiler: Compiler) -> bool {
 /// Check that all objects in rlibs for UEFI targets are COFF. This
 /// ensures that the C compiler isn't producing ELF objects, which would
 /// not link correctly with the COFF objects.
-fn verify_uefi_rlib_format(builder: &Builder<'_>, target: TargetSelection, stamp: &Path) {
+fn verify_uefi_rlib_format(builder: &Builder<'_>, target: TargetSelection, stamp: &BuildStamp) {
     if !target.ends_with("-uefi") {
         return;
     }
@@ -615,7 +624,12 @@ fn verify_uefi_rlib_format(builder: &Builder<'_>, target: TargetSelection, stamp
 }
 
 /// Copy stamped files into an image's `target/lib` directory.
-fn copy_target_libs(builder: &Builder<'_>, target: TargetSelection, image: &Path, stamp: &Path) {
+fn copy_target_libs(
+    builder: &Builder<'_>,
+    target: TargetSelection,
+    image: &Path,
+    stamp: &BuildStamp,
+) {
     let dst = image.join("lib/rustlib").join(target).join("lib");
     let self_contained_dst = dst.join("self-contained");
     t!(fs::create_dir_all(&dst));
@@ -623,7 +637,7 @@ fn copy_target_libs(builder: &Builder<'_>, target: TargetSelection, image: &Path
     for (path, dependency_type) in builder.read_stamp_file(stamp) {
         if dependency_type == DependencyType::TargetSelfContained {
             builder.copy_link(&path, &self_contained_dst.join(path.file_name().unwrap()));
-        } else if dependency_type == DependencyType::Target || builder.config.build == target {
+        } else if dependency_type == DependencyType::Target || builder.is_builder_target(&target) {
             builder.copy_link(&path, &dst.join(path.file_name().unwrap()));
         }
     }
@@ -668,7 +682,7 @@ impl Step for Std {
         tarball.include_target_in_component_name(true);
 
         let compiler_to_use = builder.compiler_for(compiler.stage, compiler.host, target);
-        let stamp = compile::libstd_stamp(builder, compiler_to_use, target);
+        let stamp = build_stamp::libstd_stamp(builder, compiler_to_use, target);
         verify_uefi_rlib_format(builder, target, &stamp);
         copy_target_libs(builder, target, tarball.image_dir(), &stamp);
 
@@ -718,7 +732,7 @@ impl Step for RustcDev {
         let tarball = Tarball::new(builder, "rustc-dev", &target.triple);
 
         let compiler_to_use = builder.compiler_for(compiler.stage, compiler.host, target);
-        let stamp = compile::librustc_stamp(builder, compiler_to_use, target);
+        let stamp = build_stamp::librustc_stamp(builder, compiler_to_use, target);
         copy_target_libs(builder, target, tarball.image_dir(), &stamp);
 
         let src_files = &["Cargo.lock"];
@@ -772,7 +786,7 @@ impl Step for Analysis {
     fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
         let compiler = self.compiler;
         let target = self.target;
-        if compiler.host != builder.config.build {
+        if !builder.is_builder_target(&compiler.host) {
             return None;
         }
 
@@ -980,20 +994,26 @@ impl Step for PlainSourceTarball {
 
         // This is the set of root paths which will become part of the source package
         let src_files = [
+            // tidy-alphabetical-start
+            ".gitmodules",
+            "Cargo.lock",
+            "Cargo.toml",
+            "config.example.toml",
+            "configure",
+            "CONTRIBUTING.md",
             "COPYRIGHT",
             "LICENSE-APACHE",
+            "license-metadata.json",
             "LICENSE-MIT",
-            "CONTRIBUTING.md",
             "README.md",
             "RELEASES.md",
-            "configure",
+            "REUSE.toml",
+            "x",
+            "x.ps1",
             "x.py",
-            "config.example.toml",
-            "Cargo.toml",
-            "Cargo.lock",
-            ".gitmodules",
+            // tidy-alphabetical-end
         ];
-        let src_dirs = ["src", "compiler", "library", "tests"];
+        let src_dirs = ["src", "compiler", "library", "tests", "LICENSES"];
 
         copy_src_dirs(
             builder,
@@ -1030,19 +1050,6 @@ impl Step for PlainSourceTarball {
         if builder.config.dist_vendor {
             builder.require_and_update_all_submodules();
 
-            // Vendor all Cargo dependencies
-            let mut cmd = command(&builder.initial_cargo);
-            cmd.arg("vendor").arg("--versioned-dirs");
-
-            for (p, _) in default_paths_to_vendor(builder) {
-                cmd.arg("--sync").arg(p);
-            }
-
-            cmd
-                // Will read the libstd Cargo.toml which uses the unstable `public-dependency` feature.
-                .env("RUSTC_BOOTSTRAP", "1")
-                .current_dir(plain_dst_src);
-
             // Vendor packages that are required by opt-dist to collect PGO profiles.
             let pkgs_for_pgo_training = build_helper::LLVM_PGO_CRATES
                 .iter()
@@ -1054,15 +1061,18 @@ impl Step for PlainSourceTarball {
                     manifest_path.push("Cargo.toml");
                     manifest_path
                 });
-            for manifest_path in pkgs_for_pgo_training {
-                cmd.arg("--sync").arg(manifest_path);
-            }
 
-            let config = cmd.run_capture(builder).stdout();
+            // Vendor all Cargo dependencies
+            let vendor = builder.ensure(Vendor {
+                sync_args: pkgs_for_pgo_training.collect(),
+                versioned_dirs: true,
+                root_dir: plain_dst_src.into(),
+                output_dir: VENDOR_DIR.into(),
+            });
 
             let cargo_config_dir = plain_dst_src.join(".cargo");
             builder.create_dir(&cargo_config_dir);
-            builder.create(&cargo_config_dir.join("config.toml"), &config);
+            builder.create(&cargo_config_dir.join("config.toml"), &vendor.config);
         }
 
         // Delete extraneous directories
