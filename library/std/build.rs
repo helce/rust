@@ -105,6 +105,8 @@ fn main() {
         ("x86_64", "windows") if target_env == "gnu" && target_abi != "llvm" => false,
         // Infinite recursion <https://github.com/llvm/llvm-project/issues/97981>
         ("csky", _) => false,
+        // NIY
+        ("e2k", _) => false,
         ("hexagon", _) => false,
         ("loongarch64", _) => false,
         ("mips" | "mips64" | "mips32r6" | "mips64r6", _) => false,
@@ -122,6 +124,8 @@ fn main() {
         _ if is_miri => true,
         // Unsupported <https://github.com/llvm/llvm-project/issues/94434>
         ("arm64ec", _) => false,
+        // NIY
+        ("e2k", _) => false,
         // Selection bug <https://github.com/llvm/llvm-project/issues/96432>
         ("mips64" | "mips64r6", _) => false,
         // Selection bug <https://github.com/llvm/llvm-project/issues/95471>
