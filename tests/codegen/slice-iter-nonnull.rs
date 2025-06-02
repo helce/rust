@@ -1,5 +1,6 @@
 //@ compile-flags: -Copt-level=3
 //@ needs-deterministic-layouts
+//@ ignore-e2k llvm-18 problem?
 #![crate_type = "lib"]
 #![feature(exact_size_is_empty)]
 
