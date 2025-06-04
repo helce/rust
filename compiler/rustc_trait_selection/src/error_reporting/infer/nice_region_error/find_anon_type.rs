@@ -3,7 +3,6 @@ use core::ops::ControlFlow;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{self, Visitor, VisitorExt};
 use rustc_hir::{self as hir, AmbigArg};
-use rustc_middle::hir::map::Map;
 use rustc_middle::hir::nested_filter;
 use rustc_middle::middle::resolve_bound_vars as rbv;
 use rustc_middle::ty::{self, Region, TyCtxt};
@@ -70,15 +69,15 @@ impl<'tcx> Visitor<'tcx> for FindNestedTypeVisitor<'tcx> {
     type Result = ControlFlow<&'tcx hir::Ty<'tcx>>;
     type NestedFilter = nested_filter::OnlyBodies;
 
-    fn nested_visit_map(&mut self) -> Self::Map {
-        self.tcx.hir()
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.tcx
     }
 
     fn visit_ty(&mut self, arg: &'tcx hir::Ty<'tcx, AmbigArg>) -> Self::Result {
         match arg.kind {
             hir::TyKind::BareFn(_) => {
                 self.current_index.shift_in(1);
-                intravisit::walk_ty(self, arg);
+                let _ = intravisit::walk_ty(self, arg);
                 self.current_index.shift_out(1);
                 return ControlFlow::Continue(());
             }
@@ -86,7 +85,7 @@ impl<'tcx> Visitor<'tcx> for FindNestedTypeVisitor<'tcx> {
             hir::TyKind::TraitObject(bounds, ..) => {
                 for bound in bounds {
                     self.current_index.shift_in(1);
-                    self.visit_poly_trait_ref(bound);
+                    let _ = self.visit_poly_trait_ref(bound);
                     self.current_index.shift_out(1);
                 }
             }
@@ -176,8 +175,8 @@ impl<'tcx> Visitor<'tcx> for TyPathVisitor<'tcx> {
     type Result = ControlFlow<()>;
     type NestedFilter = nested_filter::OnlyBodies;
 
-    fn nested_visit_map(&mut self) -> Map<'tcx> {
-        self.tcx.hir()
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.tcx
     }
 
     fn visit_lifetime(&mut self, lifetime: &hir::Lifetime) -> Self::Result {

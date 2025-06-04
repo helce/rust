@@ -38,7 +38,7 @@ use std::sync::{Arc, Weak};
 use pulldown_cmark::{
     BrokenLink, CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd, html,
 };
-use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_errors::{Diag, DiagMessage};
 use rustc_hir::def_id::LocalDefId;
 use rustc_middle::ty::TyCtxt;
@@ -1200,9 +1200,11 @@ impl LangString {
                         data.ignore = Ignore::All;
                         seen_rust_tags = !seen_other_tags;
                     }
-                    LangStringToken::LangToken(x) if x.starts_with("ignore-") => {
+                    LangStringToken::LangToken(x)
+                        if let Some(ignore) = x.strip_prefix("ignore-") =>
+                    {
                         if enable_per_target_ignores {
-                            ignores.push(x.trim_start_matches("ignore-").to_owned());
+                            ignores.push(ignore.to_owned());
                             seen_rust_tags = !seen_other_tags;
                         }
                     }
@@ -1226,37 +1228,39 @@ impl LangString {
                         data.standalone_crate = true;
                         seen_rust_tags = !seen_other_tags || seen_rust_tags;
                     }
-                    LangStringToken::LangToken(x) if x.starts_with("edition") => {
-                        data.edition = x[7..].parse::<Edition>().ok();
+                    LangStringToken::LangToken(x)
+                        if let Some(edition) = x.strip_prefix("edition") =>
+                    {
+                        data.edition = edition.parse::<Edition>().ok();
                     }
                     LangStringToken::LangToken(x)
-                        if x.starts_with("rust") && x[4..].parse::<Edition>().is_ok() =>
+                        if let Some(edition) = x.strip_prefix("rust")
+                            && edition.parse::<Edition>().is_ok()
+                            && let Some(extra) = extra =>
                     {
-                        if let Some(extra) = extra {
-                            extra.error_invalid_codeblock_attr_with_help(
-                                format!("unknown attribute `{x}`"),
-                                |lint| {
-                                    lint.help(format!(
-                                        "there is an attribute with a similar name: `edition{}`",
-                                        &x[4..],
-                                    ));
-                                },
-                            );
-                        }
+                        extra.error_invalid_codeblock_attr_with_help(
+                            format!("unknown attribute `{x}`"),
+                            |lint| {
+                                lint.help(format!(
+                                    "there is an attribute with a similar name: `edition{edition}`"
+                                ));
+                            },
+                        );
                     }
                     LangStringToken::LangToken(x)
-                        if allow_error_code_check && x.starts_with('E') && x.len() == 5 =>
+                        if allow_error_code_check
+                            && let Some(error_code) = x.strip_prefix('E')
+                            && error_code.len() == 4 =>
                     {
-                        if x[1..].parse::<u32>().is_ok() {
+                        if error_code.parse::<u32>().is_ok() {
                             data.error_codes.push(x.to_owned());
                             seen_rust_tags = !seen_other_tags || seen_rust_tags;
                         } else {
                             seen_other_tags = true;
                         }
                     }
-                    LangStringToken::LangToken(x) if extra.is_some() => {
-                        let s = x.to_lowercase();
-                        if let Some(help) = match s.as_str() {
+                    LangStringToken::LangToken(x) if let Some(extra) = extra => {
+                        if let Some(help) = match x.to_lowercase().as_str() {
                             "compile-fail" | "compile_fail" | "compilefail" => Some(
                                 "use `compile_fail` to invert the results of this test, so that it \
                                 passes if it cannot be compiled and fails if it can",
@@ -1273,33 +1277,27 @@ impl LangString {
                                 "use `test_harness` to run functions marked `#[test]` instead of a \
                                 potentially-implicit `main` function",
                             ),
-                            "standalone" | "standalone_crate" | "standalone-crate" => {
-                                if let Some(extra) = extra
-                                    && extra.sp.at_least_rust_2024()
-                                {
-                                    Some(
-                                        "use `standalone_crate` to compile this code block \
+                            "standalone" | "standalone_crate" | "standalone-crate"
+                                if extra.sp.at_least_rust_2024() =>
+                            {
+                                Some(
+                                    "use `standalone_crate` to compile this code block \
                                         separately",
-                                    )
-                                } else {
-                                    None
-                                }
+                                )
                             }
                             _ => None,
                         } {
-                            if let Some(extra) = extra {
-                                extra.error_invalid_codeblock_attr_with_help(
-                                    format!("unknown attribute `{x}`"),
-                                    |lint| {
-                                        lint.help(help).help(
-                                            "this code block may be skipped during testing, \
+                            extra.error_invalid_codeblock_attr_with_help(
+                                format!("unknown attribute `{x}`"),
+                                |lint| {
+                                    lint.help(help).help(
+                                        "this code block may be skipped during testing, \
                                             because unknown attributes are treated as markers for \
                                             code samples written in other programming languages, \
                                             unless it is also explicitly marked as `rust`",
-                                        );
-                                    },
-                                );
-                            }
+                                    );
+                                },
+                            );
                         }
                         seen_other_tags = true;
                         data.unknown.push(x.to_owned());
@@ -1308,18 +1306,17 @@ impl LangString {
                         seen_other_tags = true;
                         data.unknown.push(x.to_owned());
                     }
-                    LangStringToken::KeyValueAttribute(key, value) => {
-                        if key == "class" {
-                            data.added_classes.push(value.to_owned());
-                        } else if let Some(extra) = extra {
-                            extra.error_invalid_codeblock_attr(format!(
-                                "unsupported attribute `{key}`"
-                            ));
-                        }
+                    LangStringToken::KeyValueAttribute("class", value) => {
+                        data.added_classes.push(value.to_owned());
+                    }
+                    LangStringToken::KeyValueAttribute(key, ..) if let Some(extra) = extra => {
+                        extra
+                            .error_invalid_codeblock_attr(format!("unsupported attribute `{key}`"));
                     }
                     LangStringToken::ClassAttribute(class) => {
                         data.added_classes.push(class.to_owned());
                     }
+                    _ => {}
                 }
             }
         };
@@ -1569,7 +1566,7 @@ fn markdown_summary_with_limit(
 
     let mut buf = HtmlWithLimit::new(length_limit);
     let mut stopped_early = false;
-    p.try_for_each(|event| {
+    let _ = p.try_for_each(|event| {
         match &event {
             Event::Text(text) => {
                 let r =
@@ -1727,6 +1724,7 @@ pub(crate) fn markdown_links<'md, R>(
     md: &'md str,
     preprocess_link: impl Fn(MarkdownLink) -> Option<R>,
 ) -> Vec<R> {
+    use itertools::Itertools;
     if md.is_empty() {
         return vec![];
     }
@@ -1761,6 +1759,46 @@ pub(crate) fn markdown_links<'md, R>(
             // For anything else, we can only use the provided range.
             CowStr::Boxed(_) | CowStr::Inlined(_) => MarkdownLinkRange::WholeLink(span),
         }
+    };
+
+    let span_for_refdef = |link: &CowStr<'_>, span: Range<usize>| {
+        // We want to underline the link's definition, but `span` will point at the entire refdef.
+        // Skip the label, then try to find the entire URL.
+        let mut square_brace_count = 0;
+        let mut iter = md.as_bytes()[span.start..span.end].iter().copied().enumerate();
+        for (_i, c) in &mut iter {
+            match c {
+                b':' if square_brace_count == 0 => break,
+                b'[' => square_brace_count += 1,
+                b']' => square_brace_count -= 1,
+                _ => {}
+            }
+        }
+        while let Some((i, c)) = iter.next() {
+            if c == b'<' {
+                while let Some((j, c)) = iter.next() {
+                    match c {
+                        b'\\' => {
+                            let _ = iter.next();
+                        }
+                        b'>' => {
+                            return MarkdownLinkRange::Destination(
+                                i + 1 + span.start..j + span.start,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            } else if !c.is_ascii_whitespace() {
+                for (j, c) in iter.by_ref() {
+                    if c.is_ascii_whitespace() {
+                        return MarkdownLinkRange::Destination(i + span.start..j + span.start);
+                    }
+                }
+                return MarkdownLinkRange::Destination(i + span.start..span.end);
+            }
+        }
+        span_for_link(link, span)
     };
 
     let span_for_offset_backward = |span: Range<usize>, open: u8, close: u8| {
@@ -1844,9 +1882,16 @@ pub(crate) fn markdown_links<'md, R>(
     .into_offset_iter();
     let mut links = Vec::new();
 
+    let mut refdefs = FxIndexMap::default();
+    for (label, refdef) in event_iter.reference_definitions().iter().sorted_by_key(|x| x.0) {
+        refdefs.insert(label.to_string(), (false, refdef.dest.to_string(), refdef.span.clone()));
+    }
+
     for (event, span) in event_iter {
         match event {
-            Event::Start(Tag::Link { link_type, dest_url, .. }) if may_be_doc_link(link_type) => {
+            Event::Start(Tag::Link { link_type, dest_url, id, .. })
+                if may_be_doc_link(link_type) =>
+            {
                 let range = match link_type {
                     // Link is pulled from the link itself.
                     LinkType::ReferenceUnknown | LinkType::ShortcutUnknown => {
@@ -1856,7 +1901,12 @@ pub(crate) fn markdown_links<'md, R>(
                     LinkType::Inline => span_for_offset_backward(span, b'(', b')'),
                     // Link is pulled from elsewhere in the document.
                     LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => {
-                        span_for_link(&dest_url, span)
+                        if let Some((is_used, dest_url, span)) = refdefs.get_mut(&id[..]) {
+                            *is_used = true;
+                            span_for_refdef(&CowStr::from(&dest_url[..]), span.clone())
+                        } else {
+                            span_for_link(&dest_url, span)
+                        }
                     }
                     LinkType::Autolink | LinkType::Email => unreachable!(),
                 };
@@ -1870,6 +1920,18 @@ pub(crate) fn markdown_links<'md, R>(
                 }
             }
             _ => {}
+        }
+    }
+
+    for (_label, (is_used, dest_url, span)) in refdefs.into_iter() {
+        if !is_used
+            && let Some(link) = preprocess_link(MarkdownLink {
+                kind: LinkType::Reference,
+                range: span_for_refdef(&CowStr::from(&dest_url[..]), span),
+                link: dest_url,
+            })
+        {
+            links.push(link);
         }
     }
 

@@ -53,11 +53,7 @@ fn has_ffi_unwind_calls(tcx: TyCtxt<'_>, local_def_id: LocalDefId) -> bool {
 
         // Rust calls cannot themselves create foreign unwinds.
         // We assume this is true for intrinsics as well.
-        if let ExternAbi::RustIntrinsic
-        | ExternAbi::Rust
-        | ExternAbi::RustCall
-        | ExternAbi::RustCold = sig.abi()
-        {
+        if sig.abi().is_rustic_abi() {
             continue;
         };
 
@@ -85,7 +81,7 @@ fn has_ffi_unwind_calls(tcx: TyCtxt<'_>, local_def_id: LocalDefId) -> bool {
             let lint_root = body.source_scopes[terminator.source_info.scope]
                 .local_data
                 .as_ref()
-                .assert_crate_local()
+                .unwrap_crate_local()
                 .lint_root;
             let span = terminator.source_info.span;
 
@@ -113,7 +109,7 @@ fn required_panic_strategy(tcx: TyCtxt<'_>, _: LocalCrate) -> Option<PanicStrate
         return Some(PanicStrategy::Abort);
     }
 
-    for def_id in tcx.hir().body_owners() {
+    for def_id in tcx.hir_body_owners() {
         if tcx.has_ffi_unwind_calls(def_id) {
             // Given that this crate is compiled in `-C panic=unwind`, the `AbortUnwindingCalls`
             // MIR pass will not be run on FFI-unwind call sites, therefore a foreign exception

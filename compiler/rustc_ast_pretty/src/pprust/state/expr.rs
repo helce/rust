@@ -5,10 +5,10 @@ use itertools::{Itertools, Position};
 use rustc_ast::ptr::P;
 use rustc_ast::util::classify;
 use rustc_ast::util::literal::escape_byte_str_symbol;
-use rustc_ast::util::parser::{self, AssocOp, ExprPrecedence, Fixity};
+use rustc_ast::util::parser::{self, ExprPrecedence, Fixity};
 use rustc_ast::{
     self as ast, BlockCheckMode, FormatAlignment, FormatArgPosition, FormatArgsPiece, FormatCount,
-    FormatDebugHex, FormatSign, FormatTrait, token,
+    FormatDebugHex, FormatSign, FormatTrait, YieldKind, token,
 };
 
 use crate::pp::Breaks::Inconsistent;
@@ -279,12 +279,11 @@ impl<'a> State<'a> {
         rhs: &ast::Expr,
         fixup: FixupContext,
     ) {
-        let assoc_op = AssocOp::from_ast_binop(op.node);
-        let binop_prec = assoc_op.precedence();
+        let binop_prec = op.node.precedence();
         let left_prec = lhs.precedence();
         let right_prec = rhs.precedence();
 
-        let (mut left_needs_paren, right_needs_paren) = match assoc_op.fixity() {
+        let (mut left_needs_paren, right_needs_paren) = match op.node.fixity() {
             Fixity::Left => (left_prec < binop_prec, right_prec <= binop_prec),
             Fixity::Right => (left_prec <= binop_prec, right_prec < binop_prec),
             Fixity::None => (left_prec <= binop_prec, right_prec <= binop_prec),
@@ -575,6 +574,14 @@ impl<'a> State<'a> {
                 );
                 self.word(".await");
             }
+            ast::ExprKind::Use(expr, _) => {
+                self.print_expr_cond_paren(
+                    expr,
+                    expr.precedence() < ExprPrecedence::Unambiguous,
+                    fixup,
+                );
+                self.word(".use");
+            }
             ast::ExprKind::Assign(lhs, rhs, _) => {
                 self.print_expr_cond_paren(
                     lhs,
@@ -754,7 +761,7 @@ impl<'a> State<'a> {
                 self.print_expr(e, FixupContext::default());
                 self.pclose();
             }
-            ast::ExprKind::Yield(e) => {
+            ast::ExprKind::Yield(YieldKind::Prefix(e)) => {
                 self.word("yield");
 
                 if let Some(expr) = e {
@@ -765,6 +772,14 @@ impl<'a> State<'a> {
                         fixup.subsequent_subexpression(),
                     );
                 }
+            }
+            ast::ExprKind::Yield(YieldKind::Postfix(e)) => {
+                self.print_expr_cond_paren(
+                    e,
+                    e.precedence() < ExprPrecedence::Unambiguous,
+                    fixup.leftmost_subexpression_with_dot(),
+                );
+                self.word(".yield");
             }
             ast::ExprKind::Try(e) => {
                 self.print_expr_cond_paren(
@@ -886,6 +901,7 @@ impl<'a> State<'a> {
     fn print_capture_clause(&mut self, capture_clause: ast::CaptureBy) {
         match capture_clause {
             ast::CaptureBy::Value { .. } => self.word_space("move"),
+            ast::CaptureBy::Use { .. } => self.word_space("use"),
             ast::CaptureBy::Ref => {}
         }
     }

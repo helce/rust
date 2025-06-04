@@ -20,11 +20,11 @@
 //!
 //! unsafe impl GlobalAlloc for MyAllocator {
 //!     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-//!         System.alloc(layout)
+//!         unsafe { System.alloc(layout) }
 //!     }
 //!
 //!     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-//!         System.dealloc(ptr, layout)
+//!         unsafe { System.dealloc(ptr, layout) }
 //!     }
 //! }
 //!
@@ -102,7 +102,7 @@ pub use alloc_crate::alloc::*;
 ///
 /// unsafe impl GlobalAlloc for Counter {
 ///     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-///         let ret = System.alloc(layout);
+///         let ret = unsafe { System.alloc(layout) };
 ///         if !ret.is_null() {
 ///             ALLOCATED.fetch_add(layout.size(), Relaxed);
 ///         }
@@ -110,7 +110,7 @@ pub use alloc_crate::alloc::*;
 ///     }
 ///
 ///     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-///         System.dealloc(ptr, layout);
+///         unsafe { System.dealloc(ptr, layout); }
 ///         ALLOCATED.fetch_sub(layout.size(), Relaxed);
 ///     }
 /// }
@@ -348,6 +348,7 @@ fn default_alloc_error_hook(layout: Layout) {
     unsafe extern "Rust" {
         // This symbol is emitted by rustc next to __rust_alloc_error_handler.
         // Its value depends on the -Zoom={panic,abort} compiler option.
+        #[cfg_attr(not(bootstrap), rustc_std_internal_symbol)]
         static __rust_alloc_error_handler_should_panic: u8;
     }
 

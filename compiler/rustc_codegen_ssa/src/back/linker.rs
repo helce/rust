@@ -111,24 +111,22 @@ pub(crate) fn get_linker<'a>(
     // PATH for the child.
     let mut new_path = sess.get_tools_search_paths(self_contained);
     let mut msvc_changed_path = false;
-    if sess.target.is_like_msvc {
-        if let Some(ref tool) = msvc_tool {
-            cmd.args(tool.args());
-            for (k, v) in tool.env() {
-                if k == "PATH" {
-                    new_path.extend(env::split_paths(v));
-                    msvc_changed_path = true;
-                } else {
-                    cmd.env(k, v);
-                }
+    if sess.target.is_like_msvc
+        && let Some(ref tool) = msvc_tool
+    {
+        cmd.args(tool.args());
+        for (k, v) in tool.env() {
+            if k == "PATH" {
+                new_path.extend(env::split_paths(v));
+                msvc_changed_path = true;
+            } else {
+                cmd.env(k, v);
             }
         }
     }
 
-    if !msvc_changed_path {
-        if let Some(path) = env::var_os("PATH") {
-            new_path.extend(env::split_paths(&path));
-        }
+    if !msvc_changed_path && let Some(path) = env::var_os("PATH") {
+        new_path.extend(env::split_paths(&path));
     }
     cmd.env("PATH", env::join_paths(new_path).unwrap());
 
@@ -153,6 +151,7 @@ pub(crate) fn get_linker<'a>(
             hinted_static: None,
             is_ld: cc == Cc::No,
             is_gnu: flavor.is_gnu(),
+            uses_lld: flavor.uses_lld(),
         }) as Box<dyn Linker>,
         LinkerFlavor::Msvc(..) => Box::new(MsvcLinker { cmd, sess }) as Box<dyn Linker>,
         LinkerFlavor::EmCc => Box::new(EmLinker { cmd, sess }) as Box<dyn Linker>,
@@ -361,6 +360,7 @@ struct GccLinker<'a> {
     // Link as ld
     is_ld: bool,
     is_gnu: bool,
+    uses_lld: bool,
 }
 
 impl<'a> GccLinker<'a> {
@@ -450,9 +450,10 @@ impl<'a> GccLinker<'a> {
                     // The output filename already contains `dll_suffix` so
                     // the resulting import library will have a name in the
                     // form of libfoo.dll.a
-                    let mut implib_name = OsString::from(&*self.sess.target.staticlib_prefix);
+                    let (prefix, suffix) = self.sess.staticlib_components(false);
+                    let mut implib_name = OsString::from(prefix);
                     implib_name.push(name);
-                    implib_name.push(&*self.sess.target.staticlib_suffix);
+                    implib_name.push(suffix);
                     let mut out_implib = OsString::from("--out-implib=");
                     out_implib.push(out_filename.with_file_name(implib_name));
                     self.link_arg(out_implib);
@@ -552,6 +553,7 @@ impl<'a> Linker for GccLinker<'a> {
                 self.link_args(&["--entry", "_initialize"]);
             }
         }
+
         // VxWorks compiler driver introduced `--static-crt` flag specifically for rustc,
         // it switches linking for libc and similar system libraries to static without using
         // any `#[link]` attributes in the `libc` crate, see #72782 for details.
@@ -566,6 +568,15 @@ impl<'a> Linker for GccLinker<'a> {
             )
         {
             self.cc_arg("--static-crt");
+        }
+
+        // avr-none doesn't have default ISA, users must specify which specific
+        // CPU (well, microcontroller) they are targetting using `-Ctarget-cpu`.
+        //
+        // Currently this makes sense only when using avr-gcc as a linker, since
+        // it brings a couple of hand-written important intrinsics from libgcc.
+        if self.sess.target.arch == "avr" && !self.uses_lld {
+            self.verbatim_arg(format!("-mmcu={}", self.target_cpu));
         }
     }
 
@@ -948,9 +959,9 @@ impl<'a> Linker for MsvcLinker<'a> {
         if let Some(path) = try_find_native_static_library(self.sess, name, verbatim) {
             self.link_staticlib_by_path(&path, whole_archive);
         } else {
-            let prefix = if whole_archive { "/WHOLEARCHIVE:" } else { "" };
-            let suffix = if verbatim { "" } else { ".lib" };
-            self.link_arg(format!("{prefix}{name}{suffix}"));
+            let opts = if whole_archive { "/WHOLEARCHIVE:" } else { "" };
+            let (prefix, suffix) = self.sess.staticlib_components(verbatim);
+            self.link_arg(format!("{opts}{prefix}{name}{suffix}"));
         }
     }
 
@@ -1643,9 +1654,9 @@ impl<'a> Linker for AixLinker<'a> {
         }
     }
 
-    fn link_dylib_by_name(&mut self, name: &str, _verbatim: bool, _as_needed: bool) {
+    fn link_dylib_by_name(&mut self, name: &str, verbatim: bool, _as_needed: bool) {
         self.hint_dynamic();
-        self.link_or_cc_arg(format!("-l{name}"));
+        self.link_or_cc_arg(if verbatim { String::from(name) } else { format!("-l{name}") });
     }
 
     fn link_dylib_by_path(&mut self, path: &Path, _as_needed: bool) {
@@ -1656,7 +1667,7 @@ impl<'a> Linker for AixLinker<'a> {
     fn link_staticlib_by_name(&mut self, name: &str, verbatim: bool, whole_archive: bool) {
         self.hint_static();
         if !whole_archive {
-            self.link_or_cc_arg(format!("-l{name}"));
+            self.link_or_cc_arg(if verbatim { String::from(name) } else { format!("-l{name}") });
         } else {
             let mut arg = OsString::from("-bkeepfile:");
             arg.push(find_native_static_library(name, verbatim, self.sess));
@@ -1772,10 +1783,14 @@ fn exported_symbols_for_non_proc_macro(tcx: TyCtxt<'_>, crate_type: CrateType) -
     let mut symbols = Vec::new();
     let export_threshold = symbol_export::crates_export_threshold(&[crate_type]);
     for_each_exported_symbols_include_dep(tcx, crate_type, |symbol, info, cnum| {
-        if info.level.is_below_threshold(export_threshold) {
+        // Do not export mangled symbols from cdylibs and don't attempt to export compiler-builtins
+        // from any cdylib. The latter doesn't work anyway as we use hidden visibility for
+        // compiler-builtins. Most linkers silently ignore it, but ld64 gives a warning.
+        if info.level.is_below_threshold(export_threshold) && !tcx.is_compiler_builtins(cnum) {
             symbols.push(symbol_export::exporting_symbol_name_for_instance_in_crate(
                 tcx, symbol, cnum,
             ));
+            symbol_export::extend_exported_symbols(&mut symbols, tcx, symbol, cnum);
         }
     });
 
@@ -1810,7 +1825,9 @@ pub(crate) fn linked_symbols(
 
     let export_threshold = symbol_export::crates_export_threshold(&[crate_type]);
     for_each_exported_symbols_include_dep(tcx, crate_type, |symbol, info, cnum| {
-        if info.level.is_below_threshold(export_threshold) || info.used {
+        if info.level.is_below_threshold(export_threshold) && !tcx.is_compiler_builtins(cnum)
+            || info.used
+        {
             symbols.push((
                 symbol_export::linking_symbol_name_for_instance_in_crate(tcx, symbol, cnum),
                 info.kind,
@@ -1926,14 +1943,14 @@ impl<'a> Linker for LlbcLinker<'a> {
     }
 
     fn optimize(&mut self) {
-        match self.sess.opts.optimize {
+        self.link_arg(match self.sess.opts.optimize {
             OptLevel::No => "-O0",
             OptLevel::Less => "-O1",
             OptLevel::More => "-O2",
             OptLevel::Aggressive => "-O3",
             OptLevel::Size => "-Os",
             OptLevel::SizeMin => "-Oz",
-        };
+        });
     }
 
     fn full_relro(&mut self) {}

@@ -10,11 +10,10 @@ use smallvec::SmallVec;
 #[cfg(test)]
 mod tests;
 
+use rustc_hashes::{Hash64, Hash128};
 pub use rustc_stable_hash::{
     FromStableHash, SipHasher128Hash as StableHasherHash, StableSipHasher128 as StableHasher,
 };
-
-pub use crate::hashes::{Hash64, Hash128};
 
 /// Something that implements `HashStable<CTX>` can be hashed in a way that is
 /// stable across multiple compilation sessions.
@@ -564,6 +563,8 @@ where
         self.0.hash_stable(hcx, hasher);
     }
 }
+
+impl_stable_traits_for_trivial_type!(::std::ffi::OsStr);
 
 impl_stable_traits_for_trivial_type!(::std::path::Path);
 impl_stable_traits_for_trivial_type!(::std::path::PathBuf);

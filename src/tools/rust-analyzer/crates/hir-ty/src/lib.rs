@@ -24,11 +24,13 @@ extern crate ra_ap_rustc_pattern_analysis as rustc_pattern_analysis;
 mod builder;
 mod chalk_db;
 mod chalk_ext;
+mod drop;
 mod infer;
 mod inhabitedness;
 mod interner;
 mod lower;
 mod mapping;
+mod target_feature;
 mod tls;
 mod utils;
 
@@ -68,19 +70,22 @@ use intern::{sym, Symbol};
 use la_arena::{Arena, Idx};
 use mir::{MirEvalError, VTableMap};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
-use span::Edition;
 use syntax::ast::{make, ConstArg};
 use traits::FnTrait;
 use triomphe::Arc;
 
 use crate::{
-    consteval::unknown_const, db::HirDatabase, display::HirDisplay, generics::Generics,
+    consteval::unknown_const,
+    db::HirDatabase,
+    display::{DisplayTarget, HirDisplay},
+    generics::Generics,
     infer::unify::InferenceTable,
 };
 
 pub use autoderef::autoderef;
 pub use builder::{ParamKind, TyBuilder};
 pub use chalk_ext::*;
+pub use drop::DropGlue;
 pub use infer::{
     cast::CastError,
     closure::{CaptureKind, CapturedItem},
@@ -99,10 +104,9 @@ pub use mapping::{
     to_foreign_def_id, to_placeholder_idx,
 };
 pub use method_resolution::check_orphan_rules;
+pub use target_feature::TargetFeatures;
 pub use traits::TraitEnvironment;
-pub use utils::{
-    all_super_traits, direct_super_traits, is_fn_unsafe_to_call, TargetFeatures, Unsafety,
-};
+pub use utils::{all_super_traits, direct_super_traits, is_fn_unsafe_to_call, Unsafety};
 pub use variance::Variance;
 
 pub use chalk_ir::{
@@ -1029,14 +1033,14 @@ where
     T: ?Sized + TypeVisitable<Interner>,
 {
     let mut collector = PlaceholderCollector { db, placeholders: FxHashSet::default() };
-    value.visit_with(&mut collector, DebruijnIndex::INNERMOST);
+    let _ = value.visit_with(&mut collector, DebruijnIndex::INNERMOST);
     collector.placeholders.into_iter().collect()
 }
 
 pub fn known_const_to_ast(
     konst: &Const,
     db: &dyn HirDatabase,
-    edition: Edition,
+    display_target: DisplayTarget,
 ) -> Option<ConstArg> {
     if let ConstValue::Concrete(c) = &konst.interned().value {
         match c.interned {
@@ -1047,7 +1051,7 @@ pub fn known_const_to_ast(
             _ => (),
         }
     }
-    Some(make::expr_const_value(konst.display(db, edition).to_string().as_str()))
+    Some(make::expr_const_value(konst.display(db, display_target).to_string().as_str()))
 }
 
 #[derive(Debug, Copy, Clone)]

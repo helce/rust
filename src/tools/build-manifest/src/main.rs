@@ -101,7 +101,6 @@ static TARGETS: &[&str] = &[
     "bpfeb-unknown-none",
     "bpfel-unknown-none",
     "i386-apple-ios",
-    "i586-pc-windows-msvc",
     "i586-unknown-linux-gnu",
     "i586-unknown-linux-musl",
     "i586-unknown-redox",
@@ -395,7 +394,6 @@ impl Builder {
         // NOTE: this profile is effectively deprecated; do not add new components to it.
         let mut complete = default;
         complete.extend([
-            Rls,
             RustAnalyzer,
             RustSrc,
             LlvmTools,
@@ -484,7 +482,6 @@ impl Builder {
                 // but might be marked as unavailable if they weren't built.
                 PkgType::Clippy
                 | PkgType::Miri
-                | PkgType::Rls
                 | PkgType::RustAnalyzer
                 | PkgType::Rustfmt
                 | PkgType::LlvmTools

@@ -1,7 +1,7 @@
 use std::iter;
 use std::ops::ControlFlow;
 
-use rustc_abi::{BackendRepr, ExternAbi, TagEncoding, VariantIdx, Variants, WrappingRange};
+use rustc_abi::{BackendRepr, TagEncoding, VariantIdx, Variants, WrappingRange};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::DiagMessage;
 use rustc_hir::intravisit::VisitorExt;
@@ -696,7 +696,7 @@ declare_lint! {
     /// ### Example
     ///
     /// ```rust
-    /// extern "C" {
+    /// unsafe extern "C" {
     ///     static STATIC: String;
     /// }
     /// ```
@@ -882,27 +882,13 @@ fn ty_is_known_nonnull<'tcx>(
                 || Option::unwrap_or_default(
                     try {
                         match **pat {
-                            ty::PatternKind::Range { start, end, include_end } => {
-                                match (start, end) {
-                                    (Some(start), None) => {
-                                        start.try_to_value()?.try_to_bits(tcx, typing_env)? > 0
-                                    }
-                                    (Some(start), Some(end)) => {
-                                        let start =
-                                            start.try_to_value()?.try_to_bits(tcx, typing_env)?;
-                                        let end =
-                                            end.try_to_value()?.try_to_bits(tcx, typing_env)?;
+                            ty::PatternKind::Range { start, end } => {
+                                let start = start.try_to_value()?.try_to_bits(tcx, typing_env)?;
+                                let end = end.try_to_value()?.try_to_bits(tcx, typing_env)?;
 
-                                        if include_end {
-                                            // This also works for negative numbers, as we just need
-                                            // to ensure we aren't wrapping over zero.
-                                            start > 0 && end >= start
-                                        } else {
-                                            start > 0 && end > start
-                                        }
-                                    }
-                                    _ => false,
-                                }
+                                // This also works for negative numbers, as we just need
+                                // to ensure we aren't wrapping over zero.
+                                start > 0 && end >= start
                             }
                         }
                     },
@@ -1207,9 +1193,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                             };
                         }
 
-                        let is_non_exhaustive =
-                            def.non_enum_variant().is_field_list_non_exhaustive();
-                        if is_non_exhaustive && !def.did().is_local() {
+                        if def.non_enum_variant().field_list_has_applicable_non_exhaustive() {
                             return FfiUnsafe {
                                 ty,
                                 reason: if def.is_struct() {
@@ -1262,14 +1246,12 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
                             };
                         }
 
-                        use improper_ctypes::{
-                            check_non_exhaustive_variant, non_local_and_non_exhaustive,
-                        };
+                        use improper_ctypes::check_non_exhaustive_variant;
 
-                        let non_local_def = non_local_and_non_exhaustive(def);
+                        let non_exhaustive = def.variant_list_has_applicable_non_exhaustive();
                         // Check the contained variants.
                         let ret = def.variants().iter().try_for_each(|variant| {
-                            check_non_exhaustive_variant(non_local_def, variant)
+                            check_non_exhaustive_variant(non_exhaustive, variant)
                                 .map_break(|reason| FfiUnsafe { ty, reason, help: None })?;
 
                             match self.check_variant_for_ffi(acc, ty, def, variant, args) {
@@ -1349,7 +1331,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
 
             ty::FnPtr(sig_tys, hdr) => {
                 let sig = sig_tys.with(hdr);
-                if self.is_internal_abi(sig.abi()) {
+                if sig.abi().is_rustic_abi() {
                     return FfiUnsafe {
                         ty,
                         reason: fluent::lint_improper_ctypes_fnptr_reason,
@@ -1436,7 +1418,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
 
     fn check_for_opaque_ty(&mut self, sp: Span, ty: Ty<'tcx>) -> bool {
         struct ProhibitOpaqueTypes;
-        impl<'tcx> ty::visit::TypeVisitor<TyCtxt<'tcx>> for ProhibitOpaqueTypes {
+        impl<'tcx> ty::TypeVisitor<TyCtxt<'tcx>> for ProhibitOpaqueTypes {
             type Result = ControlFlow<Ty<'tcx>>;
 
             fn visit_ty(&mut self, ty: Ty<'tcx>) -> Self::Result {
@@ -1552,13 +1534,6 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
         self.check_type_for_ffi_and_report_errors(span, ty, true, false);
     }
 
-    fn is_internal_abi(&self, abi: ExternAbi) -> bool {
-        matches!(
-            abi,
-            ExternAbi::Rust | ExternAbi::RustCall | ExternAbi::RustCold | ExternAbi::RustIntrinsic
-        )
-    }
-
     /// Find any fn-ptr types with external ABIs in `ty`.
     ///
     /// For example, `Option<extern "C" fn()>` returns `extern "C" fn()`
@@ -1567,17 +1542,16 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
         hir_ty: &hir::Ty<'tcx>,
         ty: Ty<'tcx>,
     ) -> Vec<(Ty<'tcx>, Span)> {
-        struct FnPtrFinder<'a, 'b, 'tcx> {
-            visitor: &'a ImproperCTypesVisitor<'b, 'tcx>,
+        struct FnPtrFinder<'tcx> {
             spans: Vec<Span>,
             tys: Vec<Ty<'tcx>>,
         }
 
-        impl<'a, 'b, 'tcx> hir::intravisit::Visitor<'_> for FnPtrFinder<'a, 'b, 'tcx> {
+        impl<'tcx> hir::intravisit::Visitor<'_> for FnPtrFinder<'tcx> {
             fn visit_ty(&mut self, ty: &'_ hir::Ty<'_, AmbigArg>) {
                 debug!(?ty);
                 if let hir::TyKind::BareFn(hir::BareFnTy { abi, .. }) = ty.kind
-                    && !self.visitor.is_internal_abi(*abi)
+                    && !abi.is_rustic_abi()
                 {
                     self.spans.push(ty.span);
                 }
@@ -1586,12 +1560,12 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
             }
         }
 
-        impl<'a, 'b, 'tcx> ty::visit::TypeVisitor<TyCtxt<'tcx>> for FnPtrFinder<'a, 'b, 'tcx> {
-            type Result = ControlFlow<Ty<'tcx>>;
+        impl<'tcx> ty::TypeVisitor<TyCtxt<'tcx>> for FnPtrFinder<'tcx> {
+            type Result = ();
 
             fn visit_ty(&mut self, ty: Ty<'tcx>) -> Self::Result {
                 if let ty::FnPtr(_, hdr) = ty.kind()
-                    && !self.visitor.is_internal_abi(hdr.abi)
+                    && !hdr.abi.is_rustic_abi()
                 {
                     self.tys.push(ty);
                 }
@@ -1600,7 +1574,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
             }
         }
 
-        let mut visitor = FnPtrFinder { visitor: self, spans: Vec::new(), tys: Vec::new() };
+        let mut visitor = FnPtrFinder { spans: Vec::new(), tys: Vec::new() };
         ty.visit_with(&mut visitor);
         visitor.visit_ty_unambig(hir_ty);
 
@@ -1611,17 +1585,17 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
 impl<'tcx> LateLintPass<'tcx> for ImproperCTypesDeclarations {
     fn check_foreign_item(&mut self, cx: &LateContext<'tcx>, it: &hir::ForeignItem<'tcx>) {
         let mut vis = ImproperCTypesVisitor { cx, mode: CItemKind::Declaration };
-        let abi = cx.tcx.hir().get_foreign_abi(it.hir_id());
+        let abi = cx.tcx.hir_get_foreign_abi(it.hir_id());
 
         match it.kind {
             hir::ForeignItemKind::Fn(sig, _, _) => {
-                if vis.is_internal_abi(abi) {
+                if abi.is_rustic_abi() {
                     vis.check_fn(it.owner_id.def_id, sig.decl)
                 } else {
                     vis.check_foreign_fn(it.owner_id.def_id, sig.decl);
                 }
             }
-            hir::ForeignItemKind::Static(ty, _, _) if !vis.is_internal_abi(abi) => {
+            hir::ForeignItemKind::Static(ty, _, _) if !abi.is_rustic_abi() => {
                 vis.check_foreign_static(it.owner_id, ty.span);
             }
             hir::ForeignItemKind::Static(..) | hir::ForeignItemKind::Type => (),
@@ -1686,7 +1660,7 @@ impl ImproperCTypesDefinitions {
             && cx.tcx.sess.target.os == "aix"
             && !adt_def.all_fields().next().is_none()
         {
-            let struct_variant_data = item.expect_struct().0;
+            let struct_variant_data = item.expect_struct().1;
             for (index, ..) in struct_variant_data.fields().iter().enumerate() {
                 // Struct fields (after the first field) are checked for the
                 // power alignment rule, as fields after the first are likely
@@ -1718,9 +1692,9 @@ impl ImproperCTypesDefinitions {
 impl<'tcx> LateLintPass<'tcx> for ImproperCTypesDefinitions {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx hir::Item<'tcx>) {
         match item.kind {
-            hir::ItemKind::Static(ty, ..)
-            | hir::ItemKind::Const(ty, ..)
-            | hir::ItemKind::TyAlias(ty, ..) => {
+            hir::ItemKind::Static(_, ty, ..)
+            | hir::ItemKind::Const(_, ty, ..)
+            | hir::ItemKind::TyAlias(_, ty, ..) => {
                 self.check_ty_maybe_containing_foreign_fnptr(
                     cx,
                     ty,
@@ -1740,7 +1714,7 @@ impl<'tcx> LateLintPass<'tcx> for ImproperCTypesDefinitions {
             hir::ItemKind::Impl(..)
             | hir::ItemKind::TraitAlias(..)
             | hir::ItemKind::Trait(..)
-            | hir::ItemKind::GlobalAsm(..)
+            | hir::ItemKind::GlobalAsm { .. }
             | hir::ItemKind::ForeignMod { .. }
             | hir::ItemKind::Mod(..)
             | hir::ItemKind::Macro(..)
@@ -1775,7 +1749,7 @@ impl<'tcx> LateLintPass<'tcx> for ImproperCTypesDefinitions {
         };
 
         let mut vis = ImproperCTypesVisitor { cx, mode: CItemKind::Definition };
-        if vis.is_internal_abi(abi) {
+        if abi.is_rustic_abi() {
             vis.check_fn(id, decl);
         } else {
             vis.check_foreign_fn(id, decl);
@@ -1787,11 +1761,11 @@ declare_lint_pass!(VariantSizeDifferences => [VARIANT_SIZE_DIFFERENCES]);
 
 impl<'tcx> LateLintPass<'tcx> for VariantSizeDifferences {
     fn check_item(&mut self, cx: &LateContext<'_>, it: &hir::Item<'_>) {
-        if let hir::ItemKind::Enum(ref enum_definition, _) = it.kind {
+        if let hir::ItemKind::Enum(_, ref enum_definition, _) = it.kind {
             let t = cx.tcx.type_of(it.owner_id).instantiate_identity();
             let ty = cx.tcx.erase_regions(t);
             let Ok(layout) = cx.layout_of(ty) else { return };
-            let Variants::Multiple { tag_encoding: TagEncoding::Direct, tag, ref variants, .. } =
+            let Variants::Multiple { tag_encoding: TagEncoding::Direct, tag, variants, .. } =
                 &layout.variants
             else {
                 return;

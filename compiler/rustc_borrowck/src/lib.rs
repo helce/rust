@@ -2,6 +2,7 @@
 
 // tidy-alphabetical-start
 #![allow(internal_features)]
+#![cfg_attr(doc, recursion_limit = "256")] // FIXME(nnethercote): will be removed by #124141
 #![doc(rust_logo)]
 #![feature(assert_matches)]
 #![feature(box_patterns)]
@@ -13,7 +14,6 @@
 #![feature(rustdoc_internals)]
 #![feature(stmt_expr_attributes)]
 #![feature(try_blocks)]
-#![warn(unreachable_pub)]
 // tidy-alphabetical-end
 
 use std::borrow::Cow;
@@ -33,11 +33,9 @@ use rustc_index::{IndexSlice, IndexVec};
 use rustc_infer::infer::{
     InferCtxt, NllRegionVariableOrigin, RegionVariableOrigin, TyCtxtInferExt,
 };
-use rustc_middle::mir::tcx::PlaceTy;
 use rustc_middle::mir::*;
 use rustc_middle::query::Providers;
-use rustc_middle::ty::fold::fold_regions;
-use rustc_middle::ty::{self, ParamEnv, RegionVid, TyCtxt, TypingMode};
+use rustc_middle::ty::{self, ParamEnv, RegionVid, TyCtxt, TypingMode, fold_regions};
 use rustc_middle::{bug, span_bug};
 use rustc_mir_dataflow::impls::{
     EverInitializedPlaces, MaybeInitializedPlaces, MaybeUninitializedPlaces,
@@ -75,6 +73,7 @@ mod def_use;
 mod diagnostics;
 mod member_constraints;
 mod nll;
+mod opaque_types;
 mod path_utils;
 mod place_ext;
 mod places_conflict;
@@ -188,13 +187,13 @@ fn do_mir_borrowck<'tcx>(
         .iterate_to_fixpoint(tcx, body, Some("borrowck"))
         .into_results_cursor(body);
 
-    let locals_are_invalidated_at_exit = tcx.hir().body_owner_kind(def).is_fn_or_closure();
+    let locals_are_invalidated_at_exit = tcx.hir_body_owner_kind(def).is_fn_or_closure();
     let borrow_set = BorrowSet::build(tcx, body, locals_are_invalidated_at_exit, &move_data);
 
     // Compute non-lexical lifetimes.
     let nll::NllOutput {
         regioncx,
-        opaque_type_values,
+        concrete_opaque_types,
         polonius_input,
         polonius_output,
         opt_closure_req,
@@ -224,7 +223,7 @@ fn do_mir_borrowck<'tcx>(
         body,
         &regioncx,
         &opt_closure_req,
-        &opaque_type_values,
+        &concrete_opaque_types,
         diags_buffer,
     );
 
@@ -359,7 +358,7 @@ fn do_mir_borrowck<'tcx>(
     let tainted_by_errors = mbcx.emit_errors();
 
     let result = BorrowCheckResult {
-        concrete_opaque_types: opaque_type_values,
+        concrete_opaque_types: concrete_opaque_types.into_inner(),
         closure_requirements: opt_closure_req,
         used_mut_upvars: mbcx.used_mut_upvars,
         tainted_by_errors,
@@ -649,7 +648,7 @@ impl<'a, 'tcx> ResultsVisitor<'a, 'tcx, Borrowck<'a, 'tcx>> for MirBorrowckCtxt<
             | StatementKind::StorageLive(..) => {}
             // This does not affect borrowck
             StatementKind::BackwardIncompatibleDropHint { place, reason: BackwardIncompatibleDropReason::Edition2024 } => {
-                self.check_backward_incompatible_drop(location, (**place, span), state);
+                self.check_backward_incompatible_drop(location, **place, state);
             }
             StatementKind::StorageDead(local) => {
                 self.access_place(
@@ -1175,7 +1174,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
     fn check_backward_incompatible_drop(
         &mut self,
         location: Location,
-        (place, place_span): (Place<'tcx>, Span),
+        place: Place<'tcx>,
         state: &BorrowckDomain,
     ) {
         let tcx = self.infcx.tcx;
@@ -1491,14 +1490,20 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
                         let stmt = &bbd.statements[loc.statement_index];
                         debug!("temporary assigned in: stmt={:?}", stmt);
 
-                        if let StatementKind::Assign(box (_, Rvalue::Ref(_, _, source))) = stmt.kind
-                        {
-                            propagate_closure_used_mut_place(self, source);
-                        } else {
-                            bug!(
-                                "closures should only capture user variables \
+                        match stmt.kind {
+                            StatementKind::Assign(box (
+                                _,
+                                Rvalue::Ref(_, _, source)
+                                | Rvalue::Use(Operand::Copy(source) | Operand::Move(source)),
+                            )) => {
+                                propagate_closure_used_mut_place(self, source);
+                            }
+                            _ => {
+                                bug!(
+                                    "closures should only capture user variables \
                                  or references to user variables"
-                            );
+                                );
+                            }
                         }
                     }
                     _ => propagate_closure_used_mut_place(self, place),
@@ -2475,19 +2480,15 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         let body = self.body;
         for local in body.mut_vars_and_args_iter().filter(|local| !self.used_mut.contains(local)) {
             let local_decl = &body.local_decls[local];
-            let lint_root = match &body.source_scopes[local_decl.source_info.scope].local_data {
-                ClearCrossCrate::Set(data) => data.lint_root,
-                _ => continue,
+            let ClearCrossCrate::Set(SourceScopeLocalData { lint_root, .. }) =
+                body.source_scopes[local_decl.source_info.scope].local_data
+            else {
+                continue;
             };
 
             // Skip over locals that begin with an underscore or have no name
-            match self.local_names[local] {
-                Some(name) => {
-                    if name.as_str().starts_with('_') {
-                        continue;
-                    }
-                }
-                None => continue,
+            if self.local_names[local].is_none_or(|name| name.as_str().starts_with('_')) {
+                continue;
             }
 
             let span = local_decl.source_info.span;

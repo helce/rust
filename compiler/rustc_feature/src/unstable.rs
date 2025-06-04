@@ -1,6 +1,7 @@
 //! List of the unstable feature gates.
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rustc_data_structures::fx::FxHashSet;
 use rustc_span::{Span, Symbol, sym};
@@ -214,8 +215,6 @@ declare_features! (
     (internal, intrinsics, "1.0.0", None),
     /// Allows using `#[lang = ".."]` attribute for linking items to special compiler logic.
     (internal, lang_items, "1.0.0", None),
-    /// Changes `impl Trait` to capture all lifetimes in scope.
-    (unstable, lifetime_capture_rules_2024, "1.76.0", None),
     /// Allows `#[link(..., cfg(..))]`; perma-unstable per #37406
     (internal, link_cfg, "1.14.0", None),
     /// Allows using `?Trait` trait bounds in more contexts.
@@ -227,7 +226,7 @@ declare_features! (
     /// Allows using `#[omit_gdb_pretty_printer_section]`.
     (internal, omit_gdb_pretty_printer_section, "1.5.0", None),
     /// Set the maximum pattern complexity allowed (not limited by default).
-    (internal, pattern_complexity, "1.78.0", None),
+    (internal, pattern_complexity_limit, "1.78.0", None),
     /// Allows using pattern types.
     (internal, pattern_types, "1.79.0", Some(123646)),
     /// Allows using `#[prelude_import]` on glob `use` items.
@@ -241,7 +240,7 @@ declare_features! (
     /// Added for testing unstable lints; perma-unstable.
     (internal, test_unstable_lint, "1.60.0", None),
     /// Helps with formatting for `group_imports = "StdExternalCrate"`.
-    (unstable, unqualified_local_imports, "1.83.0", None),
+    (unstable, unqualified_local_imports, "1.83.0", Some(138299)),
     /// Use for stable + negative coherence and strict coherence depending on trait's
     /// rustc_strict_coherence value.
     (unstable, with_negative_coherence, "1.60.0", None),
@@ -272,14 +271,6 @@ declare_features! (
     (unstable, doc_notable_trait, "1.52.0", Some(45040)),
     /// Allows using the `may_dangle` attribute (RFC 1327).
     (unstable, dropck_eyepatch, "1.10.0", Some(34761)),
-    /// Allows making `dyn Trait` well-formed even if `Trait` is not dyn compatible[^1].
-    /// In that case, `dyn Trait: Trait` does not hold. Moreover, coercions and
-    /// casts in safe Rust to `dyn Trait` for such a `Trait` is also forbidden.
-    ///
-    /// Renamed from `object_safe_for_dispatch`.
-    ///
-    /// [^1]: Formerly known as "object safe".
-    (unstable, dyn_compatible_for_dispatch, "1.83.0", Some(43561)),
     /// Allows using the `#[fundamental]` attribute.
     (unstable, fundamental, "1.0.0", Some(29635)),
     /// Allows using `#[link_name="llvm.*"]`.
@@ -381,8 +372,6 @@ declare_features! (
     (unstable, asm_experimental_arch, "1.58.0", Some(93335)),
     /// Enables experimental register support in inline assembly.
     (unstable, asm_experimental_reg, "1.85.0", Some(133416)),
-    /// Allows using `label` operands in inline assembly.
-    (unstable, asm_goto, "1.78.0", Some(119364)),
     /// Allows using `label` operands in inline assembly together with output operands.
     (unstable, asm_goto_with_outputs, "1.85.0", Some(119364)),
     /// Allows the `may_unwind` option in inline assembly.
@@ -483,6 +472,8 @@ declare_features! (
     (unstable, doc_masked, "1.21.0", Some(44027)),
     /// Allows `dyn* Trait` objects.
     (incomplete, dyn_star, "1.65.0", Some(102425)),
+    /// Allows the .use postfix syntax `x.use` and use closures `use |x| { ... }`
+    (incomplete, ergonomic_clones, "1.87.0", Some(132290)),
     /// Allows exhaustive pattern matching on types that contain uninhabited types.
     (unstable, exhaustive_patterns, "1.13.0", Some(51085)),
     /// Allows explicit tail calls via `become` expression.
@@ -518,6 +509,8 @@ declare_features! (
     (incomplete, generic_const_exprs, "1.56.0", Some(76560)),
     /// Allows generic parameters and where-clauses on free & associated const items.
     (incomplete, generic_const_items, "1.73.0", Some(113521)),
+    /// Allows the type of const generics to depend on generic parameters
+    (incomplete, generic_const_parameter_types, "1.87.0", Some(137626)),
     /// Allows any generic constants being used as pattern type range ends
     (incomplete, generic_pattern_types, "1.86.0", Some(136574)),
     /// Allows registering static items globally, possibly across crates, to iterate over at runtime.
@@ -573,6 +566,8 @@ declare_features! (
     (incomplete, mut_ref, "1.79.0", Some(123076)),
     /// Allows using `#[naked]` on functions.
     (unstable, naked_functions, "1.9.0", Some(90957)),
+    /// Allows using `#[target_feature(enable = "...")]` on `#[naked]` on functions.
+    (unstable, naked_functions_target_feature, "1.86.0", Some(138568)),
     /// Allows specifying the as-needed link modifier
     (unstable, native_link_modifiers_as_needed, "1.53.0", Some(81490)),
     /// Allow negative trait implementations.
@@ -605,10 +600,10 @@ declare_features! (
     (incomplete, pin_ergonomics, "1.83.0", Some(130494)),
     /// Allows postfix match `expr.match { ... }`
     (unstable, postfix_match, "1.79.0", Some(121618)),
-    /// Allows `use<..>` precise capturign on impl Trait in traits.
-    (unstable, precise_capturing_in_traits, "1.83.0", Some(130044)),
     /// Allows macro attributes on expressions, statements and non-inline modules.
     (unstable, proc_macro_hygiene, "1.30.0", Some(54727)),
+    /// Allows the use of raw-dylibs on ELF platforms
+    (incomplete, raw_dylib_elf, "1.87.0", Some(135694)),
     /// Makes `&` and `&mut` patterns eat only one layer of references in Rust 2024.
     (incomplete, ref_pat_eat_one_layer_2024, "1.79.0", Some(123076)),
     /// Makes `&` and `&mut` patterns eat only one layer of references in Rust 2024—structural variant
@@ -665,16 +660,17 @@ declare_features! (
     (internal, unsized_fn_params, "1.49.0", Some(48055)),
     /// Allows unsized rvalues at arguments and parameters.
     (incomplete, unsized_locals, "1.30.0", Some(48055)),
-    /// Allows unsized tuple coercion.
-    (unstable, unsized_tuple_coercion, "1.20.0", Some(42877)),
     /// Allows using the `#[used(linker)]` (or `#[used(compiler)]`) attribute.
     (unstable, used_with_arg, "1.60.0", Some(93798)),
+    /// Allows use of attributes in `where` clauses.
+    (unstable, where_clause_attrs, "1.87.0", Some(115590)),
     /// Allows use of x86 `AMX` target-feature attributes and intrinsics
     (unstable, x86_amx_intrinsics, "1.81.0", Some(126622)),
     /// Allows use of the `xop` target-feature
     (unstable, xop_target_feature, "1.81.0", Some(127208)),
     /// Allows `do yeet` expressions
     (unstable, yeet_expr, "1.62.0", Some(96373)),
+    (unstable, yield_expr, "1.87.0", Some(43122)),
     // !!!!    !!!!    !!!!    !!!!   !!!!    !!!!    !!!!    !!!!    !!!!    !!!!    !!!!
     // Features are listed in alphabetical order. Tidy will fail if you don't keep it this way.
     // !!!!    !!!!    !!!!    !!!!   !!!!    !!!!    !!!!    !!!!    !!!!    !!!!    !!!!
@@ -691,11 +687,13 @@ impl Features {
     ) -> Result<(), Box<dyn std::error::Error>> {
         #[derive(serde::Serialize)]
         struct LibFeature {
+            timestamp: u128,
             symbol: String,
         }
 
         #[derive(serde::Serialize)]
         struct LangFeature {
+            timestamp: u128,
             symbol: String,
             since: Option<String>,
         }
@@ -709,10 +707,20 @@ impl Features {
         let metrics_file = std::fs::File::create(metrics_path)?;
         let metrics_file = std::io::BufWriter::new(metrics_file);
 
+        let now = || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should always be greater than the unix epoch")
+                .as_nanos()
+        };
+
         let lib_features = self
             .enabled_lib_features
             .iter()
-            .map(|EnabledLibFeature { gate_name, .. }| LibFeature { symbol: gate_name.to_string() })
+            .map(|EnabledLibFeature { gate_name, .. }| LibFeature {
+                symbol: gate_name.to_string(),
+                timestamp: now(),
+            })
             .collect();
 
         let lang_features = self
@@ -721,6 +729,7 @@ impl Features {
             .map(|EnabledLangFeature { gate_name, stable_since, .. }| LangFeature {
                 symbol: gate_name.to_string(),
                 since: stable_since.map(|since| since.to_string()),
+                timestamp: now(),
             })
             .collect();
 

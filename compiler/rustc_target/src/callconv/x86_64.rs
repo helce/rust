@@ -51,14 +51,12 @@ where
         }
 
         let mut c = match layout.backend_repr {
-            BackendRepr::Uninhabited => return Ok(()),
-
             BackendRepr::Scalar(scalar) => match scalar.primitive() {
                 Primitive::Int(..) | Primitive::Pointer(_) => Class::Int,
                 Primitive::Float(_) => Class::Sse,
             },
 
-            BackendRepr::Vector { .. } => Class::Sse,
+            BackendRepr::SimdVector { .. } => Class::Sse,
 
             BackendRepr::ScalarPair(..) | BackendRepr::Memory { .. } => {
                 for i in 0..layout.fields.count() {

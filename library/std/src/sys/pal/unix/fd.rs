@@ -47,6 +47,7 @@ const READ_LIMIT: usize = if cfg!(target_vendor = "apple") {
     target_os = "netbsd",
     target_os = "openbsd",
     target_vendor = "apple",
+    target_os = "cygwin",
 ))]
 const fn max_iov() -> usize {
     libc::IOV_MAX as usize
@@ -74,6 +75,7 @@ const fn max_iov() -> usize {
     target_os = "horizon",
     target_os = "vita",
     target_vendor = "apple",
+    target_os = "cygwin",
 )))]
 const fn max_iov() -> usize {
     16 // The minimum value required by POSIX.
@@ -251,6 +253,9 @@ impl FileDesc {
     }
 
     #[cfg(all(target_os = "android", target_pointer_width = "32"))]
+    // FIXME(#115199): Rust currently omits weak function definitions
+    // and its metadata from LLVM IR.
+    #[no_sanitize(cfi)]
     pub fn read_vectored_at(&self, bufs: &mut [IoSliceMut<'_>], offset: u64) -> io::Result<usize> {
         super::weak::weak!(fn preadv64(libc::c_int, *const libc::iovec, libc::c_int, off64_t) -> isize);
 
@@ -500,6 +505,7 @@ impl FileDesc {
         target_os = "fuchsia",
         target_os = "l4re",
         target_os = "linux",
+        target_os = "cygwin",
         target_os = "haiku",
         target_os = "redox",
         target_os = "vxworks",
@@ -522,6 +528,7 @@ impl FileDesc {
         target_os = "fuchsia",
         target_os = "l4re",
         target_os = "linux",
+        target_os = "cygwin",
         target_os = "haiku",
         target_os = "redox",
         target_os = "vxworks",

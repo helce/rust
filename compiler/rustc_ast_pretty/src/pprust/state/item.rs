@@ -37,18 +37,23 @@ impl<'a> State<'a> {
             ast::ForeignItemKind::Fn(func) => {
                 self.print_fn_full(ident, vis, attrs, &*func);
             }
-            ast::ForeignItemKind::Static(box ast::StaticItem { ty, mutability, expr, safety }) => {
-                self.print_item_const(
-                    ident,
-                    Some(*mutability),
-                    &ast::Generics::default(),
-                    ty,
-                    expr.as_deref(),
-                    vis,
-                    *safety,
-                    ast::Defaultness::Final,
-                )
-            }
+            ast::ForeignItemKind::Static(box ast::StaticItem {
+                ty,
+                mutability,
+                expr,
+                safety,
+                define_opaque,
+            }) => self.print_item_const(
+                ident,
+                Some(*mutability),
+                &ast::Generics::default(),
+                ty,
+                expr.as_deref(),
+                vis,
+                *safety,
+                ast::Defaultness::Final,
+                define_opaque.as_deref(),
+            ),
             ast::ForeignItemKind::TyAlias(box ast::TyAlias {
                 defaultness,
                 generics,
@@ -86,7 +91,9 @@ impl<'a> State<'a> {
         vis: &ast::Visibility,
         safety: ast::Safety,
         defaultness: ast::Defaultness,
+        define_opaque: Option<&[(ast::NodeId, ast::Path)]>,
     ) {
+        self.print_define_opaques(define_opaque);
         self.head("");
         self.print_visibility(vis);
         self.print_safety(safety);
@@ -174,7 +181,13 @@ impl<'a> State<'a> {
                 self.print_use_tree(tree);
                 self.word(";");
             }
-            ast::ItemKind::Static(box StaticItem { ty, safety, mutability: mutbl, expr: body }) => {
+            ast::ItemKind::Static(box StaticItem {
+                ty,
+                safety,
+                mutability: mutbl,
+                expr: body,
+                define_opaque,
+            }) => {
                 self.print_safety(*safety);
                 self.print_item_const(
                     item.ident,
@@ -185,9 +198,16 @@ impl<'a> State<'a> {
                     &item.vis,
                     ast::Safety::Default,
                     ast::Defaultness::Final,
+                    define_opaque.as_deref(),
                 );
             }
-            ast::ItemKind::Const(box ast::ConstItem { defaultness, generics, ty, expr }) => {
+            ast::ItemKind::Const(box ast::ConstItem {
+                defaultness,
+                generics,
+                ty,
+                expr,
+                define_opaque,
+            }) => {
                 self.print_item_const(
                     item.ident,
                     None,
@@ -197,6 +217,7 @@ impl<'a> State<'a> {
                     &item.vis,
                     ast::Safety::Default,
                     *defaultness,
+                    define_opaque.as_deref(),
                 );
             }
             ast::ItemKind::Fn(func) => {
@@ -537,7 +558,13 @@ impl<'a> State<'a> {
             ast::AssocItemKind::Fn(func) => {
                 self.print_fn_full(ident, vis, attrs, &*func);
             }
-            ast::AssocItemKind::Const(box ast::ConstItem { defaultness, generics, ty, expr }) => {
+            ast::AssocItemKind::Const(box ast::ConstItem {
+                defaultness,
+                generics,
+                ty,
+                expr,
+                define_opaque,
+            }) => {
                 self.print_item_const(
                     ident,
                     None,
@@ -547,6 +574,7 @@ impl<'a> State<'a> {
                     vis,
                     ast::Safety::Default,
                     *defaultness,
+                    define_opaque.as_deref(),
                 );
             }
             ast::AssocItemKind::Type(box ast::TyAlias {
@@ -650,7 +678,10 @@ impl<'a> State<'a> {
         attrs: &[ast::Attribute],
         func: &ast::Fn,
     ) {
-        let ast::Fn { defaultness, generics, sig, contract, body } = func;
+        let ast::Fn { defaultness, generics, sig, contract, body, define_opaque } = func;
+
+        self.print_define_opaques(define_opaque.as_deref());
+
         if body.is_some() {
             self.head("");
         }
@@ -667,6 +698,21 @@ impl<'a> State<'a> {
         } else {
             self.word(";");
         }
+    }
+
+    fn print_define_opaques(&mut self, define_opaque: Option<&[(ast::NodeId, ast::Path)]>) {
+        if let Some(define_opaque) = define_opaque {
+            self.word("#[define_opaque(");
+            for (i, (_, path)) in define_opaque.iter().enumerate() {
+                if i != 0 {
+                    self.word_space(",");
+                }
+
+                self.print_path(path, false, 0);
+            }
+            self.word(")]");
+        }
+        self.hardbreak_if_not_bol();
     }
 
     fn print_contract(&mut self, contract: &ast::FnContract) {
@@ -698,7 +744,7 @@ impl<'a> State<'a> {
         }
         self.print_generic_params(&generics.params);
         self.print_fn_params_and_ret(decl, false);
-        self.print_where_clause(&generics.where_clause)
+        self.print_where_clause(&generics.where_clause);
     }
 
     pub(crate) fn print_fn_params_and_ret(&mut self, decl: &ast::FnDecl, is_closure: bool) {
@@ -735,7 +781,8 @@ impl<'a> State<'a> {
     }
 
     pub fn print_where_predicate(&mut self, predicate: &ast::WherePredicate) {
-        let ast::WherePredicate { kind, id: _, span: _ } = predicate;
+        let ast::WherePredicate { attrs, kind, id: _, span: _, is_placeholder: _ } = predicate;
+        self.print_outer_attributes(attrs);
         match kind {
             ast::WherePredicateKind::BoundPredicate(where_bound_predicate) => {
                 self.print_where_bound_predicate(where_bound_predicate);

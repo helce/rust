@@ -944,6 +944,11 @@ pub(crate) struct TyQualified {
 pub(crate) struct TypeIrInherentUsage;
 
 #[derive(LintDiagnostic)]
+#[diag(lint_type_ir_trait_usage)]
+#[note]
+pub(crate) struct TypeIrTraitUsage;
+
+#[derive(LintDiagnostic)]
 #[diag(lint_non_glob_import_type_ir_inherent)]
 pub(crate) struct NonGlobImportTypeIrInherent {
     #[suggestion(code = "{snippet}", applicability = "maybe-incorrect")]
@@ -3108,7 +3113,10 @@ pub(crate) struct UnsafeAttrOutsideUnsafeSuggestion {
 #[diag(lint_out_of_scope_macro_calls)]
 #[help]
 pub(crate) struct OutOfScopeMacroCalls {
+    #[label]
+    pub span: Span,
     pub path: String,
+    pub location: String,
 }
 
 #[derive(LintDiagnostic)]

@@ -99,6 +99,13 @@ impl<'a> PostExpansionVisitor<'a> {
                 }
                 visit::walk_ty(self, ty);
             }
+
+            fn visit_anon_const(&mut self, _: &ast::AnonConst) -> Self::Result {
+                // We don't walk the anon const because it crosses a conceptual boundary: We're no
+                // longer "inside" the original type.
+                // Brittle: We assume that the callers of `check_impl_trait` will later recurse into
+                // the items found in the AnonConst to look for nested TyAliases.
+            }
         }
         ImplTraitVisitor { vis: self, in_associated_ty }.visit_ty(ty);
     }
@@ -176,18 +183,6 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
                         search_unbox => rustdoc_internals
                     }
                 );
-            }
-        }
-
-        // Emit errors for non-staged-api crates.
-        if !self.features.staged_api() {
-            if attr.has_name(sym::unstable)
-                || attr.has_name(sym::stable)
-                || attr.has_name(sym::rustc_const_unstable)
-                || attr.has_name(sym::rustc_const_stable)
-                || attr.has_name(sym::rustc_default_body_unstable)
-            {
-                self.sess.dcx().emit_err(errors::StabilityOutsideStd { span: attr.span });
             }
         }
     }
@@ -501,6 +496,7 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
     gate_all!(dyn_star, "`dyn*` trait objects are experimental");
     gate_all!(const_closures, "const closures are experimental");
     gate_all!(builtin_syntax, "`builtin #` syntax is unstable");
+    gate_all!(ergonomic_clones, "ergonomic clones are experimental");
     gate_all!(explicit_tail_calls, "`become` expression is experimental");
     gate_all!(generic_const_items, "generic const items are experimental");
     gate_all!(guard_patterns, "guard patterns are experimental", "consider using match arm guards");
@@ -515,6 +511,7 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
     gate_all!(unsafe_binders, "unsafe binder types are experimental");
     gate_all!(contracts, "contracts are incomplete");
     gate_all!(contracts_internals, "contract internal machinery is for internal use only");
+    gate_all!(where_clause_attrs, "attributes in `where` clause are unstable");
 
     if !visitor.features.never_patterns() {
         if let Some(spans) = spans.get(&sym::never_patterns) {

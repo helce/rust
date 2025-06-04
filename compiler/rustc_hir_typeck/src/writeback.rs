@@ -11,9 +11,9 @@ use rustc_hir::{self as hir, AmbigArg, HirId};
 use rustc_middle::span_bug;
 use rustc_middle::traits::ObligationCause;
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, PointerCoercion};
-use rustc_middle::ty::fold::{TypeFoldable, TypeFolder, fold_regions};
-use rustc_middle::ty::visit::TypeVisitableExt;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeSuperFoldable};
+use rustc_middle::ty::{
+    self, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable, TypeVisitableExt, fold_regions,
+};
 use rustc_span::{Span, sym};
 use rustc_trait_selection::error_reporting::infer::need_type_info::TypeAnnotationNeeded;
 use rustc_trait_selection::solve;
@@ -38,7 +38,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         body: &'tcx hir::Body<'tcx>,
     ) -> &'tcx ty::TypeckResults<'tcx> {
-        let item_def_id = self.tcx.hir().body_owner_def_id(body.id());
+        let item_def_id = self.tcx.hir_body_owner_def_id(body.id());
 
         // This attribute causes us to dump some writeback information
         // in the form of errors, which is used for unit tests.
@@ -48,13 +48,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         for param in body.params {
             wbcx.visit_node_id(param.pat.span, param.hir_id);
         }
-        // Type only exists for constants and statics, not functions.
-        match self.tcx.hir().body_owner_kind(item_def_id) {
-            hir::BodyOwnerKind::Const { .. } | hir::BodyOwnerKind::Static(_) => {
+        match self.tcx.hir_body_owner_kind(item_def_id) {
+            // Visit the type of a const or static, which is used during THIR building.
+            hir::BodyOwnerKind::Const { .. }
+            | hir::BodyOwnerKind::Static(_)
+            | hir::BodyOwnerKind::GlobalAsm => {
                 let item_hir_id = self.tcx.local_def_id_to_hir_id(item_def_id);
                 wbcx.visit_node_id(body.value.span, item_hir_id);
             }
-            hir::BodyOwnerKind::Closure | hir::BodyOwnerKind::Fn => (),
+            // For closures and consts, we already plan to visit liberated signatures.
+            hir::BodyOwnerKind::Closure | hir::BodyOwnerKind::Fn => {}
         }
         wbcx.visit_body(body);
         wbcx.visit_min_capture_map();
@@ -245,13 +248,6 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
             }
         }
     }
-
-    fn visit_const_block(&mut self, span: Span, anon_const: &hir::ConstBlock) {
-        self.visit_node_id(span, anon_const.hir_id);
-
-        let body = self.tcx().hir().body(anon_const.body);
-        self.visit_body(body);
-    }
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -266,7 +262,7 @@ impl<'cx, 'tcx> Visitor<'tcx> for WritebackCx<'cx, 'tcx> {
     fn visit_expr(&mut self, e: &'tcx hir::Expr<'tcx>) {
         match e.kind {
             hir::ExprKind::Closure(&hir::Closure { body, .. }) => {
-                let body = self.fcx.tcx.hir().body(body);
+                let body = self.fcx.tcx.hir_body(body);
                 for param in body.params {
                     self.visit_node_id(e.span, param.hir_id);
                 }
@@ -281,9 +277,6 @@ impl<'cx, 'tcx> Visitor<'tcx> for WritebackCx<'cx, 'tcx> {
             hir::ExprKind::Field(..) | hir::ExprKind::OffsetOf(..) => {
                 self.visit_field_id(e.hir_id);
             }
-            hir::ExprKind::ConstBlock(ref anon_const) => {
-                self.visit_const_block(e.span, anon_const);
-            }
             _ => {}
         }
 
@@ -292,6 +285,14 @@ impl<'cx, 'tcx> Visitor<'tcx> for WritebackCx<'cx, 'tcx> {
 
         self.fix_scalar_builtin_expr(e);
         self.fix_index_builtin_expr(e);
+    }
+
+    fn visit_inline_const(&mut self, anon_const: &hir::ConstBlock) {
+        let span = self.tcx().def_span(anon_const.def_id);
+        self.visit_node_id(span, anon_const.hir_id);
+
+        let body = self.tcx().hir_body(anon_const.body);
+        self.visit_body(body);
     }
 
     fn visit_generic_param(&mut self, p: &'tcx hir::GenericParam<'tcx>) {
@@ -316,11 +317,8 @@ impl<'cx, 'tcx> Visitor<'tcx> for WritebackCx<'cx, 'tcx> {
         match p.kind {
             hir::PatKind::Binding(..) => {
                 let typeck_results = self.fcx.typeck_results.borrow();
-                if let Some(bm) =
-                    typeck_results.extract_binding_mode(self.tcx().sess, p.hir_id, p.span)
-                {
-                    self.typeck_results.pat_binding_modes_mut().insert(p.hir_id, bm);
-                }
+                let bm = typeck_results.extract_binding_mode(self.tcx().sess, p.hir_id, p.span);
+                self.typeck_results.pat_binding_modes_mut().insert(p.hir_id, bm);
             }
             hir::PatKind::Struct(_, fields, _) => {
                 for field in fields {
@@ -340,9 +338,6 @@ impl<'cx, 'tcx> Visitor<'tcx> for WritebackCx<'cx, 'tcx> {
 
     fn visit_pat_expr(&mut self, expr: &'tcx hir::PatExpr<'tcx>) {
         self.visit_node_id(expr.span, expr.hir_id);
-        if let hir::PatExprKind::ConstBlock(c) = &expr.kind {
-            self.visit_const_block(expr.span, c);
-        }
         intravisit::walk_pat_expr(self, expr);
     }
 
@@ -553,7 +548,8 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
         let fcx_typeck_results = self.fcx.typeck_results.borrow();
         assert_eq!(fcx_typeck_results.hir_owner, self.typeck_results.hir_owner);
         for (predicate, cause) in &fcx_typeck_results.coroutine_stalled_predicates {
-            let (predicate, cause) = self.resolve((*predicate, cause.clone()), &cause.span);
+            let (predicate, cause) =
+                self.resolve_coroutine_predicate((*predicate, cause.clone()), &cause.span);
             self.typeck_results.coroutine_stalled_predicates.insert((predicate, cause));
         }
     }
@@ -735,7 +731,25 @@ impl<'cx, 'tcx> WritebackCx<'cx, 'tcx> {
         T: TypeFoldable<TyCtxt<'tcx>>,
     {
         let value = self.fcx.resolve_vars_if_possible(value);
-        let value = value.fold_with(&mut Resolver::new(self.fcx, span, self.body));
+        let value = value.fold_with(&mut Resolver::new(self.fcx, span, self.body, true));
+        assert!(!value.has_infer());
+
+        // We may have introduced e.g. `ty::Error`, if inference failed, make sure
+        // to mark the `TypeckResults` as tainted in that case, so that downstream
+        // users of the typeck results don't produce extra errors, or worse, ICEs.
+        if let Err(guar) = value.error_reported() {
+            self.typeck_results.tainted_by_errors = Some(guar);
+        }
+
+        value
+    }
+
+    fn resolve_coroutine_predicate<T>(&mut self, value: T, span: &dyn Locatable) -> T
+    where
+        T: TypeFoldable<TyCtxt<'tcx>>,
+    {
+        let value = self.fcx.resolve_vars_if_possible(value);
+        let value = value.fold_with(&mut Resolver::new(self.fcx, span, self.body, false));
         assert!(!value.has_infer());
 
         // We may have introduced e.g. `ty::Error`, if inference failed, make sure
@@ -779,8 +793,9 @@ impl<'cx, 'tcx> Resolver<'cx, 'tcx> {
         fcx: &'cx FnCtxt<'cx, 'tcx>,
         span: &'cx dyn Locatable,
         body: &'tcx hir::Body<'tcx>,
+        should_normalize: bool,
     ) -> Resolver<'cx, 'tcx> {
-        Resolver { fcx, span, body, should_normalize: fcx.next_trait_solver() }
+        Resolver { fcx, span, body, should_normalize }
     }
 
     fn report_error(&self, p: impl Into<ty::GenericArg<'tcx>>) -> ErrorGuaranteed {
@@ -790,7 +805,7 @@ impl<'cx, 'tcx> Resolver<'cx, 'tcx> {
             self.fcx
                 .err_ctxt()
                 .emit_inference_failure_err(
-                    self.fcx.tcx.hir().body_owner_def_id(self.body.id()),
+                    self.fcx.tcx.hir_body_owner_def_id(self.body.id()),
                     self.span.to_span(self.fcx.tcx),
                     p.into(),
                     TypeAnnotationNeeded::E0282,
@@ -810,11 +825,10 @@ impl<'cx, 'tcx> Resolver<'cx, 'tcx> {
         T: Into<ty::GenericArg<'tcx>> + TypeSuperFoldable<TyCtxt<'tcx>> + Copy,
     {
         let tcx = self.fcx.tcx;
-        // We must deeply normalize in the new solver, since later lints
-        // expect that types that show up in the typeck are fully
-        // normalized.
-        let mut value = if self.should_normalize {
-            let body_id = tcx.hir().body_owner_def_id(self.body.id());
+        // We must deeply normalize in the new solver, since later lints expect
+        // that types that show up in the typeck are fully normalized.
+        let mut value = if self.should_normalize && self.fcx.next_trait_solver() {
+            let body_id = tcx.hir_body_owner_def_id(self.body.id());
             let cause = ObligationCause::misc(self.span.to_span(tcx), body_id);
             let at = self.fcx.at(&cause, self.fcx.param_env);
             let universes = vec![None; outer_exclusive_binder(value).as_usize()];
@@ -869,20 +883,15 @@ impl<'cx, 'tcx> TypeFolder<TyCtxt<'tcx>> for Resolver<'cx, 'tcx> {
     }
 
     fn fold_const(&mut self, ct: ty::Const<'tcx>) -> ty::Const<'tcx> {
-        self.handle_term(ct, ty::Const::outer_exclusive_binder, |tcx, guar| {
-            ty::Const::new_error(tcx, guar)
-        })
-        .super_fold_with(self)
+        self.handle_term(ct, ty::Const::outer_exclusive_binder, ty::Const::new_error)
     }
 
     fn fold_predicate(&mut self, predicate: ty::Predicate<'tcx>) -> ty::Predicate<'tcx> {
-        // Do not normalize predicates in the new solver. The new solver is
-        // supposed to handle unnormalized predicates and incorrectly normalizing
-        // them can be unsound, e.g. for `WellFormed` predicates.
-        let prev = mem::replace(&mut self.should_normalize, false);
-        let predicate = predicate.super_fold_with(self);
-        self.should_normalize = prev;
-        predicate
+        assert!(
+            !self.should_normalize,
+            "normalizing predicates in writeback is not generally sound"
+        );
+        predicate.super_fold_with(self)
     }
 }
 

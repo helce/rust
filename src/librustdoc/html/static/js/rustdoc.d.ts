@@ -4,9 +4,15 @@
 
 /* eslint-disable */
 declare global {
+    /** Map from crate name to directory structure, for source view */
+    declare var srcIndex: Map<string, rustdoc.Dir>;
+    /** Defined and documented in `main.js` */
+    declare function nonnull(x: T|null, msg: string|undefined);
     interface Window {
         /** Make the current theme easy to find */
         currentTheme: HTMLLinkElement|null;
+        /** Generated in `render/context.rs` */
+        SIDEBAR_ITEMS?: { [key: string]: string[] };
         /** Used by the popover tooltip code. */
         RUSTDOC_TOOLTIP_HOVER_MS: number;
         /** Used by the popover tooltip code. */
@@ -39,9 +45,37 @@ declare global {
          */
         rustdocShowSourceSidebar: function(),
         /**
+         * Close the sidebar in source code view
+         */
+        rustdocCloseSourceSidebar?: function(),
+        /**
+         * Shows the sidebar in source code view
+         */
+        rustdocShowSourceSidebar?: function(),
+        /**
+         * Toggles the sidebar in source code view
+         */
+        rustdocToggleSrcSidebar?: function(),
+        /**
+         * create's the sidebar in source code view.
+         * called in generated `src-files.js`.
+         */
+        createSrcSidebar?: function(),
+        /**
          * Set up event listeners for a scraped source example.
          */
         updateScrapedExample?: function(HTMLElement, HTMLElement),
+        /**
+         * register trait implementors, called by code generated in
+         * `write_shared.rs`
+         */
+        register_implementors?: function(rustdoc.Implementors): void,
+        /**
+         * fallback in case `register_implementors` isn't defined yet.
+         */
+        pending_implementors?: rustdoc.Implementors,
+        register_type_impls?: function(rustdoc.TypeImpls): void,
+        pending_type_impls?: rustdoc.TypeImpls,
     }
     interface HTMLElement {
         /** Used by the popover tooltip code. */
@@ -123,7 +157,7 @@ declare namespace rustdoc {
      * Same as QueryElement, but bindings and typeFilter support strings
      */
     interface ParserQueryElement {
-        name: string,
+        name: string|null,
         id: number|null,
         fullPath: Array<string>,
         pathWithoutLast: Array<string>,
@@ -131,10 +165,16 @@ declare namespace rustdoc {
         normalizedPathLast: string,
         generics: Array<ParserQueryElement>,
         bindings: Map<string, Array<ParserQueryElement>>,
-        bindingName: {name: string, generics: ParserQueryElement[]}|null,
-        typeFilter: string|null,
+        bindingName: {name: string|null, generics: ParserQueryElement[]}|null,
+        typeFilter: number|string|null,
     }
 
+    /**
+     * Same as ParserQueryElement, but all fields are optional.
+     */
+    type ParserQueryElementFields = {
+        [K in keyof ParserQueryElement]?: ParserQueryElement[T]
+    }
     /**
      * Intermediate parser state. Discarded when parsing is done.
      */
@@ -176,10 +216,11 @@ declare namespace rustdoc {
         name: string,
         normalizedName: string,
         word: string,
+        paramNames: string[],
         parent: ({ty: number, name: string, path: string, exactPath: string}|null|undefined),
         path: string,
         ty: number,
-        type?: FunctionSearchType
+        type: FunctionSearchType | null,
     }
 
     /**
@@ -390,7 +431,7 @@ declare namespace rustdoc {
      */
     type RawSearchIndexCrate = {
     doc: string,
-    a: Object,
+    a: { [key: string]: number[] },
     n: Array<string>,
     t: string,
     D: string,
@@ -406,4 +447,24 @@ declare namespace rustdoc {
     };
 
     type VlqData = VlqData[] | number;
+
+    /**
+     * Maps from crate names to trait implementation data.
+     * Provied by generated `trait.impl` files.
+     */
+    type Implementors = {
+        [key: string]: Array<[string, number, Array<string>]>
+    }
+
+    type TypeImpls = {
+        [cratename: string]: Array<Array<string|0>>
+    }
+
+    /**
+     * Directory structure for source code view,
+     * defined in generated `src-files.js`.
+     *
+     * is a tuple of (filename, subdirs, filenames).
+     */
+    type Dir = [string, rustdoc.Dir[], string[]]
 }

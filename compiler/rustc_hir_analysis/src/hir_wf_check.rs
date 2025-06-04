@@ -4,8 +4,7 @@ use rustc_infer::infer::TyCtxtInferExt;
 use rustc_infer::traits::{ObligationCause, WellFormedLoc};
 use rustc_middle::bug;
 use rustc_middle::query::Providers;
-use rustc_middle::ty::fold::fold_regions;
-use rustc_middle::ty::{self, TyCtxt, TypingMode};
+use rustc_middle::ty::{self, TyCtxt, TypingMode, fold_regions};
 use rustc_span::def_id::LocalDefId;
 use rustc_trait_selection::traits::{self, ObligationCtxt};
 use tracing::debug;
@@ -22,8 +21,6 @@ fn diagnostic_hir_wf_check<'tcx>(
     tcx: TyCtxt<'tcx>,
     (predicate, loc): (ty::Predicate<'tcx>, WellFormedLoc),
 ) -> Option<ObligationCause<'tcx>> {
-    let hir = tcx.hir();
-
     let def_id = match loc {
         WellFormedLoc::Ty(def_id) => def_id,
         WellFormedLoc::Param { function, param_idx: _ } => function,
@@ -139,9 +136,9 @@ fn diagnostic_hir_wf_check<'tcx>(
                 ref item => bug!("Unexpected TraitItem {:?}", item),
             },
             hir::Node::Item(item) => match item.kind {
-                hir::ItemKind::TyAlias(ty, _)
-                | hir::ItemKind::Static(ty, _, _)
-                | hir::ItemKind::Const(ty, _, _) => vec![ty],
+                hir::ItemKind::TyAlias(_, ty, _)
+                | hir::ItemKind::Static(_, ty, _, _)
+                | hir::ItemKind::Const(_, ty, _, _) => vec![ty],
                 hir::ItemKind::Impl(impl_) => match &impl_.of_trait {
                     Some(t) => t
                         .path
@@ -187,7 +184,7 @@ fn diagnostic_hir_wf_check<'tcx>(
             ref node => bug!("Unexpected node {:?}", node),
         },
         WellFormedLoc::Param { function: _, param_idx } => {
-            let fn_decl = hir.fn_decl_by_hir_id(hir_id).unwrap();
+            let fn_decl = tcx.hir_fn_decl_by_hir_id(hir_id).unwrap();
             // Get return type
             if param_idx as usize == fn_decl.inputs.len() {
                 match fn_decl.output {

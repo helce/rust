@@ -637,6 +637,25 @@ impl GlobalState {
             }
         });
     }
+
+    pub(crate) fn check_workspaces_msrv(&self) -> impl Iterator<Item = String> + '_ {
+        self.workspaces.iter().filter_map(|ws| {
+            if let Some(toolchain) = &ws.toolchain {
+                if *toolchain < crate::MINIMUM_SUPPORTED_TOOLCHAIN_VERSION {
+                    return Some(format!(
+                        "Workspace `{}` is using an outdated toolchain version `{}` but \
+                        rust-analyzer only supports `{}` and higher.\n\
+                        Consider using the rust-analyzer rustup component for your toolchain or
+                        upgrade your toolchain to a supported version.\n\n",
+                        ws.manifest_or_root(),
+                        toolchain,
+                        crate::MINIMUM_SUPPORTED_TOOLCHAIN_VERSION,
+                    ));
+                }
+            }
+            None
+        })
+    }
 }
 
 impl Drop for GlobalState {
@@ -650,7 +669,8 @@ impl GlobalStateSnapshot {
         RwLockReadGuard::map(self.vfs.read(), |(it, _)| it)
     }
 
-    pub(crate) fn url_to_file_id(&self, url: &Url) -> anyhow::Result<FileId> {
+    /// Returns `None` if the file was excluded.
+    pub(crate) fn url_to_file_id(&self, url: &Url) -> anyhow::Result<Option<FileId>> {
         url_to_file_id(&self.vfs_read(), url)
     }
 
@@ -658,7 +678,8 @@ impl GlobalStateSnapshot {
         file_id_to_url(&self.vfs_read(), id)
     }
 
-    pub(crate) fn vfs_path_to_file_id(&self, vfs_path: &VfsPath) -> anyhow::Result<FileId> {
+    /// Returns `None` if the file was excluded.
+    pub(crate) fn vfs_path_to_file_id(&self, vfs_path: &VfsPath) -> anyhow::Result<Option<FileId>> {
         vfs_path_to_file_id(&self.vfs_read(), vfs_path)
     }
 
@@ -750,14 +771,21 @@ pub(crate) fn file_id_to_url(vfs: &vfs::Vfs, id: FileId) -> Url {
     url_from_abs_path(path)
 }
 
-pub(crate) fn url_to_file_id(vfs: &vfs::Vfs, url: &Url) -> anyhow::Result<FileId> {
+/// Returns `None` if the file was excluded.
+pub(crate) fn url_to_file_id(vfs: &vfs::Vfs, url: &Url) -> anyhow::Result<Option<FileId>> {
     let path = from_proto::vfs_path(url)?;
-    let res = vfs.file_id(&path).ok_or_else(|| anyhow::format_err!("file not found: {path}"))?;
-    Ok(res)
+    vfs_path_to_file_id(vfs, &path)
 }
 
-pub(crate) fn vfs_path_to_file_id(vfs: &vfs::Vfs, vfs_path: &VfsPath) -> anyhow::Result<FileId> {
-    let res =
+/// Returns `None` if the file was excluded.
+pub(crate) fn vfs_path_to_file_id(
+    vfs: &vfs::Vfs,
+    vfs_path: &VfsPath,
+) -> anyhow::Result<Option<FileId>> {
+    let (file_id, excluded) =
         vfs.file_id(vfs_path).ok_or_else(|| anyhow::format_err!("file not found: {vfs_path}"))?;
-    Ok(res)
+    match excluded {
+        vfs::FileExcluded::Yes => Ok(None),
+        vfs::FileExcluded::No => Ok(Some(file_id)),
+    }
 }

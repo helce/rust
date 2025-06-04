@@ -3,8 +3,7 @@
 
 use rustc_hir as hir;
 use rustc_hir::def_id::{DefId, LocalDefId};
-use rustc_middle::ty::fold::fold_regions;
-use rustc_middle::ty::{self, Binder, Region, Ty, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{self, Binder, Region, Ty, TyCtxt, TypeFoldable, fold_regions};
 use rustc_span::Span;
 use tracing::instrument;
 
@@ -64,10 +63,10 @@ pub fn find_param_with_region<'tcx>(
         _ => {}
     }
 
-    let body = hir.maybe_body_owned_by(def_id)?;
+    let body = tcx.hir_maybe_body_owned_by(def_id)?;
 
-    let owner_id = hir.body_owner(body.id());
-    let fn_decl = hir.fn_decl_by_hir_id(owner_id)?;
+    let owner_id = tcx.hir_body_owner(body.id());
+    let fn_decl = tcx.hir_fn_decl_by_hir_id(owner_id)?;
     let poly_fn_sig = tcx.fn_sig(id).instantiate_identity();
 
     let fn_sig = tcx.liberate_late_bound_regions(id, poly_fn_sig);

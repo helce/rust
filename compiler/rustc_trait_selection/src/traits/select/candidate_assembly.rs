@@ -16,7 +16,7 @@ use rustc_infer::traits::{Obligation, PolyTraitObligation, SelectionError};
 use rustc_middle::ty::fast_reject::DeepRejectCtxt;
 use rustc_middle::ty::{self, Ty, TypeVisitableExt, TypingMode};
 use rustc_middle::{bug, span_bug};
-use rustc_type_ir::{Interner, elaborate};
+use rustc_type_ir::elaborate;
 use tracing::{debug, instrument, trace};
 
 use super::SelectionCandidate::*;
@@ -176,7 +176,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // normalization, so try to deduplicate when possible to avoid
             // unnecessary ambiguity.
             let mut distinct_normalized_bounds = FxHashSet::default();
-            self.for_each_item_bound::<!>(
+            let _ = self.for_each_item_bound::<!>(
                 placeholder_trait_predicate.self_ty(),
                 |selcx, bound, idx| {
                     let Some(bound) = bound.as_trait_clause() else {
@@ -802,7 +802,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                 | ty::UnsafeBinder(_) => {
                     // Only consider auto impls of unsafe traits when there are
                     // no unsafe fields.
-                    if self.tcx().trait_is_unsafe(def_id) && self_ty.has_unsafe_fields() {
+                    if self.tcx().trait_def(def_id).safety.is_unsafe()
+                        && self_ty.has_unsafe_fields()
+                    {
                         return;
                     }
 
@@ -859,13 +861,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                         }
 
                         if let Some(principal) = data.principal() {
-                            if !self.infcx.tcx.features().dyn_compatible_for_dispatch() {
-                                principal.with_self_ty(self.tcx(), self_ty)
-                            } else if self.tcx().is_dyn_compatible(principal.def_id()) {
-                                principal.with_self_ty(self.tcx(), self_ty)
-                            } else {
-                                return;
-                            }
+                            principal.with_self_ty(self.tcx(), self_ty)
                         } else {
                             // Only auto trait bounds exist.
                             return;
@@ -1019,13 +1015,6 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // `Struct<T>` -> `Struct<U>`
             (&ty::Adt(def_id_a, _), &ty::Adt(def_id_b, _)) if def_id_a.is_struct() => {
                 if def_id_a == def_id_b {
-                    candidates.vec.push(BuiltinUnsizeCandidate);
-                }
-            }
-
-            // `(.., T)` -> `(.., U)`
-            (&ty::Tuple(tys_a), &ty::Tuple(tys_b)) => {
-                if tys_a.len() == tys_b.len() {
                     candidates.vec.push(BuiltinUnsizeCandidate);
                 }
             }

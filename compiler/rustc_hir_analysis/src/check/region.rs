@@ -23,12 +23,11 @@ use tracing::debug;
 
 #[derive(Debug, Copy, Clone)]
 struct Context {
-    /// The scope that contains any new variables declared, plus its depth in
-    /// the scope tree.
-    var_parent: Option<(Scope, ScopeDepth)>,
+    /// The scope that contains any new variables declared.
+    var_parent: Option<Scope>,
 
-    /// Region parent of expressions, etc., plus its depth in the scope tree.
-    parent: Option<(Scope, ScopeDepth)>,
+    /// Region parent of expressions, etc.
+    parent: Option<Scope>,
 }
 
 struct ScopeResolutionVisitor<'tcx> {
@@ -78,7 +77,7 @@ fn record_var_lifetime(visitor: &mut ScopeResolutionVisitor<'_>, var_id: hir::It
             //
             // extern fn isalnum(c: c_int) -> c_int
         }
-        Some((parent_scope, _)) => visitor.scope_tree.record_var_scope(var_id, parent_scope),
+        Some(parent_scope) => visitor.scope_tree.record_var_scope(var_id, parent_scope),
     }
 }
 
@@ -221,8 +220,6 @@ fn resolve_arm<'tcx>(visitor: &mut ScopeResolutionVisitor<'tcx>, arm: &'tcx hir:
 }
 
 fn resolve_pat<'tcx>(visitor: &mut ScopeResolutionVisitor<'tcx>, pat: &'tcx hir::Pat<'tcx>) {
-    visitor.record_child_scope(Scope { local_id: pat.hir_id.local_id, data: ScopeData::Node });
-
     // If this is a binding then record the lifetime of that binding.
     if let PatKind::Binding(..) = pat.kind {
         record_var_lifetime(visitor, pat.hir_id.local_id);
@@ -424,7 +421,7 @@ fn resolve_expr<'tcx>(visitor: &mut ScopeResolutionVisitor<'tcx>, expr: &'tcx hi
         // that share the parent environment. We handle const blocks in
         // `visit_inline_const`.
         hir::ExprKind::Closure(&hir::Closure { body, .. }) => {
-            let body = visitor.tcx.hir().body(body);
+            let body = visitor.tcx.hir_body(body);
             visitor.visit_body(body);
         }
         hir::ExprKind::AssignOp(_, left_expr, right_expr) => {
@@ -541,7 +538,7 @@ fn resolve_expr<'tcx>(visitor: &mut ScopeResolutionVisitor<'tcx>, expr: &'tcx hi
             // Keep traversing up while we can.
             match visitor.scope_tree.parent_map.get(&scope) {
                 // Don't cross from closure bodies to their parent.
-                Some(&(superscope, _)) => match superscope.data {
+                Some(&superscope) => match superscope.data {
                     ScopeData::CallSite => break,
                     _ => scope = superscope,
                 },
@@ -560,7 +557,7 @@ fn resolve_local<'tcx>(
 ) {
     debug!("resolve_local(pat={:?}, init={:?})", pat, init);
 
-    let blk_scope = visitor.cx.var_parent.map(|(p, _)| p);
+    let blk_scope = visitor.cx.var_parent;
 
     // As an exception to the normal rules governing temporary
     // lifetimes, initializers in a let have a temporary lifetime
@@ -625,10 +622,7 @@ fn resolve_local<'tcx>(
             if is_binding_pat(pat) {
                 visitor.scope_tree.record_rvalue_candidate(
                     expr.hir_id,
-                    RvalueCandidateType::Pattern {
-                        target: expr.hir_id.local_id,
-                        lifetime: blk_scope,
-                    },
+                    RvalueCandidate { target: expr.hir_id.local_id, lifetime: blk_scope },
                 );
             }
         }
@@ -733,10 +727,7 @@ fn resolve_local<'tcx>(
                 record_rvalue_scope_if_borrow_expr(visitor, subexpr, blk_id);
                 visitor.scope_tree.record_rvalue_candidate(
                     subexpr.hir_id,
-                    RvalueCandidateType::Borrow {
-                        target: subexpr.hir_id.local_id,
-                        lifetime: blk_id,
-                    },
+                    RvalueCandidate { target: subexpr.hir_id.local_id, lifetime: blk_id },
                 );
             }
             hir::ExprKind::Struct(_, fields, _) => {
@@ -783,20 +774,16 @@ fn resolve_local<'tcx>(
 
 impl<'tcx> ScopeResolutionVisitor<'tcx> {
     /// Records the current parent (if any) as the parent of `child_scope`.
-    /// Returns the depth of `child_scope`.
-    fn record_child_scope(&mut self, child_scope: Scope) -> ScopeDepth {
+    fn record_child_scope(&mut self, child_scope: Scope) {
         let parent = self.cx.parent;
         self.scope_tree.record_scope_parent(child_scope, parent);
-        // If `child_scope` has no parent, it must be the root node, and so has
-        // a depth of 1. Otherwise, its depth is one more than its parent's.
-        parent.map_or(1, |(_p, d)| d + 1)
     }
 
     /// Records the current parent (if any) as the parent of `child_scope`,
     /// and sets `child_scope` as the new current parent.
     fn enter_scope(&mut self, child_scope: Scope) {
-        let child_depth = self.record_child_scope(child_scope);
-        self.cx.parent = Some((child_scope, child_depth));
+        self.record_child_scope(child_scope);
+        self.cx.parent = Some(child_scope);
     }
 
     fn enter_node_scope_with_dtor(&mut self, id: hir::ItemLocalId) {
@@ -844,7 +831,7 @@ impl<'tcx> Visitor<'tcx> for ScopeResolutionVisitor<'tcx> {
 
     fn visit_body(&mut self, body: &hir::Body<'tcx>) {
         let body_id = body.id();
-        let owner_id = self.tcx.hir().body_owner_def_id(body_id);
+        let owner_id = self.tcx.hir_body_owner_def_id(body_id);
 
         debug!(
             "visit_body(id={:?}, span={:?}, body.id={:?}, cx.parent={:?})",
@@ -855,15 +842,14 @@ impl<'tcx> Visitor<'tcx> for ScopeResolutionVisitor<'tcx> {
         );
 
         self.enter_body(body.value.hir_id, |this| {
-            if this.tcx.hir().body_owner_kind(owner_id).is_fn_or_closure() {
+            if this.tcx.hir_body_owner_kind(owner_id).is_fn_or_closure() {
                 // The arguments and `self` are parented to the fn.
-                this.cx.var_parent = this.cx.parent.take();
+                this.cx.var_parent = this.cx.parent;
                 for param in body.params {
                     this.visit_pat(param.pat);
                 }
 
                 // The body of the every fn is a root scope.
-                this.cx.parent = this.cx.var_parent;
                 this.visit_expr(body.value)
             } else {
                 // Only functions have an outer terminating (drop) scope, while
@@ -906,7 +892,7 @@ impl<'tcx> Visitor<'tcx> for ScopeResolutionVisitor<'tcx> {
         resolve_local(self, Some(l.pat), l.init)
     }
     fn visit_inline_const(&mut self, c: &'tcx hir::ConstBlock) {
-        let body = self.tcx.hir().body(c.body);
+        let body = self.tcx.hir_body(c.body);
         self.visit_body(body);
     }
 }
@@ -924,7 +910,7 @@ pub(crate) fn region_scope_tree(tcx: TyCtxt<'_>, def_id: DefId) -> &ScopeTree {
         return tcx.region_scope_tree(typeck_root_def_id);
     }
 
-    let scope_tree = if let Some(body) = tcx.hir().maybe_body_owned_by(def_id.expect_local()) {
+    let scope_tree = if let Some(body) = tcx.hir_maybe_body_owned_by(def_id.expect_local()) {
         let mut visitor = ScopeResolutionVisitor {
             tcx,
             scope_tree: ScopeTree::default(),

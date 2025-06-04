@@ -302,9 +302,9 @@ impl<'gcc, 'tcx> CodegenCx<'gcc, 'tcx> {
     }
 }
 
-pub fn const_alloc_to_gcc<'gcc, 'tcx>(
-    cx: &CodegenCx<'gcc, 'tcx>,
-    alloc: ConstAllocation<'tcx>,
+pub fn const_alloc_to_gcc<'gcc>(
+    cx: &CodegenCx<'gcc, '_>,
+    alloc: ConstAllocation<'_>,
 ) -> RValue<'gcc> {
     let alloc = alloc.inner();
     let mut llvals = Vec::with_capacity(alloc.provenance().ptrs().len() + 1);
@@ -364,6 +364,7 @@ pub fn const_alloc_to_gcc<'gcc, 'tcx>(
         llvals.push(cx.const_bytes(bytes));
     }
 
+    // FIXME(bjorn3) avoid wrapping in a struct when there is only a single element.
     cx.const_struct(&llvals, true)
 }
 

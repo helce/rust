@@ -1,14 +1,11 @@
 //! This module contains helpers for walking all types of
 //! a signature, while preserving spans as much as possible
 
-use rustc_ast_ir::try_visit;
-use rustc_ast_ir::visit::VisitorResult;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalDefId;
 use rustc_middle::span_bug;
-use rustc_middle::ty::{self, TyCtxt};
+use rustc_middle::ty::{self, TyCtxt, TypeVisitable, VisitorResult, try_visit};
 use rustc_span::Span;
-use rustc_type_ir::visit::TypeVisitable;
 use tracing::{instrument, trace};
 
 pub trait SpannedTypeVisitor<'tcx> {

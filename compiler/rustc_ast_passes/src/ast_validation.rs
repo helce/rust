@@ -334,8 +334,8 @@ impl<'a> AstValidator<'a> {
             .filter(|attr| {
                 let arr = [
                     sym::allow,
-                    sym::cfg,
-                    sym::cfg_attr,
+                    sym::cfg_trace,
+                    sym::cfg_attr_trace,
                     sym::deny,
                     sym::expect,
                     sym::forbid,
@@ -859,7 +859,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                     this.visit_trait_ref(t);
                     this.visit_ty(self_ty);
 
-                    walk_list!(this, visit_assoc_item, items, AssocCtxt::Impl);
+                    walk_list!(this, visit_assoc_item, items, AssocCtxt::Impl { of_trait: true });
                 });
                 walk_list!(self, visit_attribute, &item.attrs);
                 return; // Avoid visiting again.
@@ -912,12 +912,15 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                         |this| this.visit_generics(generics),
                     );
                     this.visit_ty(self_ty);
-                    walk_list!(this, visit_assoc_item, items, AssocCtxt::Impl);
+                    walk_list!(this, visit_assoc_item, items, AssocCtxt::Impl { of_trait: false });
                 });
                 walk_list!(self, visit_attribute, &item.attrs);
                 return; // Avoid visiting again.
             }
-            ItemKind::Fn(func @ box Fn { defaultness, generics: _, sig, contract: _, body }) => {
+            ItemKind::Fn(
+                func
+                @ box Fn { defaultness, generics: _, sig, contract: _, body, define_opaque: _ },
+            ) => {
                 self.check_defaultness(item.span, *defaultness);
 
                 let is_intrinsic =
@@ -1410,7 +1413,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
             self.check_defaultness(item.span, item.kind.defaultness());
         }
 
-        if ctxt == AssocCtxt::Impl {
+        if let AssocCtxt::Impl { .. } = ctxt {
             match &item.kind {
                 AssocItemKind::Const(box ConstItem { expr: None, .. }) => {
                     self.dcx().emit_err(errors::AssocConstWithoutBody {

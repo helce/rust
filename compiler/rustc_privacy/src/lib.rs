@@ -1,12 +1,12 @@
 // tidy-alphabetical-start
 #![allow(internal_features)]
+#![cfg_attr(doc, recursion_limit = "256")] // FIXME(nnethercote): will be removed by #124141
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
 #![feature(associated_type_defaults)]
 #![feature(let_chains)]
 #![feature(rustdoc_internals)]
 #![feature(try_blocks)]
-#![warn(unreachable_pub)]
 // tidy-alphabetical-end
 
 mod errors;
@@ -22,6 +22,7 @@ use errors::{
 };
 use rustc_ast::MacroDef;
 use rustc_ast::visit::{VisitorResult, try_visit};
+use rustc_attr_parsing::AttributeKind;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::intern::Interned;
 use rustc_errors::{MultiSpan, listify};
@@ -39,7 +40,7 @@ use rustc_middle::ty::{
 use rustc_middle::{bug, span_bug};
 use rustc_session::lint;
 use rustc_span::hygiene::Transparency;
-use rustc_span::{Ident, Span, Symbol, kw, sym};
+use rustc_span::{Ident, Span, Symbol, sym};
 use tracing::debug;
 use {rustc_attr_parsing as attr, rustc_hir as hir};
 
@@ -71,7 +72,9 @@ impl<'tcx> fmt::Display for LazyDefPathStr<'tcx> {
 pub trait DefIdVisitor<'tcx> {
     type Result: VisitorResult = ();
     const SHALLOW: bool = false;
-    const SKIP_ASSOC_TYS: bool = false;
+    fn skip_assoc_tys(&self) -> bool {
+        false
+    }
 
     fn tcx(&self) -> TyCtxt<'tcx>;
     fn visit_def_id(&mut self, def_id: DefId, kind: &str, descr: &dyn fmt::Display)
@@ -212,7 +215,7 @@ where
                 }
             }
             ty::Alias(kind @ (ty::Inherent | ty::Weak | ty::Projection), data) => {
-                if V::SKIP_ASSOC_TYS {
+                if self.def_id_visitor.skip_assoc_tys() {
                     // Visitors searching for minimal visibility/reachability want to
                     // conservatively approximate associated types like `Type::Alias`
                     // as visible/reachable even if `Type` is private.
@@ -323,7 +326,9 @@ impl<'a, 'tcx, VL: VisibilityLike, const SHALLOW: bool> DefIdVisitor<'tcx>
     for FindMin<'a, 'tcx, VL, SHALLOW>
 {
     const SHALLOW: bool = SHALLOW;
-    const SKIP_ASSOC_TYS: bool = true;
+    fn skip_assoc_tys(&self) -> bool {
+        true
+    }
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
@@ -341,7 +346,7 @@ trait VisibilityLike: Sized {
         def_id: LocalDefId,
     ) -> Self;
 
-    // Returns an over-approximation (`SKIP_ASSOC_TYS` = true) of visibility due to
+    // Returns an over-approximation (`skip_assoc_tys()` = true) of visibility due to
     // associated types for which we can't determine visibility precisely.
     fn of_impl<const SHALLOW: bool>(
         def_id: LocalDefId,
@@ -492,8 +497,12 @@ impl<'tcx> EmbargoVisitor<'tcx> {
     ) {
         // Non-opaque macros cannot make other items more accessible than they already are.
         let hir_id = self.tcx.local_def_id_to_hir_id(local_def_id);
-        let attrs = self.tcx.hir().attrs(hir_id);
-        if attr::find_transparency(attrs, md.macro_rules).0 != Transparency::Opaque {
+        let attrs = self.tcx.hir_attrs(hir_id);
+
+        if attr::find_attr!(attrs, AttributeKind::MacroTransparency(x) => *x)
+            .unwrap_or(Transparency::fallback(md.macro_rules))
+            != Transparency::Opaque
+        {
             return;
         }
 
@@ -568,8 +577,8 @@ impl<'tcx> EmbargoVisitor<'tcx> {
             // have normal hygiene, so we can treat them like other items without type
             // privacy and mark them reachable.
             DefKind::Macro(_) => {
-                let item = self.tcx.hir().expect_item(def_id);
-                if let hir::ItemKind::Macro(MacroDef { macro_rules: false, .. }, _) = item.kind {
+                let item = self.tcx.hir_expect_item(def_id);
+                if let hir::ItemKind::Macro(_, MacroDef { macro_rules: false, .. }, _) = item.kind {
                     if vis.is_accessible_from(module, self.tcx) {
                         self.update(def_id, macro_ev, Level::Reachable);
                     }
@@ -592,9 +601,9 @@ impl<'tcx> EmbargoVisitor<'tcx> {
 
             DefKind::Struct | DefKind::Union => {
                 // While structs and unions have type privacy, their fields do not.
-                let item = self.tcx.hir().expect_item(def_id);
-                if let hir::ItemKind::Struct(ref struct_def, _)
-                | hir::ItemKind::Union(ref struct_def, _) = item.kind
+                let item = self.tcx.hir_expect_item(def_id);
+                if let hir::ItemKind::Struct(_, ref struct_def, _)
+                | hir::ItemKind::Union(_, ref struct_def, _) = item.kind
                 {
                     for field in struct_def.fields() {
                         let field_vis = self.tcx.local_visibility(field.def_id);
@@ -645,10 +654,10 @@ impl<'tcx> Visitor<'tcx> for EmbargoVisitor<'tcx> {
             // The interface is empty, and no nested items.
             hir::ItemKind::Use(..)
             | hir::ItemKind::ExternCrate(..)
-            | hir::ItemKind::GlobalAsm(..) => {}
+            | hir::ItemKind::GlobalAsm { .. } => {}
             // The interface is empty, and all nested items are processed by `visit_item`.
             hir::ItemKind::Mod(..) => {}
-            hir::ItemKind::Macro(macro_def, _) => {
+            hir::ItemKind::Macro(_, macro_def, _) => {
                 if let Some(item_ev) = item_ev {
                     self.update_reachability_from_macro(item.owner_id.def_id, macro_def, item_ev);
                 }
@@ -719,7 +728,7 @@ impl<'tcx> Visitor<'tcx> for EmbargoVisitor<'tcx> {
                     }
                 }
             }
-            hir::ItemKind::Enum(ref def, _) => {
+            hir::ItemKind::Enum(_, ref def, _) => {
                 if let Some(item_ev) = item_ev {
                     self.reach(item.owner_id.def_id, item_ev).generics().predicates();
                 }
@@ -757,7 +766,8 @@ impl<'tcx> Visitor<'tcx> for EmbargoVisitor<'tcx> {
                     }
                 }
             }
-            hir::ItemKind::Struct(ref struct_def, _) | hir::ItemKind::Union(ref struct_def, _) => {
+            hir::ItemKind::Struct(_, ref struct_def, _)
+            | hir::ItemKind::Union(_, ref struct_def, _) => {
                 if let Some(item_ev) = item_ev {
                     self.reach(item.owner_id.def_id, item_ev).generics().predicates();
                     for field in struct_def.fields() {
@@ -861,7 +871,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TestReachabilityVisitor<'a, 'tcx> {
         self.effective_visibility_diagnostic(item.owner_id.def_id);
 
         match item.kind {
-            hir::ItemKind::Enum(ref def, _) => {
+            hir::ItemKind::Enum(_, ref def, _) => {
                 for variant in def.variants.iter() {
                     self.effective_visibility_diagnostic(variant.def_id);
                     if let Some(ctor_def_id) = variant.data.ctor_def_id() {
@@ -872,7 +882,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TestReachabilityVisitor<'a, 'tcx> {
                     }
                 }
             }
-            hir::ItemKind::Struct(ref def, _) | hir::ItemKind::Union(ref def, _) => {
+            hir::ItemKind::Struct(_, ref def, _) | hir::ItemKind::Union(_, ref def, _) => {
                 if let Some(ctor_def_id) = def.ctor_def_id() {
                     self.effective_visibility_diagnostic(ctor_def_id);
                 }
@@ -930,8 +940,8 @@ impl<'tcx> NamePrivacyVisitor<'tcx> {
         }
 
         // definition of the field
-        let ident = Ident::new(kw::Empty, use_ctxt);
-        let def_id = self.tcx.adjust_ident_and_get_scope(ident, def.did(), hir_id).1;
+        let ident = Ident::new(sym::dummy, use_ctxt);
+        let (_, def_id) = self.tcx.adjust_ident_and_get_scope(ident, def.did(), hir_id);
         !field.vis.is_accessible_from(def_id, self.tcx)
     }
 
@@ -1036,7 +1046,7 @@ impl<'tcx> Visitor<'tcx> for NamePrivacyVisitor<'tcx> {
             return;
         }
         let old_maybe_typeck_results = self.maybe_typeck_results.replace(new_typeck_results);
-        self.visit_body(self.tcx.hir().body(body_id));
+        self.visit_body(self.tcx.hir_body(body_id));
         self.maybe_typeck_results = old_maybe_typeck_results;
     }
 
@@ -1161,7 +1171,7 @@ impl<'tcx> Visitor<'tcx> for TypePrivacyVisitor<'tcx> {
     fn visit_nested_body(&mut self, body_id: hir::BodyId) {
         let old_maybe_typeck_results =
             self.maybe_typeck_results.replace(self.tcx.typeck_body(body_id));
-        self.visit_body(self.tcx.hir().body(body_id));
+        self.visit_body(self.tcx.hir_body(body_id));
         self.maybe_typeck_results = old_maybe_typeck_results;
     }
 
@@ -1346,6 +1356,7 @@ struct SearchInterfaceForPrivateItemsVisitor<'tcx> {
     required_effective_vis: Option<EffectiveVisibility>,
     in_assoc_ty: bool,
     in_primary_interface: bool,
+    skip_assoc_tys: bool,
 }
 
 impl SearchInterfaceForPrivateItemsVisitor<'_> {
@@ -1356,12 +1367,12 @@ impl SearchInterfaceForPrivateItemsVisitor<'_> {
                 GenericParamDefKind::Lifetime => {}
                 GenericParamDefKind::Type { has_default, .. } => {
                     if has_default {
-                        self.visit(self.tcx.type_of(param.def_id).instantiate_identity());
+                        let _ = self.visit(self.tcx.type_of(param.def_id).instantiate_identity());
                     }
                 }
                 // FIXME(generic_const_exprs): May want to look inside const here
                 GenericParamDefKind::Const { .. } => {
-                    self.visit(self.tcx.type_of(param.def_id).instantiate_identity());
+                    let _ = self.visit(self.tcx.type_of(param.def_id).instantiate_identity());
                 }
             }
         }
@@ -1376,19 +1387,27 @@ impl SearchInterfaceForPrivateItemsVisitor<'_> {
         // consider the ones that the user wrote. This is important
         // for the inferred outlives rules; see
         // `tests/ui/rfc-2093-infer-outlives/privacy.rs`.
-        self.visit_predicates(self.tcx.explicit_predicates_of(self.item_def_id));
+        let _ = self.visit_predicates(self.tcx.explicit_predicates_of(self.item_def_id));
         self
     }
 
     fn bounds(&mut self) -> &mut Self {
         self.in_primary_interface = false;
-        self.visit_clauses(self.tcx.explicit_item_bounds(self.item_def_id).skip_binder());
+        let _ = self.visit_clauses(self.tcx.explicit_item_bounds(self.item_def_id).skip_binder());
         self
     }
 
     fn ty(&mut self) -> &mut Self {
         self.in_primary_interface = true;
-        self.visit(self.tcx.type_of(self.item_def_id).instantiate_identity());
+        let _ = self.visit(self.tcx.type_of(self.item_def_id).instantiate_identity());
+        self
+    }
+
+    fn trait_ref(&mut self) -> &mut Self {
+        self.in_primary_interface = true;
+        if let Some(trait_ref) = self.tcx.impl_trait_ref(self.item_def_id) {
+            let _ = self.visit_trait(trait_ref.instantiate_identity());
+        }
         self
     }
 
@@ -1489,6 +1508,9 @@ impl SearchInterfaceForPrivateItemsVisitor<'_> {
 
 impl<'tcx> DefIdVisitor<'tcx> for SearchInterfaceForPrivateItemsVisitor<'tcx> {
     type Result = ControlFlow<()>;
+    fn skip_assoc_tys(&self) -> bool {
+        self.skip_assoc_tys
+    }
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
@@ -1525,6 +1547,7 @@ impl<'tcx> PrivateItemsInPublicInterfacesChecker<'_, 'tcx> {
             required_effective_vis,
             in_assoc_ty: false,
             in_primary_interface: true,
+            skip_assoc_tys: false,
         }
     }
 
@@ -1599,7 +1622,7 @@ impl<'tcx> PrivateItemsInPublicInterfacesChecker<'_, 'tcx> {
                 self.check(def_id, item_visibility, effective_vis).generics().bounds();
             }
             DefKind::Trait => {
-                let item = tcx.hir().item(id);
+                let item = tcx.hir_item(id);
                 if let hir::ItemKind::Trait(.., trait_item_refs) = item.kind {
                     self.check_unnameable(item.owner_id.def_id, effective_vis);
 
@@ -1630,8 +1653,8 @@ impl<'tcx> PrivateItemsInPublicInterfacesChecker<'_, 'tcx> {
                 self.check(def_id, item_visibility, effective_vis).generics().predicates();
             }
             DefKind::Enum => {
-                let item = tcx.hir().item(id);
-                if let hir::ItemKind::Enum(ref def, _) = item.kind {
+                let item = tcx.hir_item(id);
+                if let hir::ItemKind::Enum(_, ref def, _) = item.kind {
                     self.check_unnameable(item.owner_id.def_id, effective_vis);
 
                     self.check(item.owner_id.def_id, item_visibility, effective_vis)
@@ -1647,10 +1670,10 @@ impl<'tcx> PrivateItemsInPublicInterfacesChecker<'_, 'tcx> {
             }
             // Subitems of foreign modules have their own publicity.
             DefKind::ForeignMod => {
-                let item = tcx.hir().item(id);
+                let item = tcx.hir_item(id);
                 if let hir::ItemKind::ForeignMod { items, .. } = item.kind {
                     for foreign_item in items {
-                        let foreign_item = tcx.hir().foreign_item(foreign_item.id);
+                        let foreign_item = tcx.hir_foreign_item(foreign_item.id);
 
                         let ev = self.get(foreign_item.owner_id.def_id);
                         let vis = tcx.local_visibility(foreign_item.owner_id.def_id);
@@ -1668,9 +1691,9 @@ impl<'tcx> PrivateItemsInPublicInterfacesChecker<'_, 'tcx> {
             }
             // Subitems of structs and unions have their own publicity.
             DefKind::Struct | DefKind::Union => {
-                let item = tcx.hir().item(id);
-                if let hir::ItemKind::Struct(ref struct_def, _)
-                | hir::ItemKind::Union(ref struct_def, _) = item.kind
+                let item = tcx.hir_item(id);
+                if let hir::ItemKind::Struct(_, ref struct_def, _)
+                | hir::ItemKind::Union(_, ref struct_def, _) = item.kind
                 {
                     self.check_unnameable(item.owner_id.def_id, effective_vis);
                     self.check(item.owner_id.def_id, item_visibility, effective_vis)
@@ -1695,7 +1718,7 @@ impl<'tcx> PrivateItemsInPublicInterfacesChecker<'_, 'tcx> {
             // A trait impl is public when both its type and its trait are public
             // Subitems of trait impls have inherited publicity.
             DefKind::Impl { .. } => {
-                let item = tcx.hir().item(id);
+                let item = tcx.hir_item(id);
                 if let hir::ItemKind::Impl(impl_) = item.kind {
                     let impl_vis = ty::Visibility::of_impl::<false>(
                         item.owner_id.def_id,
@@ -1720,13 +1743,18 @@ impl<'tcx> PrivateItemsInPublicInterfacesChecker<'_, 'tcx> {
                         self.effective_visibilities,
                     );
 
-                    // check that private components do not appear in the generics or predicates of inherent impls
-                    // this check is intentionally NOT performed for impls of traits, per #90586
+                    let mut check = self.check(item.owner_id.def_id, impl_vis, Some(impl_ev));
+                    // Generics and predicates of trait impls are intentionally not checked
+                    // for private components (#90586).
                     if impl_.of_trait.is_none() {
-                        self.check(item.owner_id.def_id, impl_vis, Some(impl_ev))
-                            .generics()
-                            .predicates();
+                        check.generics().predicates();
                     }
+                    // Skip checking private components in associated types, due to lack of full
+                    // normalization they produce very ridiculous false positives.
+                    // FIXME: Remove this when full normalization is implemented.
+                    check.skip_assoc_tys = true;
+                    check.ty().trait_ref();
+
                     for impl_item_ref in impl_.items {
                         let impl_item_vis = if impl_.of_trait.is_none() {
                             min(
@@ -1771,7 +1799,7 @@ pub fn provide(providers: &mut Providers) {
 fn check_mod_privacy(tcx: TyCtxt<'_>, module_def_id: LocalModDefId) {
     // Check privacy of names not checked in previous compilation stages.
     let mut visitor = NamePrivacyVisitor { tcx, maybe_typeck_results: None };
-    tcx.hir().visit_item_likes_in_module(module_def_id, &mut visitor);
+    tcx.hir_visit_item_likes_in_module(module_def_id, &mut visitor);
 
     // Check privacy of explicitly written types and traits as well as
     // inferred types of expressions and patterns.
@@ -1780,20 +1808,24 @@ fn check_mod_privacy(tcx: TyCtxt<'_>, module_def_id: LocalModDefId) {
 
     let module = tcx.hir_module_items(module_def_id);
     for def_id in module.definitions() {
-        rustc_ty_utils::sig_types::walk_types(tcx, def_id, &mut visitor);
+        let _ = rustc_ty_utils::sig_types::walk_types(tcx, def_id, &mut visitor);
 
-        if let Some(body_id) = tcx.hir().maybe_body_owned_by(def_id) {
+        if let Some(body_id) = tcx.hir_maybe_body_owned_by(def_id) {
             visitor.visit_nested_body(body_id.id());
         }
     }
 
     for id in module.free_items() {
-        if let ItemKind::Impl(i) = tcx.hir().item(id).kind {
+        if let ItemKind::Impl(i) = tcx.hir_item(id).kind {
             if let Some(item) = i.of_trait {
                 let trait_ref = tcx.impl_trait_ref(id.owner_id.def_id).unwrap();
                 let trait_ref = trait_ref.instantiate_identity();
                 visitor.span = item.path.span;
-                visitor.visit_def_id(trait_ref.def_id, "trait", &trait_ref.print_only_trait_path());
+                let _ = visitor.visit_def_id(
+                    trait_ref.def_id,
+                    "trait",
+                    &trait_ref.print_only_trait_path(),
+                );
             }
         }
     }
@@ -1863,7 +1895,7 @@ fn effective_visibilities(tcx: TyCtxt<'_>, (): ()) -> &EffectiveVisibilities {
     }
 
     loop {
-        tcx.hir().visit_all_item_likes_in_crate(&mut visitor);
+        tcx.hir_visit_all_item_likes_in_crate(&mut visitor);
         if visitor.changed {
             visitor.changed = false;
         } else {
@@ -1875,7 +1907,7 @@ fn effective_visibilities(tcx: TyCtxt<'_>, (): ()) -> &EffectiveVisibilities {
     let mut check_visitor =
         TestReachabilityVisitor { tcx, effective_visibilities: &visitor.effective_visibilities };
     check_visitor.effective_visibility_diagnostic(CRATE_DEF_ID);
-    tcx.hir().visit_all_item_likes_in_crate(&mut check_visitor);
+    tcx.hir_visit_all_item_likes_in_crate(&mut check_visitor);
 
     tcx.arena.alloc(visitor.effective_visibilities)
 }
@@ -1885,7 +1917,7 @@ fn check_private_in_public(tcx: TyCtxt<'_>, (): ()) {
     // Check for private types in public interfaces.
     let mut checker = PrivateItemsInPublicInterfacesChecker { tcx, effective_visibilities };
 
-    for id in tcx.hir().items() {
+    for id in tcx.hir_free_items() {
         checker.check_item(id);
     }
 }

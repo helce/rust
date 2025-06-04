@@ -20,7 +20,6 @@ use std::ops::Bound;
 
 use rustc_abi::ExternAbi;
 use rustc_ast::Recovered;
-use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
 use rustc_data_structures::unord::UnordMap;
 use rustc_errors::{
@@ -29,14 +28,13 @@ use rustc_errors::{
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::{self, InferKind, Visitor, VisitorExt, walk_generics};
-use rustc_hir::{self as hir, GenericParamKind, HirId, Node};
+use rustc_hir::{self as hir, GenericParamKind, HirId, Node, PreciseCapturingArgKind};
 use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
 use rustc_infer::traits::ObligationCause;
 use rustc_middle::hir::nested_filter;
 use rustc_middle::query::Providers;
-use rustc_middle::ty::fold::fold_regions;
 use rustc_middle::ty::util::{Discr, IntTypeExt};
-use rustc_middle::ty::{self, AdtKind, Const, IsSuggestable, Ty, TyCtxt, TypingMode};
+use rustc_middle::ty::{self, AdtKind, Const, IsSuggestable, Ty, TyCtxt, TypingMode, fold_regions};
 use rustc_middle::{bug, span_bug};
 use rustc_span::{DUMMY_SP, Ident, Span, Symbol, kw, sym};
 use rustc_trait_selection::error_reporting::traits::suggestions::NextTypeParamName;
@@ -46,6 +44,7 @@ use tracing::{debug, instrument};
 
 use crate::check::intrinsic::intrinsic_operation_unsafety;
 use crate::errors;
+use crate::hir_ty_lowering::errors::assoc_kind_str;
 use crate::hir_ty_lowering::{FeedConstTy, HirTyLowerer, RegionInferReason};
 
 pub(crate) mod dump;
@@ -248,13 +247,13 @@ fn reject_placeholder_type_signatures_in_item<'tcx>(
     item: &'tcx hir::Item<'tcx>,
 ) {
     let (generics, suggest) = match &item.kind {
-        hir::ItemKind::Union(_, generics)
-        | hir::ItemKind::Enum(_, generics)
-        | hir::ItemKind::TraitAlias(generics, _)
-        | hir::ItemKind::Trait(_, _, generics, ..)
+        hir::ItemKind::Union(_, _, generics)
+        | hir::ItemKind::Enum(_, _, generics)
+        | hir::ItemKind::TraitAlias(_, generics, _)
+        | hir::ItemKind::Trait(_, _, _, generics, ..)
         | hir::ItemKind::Impl(hir::Impl { generics, .. })
-        | hir::ItemKind::Struct(_, generics) => (generics, true),
-        hir::ItemKind::TyAlias(_, generics) => (generics, false),
+        | hir::ItemKind::Struct(_, _, generics) => (generics, true),
+        hir::ItemKind::TyAlias(_, _, generics) => (generics, false),
         // `static`, `fn` and `const` are handled elsewhere to suggest appropriate type.
         _ => return,
     };
@@ -277,8 +276,8 @@ fn reject_placeholder_type_signatures_in_item<'tcx>(
 impl<'tcx> Visitor<'tcx> for CollectItemTypesVisitor<'tcx> {
     type NestedFilter = nested_filter::OnlyBodies;
 
-    fn nested_visit_map(&mut self) -> Self::Map {
-        self.tcx.hir()
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.tcx
     }
 
     fn visit_item(&mut self, item: &'tcx hir::Item<'tcx>) {
@@ -444,13 +443,14 @@ impl<'tcx> HirTyLowerer<'tcx> for ItemCtxt<'tcx> {
         self.tcx.at(span).type_param_predicates((self.item_def_id, def_id, assoc_name))
     }
 
-    fn lower_assoc_ty(
+    fn lower_assoc_shared(
         &self,
         span: Span,
         item_def_id: DefId,
-        item_segment: &hir::PathSegment<'tcx>,
+        item_segment: &rustc_hir::PathSegment<'tcx>,
         poly_trait_ref: ty::PolyTraitRef<'tcx>,
-    ) -> Ty<'tcx> {
+        kind: ty::AssocKind,
+    ) -> Result<(DefId, ty::GenericArgsRef<'tcx>), ErrorGuaranteed> {
         if let Some(trait_ref) = poly_trait_ref.no_bound_vars() {
             let item_args = self.lowerer().lower_generic_args_of_assoc_item(
                 span,
@@ -458,7 +458,7 @@ impl<'tcx> HirTyLowerer<'tcx> for ItemCtxt<'tcx> {
                 item_segment,
                 trait_ref.args,
             );
-            Ty::new_projection_from_args(self.tcx(), item_def_id, item_args)
+            Ok((item_def_id, item_args))
         } else {
             // There are no late-bound regions; we can just ignore the binder.
             let (mut mpart_sugg, mut inferred_sugg) = (None, None);
@@ -468,12 +468,11 @@ impl<'tcx> HirTyLowerer<'tcx> for ItemCtxt<'tcx> {
                 hir::Node::Field(_) | hir::Node::Ctor(_) | hir::Node::Variant(_) => {
                     let item = self
                         .tcx
-                        .hir()
-                        .expect_item(self.tcx.hir().get_parent_item(self.hir_id()).def_id);
+                        .hir_expect_item(self.tcx.hir_get_parent_item(self.hir_id()).def_id);
                     match &item.kind {
-                        hir::ItemKind::Enum(_, generics)
-                        | hir::ItemKind::Struct(_, generics)
-                        | hir::ItemKind::Union(_, generics) => {
+                        hir::ItemKind::Enum(_, _, generics)
+                        | hir::ItemKind::Struct(_, _, generics)
+                        | hir::ItemKind::Union(_, _, generics) => {
                             let lt_name = get_new_lifetime_name(self.tcx, poly_trait_ref, generics);
                             let (lt_sp, sugg) = match generics.params {
                                 [] => (generics.span, format!("<{lt_name}>")),
@@ -519,16 +518,14 @@ impl<'tcx> HirTyLowerer<'tcx> for ItemCtxt<'tcx> {
                 }
                 _ => {}
             }
-            Ty::new_error(
-                self.tcx(),
-                self.tcx().dcx().emit_err(errors::AssociatedItemTraitUninferredGenericParams {
-                    span,
-                    inferred_sugg,
-                    bound,
-                    mpart_sugg,
-                    what: "type",
-                }),
-            )
+
+            Err(self.tcx().dcx().emit_err(errors::AssociatedItemTraitUninferredGenericParams {
+                span,
+                inferred_sugg,
+                bound,
+                mpart_sugg,
+                what: assoc_kind_str(kind),
+            }))
         }
     }
 
@@ -669,21 +666,21 @@ fn get_new_lifetime_name<'tcx>(
 
 #[instrument(level = "debug", skip_all)]
 fn lower_item(tcx: TyCtxt<'_>, item_id: hir::ItemId) {
-    let it = tcx.hir().item(item_id);
-    debug!(item = %it.ident, id = %it.hir_id());
+    let it = tcx.hir_item(item_id);
+    debug!(item = ?it.kind.ident(), id = %it.hir_id());
     let def_id = item_id.owner_id.def_id;
     let icx = ItemCtxt::new(tcx, def_id);
 
     match &it.kind {
         // These don't define types.
-        hir::ItemKind::ExternCrate(_)
+        hir::ItemKind::ExternCrate(..)
         | hir::ItemKind::Use(..)
         | hir::ItemKind::Macro(..)
-        | hir::ItemKind::Mod(_)
-        | hir::ItemKind::GlobalAsm(_) => {}
+        | hir::ItemKind::Mod(..)
+        | hir::ItemKind::GlobalAsm { .. } => {}
         hir::ItemKind::ForeignMod { items, .. } => {
             for item in *items {
-                let item = tcx.hir().foreign_item(item.id);
+                let item = tcx.hir_foreign_item(item.id);
                 tcx.ensure_ok().generics_of(item.owner_id);
                 tcx.ensure_ok().type_of(item.owner_id);
                 tcx.ensure_ok().predicates_of(item.owner_id);
@@ -739,7 +736,7 @@ fn lower_item(tcx: TyCtxt<'_>, item_id: hir::ItemId) {
             tcx.at(it.span).explicit_super_predicates_of(def_id);
             tcx.ensure_ok().predicates_of(def_id);
         }
-        hir::ItemKind::Struct(struct_def, _) | hir::ItemKind::Union(struct_def, _) => {
+        hir::ItemKind::Struct(_, struct_def, _) | hir::ItemKind::Union(_, struct_def, _) => {
             tcx.ensure_ok().generics_of(def_id);
             tcx.ensure_ok().type_of(def_id);
             tcx.ensure_ok().predicates_of(def_id);
@@ -761,7 +758,7 @@ fn lower_item(tcx: TyCtxt<'_>, item_id: hir::ItemId) {
             tcx.ensure_ok().predicates_of(def_id);
         }
 
-        hir::ItemKind::Static(ty, ..) | hir::ItemKind::Const(ty, ..) => {
+        hir::ItemKind::Static(_, ty, ..) | hir::ItemKind::Const(_, ty, ..) => {
             tcx.ensure_ok().generics_of(def_id);
             tcx.ensure_ok().type_of(def_id);
             tcx.ensure_ok().predicates_of(def_id);
@@ -790,7 +787,7 @@ fn lower_item(tcx: TyCtxt<'_>, item_id: hir::ItemId) {
 }
 
 fn lower_trait_item(tcx: TyCtxt<'_>, trait_item_id: hir::TraitItemId) {
-    let trait_item = tcx.hir().trait_item(trait_item_id);
+    let trait_item = tcx.hir_trait_item(trait_item_id);
     let def_id = trait_item_id.owner_id;
     tcx.ensure_ok().generics_of(def_id);
     let icx = ItemCtxt::new(tcx, def_id.def_id);
@@ -865,7 +862,7 @@ fn lower_impl_item(tcx: TyCtxt<'_>, impl_item_id: hir::ImplItemId) {
     tcx.ensure_ok().generics_of(def_id);
     tcx.ensure_ok().type_of(def_id);
     tcx.ensure_ok().predicates_of(def_id);
-    let impl_item = tcx.hir().impl_item(impl_item_id);
+    let impl_item = tcx.hir_impl_item(impl_item_id);
     let icx = ItemCtxt::new(tcx, def_id.def_id);
     match impl_item.kind {
         hir::ImplItemKind::Fn(..) => {
@@ -1075,7 +1072,6 @@ fn lower_variant<'tcx>(
         def.ctor().map(|(kind, _, def_id)| (kind, def_id.to_def_id())),
         discr,
         fields,
-        adt_kind,
         parent_did.to_def_id(),
         recovered,
         adt_kind == AdtKind::Struct && tcx.has_attr(parent_did, sym::non_exhaustive)
@@ -1093,7 +1089,7 @@ fn adt_def(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::AdtDef<'_> {
 
     let repr = tcx.repr_options_of_def(def_id);
     let (kind, variants) = match &item.kind {
-        ItemKind::Enum(def, _) => {
+        ItemKind::Enum(_, def, _) => {
             let mut distance_from_explicit = 0;
             let variants = def
                 .variants
@@ -1121,7 +1117,7 @@ fn adt_def(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::AdtDef<'_> {
 
             (AdtKind::Enum, variants)
         }
-        ItemKind::Struct(def, _) | ItemKind::Union(def, _) => {
+        ItemKind::Struct(ident, def, _) | ItemKind::Union(ident, def, _) => {
             let adt_kind = match item.kind {
                 ItemKind::Struct(..) => AdtKind::Struct,
                 _ => AdtKind::Union,
@@ -1129,7 +1125,7 @@ fn adt_def(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::AdtDef<'_> {
             let variants = std::iter::once(lower_variant(
                 tcx,
                 None,
-                item.ident,
+                *ident,
                 ty::VariantDiscr::Relative(0),
                 def,
                 adt_kind,
@@ -1145,7 +1141,7 @@ fn adt_def(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::AdtDef<'_> {
 }
 
 fn trait_def(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::TraitDef {
-    let item = tcx.hir().expect_item(def_id);
+    let item = tcx.hir_expect_item(def_id);
 
     let (is_alias, is_auto, safety, items) = match item.kind {
         hir::ItemKind::Trait(is_auto, safety, .., items) => {
@@ -1203,7 +1199,7 @@ fn trait_def(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::TraitDef {
         // and that they are all identifiers
         .and_then(|attr| match attr.meta_item_list() {
             Some(items) if items.len() < 2 => {
-                tcx.dcx().emit_err(errors::MustImplementOneOfAttribute { span: attr.span });
+                tcx.dcx().emit_err(errors::MustImplementOneOfAttribute { span: attr.span() });
 
                 None
             }
@@ -1215,7 +1211,7 @@ fn trait_def(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::TraitDef {
                     tcx.dcx().emit_err(errors::MustBeNameOfAssociatedFunction { span });
                 })
                 .ok()
-                .zip(Some(attr.span)),
+                .zip(Some(attr.span())),
             // Error is reported by `rustc_attr!`
             None => None,
         })
@@ -1344,12 +1340,12 @@ fn fn_sig(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::EarlyBinder<'_, ty::PolyFn
         ),
 
         ForeignItem(&hir::ForeignItem { kind: ForeignItemKind::Fn(sig, _, _), .. }) => {
-            let abi = tcx.hir().get_foreign_abi(hir_id);
+            let abi = tcx.hir_get_foreign_abi(hir_id);
             compute_sig_of_foreign_fn_decl(tcx, def_id, sig.decl, abi, sig.header.safety())
         }
 
         Ctor(data) | Variant(hir::Variant { data, .. }) if data.ctor().is_some() => {
-            let adt_def_id = tcx.hir().get_parent_item(hir_id).def_id.to_def_id();
+            let adt_def_id = tcx.hir_get_parent_item(hir_id).def_id.to_def_id();
             let ty = tcx.type_of(adt_def_id).instantiate_identity();
             let inputs = data.fields().iter().map(|f| tcx.type_of(f.def_id).instantiate_identity());
             // constructors for structs with `layout_scalar_valid_range` are unsafe to call
@@ -1599,7 +1595,7 @@ pub fn suggest_impl_trait<'tcx>(
 
 fn impl_trait_header(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ty::ImplTraitHeader<'_>> {
     let icx = ItemCtxt::new(tcx, def_id);
-    let item = tcx.hir().expect_item(def_id);
+    let item = tcx.hir_expect_item(def_id);
     let impl_ = item.expect_impl();
     impl_.of_trait.as_ref().map(|ast_trait_ref| {
         let selfty = tcx.type_of(def_id).instantiate_identity();
@@ -1690,10 +1686,10 @@ fn polarity_of_impl(
 /// the lifetimes that are declared. For fns or methods, we have to
 /// screen out those that do not appear in any where-clauses etc using
 /// `resolve_lifetime::early_bound_lifetimes`.
-fn early_bound_lifetimes_from_generics<'a, 'tcx: 'a>(
+fn early_bound_lifetimes_from_generics<'a, 'tcx>(
     tcx: TyCtxt<'tcx>,
     generics: &'a hir::Generics<'a>,
-) -> impl Iterator<Item = &'a hir::GenericParam<'a>> + Captures<'tcx> {
+) -> impl Iterator<Item = &'a hir::GenericParam<'a>> {
     generics.params.iter().filter(move |param| match param.kind {
         GenericParamKind::Lifetime { .. } => !tcx.is_late_bound(param.hir_id),
         _ => false,
@@ -1769,7 +1765,7 @@ fn coroutine_for_closure(tcx: TyCtxt<'_>, def_id: LocalDefId) -> DefId {
                 ..
             }),
         ..
-    } = tcx.hir().body(body).value
+    } = tcx.hir_body(body).value
     else {
         bug!()
     };
@@ -1794,7 +1790,7 @@ fn opaque_ty_origin<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> hir::OpaqueT
 fn rendered_precise_capturing_args<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: LocalDefId,
-) -> Option<&'tcx [Symbol]> {
+) -> Option<&'tcx [PreciseCapturingArgKind<Symbol, Symbol>]> {
     if let Some(ty::ImplTraitInTraitData::Trait { opaque_def_id, .. }) =
         tcx.opt_rpitit_info(def_id.to_def_id())
     {
@@ -1803,7 +1799,12 @@ fn rendered_precise_capturing_args<'tcx>(
 
     tcx.hir_node_by_def_id(def_id).expect_opaque_ty().bounds.iter().find_map(|bound| match bound {
         hir::GenericBound::Use(args, ..) => {
-            Some(&*tcx.arena.alloc_from_iter(args.iter().map(|arg| arg.name())))
+            Some(&*tcx.arena.alloc_from_iter(args.iter().map(|arg| match arg {
+                PreciseCapturingArgKind::Lifetime(_) => {
+                    PreciseCapturingArgKind::Lifetime(arg.name())
+                }
+                PreciseCapturingArgKind::Param(_) => PreciseCapturingArgKind::Param(arg.name()),
+            })))
         }
         _ => None,
     })
@@ -1824,6 +1825,9 @@ fn const_param_default<'tcx>(
         ),
     };
     let icx = ItemCtxt::new(tcx, def_id);
-    let ct = icx.lowerer().lower_const_arg(default_ct, FeedConstTy::Param(def_id.to_def_id()));
+    let identity_args = ty::GenericArgs::identity_for_item(tcx, def_id);
+    let ct = icx
+        .lowerer()
+        .lower_const_arg(default_ct, FeedConstTy::Param(def_id.to_def_id(), identity_args));
     ty::EarlyBinder::bind(ct)
 }

@@ -237,22 +237,9 @@ pub struct Box<
 /// the newly allocated memory. This is an intrinsic to avoid unnecessary copies.
 ///
 /// This is the surface syntax for `box <expr>` expressions.
-#[cfg(not(bootstrap))]
 #[rustc_intrinsic]
-#[rustc_intrinsic_must_be_overridden]
 #[unstable(feature = "liballoc_internals", issue = "none")]
-pub fn box_new<T>(_x: T) -> Box<T> {
-    unreachable!()
-}
-
-/// Transition function for the next bootstrap bump.
-#[cfg(bootstrap)]
-#[unstable(feature = "liballoc_internals", issue = "none")]
-#[inline(always)]
-pub fn box_new<T>(x: T) -> Box<T> {
-    #[rustc_box]
-    Box::new(x)
-}
+pub fn box_new<T>(x: T) -> Box<T>;
 
 impl<T> Box<T> {
     /// Allocates memory on the heap and then places `x` into it.
@@ -950,8 +937,6 @@ impl<T, A: Allocator> Box<mem::MaybeUninit<T>, A> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(box_uninit_write)]
-    ///
     /// let big_box = Box::<[usize; 1024]>::new_uninit();
     ///
     /// let mut array = [0; 1024];
@@ -967,7 +952,7 @@ impl<T, A: Allocator> Box<mem::MaybeUninit<T>, A> {
     ///     assert_eq!(*x, i);
     /// }
     /// ```
-    #[unstable(feature = "box_uninit_write", issue = "129397")]
+    #[stable(feature = "box_uninit_write", since = "1.87.0")]
     #[inline]
     pub fn write(mut boxed: Self, value: T) -> Box<T, A> {
         unsafe {
@@ -1053,7 +1038,6 @@ impl<T: ?Sized> Box<T> {
     /// ```
     ///
     /// [memory layout]: self#memory-layout
-    /// [`Layout`]: crate::Layout
     #[stable(feature = "box_raw", since = "1.4.0")]
     #[inline]
     #[must_use = "call `drop(Box::from_raw(ptr))` if you intend to drop the `Box`"]
@@ -1108,7 +1092,6 @@ impl<T: ?Sized> Box<T> {
     /// ```
     ///
     /// [memory layout]: self#memory-layout
-    /// [`Layout`]: crate::Layout
     #[unstable(feature = "box_vec_non_null", reason = "new API", issue = "130364")]
     #[inline]
     #[must_use = "call `drop(Box::from_non_null(ptr))` if you intend to drop the `Box`"]
@@ -1165,11 +1148,9 @@ impl<T: ?Sized, A: Allocator> Box<T, A> {
     /// ```
     ///
     /// [memory layout]: self#memory-layout
-    /// [`Layout`]: crate::Layout
     #[unstable(feature = "allocator_api", issue = "32838")]
-    #[rustc_const_unstable(feature = "const_box", issue = "92521")]
     #[inline]
-    pub const unsafe fn from_raw_in(raw: *mut T, alloc: A) -> Self {
+    pub unsafe fn from_raw_in(raw: *mut T, alloc: A) -> Self {
         Box(unsafe { Unique::new_unchecked(raw) }, alloc)
     }
 
@@ -1219,12 +1200,10 @@ impl<T: ?Sized, A: Allocator> Box<T, A> {
     /// ```
     ///
     /// [memory layout]: self#memory-layout
-    /// [`Layout`]: crate::Layout
     #[unstable(feature = "allocator_api", issue = "32838")]
     // #[unstable(feature = "box_vec_non_null", reason = "new API", issue = "130364")]
-    #[rustc_const_unstable(feature = "const_box", issue = "92521")]
     #[inline]
-    pub const unsafe fn from_non_null_in(raw: NonNull<T>, alloc: A) -> Self {
+    pub unsafe fn from_non_null_in(raw: NonNull<T>, alloc: A) -> Self {
         // SAFETY: guaranteed by the caller.
         unsafe { Box::from_raw_in(raw.as_ptr(), alloc) }
     }
@@ -1569,9 +1548,8 @@ impl<T: ?Sized, A: Allocator> Box<T, A> {
     /// to call it as `Box::allocator(&b)` instead of `b.allocator()`. This
     /// is so that there is no conflict with a method on the inner type.
     #[unstable(feature = "allocator_api", issue = "32838")]
-    #[rustc_const_unstable(feature = "const_box", issue = "92521")]
     #[inline]
-    pub const fn allocator(b: &Self) -> &A {
+    pub fn allocator(b: &Self) -> &A {
         &b.1
     }
 
@@ -1658,8 +1636,7 @@ impl<T: ?Sized, A: Allocator> Box<T, A> {
     /// let bar = Pin::from(foo);
     /// ```
     #[stable(feature = "box_into_pin", since = "1.63.0")]
-    #[rustc_const_unstable(feature = "const_box", issue = "92521")]
-    pub const fn into_pin(boxed: Self) -> Pin<Self>
+    pub fn into_pin(boxed: Self) -> Pin<Self>
     where
         A: 'static,
     {
@@ -1693,7 +1670,20 @@ impl<T: Default> Default for Box<T> {
     /// Creates a `Box<T>`, with the `Default` value for T.
     #[inline]
     fn default() -> Self {
-        Box::write(Box::new_uninit(), T::default())
+        let mut x: Box<mem::MaybeUninit<T>> = Box::new_uninit();
+        unsafe {
+            // SAFETY: `x` is valid for writing and has the same layout as `T`.
+            // If `T::default()` panics, dropping `x` will just deallocate the Box as `MaybeUninit<T>`
+            // does not have a destructor.
+            //
+            // We use `ptr::write` as `MaybeUninit::write` creates
+            // extra stack copies of `T` in debug mode.
+            //
+            // See https://github.com/rust-lang/rust/issues/136043 for more context.
+            ptr::write(&raw mut *x as *mut T, T::default());
+            // SAFETY: `x` was just initialized above.
+            x.assume_init()
+        }
     }
 }
 

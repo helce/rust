@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::hash::{DefaultHasher, Hasher};
 use std::num::{IntErrorKind, NonZero};
 use std::path::PathBuf;
 use std::str;
@@ -7,9 +6,10 @@ use std::str;
 use rustc_abi::Align;
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::profiling::TimePassesFormat;
-use rustc_data_structures::stable_hasher::Hash64;
+use rustc_data_structures::stable_hasher::StableHasher;
 use rustc_errors::{ColorConfig, LanguageIdentifier, TerminalUrl};
 use rustc_feature::UnstableFeatures;
+use rustc_hashes::Hash64;
 use rustc_macros::{Decodable, Encodable};
 use rustc_span::edition::Edition;
 use rustc_span::{RealFileName, SourceFileHashAlgorithm};
@@ -94,45 +94,49 @@ fn tmod_push_impl(
     tmod_vals: &BTreeMap<OptionsTargetModifiers, String>,
     tmods: &mut Vec<TargetModifier>,
 ) {
-    tmods.push(TargetModifier { opt, value_name: tmod_vals.get(&opt).cloned().unwrap_or_default() })
+    if let Some(v) = tmod_vals.get(&opt) {
+        tmods.push(TargetModifier { opt, value_name: v.clone() })
+    }
 }
 
 macro_rules! tmod_push {
-    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $mods:expr, $tmod_vals:expr) => {
-        tmod_push_impl(
-            OptionsTargetModifiers::$struct_name($tmod_enum_name::$opt_name),
-            $tmod_vals,
-            $mods,
-        );
+    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $init:expr, $mods:expr, $tmod_vals:expr) => {
+        if *$opt_expr != $init {
+            tmod_push_impl(
+                OptionsTargetModifiers::$struct_name($tmod_enum_name::$opt_name),
+                $tmod_vals,
+                $mods,
+            );
+        }
     };
 }
 
 macro_rules! gather_tmods {
-    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $mods:expr, $tmod_vals:expr,
+    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $init:expr, $mods:expr, $tmod_vals:expr,
         [SUBSTRUCT], [TARGET_MODIFIER]) => {
         compile_error!("SUBSTRUCT can't be target modifier");
     };
-    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $mods:expr, $tmod_vals:expr,
+    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $init:expr, $mods:expr, $tmod_vals:expr,
         [UNTRACKED], [TARGET_MODIFIER]) => {
-        tmod_push!($struct_name, $tmod_enum_name, $opt_name, $mods, $tmod_vals)
+        tmod_push!($struct_name, $tmod_enum_name, $opt_name, $opt_expr, $init, $mods, $tmod_vals)
     };
-    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $mods:expr, $tmod_vals:expr,
+    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $init:expr, $mods:expr, $tmod_vals:expr,
         [TRACKED], [TARGET_MODIFIER]) => {
-        tmod_push!($struct_name, $tmod_enum_name, $opt_name, $mods, $tmod_vals)
+        tmod_push!($struct_name, $tmod_enum_name, $opt_name, $opt_expr, $init, $mods, $tmod_vals)
     };
-    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $mods:expr, $tmod_vals:expr,
+    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $init:expr, $mods:expr, $tmod_vals:expr,
         [TRACKED_NO_CRATE_HASH], [TARGET_MODIFIER]) => {
-        tmod_push!($struct_name, $tmod_enum_name, $opt_name, $mods, $tmod_vals)
+        tmod_push!($struct_name, $tmod_enum_name, $opt_name, $opt_expr, $init, $mods, $tmod_vals)
     };
-    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $mods:expr, $tmod_vals:expr,
+    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $init:expr, $mods:expr, $tmod_vals:expr,
         [SUBSTRUCT], []) => {
         $opt_expr.gather_target_modifiers($mods, $tmod_vals);
     };
-    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $mods:expr, $tmod_vals:expr,
+    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $init:expr, $mods:expr, $tmod_vals:expr,
         [UNTRACKED], []) => {{}};
-    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $mods:expr, $tmod_vals:expr,
+    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $init:expr, $mods:expr, $tmod_vals:expr,
         [TRACKED], []) => {{}};
-    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $mods:expr, $tmod_vals:expr,
+    ($struct_name:ident, $tmod_enum_name:ident, $opt_name:ident, $opt_expr:expr, $init:expr, $mods:expr, $tmod_vals:expr,
         [TRACKED_NO_CRATE_HASH], []) => {{}};
 }
 
@@ -251,7 +255,7 @@ macro_rules! top_level_options {
         }
 
         impl Options {
-            pub fn dep_tracking_hash(&self, for_crate_hash: bool) -> u64 {
+            pub fn dep_tracking_hash(&self, for_crate_hash: bool) -> Hash64 {
                 let mut sub_hashes = BTreeMap::new();
                 $({
                     hash_opt!($opt,
@@ -260,7 +264,7 @@ macro_rules! top_level_options {
                                 for_crate_hash,
                                 [$dep_tracking_marker]);
                 })*
-                let mut hasher = DefaultHasher::new();
+                let mut hasher = StableHasher::new();
                 dep_tracking::stable_hash(sub_hashes,
                                           &mut hasher,
                                           self.error_format,
@@ -333,7 +337,7 @@ top_level_options!(
         output_types: OutputTypes [TRACKED],
         search_paths: Vec<SearchPath> [UNTRACKED],
         libs: Vec<NativeLib> [TRACKED],
-        maybe_sysroot: Option<PathBuf> [UNTRACKED],
+        sysroot: PathBuf [UNTRACKED],
 
         target_triple: TargetTuple [TRACKED],
 
@@ -389,7 +393,7 @@ top_level_options!(
         ///
         /// This directory is what the virtual `/rustc/$hash` is translated back to,
         /// if Rust was built with path remapping to `/rustc/$hash` enabled
-        /// (the `rust.remap-debuginfo` option in `config.toml`).
+        /// (the `rust.remap-debuginfo` option in `bootstrap.toml`).
         real_rust_source_base_dir: Option<PathBuf> [TRACKED_NO_CRATE_HASH],
 
         edition: Edition [TRACKED],
@@ -474,7 +478,8 @@ macro_rules! tmod_enum {
                 $($pout)*
                 Self::$opt => {
                     let mut parsed : $t = Default::default();
-                    parse::$parse(&mut parsed, Some($puser_value));
+                    let val = if $puser_value.is_empty() { None } else { Some($puser_value) };
+                    parse::$parse(&mut parsed, val);
                     ExtendedTargetModifierInfo {
                         prefix: $prefix.to_string(),
                         name: stringify!($opt).to_string().replace('_', "-"),
@@ -545,7 +550,7 @@ macro_rules! options {
             build_options(early_dcx, matches, target_modifiers, $stat, $prefix, $outputname)
         }
 
-        fn dep_tracking_hash(&self, for_crate_hash: bool, error_format: ErrorOutputType) -> u64 {
+        fn dep_tracking_hash(&self, for_crate_hash: bool, error_format: ErrorOutputType) -> Hash64 {
             let mut sub_hashes = BTreeMap::new();
             $({
                 hash_opt!($opt,
@@ -554,7 +559,7 @@ macro_rules! options {
                             for_crate_hash,
                             [$dep_tracking_marker]);
             })*
-            let mut hasher = DefaultHasher::new();
+            let mut hasher = StableHasher::new();
             dep_tracking::stable_hash(sub_hashes,
                                         &mut hasher,
                                         error_format,
@@ -569,7 +574,7 @@ macro_rules! options {
             _tmod_vals: &BTreeMap<OptionsTargetModifiers, String>,
         ) {
             $({
-                gather_tmods!($struct_name, $tmod_enum_name, $opt, &self.$opt, _mods, _tmod_vals,
+                gather_tmods!($struct_name, $tmod_enum_name, $opt, &self.$opt, $init, _mods, _tmod_vals,
                     [$dep_tracking_marker], [$($tmod),*]);
             })*
         }
@@ -681,10 +686,9 @@ fn build_options<O: Default>(
                         ),
                     }
                 }
-                if let Some(tmod) = *tmod
-                    && let Some(value) = value
-                {
-                    target_modifiers.insert(tmod, value.to_string());
+                if let Some(tmod) = *tmod {
+                    let v = value.map_or(String::new(), ToOwned::to_owned);
+                    target_modifiers.insert(tmod, v);
                 }
             }
             None => early_dcx.early_fatal(format!("unknown {outputname} option: `{key}`")),
@@ -707,7 +711,7 @@ mod desc {
     pub(crate) const parse_list: &str = "a space-separated list of strings";
     pub(crate) const parse_list_with_polarity: &str =
         "a comma-separated list of strings, with elements beginning with + or -";
-    pub(crate) const parse_autodiff: &str = "a comma separated list of settings: `Print`, `PrintTA`, `PrintAA`, `PrintPerf`, `PrintModBefore`, `PrintModAfterOpts`, `PrintModAfterEnzyme`, `LooseTypes`, `NoModOptAfter`, `EnableFncOpt`, `NoVecUnroll`, `Inline`";
+    pub(crate) const parse_autodiff: &str = "a comma separated list of settings: `Enable`, `PrintSteps`, `PrintTA`, `PrintAA`, `PrintPerf`, `PrintModBefore`, `PrintModAfter`, `LooseTypes`, `Inline`";
     pub(crate) const parse_comma_list: &str = "a comma-separated list of strings";
     pub(crate) const parse_opt_comma_list: &str = parse_comma_list;
     pub(crate) const parse_number: &str = "a number";
@@ -1348,17 +1352,14 @@ pub mod parse {
         v.sort_unstable();
         for &val in v.iter() {
             let variant = match val {
+                "Enable" => AutoDiff::Enable,
                 "PrintTA" => AutoDiff::PrintTA,
                 "PrintAA" => AutoDiff::PrintAA,
                 "PrintPerf" => AutoDiff::PrintPerf,
-                "Print" => AutoDiff::Print,
+                "PrintSteps" => AutoDiff::PrintSteps,
                 "PrintModBefore" => AutoDiff::PrintModBefore,
-                "PrintModAfterOpts" => AutoDiff::PrintModAfterOpts,
-                "PrintModAfterEnzyme" => AutoDiff::PrintModAfterEnzyme,
+                "PrintModAfter" => AutoDiff::PrintModAfter,
                 "LooseTypes" => AutoDiff::LooseTypes,
-                "NoModOptAfter" => AutoDiff::NoModOptAfter,
-                "EnableFncOpt" => AutoDiff::EnableFncOpt,
-                "NoVecUnroll" => AutoDiff::NoVecUnroll,
                 "Inline" => AutoDiff::Inline,
                 _ => {
                     // FIXME(ZuseZ4): print an error saying which value is not recognized
@@ -1889,7 +1890,8 @@ pub mod parse {
     pub(crate) fn parse_wasm_c_abi(slot: &mut WasmCAbi, v: Option<&str>) -> bool {
         match v {
             Some("spec") => *slot = WasmCAbi::Spec,
-            Some("legacy") => *slot = WasmCAbi::Legacy,
+            // Explicitly setting the `-Z` flag suppresses the lint.
+            Some("legacy") => *slot = WasmCAbi::Legacy { with_lint: false },
             _ => return false,
         }
         true
@@ -2081,21 +2083,19 @@ options! {
     assume_incomplete_release: bool = (false, parse_bool, [TRACKED],
         "make cfg(version) treat the current version as incomplete (default: no)"),
     autodiff: Vec<crate::config::AutoDiff> = (Vec::new(), parse_autodiff, [TRACKED],
-        "a list of optional autodiff flags to enable
-         Optional extra settings:
-         `=PrintTA`
-         `=PrintAA`
-         `=PrintPerf`
-         `=Print`
-         `=PrintModBefore`
-         `=PrintModAfterOpts`
-         `=PrintModAfterEnzyme`
-         `=LooseTypes`
-         `=NoModOptAfter`
-         `=EnableFncOpt`
-         `=NoVecUnroll`
-         `=Inline`
-         Multiple options can be combined with commas."),
+        "a list of autodiff flags to enable
+        Mandatory setting:
+        `=Enable`
+        Optional extra settings:
+        `=PrintTA`
+        `=PrintAA`
+        `=PrintPerf`
+        `=PrintSteps`
+        `=PrintModBefore`
+        `=PrintModAfter`
+        `=LooseTypes`
+        `=Inline`
+        Multiple options can be combined with commas."),
     #[rustc_lint_opt_deny_field_access("use `Session::binary_dep_depinfo` instead of this field")]
     binary_dep_depinfo: bool = (false, parse_bool, [TRACKED],
         "include artifacts (sysroot, crate dependencies) used during compilation in dep-info \
@@ -2232,7 +2232,8 @@ options! {
     incremental_verify_ich: bool = (false, parse_bool, [UNTRACKED],
         "verify extended properties for incr. comp. (default: no):
         - hashes of green query instances
-        - hash collisions of query keys"),
+        - hash collisions of query keys
+        - hash collisions when creating dep-nodes"),
     inline_llvm: bool = (true, parse_bool, [TRACKED],
         "enable LLVM inlining (default: yes)"),
     inline_mir: Option<bool> = (None, parse_opt_bool, [TRACKED],
@@ -2530,7 +2531,7 @@ written to standard error output)"),
         "for every macro invocation, print its name and arguments (default: no)"),
     track_diagnostics: bool = (false, parse_bool, [UNTRACKED],
         "tracks where in rustc a diagnostic was emitted"),
-    // Diagnostics are considered side-effects of a query (see `QuerySideEffects`) and are saved
+    // Diagnostics are considered side-effects of a query (see `QuerySideEffect`) and are saved
     // alongside query results and changes to translation options can affect diagnostics - so
     // translation options should be tracked.
     translate_additional_ftl: Option<PathBuf> = (None, parse_opt_pathbuf, [TRACKED],
@@ -2604,7 +2605,7 @@ written to standard error output)"),
         Requires `-Clto[=[fat,yes]]`"),
     wasi_exec_model: Option<WasiExecModel> = (None, parse_wasi_exec_model, [TRACKED],
         "whether to build a wasi command or reactor"),
-    wasm_c_abi: WasmCAbi = (WasmCAbi::Legacy, parse_wasm_c_abi, [TRACKED],
+    wasm_c_abi: WasmCAbi = (WasmCAbi::Legacy { with_lint: true }, parse_wasm_c_abi, [TRACKED],
         "use spec-compliant C ABI for `wasm32-unknown-unknown` (default: legacy)"),
     write_long_types_to_disk: bool = (true, parse_bool, [UNTRACKED],
         "whether long type names should be written to files instead of being printed in errors"),

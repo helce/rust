@@ -63,7 +63,7 @@ rustc_index::newtype_index! {
     pub struct SerializedDepNodeIndex {}
 }
 
-const DEP_NODE_SIZE: usize = std::mem::size_of::<SerializedDepNodeIndex>();
+const DEP_NODE_SIZE: usize = size_of::<SerializedDepNodeIndex>();
 /// Amount of padding we need to add to the edge list data so that we can retrieve every
 /// SerializedDepNodeIndex with a fixed-size read then mask.
 const DEP_NODE_PAD: usize = DEP_NODE_SIZE - 1;
@@ -98,7 +98,7 @@ impl SerializedDepGraph {
     pub fn edge_targets_from(
         &self,
         source: SerializedDepNodeIndex,
-    ) -> impl Iterator<Item = SerializedDepNodeIndex> + Clone + '_ {
+    ) -> impl Iterator<Item = SerializedDepNodeIndex> + Clone {
         let header = self.edge_list_indices[source];
         let mut raw = &self.edge_list_data[header.start()..];
         // Figure out where the edge list for `source` ends by getting the start index of the next
@@ -175,12 +175,12 @@ impl EdgeHeader {
 
 #[inline]
 fn mask(bits: usize) -> usize {
-    usize::MAX >> ((std::mem::size_of::<usize>() * 8) - bits)
+    usize::MAX >> ((size_of::<usize>() * 8) - bits)
 }
 
 impl SerializedDepGraph {
-    #[instrument(level = "debug", skip(d))]
-    pub fn decode<D: Deps>(d: &mut MemDecoder<'_>) -> Arc<SerializedDepGraph> {
+    #[instrument(level = "debug", skip(d, deps))]
+    pub fn decode<D: Deps>(d: &mut MemDecoder<'_>, deps: &D) -> Arc<SerializedDepGraph> {
         // The last 16 bytes are the node count and edge count.
         debug!("position: {:?}", d.position());
         let (node_count, edge_count) =
@@ -208,9 +208,8 @@ impl SerializedDepGraph {
         // for a node with length 64, which means the spilled 1-byte leb128 length is 1 byte of at
         // least (34 byte header + 1 byte len + 64 bytes edge data), which is ~1%. A 2-byte leb128
         // length is about the same fractional overhead and it amortizes for yet greater lengths.
-        let mut edge_list_data = Vec::with_capacity(
-            graph_bytes - node_count * std::mem::size_of::<SerializedNodeHeader<D>>(),
-        );
+        let mut edge_list_data =
+            Vec::with_capacity(graph_bytes - node_count * size_of::<SerializedNodeHeader<D>>());
 
         for _index in 0..node_count {
             // Decode the header for this edge; the header packs together as many of the fixed-size
@@ -253,7 +252,18 @@ impl SerializedDepGraph {
             .collect();
 
         for (idx, node) in nodes.iter_enumerated() {
-            index[node.kind.as_usize()].insert(node.hash, idx);
+            if index[node.kind.as_usize()].insert(node.hash, idx).is_some() {
+                // Side effect nodes can have duplicates
+                if node.kind != D::DEP_KIND_SIDE_EFFECT {
+                    let name = deps.name(node.kind);
+                    panic!(
+                    "Error: A dep graph node ({name}) does not have an unique index. \
+                     Running a clean build on a nightly compiler with `-Z incremental-verify-ich` \
+                     can help narrow down the issue for reporting. A clean build may also work around the issue.\n
+                     DepNode: {node:?}"
+                )
+                }
+            }
         }
 
         Arc::new(SerializedDepGraph {
@@ -300,7 +310,7 @@ struct Unpacked {
 // M..M+N  bytes per index
 // M+N..16 kind
 impl<D: Deps> SerializedNodeHeader<D> {
-    const TOTAL_BITS: usize = std::mem::size_of::<DepKind>() * 8;
+    const TOTAL_BITS: usize = size_of::<DepKind>() * 8;
     const LEN_BITS: usize = Self::TOTAL_BITS - Self::KIND_BITS - Self::WIDTH_BITS;
     const WIDTH_BITS: usize = DEP_NODE_WIDTH_BITS;
     const KIND_BITS: usize = Self::TOTAL_BITS - D::DEP_KIND_MAX.leading_zeros() as usize;

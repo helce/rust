@@ -201,7 +201,8 @@ pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
         (Loop(lt, ll, _), Loop(rt, rl, _)) => eq_label(ll.as_ref(), rl.as_ref()) && eq_block(lt, rt),
         (Block(lb, ll), Block(rb, rl)) => eq_label(ll.as_ref(), rl.as_ref()) && eq_block(lb, rb),
         (TryBlock(l), TryBlock(r)) => eq_block(l, r),
-        (Yield(l), Yield(r)) | (Ret(l), Ret(r)) => eq_expr_opt(l.as_ref(), r.as_ref()),
+        (Yield(l), Yield(r)) => eq_expr_opt(l.expr(), r.expr()) && l.same_kind(r),
+        (Ret(l), Ret(r)) => eq_expr_opt(l.as_ref(), r.as_ref()),
         (Break(ll, le), Break(rl, re)) => eq_label(ll.as_ref(), rl.as_ref()) && eq_expr_opt(le.as_ref(), re.as_ref()),
         (Continue(ll), Continue(rl)) => eq_label(ll.as_ref(), rl.as_ref()),
         (Assign(l1, l2, _), Assign(r1, r2, _)) | (Index(l1, l2, _), Index(r1, r2, _)) => {
@@ -335,12 +336,14 @@ pub fn eq_item_kind(l: &ItemKind, r: &ItemKind) -> bool {
                 mutability: lm,
                 expr: le,
                 safety: ls,
+                define_opaque: _,
             }),
             Static(box StaticItem {
                 ty: rt,
                 mutability: rm,
                 expr: re,
                 safety: rs,
+                define_opaque: _,
             }),
         ) => lm == rm && ls == rs && eq_ty(lt, rt) && eq_expr_opt(le.as_ref(), re.as_ref()),
         (
@@ -349,12 +352,14 @@ pub fn eq_item_kind(l: &ItemKind, r: &ItemKind) -> bool {
                 generics: lg,
                 ty: lt,
                 expr: le,
+                define_opaque: _,
             }),
             Const(box ConstItem {
                 defaultness: rd,
                 generics: rg,
                 ty: rt,
                 expr: re,
+                define_opaque: _,
             }),
         ) => eq_defaultness(*ld, *rd) && eq_generics(lg, rg) && eq_ty(lt, rt) && eq_expr_opt(le.as_ref(), re.as_ref()),
         (
@@ -364,6 +369,7 @@ pub fn eq_item_kind(l: &ItemKind, r: &ItemKind) -> bool {
                 generics: lg,
                 contract: lc,
                 body: lb,
+                define_opaque: _,
             }),
             Fn(box ast::Fn {
                 defaultness: rd,
@@ -371,6 +377,7 @@ pub fn eq_item_kind(l: &ItemKind, r: &ItemKind) -> bool {
                 generics: rg,
                 contract: rc,
                 body: rb,
+                define_opaque: _,
             }),
         ) => {
             eq_defaultness(*ld, *rd)
@@ -487,12 +494,14 @@ pub fn eq_foreign_item_kind(l: &ForeignItemKind, r: &ForeignItemKind) -> bool {
                 mutability: lm,
                 expr: le,
                 safety: ls,
+                define_opaque: _,
             }),
             Static(box StaticItem {
                 ty: rt,
                 mutability: rm,
                 expr: re,
                 safety: rs,
+                define_opaque: _,
             }),
         ) => lm == rm && eq_ty(lt, rt) && eq_expr_opt(le.as_ref(), re.as_ref()) && ls == rs,
         (
@@ -502,6 +511,7 @@ pub fn eq_foreign_item_kind(l: &ForeignItemKind, r: &ForeignItemKind) -> bool {
                 generics: lg,
                 contract: lc,
                 body: lb,
+                define_opaque: _,
             }),
             Fn(box ast::Fn {
                 defaultness: rd,
@@ -509,6 +519,7 @@ pub fn eq_foreign_item_kind(l: &ForeignItemKind, r: &ForeignItemKind) -> bool {
                 generics: rg,
                 contract: rc,
                 body: rb,
+                define_opaque: _,
             }),
         ) => {
             eq_defaultness(*ld, *rd)
@@ -552,12 +563,14 @@ pub fn eq_assoc_item_kind(l: &AssocItemKind, r: &AssocItemKind) -> bool {
                 generics: lg,
                 ty: lt,
                 expr: le,
+                define_opaque: _,
             }),
             Const(box ConstItem {
                 defaultness: rd,
                 generics: rg,
                 ty: rt,
                 expr: re,
+                define_opaque: _,
             }),
         ) => eq_defaultness(*ld, *rd) && eq_generics(lg, rg) && eq_ty(lt, rt) && eq_expr_opt(le.as_ref(), re.as_ref()),
         (
@@ -567,6 +580,7 @@ pub fn eq_assoc_item_kind(l: &AssocItemKind, r: &AssocItemKind) -> bool {
                 generics: lg,
                 contract: lc,
                 body: lb,
+                define_opaque: _,
             }),
             Fn(box ast::Fn {
                 defaultness: rd,
@@ -574,6 +588,7 @@ pub fn eq_assoc_item_kind(l: &AssocItemKind, r: &AssocItemKind) -> bool {
                 generics: rg,
                 contract: rc,
                 body: rb,
+                define_opaque: _,
             }),
         ) => {
             eq_defaultness(*ld, *rd)
@@ -682,19 +697,20 @@ pub fn eq_generics(l: &Generics, r: &Generics) -> bool {
 
 pub fn eq_where_predicate(l: &WherePredicate, r: &WherePredicate) -> bool {
     use WherePredicateKind::*;
-    match (&l.kind, &r.kind) {
-        (BoundPredicate(l), BoundPredicate(r)) => {
-            over(&l.bound_generic_params, &r.bound_generic_params, |l, r| {
-                eq_generic_param(l, r)
-            }) && eq_ty(&l.bounded_ty, &r.bounded_ty)
-                && over(&l.bounds, &r.bounds, eq_generic_bound)
-        },
-        (RegionPredicate(l), RegionPredicate(r)) => {
-            eq_id(l.lifetime.ident, r.lifetime.ident) && over(&l.bounds, &r.bounds, eq_generic_bound)
-        },
-        (EqPredicate(l), EqPredicate(r)) => eq_ty(&l.lhs_ty, &r.lhs_ty) && eq_ty(&l.rhs_ty, &r.rhs_ty),
-        _ => false,
-    }
+    over(&l.attrs, &r.attrs, eq_attr)
+        && match (&l.kind, &r.kind) {
+            (BoundPredicate(l), BoundPredicate(r)) => {
+                over(&l.bound_generic_params, &r.bound_generic_params, |l, r| {
+                    eq_generic_param(l, r)
+                }) && eq_ty(&l.bounded_ty, &r.bounded_ty)
+                    && over(&l.bounds, &r.bounds, eq_generic_bound)
+            },
+            (RegionPredicate(l), RegionPredicate(r)) => {
+                eq_id(l.lifetime.ident, r.lifetime.ident) && over(&l.bounds, &r.bounds, eq_generic_bound)
+            },
+            (EqPredicate(l), EqPredicate(r)) => eq_ty(&l.lhs_ty, &r.lhs_ty) && eq_ty(&l.rhs_ty, &r.rhs_ty),
+            _ => false,
+        }
 }
 
 pub fn eq_use_tree(l: &UseTree, r: &UseTree) -> bool {

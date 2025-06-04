@@ -45,8 +45,8 @@ use std::fmt;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use rustc_ast_ir::visit::VisitorResult;
-use rustc_ast_ir::{try_visit, walk_visitable_list};
+pub use rustc_ast_ir::visit::VisitorResult;
+pub use rustc_ast_ir::{try_visit, walk_visitable_list};
 use rustc_index::{Idx, IndexVec};
 use smallvec::SmallVec;
 use thin_vec::ThinVec;
@@ -224,6 +224,13 @@ impl<I: Interner, T: TypeVisitable<I>, Ix: Idx> TypeVisitable<I> for IndexVec<Ix
     }
 }
 
+impl<I: Interner, T: TypeVisitable<I>, S> TypeVisitable<I> for indexmap::IndexSet<T, S> {
+    fn visit_with<V: TypeVisitor<I>>(&self, visitor: &mut V) -> V::Result {
+        walk_visitable_list!(visitor, self.iter());
+        V::Result::output()
+    }
+}
+
 pub trait Flags {
     fn flags(&self) -> TypeFlags;
     fn outer_exclusive_binder(&self) -> ty::DebruijnIndex;
@@ -260,10 +267,6 @@ pub trait TypeVisitableExt<I: Interner>: TypeVisitable<I> {
 
     fn has_opaque_types(&self) -> bool {
         self.has_type_flags(TypeFlags::HAS_TY_OPAQUE)
-    }
-
-    fn has_coroutines(&self) -> bool {
-        self.has_type_flags(TypeFlags::HAS_TY_COROUTINE)
     }
 
     fn references_error(&self) -> bool {

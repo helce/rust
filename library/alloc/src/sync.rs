@@ -11,6 +11,7 @@
 use core::any::Any;
 #[cfg(not(no_global_oom_handling))]
 use core::clone::CloneToUninit;
+use core::clone::UseCloned;
 use core::cmp::Ordering;
 use core::hash::{Hash, Hasher};
 use core::intrinsics::abort;
@@ -83,9 +84,29 @@ macro_rules! acquire {
 ///
 /// Shared references in Rust disallow mutation by default, and `Arc` is no
 /// exception: you cannot generally obtain a mutable reference to something
-/// inside an `Arc`. If you need to mutate through an `Arc`, use
-/// [`Mutex`][mutex], [`RwLock`][rwlock], or one of the [`Atomic`][atomic]
-/// types.
+/// inside an `Arc`. If you do need to mutate through an `Arc`, you have several options:
+///
+/// 1. Use interior mutability with synchronization primitives like [`Mutex`][mutex],
+///    [`RwLock`][rwlock], or one of the [`Atomic`][atomic] types.
+///
+/// 2. Use clone-on-write semantics with [`Arc::make_mut`] which provides efficient mutation
+///    without requiring interior mutability. This approach clones the data only when
+///    needed (when there are multiple references) and can be more efficient when mutations
+///    are infrequent.
+///
+/// 3. Use [`Arc::get_mut`] when you know your `Arc` is not shared (has a reference count of 1),
+///    which provides direct mutable access to the inner value without any cloning.
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// let mut data = Arc::new(vec![1, 2, 3]);
+///
+/// // This will clone the vector only if there are other references to it
+/// Arc::make_mut(&mut data).push(4);
+///
+/// assert_eq!(*data, vec![1, 2, 3, 4]);
+/// ```
 ///
 /// **Note**: This type is only available on platforms that support atomic
 /// loads and stores of pointers, which includes all platforms that support
@@ -234,7 +255,7 @@ macro_rules! acquire {
 ///
 /// [rc_examples]: crate::rc#examples
 #[doc(search_unbox)]
-#[cfg_attr(not(test), rustc_diagnostic_item = "Arc")]
+#[rustc_diagnostic_item = "Arc"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_insignificant_dtor]
 pub struct Arc<
@@ -311,7 +332,7 @@ impl<T: ?Sized, A: Allocator> Arc<T, A> {
 ///
 /// [`upgrade`]: Weak::upgrade
 #[stable(feature = "arc_weak", since = "1.4.0")]
-#[cfg_attr(not(test), rustc_diagnostic_item = "ArcWeak")]
+#[rustc_diagnostic_item = "ArcWeak"]
 pub struct Weak<
     T: ?Sized,
     #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global,
@@ -1452,10 +1473,13 @@ impl<T: ?Sized> Arc<T> {
     ///
     /// # Safety
     ///
-    /// The pointer must have been obtained through `Arc::into_raw`, and the
-    /// associated `Arc` instance must be valid (i.e. the strong count must be at
+    /// The pointer must have been obtained through `Arc::into_raw` and must satisfy the
+    /// same layout requirements specified in [`Arc::from_raw_in`][from_raw_in].
+    /// The associated `Arc` instance must be valid (i.e. the strong count must be at
     /// least 1) for the duration of this method, and `ptr` must point to a block of memory
     /// allocated by the global allocator.
+    ///
+    /// [from_raw_in]: Arc::from_raw_in
     ///
     /// # Examples
     ///
@@ -1487,12 +1511,15 @@ impl<T: ?Sized> Arc<T> {
     ///
     /// # Safety
     ///
-    /// The pointer must have been obtained through `Arc::into_raw`, and the
-    /// associated `Arc` instance must be valid (i.e. the strong count must be at
+    /// The pointer must have been obtained through `Arc::into_raw` and must satisfy the
+    /// same layout requirements specified in [`Arc::from_raw_in`][from_raw_in].
+    /// The associated `Arc` instance must be valid (i.e. the strong count must be at
     /// least 1) when invoking this method, and `ptr` must point to a block of memory
     /// allocated by the global allocator. This method can be used to release the final
     /// `Arc` and backing storage, but **should not** be called after the final `Arc` has been
     /// released.
+    ///
+    /// [from_raw_in]: Arc::from_raw_in
     ///
     /// # Examples
     ///
@@ -1805,10 +1832,13 @@ impl<T: ?Sized, A: Allocator> Arc<T, A> {
     ///
     /// # Safety
     ///
-    /// The pointer must have been obtained through `Arc::into_raw`, and the
-    /// associated `Arc` instance must be valid (i.e. the strong count must be at
-    /// least 1) for the duration of this method,, and `ptr` must point to a block of memory
+    /// The pointer must have been obtained through `Arc::into_raw` and must satisfy the
+    /// same layout requirements specified in [`Arc::from_raw_in`][from_raw_in].
+    /// The associated `Arc` instance must be valid (i.e. the strong count must be at
+    /// least 1) for the duration of this method, and `ptr` must point to a block of memory
     /// allocated by `alloc`.
+    ///
+    /// [from_raw_in]: Arc::from_raw_in
     ///
     /// # Examples
     ///
@@ -1849,12 +1879,15 @@ impl<T: ?Sized, A: Allocator> Arc<T, A> {
     ///
     /// # Safety
     ///
-    /// The pointer must have been obtained through `Arc::into_raw`,  the
-    /// associated `Arc` instance must be valid (i.e. the strong count must be at
+    /// The pointer must have been obtained through `Arc::into_raw` and must satisfy the
+    /// same layout requirements specified in [`Arc::from_raw_in`][from_raw_in].
+    /// The associated `Arc` instance must be valid (i.e. the strong count must be at
     /// least 1) when invoking this method, and `ptr` must point to a block of memory
     /// allocated by `alloc`. This method can be used to release the final
     /// `Arc` and backing storage, but **should not** be called after the final `Arc` has been
     /// released.
+    ///
+    /// [from_raw_in]: Arc::from_raw_in
     ///
     /// # Examples
     ///
@@ -2197,6 +2230,9 @@ impl<T: ?Sized, A: Allocator + Clone> Clone for Arc<T, A> {
     }
 }
 
+#[unstable(feature = "ergonomic_clones", issue = "132290")]
+impl<T: ?Sized, A: Allocator + Clone> UseCloned for Arc<T, A> {}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized, A: Allocator> Deref for Arc<T, A> {
     type Target = T;
@@ -2274,7 +2310,7 @@ impl<T: ?Sized + CloneToUninit, A: Allocator + Clone> Arc<T, A> {
     #[inline]
     #[stable(feature = "arc_unique", since = "1.4.0")]
     pub fn make_mut(this: &mut Self) -> &mut T {
-        let size_of_val = mem::size_of_val::<T>(&**this);
+        let size_of_val = size_of_val::<T>(&**this);
 
         // Note that we hold both a strong reference and a weak reference.
         // Thus, releasing our strong reference only will not, by itself, cause
@@ -3158,6 +3194,9 @@ impl<T: ?Sized, A: Allocator + Clone> Clone for Weak<T, A> {
     }
 }
 
+#[unstable(feature = "ergonomic_clones", issue = "132290")]
+impl<T: ?Sized, A: Allocator + Clone> UseCloned for Weak<T, A> {}
+
 #[stable(feature = "downgraded_weak", since = "1.10.0")]
 impl<T> Default for Weak<T> {
     /// Constructs a new `Weak<T>`, without allocating memory.
@@ -3544,7 +3583,7 @@ impl<T> Default for Arc<[T]> {
     /// This may or may not share an allocation with other Arcs.
     #[inline]
     fn default() -> Self {
-        if mem::align_of::<T>() <= MAX_STATIC_INNER_SLICE_ALIGNMENT {
+        if align_of::<T>() <= MAX_STATIC_INNER_SLICE_ALIGNMENT {
             // We take a reference to the whole struct instead of the ArcInner<[u8; 1]> inside it so
             // we don't shrink the range of bytes the ptr is allowed to access under Stacked Borrows.
             // (Miri complains on 32-bit targets with Arc<[Align16]> otherwise.)

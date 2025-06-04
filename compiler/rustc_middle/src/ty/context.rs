@@ -7,6 +7,8 @@ pub mod tls;
 use std::assert_matches::{assert_matches, debug_assert_matches};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
+use std::env::VarError;
+use std::ffi::OsStr;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::ops::{Bound, Deref};
@@ -49,11 +51,10 @@ use rustc_session::{Limit, MetadataKind, Session};
 use rustc_span::def_id::{CRATE_DEF_ID, DefPathHash, StableCrateId};
 use rustc_span::{DUMMY_SP, Ident, Span, Symbol, kw, sym};
 use rustc_type_ir::TyKind::*;
-use rustc_type_ir::fold::TypeFoldable;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
 pub use rustc_type_ir::lift::Lift;
 use rustc_type_ir::{
-    CollectAndApply, Interner, TypeFlags, WithCachedTypeInfo, elaborate, search_graph,
+    CollectAndApply, Interner, TypeFlags, TypeFoldable, WithCachedTypeInfo, elaborate, search_graph,
 };
 use tracing::{debug, instrument};
 
@@ -324,11 +325,11 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
         self.features()
     }
 
-    fn bound_coroutine_hidden_types(
+    fn coroutine_hidden_types(
         self,
         def_id: DefId,
-    ) -> impl IntoIterator<Item = ty::EarlyBinder<'tcx, ty::Binder<'tcx, Ty<'tcx>>>> {
-        self.bound_coroutine_hidden_types(def_id)
+    ) -> ty::EarlyBinder<'tcx, ty::Binder<'tcx, &'tcx ty::List<Ty<'tcx>>>> {
+        self.coroutine_hidden_types(def_id)
     }
 
     fn fn_sig(self, def_id: DefId) -> ty::EarlyBinder<'tcx, ty::PolyFnSig<'tcx>> {
@@ -594,6 +595,10 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
         self.trait_is_auto(trait_def_id)
     }
 
+    fn trait_is_coinductive(self, trait_def_id: DefId) -> bool {
+        self.trait_is_coinductive(trait_def_id)
+    }
+
     fn trait_is_alias(self, trait_def_id: DefId) -> bool {
         self.trait_is_alias(trait_def_id)
     }
@@ -812,32 +817,38 @@ pub struct CtxtInterners<'tcx> {
 
 impl<'tcx> CtxtInterners<'tcx> {
     fn new(arena: &'tcx WorkerLocal<Arena<'tcx>>) -> CtxtInterners<'tcx> {
+        // Default interner size - this value has been chosen empirically, and may need to be adjusted
+        // as the compiler evolves.
+        const N: usize = 2048;
         CtxtInterners {
             arena,
-            type_: Default::default(),
-            const_lists: Default::default(),
-            args: Default::default(),
-            type_lists: Default::default(),
-            region: Default::default(),
-            poly_existential_predicates: Default::default(),
-            canonical_var_infos: Default::default(),
-            predicate: Default::default(),
-            clauses: Default::default(),
-            projs: Default::default(),
-            place_elems: Default::default(),
-            const_: Default::default(),
-            pat: Default::default(),
-            const_allocation: Default::default(),
-            bound_variable_kinds: Default::default(),
-            layout: Default::default(),
-            adt_def: Default::default(),
-            external_constraints: Default::default(),
-            predefined_opaques_in_body: Default::default(),
-            fields: Default::default(),
-            local_def_ids: Default::default(),
-            captures: Default::default(),
-            offset_of: Default::default(),
-            valtree: Default::default(),
+            // The factors have been chosen by @FractalFir based on observed interner sizes, and local perf runs.
+            // To get the interner sizes, insert `eprintln` printing the size of the interner in functions like `intern_ty`.
+            // Bigger benchmarks tend to give more accurate ratios, so use something like `x perf eprintln --includes cargo`.
+            type_: InternedSet::with_capacity(N * 16),
+            const_lists: InternedSet::with_capacity(N * 4),
+            args: InternedSet::with_capacity(N * 4),
+            type_lists: InternedSet::with_capacity(N * 4),
+            region: InternedSet::with_capacity(N * 4),
+            poly_existential_predicates: InternedSet::with_capacity(N / 4),
+            canonical_var_infos: InternedSet::with_capacity(N / 2),
+            predicate: InternedSet::with_capacity(N),
+            clauses: InternedSet::with_capacity(N),
+            projs: InternedSet::with_capacity(N * 4),
+            place_elems: InternedSet::with_capacity(N * 2),
+            const_: InternedSet::with_capacity(N * 2),
+            pat: InternedSet::with_capacity(N),
+            const_allocation: InternedSet::with_capacity(N),
+            bound_variable_kinds: InternedSet::with_capacity(N * 2),
+            layout: InternedSet::with_capacity(N),
+            adt_def: InternedSet::with_capacity(N),
+            external_constraints: InternedSet::with_capacity(N),
+            predefined_opaques_in_body: InternedSet::with_capacity(N),
+            fields: InternedSet::with_capacity(N * 4),
+            local_def_ids: InternedSet::with_capacity(N),
+            captures: InternedSet::with_capacity(N),
+            offset_of: InternedSet::with_capacity(N),
+            valtree: InternedSet::with_capacity(N),
         }
     }
 
@@ -1279,7 +1290,8 @@ impl<'tcx> TyCtxtFeed<'tcx, LocalDefId> {
         let bodies = Default::default();
         let attrs = hir::AttributeMap::EMPTY;
 
-        let (opt_hash_including_bodies, _) = self.tcx.hash_owner_nodes(node, &bodies, &attrs.map);
+        let (opt_hash_including_bodies, _) =
+            self.tcx.hash_owner_nodes(node, &bodies, &attrs.map, attrs.define_opaque);
         let node = node.into();
         self.opt_hir_owner_nodes(Some(self.tcx.arena.alloc(hir::OwnerNodes {
             opt_hash_including_bodies,
@@ -1289,7 +1301,7 @@ impl<'tcx> TyCtxtFeed<'tcx, LocalDefId> {
             ),
             bodies,
         })));
-        self.feed_owner_id().hir_attrs(attrs);
+        self.feed_owner_id().hir_attr_map(attrs);
     }
 }
 
@@ -1317,6 +1329,11 @@ pub struct TyCtxt<'tcx> {
     gcx: &'tcx GlobalCtxt<'tcx>,
 }
 
+// Explicitly implement `DynSync` and `DynSend` for `TyCtxt` to short circuit trait resolution. Its
+// field are asserted to implement these traits below, so this is trivially safe, and it greatly
+// speeds-up compilation of this crate and its dependents.
+unsafe impl DynSend for TyCtxt<'_> {}
+unsafe impl DynSync for TyCtxt<'_> {}
 fn _assert_tcx_fields() {
     sync::assert_dyn_sync::<&'_ GlobalCtxt<'_>>();
     sync::assert_dyn_send::<&'_ GlobalCtxt<'_>>();
@@ -1370,7 +1387,6 @@ pub struct GlobalCtxt<'tcx> {
 
     // Internal caches for metadata decoding. No need to track deps on this.
     pub ty_rcache: Lock<FxHashMap<ty::CReaderCacheKey, Ty<'tcx>>>,
-    pub pred_rcache: Lock<FxHashMap<ty::CReaderCacheKey, Predicate<'tcx>>>,
 
     /// Caches the results of trait selection. This cache is used
     /// for things that do not have to do with the parameters in scope.
@@ -1473,7 +1489,11 @@ impl<'tcx> TyCtxt<'tcx> {
             self.codegen_fn_attrs(def_id)
         } else if matches!(
             def_kind,
-            DefKind::AnonConst | DefKind::AssocConst | DefKind::Const | DefKind::InlineConst
+            DefKind::AnonConst
+                | DefKind::AssocConst
+                | DefKind::Const
+                | DefKind::InlineConst
+                | DefKind::GlobalAsm
         ) {
             CodegenFnAttrs::EMPTY
         } else {
@@ -1539,7 +1559,7 @@ impl<'tcx> TyCtxt<'tcx> {
                 Bound::Included(a.get())
             } else {
                 self.dcx().span_delayed_bug(
-                    attr.span,
+                    attr.span(),
                     "invalid rustc_layout_scalar_valid_range attribute",
                 );
                 Bound::Unbounded
@@ -1601,7 +1621,6 @@ impl<'tcx> TyCtxt<'tcx> {
             query_system,
             query_kinds,
             ty_rcache: Default::default(),
-            pred_rcache: Default::default(),
             selection_cache: Default::default(),
             evaluation_cache: Default::default(),
             new_solver_evaluation_cache: Default::default(),
@@ -1866,6 +1885,15 @@ impl<'tcx> TyCtxt<'tcx> {
         }
         None
     }
+
+    /// Helper to get a tracked environment variable via. [`TyCtxt::env_var_os`] and converting to
+    /// UTF-8 like [`std::env::var`].
+    pub fn env_var<K: ?Sized + AsRef<OsStr>>(self, key: &'tcx K) -> Result<&'tcx str, VarError> {
+        match self.env_var_os(key.as_ref()) {
+            Some(value) => value.to_str().ok_or_else(|| VarError::NotUnicode(value.to_os_string())),
+            None => Err(VarError::NotPresent),
+        }
+    }
 }
 
 impl<'tcx> TyCtxtAt<'tcx> {
@@ -1873,7 +1901,7 @@ impl<'tcx> TyCtxtAt<'tcx> {
     pub fn create_def(
         self,
         parent: LocalDefId,
-        name: Symbol,
+        name: Option<Symbol>,
         def_kind: DefKind,
     ) -> TyCtxtFeed<'tcx, LocalDefId> {
         let feed = self.tcx.create_def(parent, name, def_kind);
@@ -1888,7 +1916,7 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn create_def(
         self,
         parent: LocalDefId,
-        name: Symbol,
+        name: Option<Symbol>,
         def_kind: DefKind,
     ) -> TyCtxtFeed<'tcx, LocalDefId> {
         let data = def_kind.def_path_data(name);
@@ -1941,7 +1969,7 @@ impl<'tcx> TyCtxt<'tcx> {
         Ok(TyCtxtFeed { key: num, tcx: self })
     }
 
-    pub fn iter_local_def_id(self) -> impl Iterator<Item = LocalDefId> + 'tcx {
+    pub fn iter_local_def_id(self) -> impl Iterator<Item = LocalDefId> {
         // Create a dependency to the red node to be sure we re-execute this when the amount of
         // definitions change.
         self.dep_graph.read_index(DepNodeIndex::FOREVER_RED_NODE);
@@ -2079,7 +2107,7 @@ impl<'tcx> TyCtxt<'tcx> {
     ) -> Vec<&'tcx hir::Ty<'tcx>> {
         let hir_id = self.local_def_id_to_hir_id(scope_def_id);
         let Some(hir::FnDecl { output: hir::FnRetTy::Return(hir_output), .. }) =
-            self.hir().fn_decl_by_hir_id(hir_id)
+            self.hir_fn_decl_by_hir_id(hir_id)
         else {
             return vec![];
         };
@@ -2099,7 +2127,7 @@ impl<'tcx> TyCtxt<'tcx> {
         let hir_id = self.local_def_id_to_hir_id(scope_def_id);
         let mut v = TraitObjectVisitor(vec![], self.hir());
         // when the return type is a type alias
-        if let Some(hir::FnDecl { output: hir::FnRetTy::Return(hir_output), .. }) = self.hir().fn_decl_by_hir_id(hir_id)
+        if let Some(hir::FnDecl { output: hir::FnRetTy::Return(hir_output), .. }) = self.hir_fn_decl_by_hir_id(hir_id)
             && let hir::TyKind::Path(hir::QPath::Resolved(
                 None,
                 hir::Path { res: hir::def::Res::Def(DefKind::TyAlias, def_id), .. }, )) = hir_output.kind
@@ -2168,15 +2196,19 @@ impl<'tcx> TyCtxt<'tcx> {
         self.limits(()).move_size_limit
     }
 
+    pub fn pattern_complexity_limit(self) -> Limit {
+        self.limits(()).pattern_complexity_limit
+    }
+
     /// All traits in the crate graph, including those not visible to the user.
-    pub fn all_traits(self) -> impl Iterator<Item = DefId> + 'tcx {
+    pub fn all_traits(self) -> impl Iterator<Item = DefId> {
         iter::once(LOCAL_CRATE)
             .chain(self.crates(()).iter().copied())
             .flat_map(move |cnum| self.traits(cnum).iter().copied())
     }
 
     /// All traits that are visible within the crate graph (i.e. excluding private dependencies).
-    pub fn visible_traits(self) -> impl Iterator<Item = DefId> + 'tcx {
+    pub fn visible_traits(self) -> impl Iterator<Item = DefId> {
         let visible_crates =
             self.crates(()).iter().copied().filter(move |cnum| self.is_user_visible_dep(*cnum));
 
@@ -2193,7 +2225,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Returns the origin of the opaque type `def_id`.
     #[instrument(skip(self), level = "trace", ret)]
     pub fn local_opaque_ty_origin(self, def_id: LocalDefId) -> hir::OpaqueTyOrigin<LocalDefId> {
-        self.hir().expect_opaque_ty(def_id).origin
+        self.hir_expect_opaque_ty(def_id).origin
     }
 
     pub fn finish(self) {
@@ -2315,8 +2347,8 @@ macro_rules! sty_debug_print {
                 $(let mut $variant = total;)*
 
                 for shard in tcx.interners.type_.lock_shards() {
-                    let types = shard.keys();
-                    for &InternedInSet(t) in types {
+                    let types = shard.iter();
+                    for &(InternedInSet(t), ()) in types {
                         let variant = match t.internee {
                             ty::Bool | ty::Char | ty::Int(..) | ty::Uint(..) |
                                 ty::Float(..) | ty::Str | ty::Never => continue,
@@ -2361,7 +2393,7 @@ macro_rules! sty_debug_print {
 }
 
 impl<'tcx> TyCtxt<'tcx> {
-    pub fn debug_stats(self) -> impl fmt::Debug + 'tcx {
+    pub fn debug_stats(self) -> impl fmt::Debug {
         fmt::from_fn(move |fmt| {
             sty_debug_print!(
                 fmt,
@@ -3015,7 +3047,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Find the crate root and the appropriate span where `use` and outer attributes can be
     /// inserted at.
     pub fn crate_level_attribute_injection_span(self, hir_id: HirId) -> Option<Span> {
-        for (_hir_id, node) in self.hir().parent_iter(hir_id) {
+        for (_hir_id, node) in self.hir_parent_iter(hir_id) {
             if let hir::Node::Crate(m) = node {
                 return Some(m.spans.inject_use_span.shrink_to_lo());
             }
@@ -3097,9 +3129,11 @@ impl<'tcx> TyCtxt<'tcx> {
 
     pub fn late_bound_vars(self, id: HirId) -> &'tcx List<ty::BoundVariableKind> {
         self.mk_bound_variable_kinds(
-            &self.late_bound_vars_map(id.owner).get(&id.local_id).cloned().unwrap_or_else(|| {
-                bug!("No bound vars found for {}", self.hir().node_to_string(id))
-            }),
+            &self
+                .late_bound_vars_map(id.owner)
+                .get(&id.local_id)
+                .cloned()
+                .unwrap_or_else(|| bug!("No bound vars found for {}", self.hir_id_to_string(id))),
         )
     }
 
@@ -3293,9 +3327,9 @@ pub fn provide(providers: &mut Providers) {
     providers.extern_mod_stmt_cnum =
         |tcx, id| tcx.resolutions(()).extern_crate_map.get(&id).cloned();
     providers.is_panic_runtime =
-        |tcx, LocalCrate| contains_name(tcx.hir().krate_attrs(), sym::panic_runtime);
+        |tcx, LocalCrate| contains_name(tcx.hir_krate_attrs(), sym::panic_runtime);
     providers.is_compiler_builtins =
-        |tcx, LocalCrate| contains_name(tcx.hir().krate_attrs(), sym::compiler_builtins);
+        |tcx, LocalCrate| contains_name(tcx.hir_krate_attrs(), sym::compiler_builtins);
     providers.has_panic_handler = |tcx, LocalCrate| {
         // We want to check if the panic handler was defined in this crate
         tcx.lang_items().panic_impl().is_some_and(|did| did.is_local())

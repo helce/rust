@@ -9,11 +9,11 @@ macro_rules! define_tests {
             let unambig = $kind::$variant::<'_, ()> { $($init)* };
             let unambig_to_ambig = unsafe { std::mem::transmute::<_, $kind<'_, AmbigArg>>(unambig) };
 
-            assert!(matches!(&unambig_to_ambig, $kind::$variant { $($init)* }));
+            assert!(matches!(&unambig_to_ambig, &$kind::$variant { $($init)* }));
 
             let ambig_to_unambig = unsafe { std::mem::transmute::<_, $kind<'_, ()>>(unambig_to_ambig) };
 
-            assert!(matches!(&ambig_to_unambig, $kind::$variant { $($init)* }));
+            assert!(matches!(&ambig_to_unambig, &$kind::$variant { $($init)* }));
         }
     )*};
 }
@@ -58,6 +58,7 @@ fn trait_object_roundtrips_impl(syntax: TraitObjectSyntax) {
                     hir_id: HirId::INVALID,
                     ident: Ident::new(sym::name, DUMMY_SP),
                     res: LifetimeName::Static,
+                    is_anon_in_path: IsAnonInPath::No,
                 }
             },
             syntax,

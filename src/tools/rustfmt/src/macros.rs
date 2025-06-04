@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use rustc_ast::token::{BinOpToken, Delimiter, Token, TokenKind};
+use rustc_ast::token::{Delimiter, Token, TokenKind};
 use rustc_ast::tokenstream::{TokenStream, TokenStreamIter, TokenTree};
 use rustc_ast::{ast, ptr};
 use rustc_ast_pretty::pprust;
@@ -423,7 +423,6 @@ fn rewrite_empty_macro_def_body(
         rules: ast::BlockCheckMode::Default,
         span,
         tokens: None,
-        could_be_bare_literal: false,
     };
     block.rewrite_result(context, shape)
 }
@@ -841,7 +840,7 @@ impl MacroArgParser {
             match tok {
                 TokenTree::Token(
                     Token {
-                        kind: TokenKind::BinOp(BinOpToken::Plus),
+                        kind: TokenKind::Plus,
                         ..
                     },
                     _,
@@ -855,7 +854,7 @@ impl MacroArgParser {
                 )
                 | TokenTree::Token(
                     Token {
-                        kind: TokenKind::BinOp(BinOpToken::Star),
+                        kind: TokenKind::Star,
                         ..
                     },
                     _,
@@ -1088,14 +1087,32 @@ fn force_space_before(tok: &TokenKind) -> bool {
         | TokenKind::Gt
         | TokenKind::AndAnd
         | TokenKind::OrOr
-        | TokenKind::Not
+        | TokenKind::Bang
         | TokenKind::Tilde
-        | TokenKind::BinOpEq(_)
+        | TokenKind::PlusEq
+        | TokenKind::MinusEq
+        | TokenKind::StarEq
+        | TokenKind::SlashEq
+        | TokenKind::PercentEq
+        | TokenKind::CaretEq
+        | TokenKind::AndEq
+        | TokenKind::OrEq
+        | TokenKind::ShlEq
+        | TokenKind::ShrEq
         | TokenKind::At
         | TokenKind::RArrow
         | TokenKind::LArrow
         | TokenKind::FatArrow
-        | TokenKind::BinOp(_)
+        | TokenKind::Plus
+        | TokenKind::Minus
+        | TokenKind::Star
+        | TokenKind::Slash
+        | TokenKind::Percent
+        | TokenKind::Caret
+        | TokenKind::And
+        | TokenKind::Or
+        | TokenKind::Shl
+        | TokenKind::Shr
         | TokenKind::Pound
         | TokenKind::Dollar => true,
         _ => false,
@@ -1113,8 +1130,8 @@ fn next_space(tok: &TokenKind) -> SpaceState {
     debug!("next_space: {:?}", tok);
 
     match tok {
-        TokenKind::Not
-        | TokenKind::BinOp(BinOpToken::And)
+        TokenKind::Bang
+        | TokenKind::And
         | TokenKind::Tilde
         | TokenKind::At
         | TokenKind::Comma

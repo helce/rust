@@ -404,7 +404,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                         pat.kind
                 {
                     if upvar_ident.name == kw::SelfLower {
-                        for (_, node) in self.infcx.tcx.hir().parent_iter(upvar_hir_id) {
+                        for (_, node) in self.infcx.tcx.hir_parent_iter(upvar_hir_id) {
                             if let Some(fn_decl) = node.fn_decl() {
                                 if !matches!(
                                     fn_decl.implicit_self,
@@ -648,10 +648,9 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     }
                 }
             }
-            let hir_map = self.infcx.tcx.hir();
             let def_id = self.body.source.def_id();
             let Some(local_def_id) = def_id.as_local() else { return };
-            let Some(body) = hir_map.maybe_body_owned_by(local_def_id) else { return };
+            let Some(body) = self.infcx.tcx.hir_maybe_body_owned_by(local_def_id) else { return };
 
             let mut v = SuggestIndexOperatorAlternativeVisitor {
                 assign_span: span,
@@ -692,14 +691,16 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             true,
             td.is_local(),
             td.as_local().and_then(|tld| match self.infcx.tcx.hir_node_by_def_id(tld) {
-                Node::Item(hir::Item { kind: hir::ItemKind::Trait(_, _, _, _, items), .. }) => {
+                Node::Item(hir::Item {
+                    kind: hir::ItemKind::Trait(_, _, _, _, _, items), ..
+                }) => {
                     let mut f_in_trait_opt = None;
                     for hir::TraitItemRef { id: fi, kind: k, .. } in *items {
                         let hi = fi.hir_id();
                         if !matches!(k, hir::AssocItemKind::Fn { .. }) {
                             continue;
                         }
-                        if self.infcx.tcx.hir().name(hi) != self.infcx.tcx.hir().name(my_hir) {
+                        if self.infcx.tcx.hir_name(hi) != self.infcx.tcx.hir_name(my_hir) {
                             continue;
                         }
                         f_in_trait_opt = Some(hi);
@@ -749,7 +750,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         // `fn foo(&x: &i32)` -> `fn foo(&(mut x): &i32)`
         let def_id = self.body.source.def_id();
         if let Some(local_def_id) = def_id.as_local()
-            && let Some(body) = self.infcx.tcx.hir().maybe_body_owned_by(local_def_id)
+            && let Some(body) = self.infcx.tcx.hir_maybe_body_owned_by(local_def_id)
             && let Some(hir_id) = (BindingFinder { span: pat_span }).visit_body(&body).break_value()
             && let node = self.infcx.tcx.hir_node(hir_id)
             && let hir::Node::LetStmt(hir::LetStmt {
@@ -824,7 +825,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                             ) => {
                                 capture_reason = format!("mutable borrow of `{upvar}`");
                             }
-                            ty::UpvarCapture::ByValue => {
+                            ty::UpvarCapture::ByValue | ty::UpvarCapture::ByUse => {
                                 capture_reason = format!("possible mutation of `{upvar}`");
                             }
                             _ => bug!("upvar `{upvar}` borrowed, but not mutably"),
@@ -856,7 +857,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         use hir::ExprKind::{AddrOf, Block, Call, MethodCall};
         use hir::{BorrowKind, Expr};
 
-        let hir_map = self.infcx.tcx.hir();
+        let tcx = self.infcx.tcx;
         struct Finder {
             span: Span,
         }
@@ -871,7 +872,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 }
             }
         }
-        if let Some(body) = hir_map.maybe_body_owned_by(self.mir_def_id())
+        if let Some(body) = tcx.hir_maybe_body_owned_by(self.mir_def_id())
             && let Block(block, _) = body.value.kind
         {
             // `span` corresponds to the expression being iterated, find the `for`-loop desugared
@@ -884,17 +885,15 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     MethodCall(path_segment, _, _, span) => {
                         // We have `for _ in iter.read_only_iter()`, try to
                         // suggest `for _ in iter.mutable_iter()` instead.
-                        let opt_suggestions = self
-                            .infcx
-                            .tcx
+                        let opt_suggestions = tcx
                             .typeck(path_segment.hir_id.owner.def_id)
                             .type_dependent_def_id(expr.hir_id)
-                            .and_then(|def_id| self.infcx.tcx.impl_of_method(def_id))
-                            .map(|def_id| self.infcx.tcx.associated_items(def_id))
+                            .and_then(|def_id| tcx.impl_of_method(def_id))
+                            .map(|def_id| tcx.associated_items(def_id))
                             .map(|assoc_items| {
                                 assoc_items
                                     .in_definition_order()
-                                    .map(|assoc_item_def| assoc_item_def.ident(self.infcx.tcx))
+                                    .map(|assoc_item_def| assoc_item_def.ident(tcx))
                                     .filter(|&ident| {
                                         let original_method_ident = path_segment.ident;
                                         original_method_ident != ident
@@ -936,12 +935,12 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
     fn expected_fn_found_fn_mut_call(&self, err: &mut Diag<'_>, sp: Span, act: &str) {
         err.span_label(sp, format!("cannot {act}"));
 
-        let hir = self.infcx.tcx.hir();
+        let tcx = self.infcx.tcx;
         let closure_id = self.mir_hir_id();
-        let closure_span = self.infcx.tcx.def_span(self.mir_def_id());
-        let fn_call_id = self.infcx.tcx.parent_hir_id(closure_id);
-        let node = self.infcx.tcx.hir_node(fn_call_id);
-        let def_id = hir.enclosing_body_owner(fn_call_id);
+        let closure_span = tcx.def_span(self.mir_def_id());
+        let fn_call_id = tcx.parent_hir_id(closure_id);
+        let node = tcx.hir_node(fn_call_id);
+        let def_id = tcx.hir_enclosing_body_owner(fn_call_id);
         let mut look_at_return = true;
 
         // If the HIR node is a function or method call gets the def ID
@@ -951,7 +950,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 return None;
             };
 
-            let typeck_results = self.infcx.tcx.typeck(def_id);
+            let typeck_results = tcx.typeck(def_id);
 
             match kind {
                 hir::ExprKind::Call(expr, args) => {
@@ -980,10 +979,10 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 .map(|(pos, _)| pos)
                 .next();
 
-            let arg = match hir.get_if_local(callee_def_id) {
+            let arg = match tcx.hir_get_if_local(callee_def_id) {
                 Some(
                     hir::Node::Item(hir::Item {
-                        ident, kind: hir::ItemKind::Fn { sig, .. }, ..
+                        kind: hir::ItemKind::Fn { ident, sig, .. }, ..
                     })
                     | hir::Node::TraitItem(hir::TraitItem {
                         ident,
@@ -1019,12 +1018,12 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             }
         }
 
-        if look_at_return && hir.get_fn_id_for_return_block(closure_id).is_some() {
+        if look_at_return && tcx.hir_get_fn_id_for_return_block(closure_id).is_some() {
             // ...otherwise we are probably in the tail expression of the function, point at the
             // return type.
-            match self.infcx.tcx.hir_node_by_def_id(hir.get_parent_item(fn_call_id).def_id) {
+            match tcx.hir_node_by_def_id(tcx.hir_get_parent_item(fn_call_id).def_id) {
                 hir::Node::Item(hir::Item {
-                    ident, kind: hir::ItemKind::Fn { sig, .. }, ..
+                    kind: hir::ItemKind::Fn { ident, sig, .. }, ..
                 })
                 | hir::Node::TraitItem(hir::TraitItem {
                     ident,
@@ -1050,9 +1049,9 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
 
     fn suggest_using_iter_mut(&self, err: &mut Diag<'_>) {
         let source = self.body.source;
-        let hir = self.infcx.tcx.hir();
         if let InstanceKind::Item(def_id) = source.instance
-            && let Some(Node::Expr(hir::Expr { hir_id, kind, .. })) = hir.get_if_local(def_id)
+            && let Some(Node::Expr(hir::Expr { hir_id, kind, .. })) =
+                self.infcx.tcx.hir_get_if_local(def_id)
             && let ExprKind::Closure(hir::Closure { kind: hir::ClosureKind::Closure, .. }) = kind
             && let Node::Expr(expr) = self.infcx.tcx.parent_hir_node(*hir_id)
         {
@@ -1274,7 +1273,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             }) => {
                 let def_id = self.body.source.def_id();
                 let hir_id = if let Some(local_def_id) = def_id.as_local()
-                    && let Some(body) = self.infcx.tcx.hir().maybe_body_owned_by(local_def_id)
+                    && let Some(body) = self.infcx.tcx.hir_maybe_body_owned_by(local_def_id)
                 {
                     BindingFinder { span: err_label_span }.visit_body(&body).break_value()
                 } else {
@@ -1635,8 +1634,8 @@ fn get_mut_span_in_struct_field<'tcx>(
 /// If possible, suggest replacing `ref` with `ref mut`.
 fn suggest_ref_mut(tcx: TyCtxt<'_>, span: Span) -> Option<Span> {
     let pattern_str = tcx.sess.source_map().span_to_snippet(span).ok()?;
-    if pattern_str.starts_with("ref")
-        && pattern_str["ref".len()..].starts_with(rustc_lexer::is_whitespace)
+    if let Some(rest) = pattern_str.strip_prefix("ref")
+        && rest.starts_with(rustc_lexer::is_whitespace)
     {
         let span = span.with_lo(span.lo() + BytePos(4)).shrink_to_lo();
         Some(span)

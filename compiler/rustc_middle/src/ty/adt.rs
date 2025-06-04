@@ -4,7 +4,6 @@ use std::ops::Range;
 use std::str;
 
 use rustc_abi::{FIRST_VARIANT, ReprOptions, VariantIdx};
-use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::intern::Interned;
@@ -54,8 +53,6 @@ bitflags::bitflags! {
         const IS_VARIANT_LIST_NON_EXHAUSTIVE = 1 << 8;
         /// Indicates whether the type is `UnsafeCell`.
         const IS_UNSAFE_CELL              = 1 << 9;
-        /// Indicates whether the type is anonymous.
-        const IS_ANONYMOUS                = 1 << 10;
     }
 }
 rustc_data_structures::external_bitflags_debug! { AdtFlags }
@@ -330,9 +327,20 @@ impl<'tcx> AdtDef<'tcx> {
     }
 
     /// Returns `true` if the variant list of this ADT is `#[non_exhaustive]`.
+    ///
+    /// Note that this function will return `true` even if the ADT has been
+    /// defined in the crate currently being compiled. If that's not what you
+    /// want, see [`Self::variant_list_has_applicable_non_exhaustive`].
     #[inline]
     pub fn is_variant_list_non_exhaustive(self) -> bool {
         self.flags().contains(AdtFlags::IS_VARIANT_LIST_NON_EXHAUSTIVE)
+    }
+
+    /// Returns `true` if the variant list of this ADT is `#[non_exhaustive]`
+    /// and has been defined in another crate.
+    #[inline]
+    pub fn variant_list_has_applicable_non_exhaustive(self) -> bool {
+        self.is_variant_list_non_exhaustive() && !self.did().is_local()
     }
 
     /// Returns the kind of the ADT.
@@ -401,12 +409,6 @@ impl<'tcx> AdtDef<'tcx> {
     #[inline]
     pub fn is_manually_drop(self) -> bool {
         self.flags().contains(AdtFlags::IS_MANUALLY_DROP)
-    }
-
-    /// Returns `true` if this is an anonymous adt
-    #[inline]
-    pub fn is_anonymous(self) -> bool {
-        self.flags().contains(AdtFlags::IS_ANONYMOUS)
     }
 
     /// Returns `true` if this type has a destructor.
@@ -540,7 +542,7 @@ impl<'tcx> AdtDef<'tcx> {
     pub fn discriminants(
         self,
         tcx: TyCtxt<'tcx>,
-    ) -> impl Iterator<Item = (VariantIdx, Discr<'tcx>)> + Captures<'tcx> {
+    ) -> impl Iterator<Item = (VariantIdx, Discr<'tcx>)> {
         assert!(self.is_enum());
         let repr_type = self.repr().discr_type();
         let initial = repr_type.initial_discriminant(tcx);

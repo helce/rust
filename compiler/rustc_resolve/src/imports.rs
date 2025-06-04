@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::mem;
 
 use rustc_ast::NodeId;
-use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
 use rustc_data_structures::intern::Interned;
 use rustc_errors::codes::*;
 use rustc_errors::{Applicability, MultiSpan, pluralize, struct_span_code_err};
@@ -98,13 +98,13 @@ impl<'ra> std::fmt::Debug for ImportKind<'ra> {
         use ImportKind::*;
         match self {
             Single {
-                ref source,
-                ref target,
-                ref source_bindings,
-                ref target_bindings,
-                ref type_ns_only,
-                ref nested,
-                ref id,
+                source,
+                target,
+                source_bindings,
+                target_bindings,
+                type_ns_only,
+                nested,
+                id,
             } => f
                 .debug_struct("Single")
                 .field("source", source)
@@ -122,13 +122,13 @@ impl<'ra> std::fmt::Debug for ImportKind<'ra> {
                 .field("nested", nested)
                 .field("id", id)
                 .finish(),
-            Glob { ref is_prelude, ref max_vis, ref id } => f
+            Glob { is_prelude, max_vis, id } => f
                 .debug_struct("Glob")
                 .field("is_prelude", is_prelude)
                 .field("max_vis", max_vis)
                 .field("id", id)
                 .finish(),
-            ExternCrate { ref source, ref target, ref id } => f
+            ExternCrate { source, target, id } => f
                 .debug_struct("ExternCrate")
                 .field("source", source)
                 .field("target", target)
@@ -182,6 +182,19 @@ pub(crate) struct ImportData<'ra> {
 /// so we can use referential equality to compare them.
 pub(crate) type Import<'ra> = Interned<'ra, ImportData<'ra>>;
 
+// Allows us to use Interned without actually enforcing (via Hash/PartialEq/...) uniqueness of the
+// contained data.
+// FIXME: We may wish to actually have at least debug-level assertions that Interned's guarantees
+// are upheld.
+impl std::hash::Hash for ImportData<'_> {
+    fn hash<H>(&self, _: &mut H)
+    where
+        H: std::hash::Hasher,
+    {
+        unreachable!()
+    }
+}
+
 impl<'ra> ImportData<'ra> {
     pub(crate) fn is_glob(&self) -> bool {
         matches!(self.kind, ImportKind::Glob { .. })
@@ -220,7 +233,7 @@ impl<'ra> ImportData<'ra> {
 pub(crate) struct NameResolution<'ra> {
     /// Single imports that may define the name in the namespace.
     /// Imports are arena-allocated, so it's ok to use pointers as keys.
-    pub single_imports: FxHashSet<Import<'ra>>,
+    pub single_imports: FxIndexSet<Import<'ra>>,
     /// The least shadowable known binding for this name, or None if there are no known bindings.
     pub binding: Option<NameBinding<'ra>>,
     pub shadowed_glob: Option<NameBinding<'ra>>,
@@ -481,7 +494,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 let key = BindingKey::new(target, ns);
                 let _ = this.try_define(import.parent_scope.module, key, dummy_binding, false);
                 this.update_resolution(import.parent_scope.module, key, false, |_, resolution| {
-                    resolution.single_imports.remove(&import);
+                    resolution.single_imports.swap_remove(&import);
                 })
             });
             self.record_use(target, dummy_binding, Used::Other);
@@ -849,7 +862,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                         }
                         let key = BindingKey::new(target, ns);
                         this.update_resolution(parent, key, false, |_, resolution| {
-                            resolution.single_imports.remove(&import);
+                            resolution.single_imports.swap_remove(&import);
                         });
                     }
                 }
@@ -942,11 +955,9 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     } else {
                         None
                     };
-                    let err = match self.make_path_suggestion(
-                        span,
-                        import.module_path.clone(),
-                        &import.parent_scope,
-                    ) {
+                    let err = match self
+                        .make_path_suggestion(import.module_path.clone(), &import.parent_scope)
+                    {
                         Some((suggestion, note)) => UnresolvedImportError {
                             span,
                             label: None,

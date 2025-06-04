@@ -232,7 +232,7 @@ impl DocVisitor<'_> for CoverageCalculator<'_, '_> {
                     .item_id
                     .as_def_id()
                     .and_then(|def_id| self.ctx.tcx.opt_parent(def_id))
-                    .and_then(|def_id| self.ctx.tcx.hir().get_if_local(def_id))
+                    .and_then(|def_id| self.ctx.tcx.hir_get_if_local(def_id))
                     .map(|node| {
                         matches!(
                             node,
@@ -240,7 +240,7 @@ impl DocVisitor<'_> for CoverageCalculator<'_, '_> {
                                 data: hir::VariantData::Tuple(_, _, _),
                                 ..
                             }) | hir::Node::Item(hir::Item {
-                                kind: hir::ItemKind::Struct(hir::VariantData::Tuple(_, _, _), _),
+                                kind: hir::ItemKind::Struct(_, hir::VariantData::Tuple(_, _, _), _),
                                 ..
                             })
                         )

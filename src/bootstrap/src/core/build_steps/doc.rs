@@ -11,7 +11,6 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::{env, fs, mem};
 
-use crate::Mode;
 use crate::core::build_steps::compile;
 use crate::core::build_steps::tool::{self, SourceType, Tool, prepare_tool_cargo};
 use crate::core::builder::{
@@ -19,6 +18,7 @@ use crate::core::builder::{
 };
 use crate::core::config::{Config, TargetSelection};
 use crate::helpers::{submodule_path_of, symlink_dir, t, up_to_date};
+use crate::{FileType, Mode};
 
 macro_rules! book {
     ($($name:ident, $path:expr, $book_name:expr, $lang:expr ;)+) => {
@@ -546,6 +546,7 @@ impl Step for SharedAssets {
         builder.copy_link(
             &builder.src.join("src").join("doc").join("rust.css"),
             &out.join("rust.css"),
+            FileType::Regular,
         );
 
         SharedAssetsPaths { version_info }
@@ -572,14 +573,15 @@ impl Step for Std {
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         let builder = run.builder;
-        run.crate_or_deps("sysroot")
-            .path("library")
-            .alias("core")
-            .default_condition(builder.config.docs)
+        run.crate_or_deps("sysroot").path("library").default_condition(builder.config.docs)
     }
 
     fn make_run(run: RunConfig<'_>) {
         let crates = compile::std_crates_for_run_make(&run);
+        let target_is_no_std = run.builder.no_std(run.target).unwrap_or(false);
+        if crates.is_empty() && target_is_no_std {
+            return;
+        }
         run.builder.ensure(Std {
             stage: run.builder.top_stage,
             target: run.target,
@@ -986,9 +988,7 @@ macro_rules! tool_doc {
                 cargo.rustdocflag("-Arustdoc::private-intra-doc-links");
                 cargo.rustdocflag("--enable-index-page");
                 cargo.rustdocflag("--show-type-layout");
-                // FIXME: `--generate-link-to-definition` tries to resolve cfged out code
-                // see https://github.com/rust-lang/rust/pull/122066#issuecomment-1983049222
-                // cargo.rustdocflag("--generate-link-to-definition");
+                cargo.rustdocflag("--generate-link-to-definition");
 
                 let out_dir = builder.stage_out(compiler, Mode::ToolRustc).join(target).join("doc");
                 $(for krate in $crates {
@@ -1219,7 +1219,7 @@ impl Step for RustcBook {
         cmd.env("RUSTC_BOOTSTRAP", "1");
 
         // If the lib directories are in an unusual location (changed in
-        // config.toml), then this needs to explicitly update the dylib search
+        // bootstrap.toml), then this needs to explicitly update the dylib search
         // path.
         builder.add_rustc_lib_path(self.compiler, &mut cmd);
         let doc_generator_guard = builder.msg(

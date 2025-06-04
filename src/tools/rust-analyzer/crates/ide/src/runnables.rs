@@ -4,16 +4,17 @@ use arrayvec::ArrayVec;
 use ast::HasName;
 use cfg::{CfgAtom, CfgExpr};
 use hir::{
-    db::HirDatabase, sym, AsAssocItem, AttrsWithOwner, HasAttrs, HasCrate, HasSource, HirFileIdExt,
-    ModPath, Name, PathKind, Semantics, Symbol,
+    db::HirDatabase, sym, symbols::FxIndexSet, AsAssocItem, AttrsWithOwner, HasAttrs, HasCrate,
+    HasSource, HirFileIdExt, ModPath, Name, PathKind, Semantics, Symbol,
 };
 use ide_assists::utils::{has_test_related_attribute, test_related_attribute_syn};
 use ide_db::{
+    base_db::SourceDatabase,
     defs::Definition,
     documentation::docs_from_attrs,
     helpers::visit_file_defs,
     search::{FileReferenceNode, SearchScope},
-    FilePosition, FxHashMap, FxHashSet, RootDatabase, SymbolKind,
+    FilePosition, FxHashMap, FxIndexMap, RootDatabase, SymbolKind,
 };
 use itertools::Itertools;
 use smallvec::SmallVec;
@@ -61,8 +62,8 @@ pub enum RunnableKind {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 enum RunnableDiscKind {
-    Test,
     TestMod,
+    Test,
     DocTest,
     Bench,
     Bin,
@@ -130,7 +131,7 @@ pub(crate) fn runnables(db: &RootDatabase, file_id: FileId) -> Vec<Runnable> {
     let mut res = Vec::new();
     // Record all runnables that come from macro expansions here instead.
     // In case an expansion creates multiple runnables we want to name them to avoid emitting a bunch of equally named runnables.
-    let mut in_macro_expansion = FxHashMap::<hir::HirFileId, Vec<Runnable>>::default();
+    let mut in_macro_expansion = FxIndexMap::<hir::HirFileId, Vec<Runnable>>::default();
     let mut add_opt = |runnable: Option<Runnable>, def| {
         if let Some(runnable) = runnable.filter(|runnable| runnable.nav.file_id == file_id) {
             if let Some(def) = def {
@@ -182,20 +183,7 @@ pub(crate) fn runnables(db: &RootDatabase, file_id: FileId) -> Vec<Runnable> {
             r
         })
     }));
-    res.sort_by(|Runnable { nav, kind, .. }, Runnable { nav: nav_b, kind: kind_b, .. }| {
-        // full_range.start < focus_range.start < name, should give us a decent unique ordering
-        nav.full_range
-            .start()
-            .cmp(&nav_b.full_range.start())
-            .then_with(|| {
-                let t_0 = || TextSize::from(0);
-                nav.focus_range
-                    .map_or_else(t_0, |it| it.start())
-                    .cmp(&nav_b.focus_range.map_or_else(t_0, |it| it.start()))
-            })
-            .then_with(|| kind.disc().cmp(&kind_b.disc()))
-            .then_with(|| nav.name.cmp(&nav_b.name))
-    });
+    res.sort_by(cmp_runnables);
     res
 }
 
@@ -215,12 +203,30 @@ pub(crate) fn related_tests(
     search_scope: Option<SearchScope>,
 ) -> Vec<Runnable> {
     let sema = Semantics::new(db);
-    let mut res: FxHashSet<Runnable> = FxHashSet::default();
+    let mut res: FxIndexSet<Runnable> = FxIndexSet::default();
     let syntax = sema.parse_guess_edition(position.file_id).syntax().clone();
 
     find_related_tests(&sema, &syntax, position, search_scope, &mut res);
 
-    res.into_iter().collect()
+    res.into_iter().sorted_by(cmp_runnables).collect()
+}
+
+fn cmp_runnables(
+    Runnable { nav, kind, .. }: &Runnable,
+    Runnable { nav: nav_b, kind: kind_b, .. }: &Runnable,
+) -> std::cmp::Ordering {
+    // full_range.start < focus_range.start < name, should give us a decent unique ordering
+    nav.full_range
+        .start()
+        .cmp(&nav_b.full_range.start())
+        .then_with(|| {
+            let t_0 = || TextSize::from(0);
+            nav.focus_range
+                .map_or_else(t_0, |it| it.start())
+                .cmp(&nav_b.focus_range.map_or_else(t_0, |it| it.start()))
+        })
+        .then_with(|| kind.disc().cmp(&kind_b.disc()))
+        .then_with(|| nav.name.cmp(&nav_b.name))
 }
 
 fn find_related_tests(
@@ -228,7 +234,7 @@ fn find_related_tests(
     syntax: &SyntaxNode,
     position: FilePosition,
     search_scope: Option<SearchScope>,
-    tests: &mut FxHashSet<Runnable>,
+    tests: &mut FxIndexSet<Runnable>,
 ) {
     // FIXME: why is this using references::find_defs, this should use ide_db::search
     let defs = match references::find_defs(sema, syntax, position.offset) {
@@ -268,7 +274,7 @@ fn find_related_tests_in_module(
     syntax: &SyntaxNode,
     fn_def: &ast::Fn,
     parent_module: &hir::Module,
-    tests: &mut FxHashSet<Runnable>,
+    tests: &mut FxIndexSet<Runnable>,
 ) {
     let fn_name = match fn_def.name() {
         Some(it) => it,
@@ -394,7 +400,8 @@ pub(crate) fn runnable_impl(
     sema: &Semantics<'_, RootDatabase>,
     def: &hir::Impl,
 ) -> Option<Runnable> {
-    let edition = def.module(sema.db).krate().edition(sema.db);
+    let display_target = def.module(sema.db).krate().to_display_target(sema.db);
+    let edition = display_target.edition;
     let attrs = def.attrs(sema.db);
     if !has_runnable_doc_test(&attrs) {
         return None;
@@ -403,7 +410,7 @@ pub(crate) fn runnable_impl(
     let nav = def.try_to_nav(sema.db)?.call_site();
     let ty = def.self_ty(sema.db);
     let adt_name = ty.as_adt()?.name(sema.db);
-    let mut ty_args = ty.generic_parameters(sema.db, edition).peekable();
+    let mut ty_args = ty.generic_parameters(sema.db, display_target).peekable();
     let params = if ty_args.peek().is_some() {
         format!("<{}>", ty_args.format_with(",", |ty, cb| cb(&ty)))
     } else {
@@ -489,7 +496,11 @@ fn module_def_doctest(db: &RootDatabase, def: Definition) -> Option<Runnable> {
         Definition::SelfType(it) => it.attrs(db),
         _ => return None,
     };
-    let edition = def.krate(db).map(|it| it.edition(db)).unwrap_or(Edition::CURRENT);
+    let krate = def.krate(db);
+    let edition = krate.map(|it| it.edition(db)).unwrap_or(Edition::CURRENT);
+    let display_target = krate
+        .unwrap_or_else(|| (*db.crate_graph().crates_in_topological_order().last().unwrap()).into())
+        .to_display_target(db);
     if !has_runnable_doc_test(&attrs) {
         return None;
     }
@@ -504,7 +515,7 @@ fn module_def_doctest(db: &RootDatabase, def: Definition) -> Option<Runnable> {
             if let Some(ty) = assoc_item.implementing_ty(db) {
                 if let Some(adt) = ty.as_adt() {
                     let name = adt.name(db);
-                    let mut ty_args = ty.generic_parameters(db, edition).peekable();
+                    let mut ty_args = ty.generic_parameters(db, display_target).peekable();
                     format_to!(path, "{}", name.display(db, edition));
                     if ty_args.peek().is_some() {
                         format_to!(path, "<{}>", ty_args.format_with(",", |ty, cb| cb(&ty)));
@@ -1228,8 +1239,8 @@ gen_main!();
                     "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 0..315, name: \"\", kind: Module })",
                     "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 267..292, focus_range: 271..276, name: \"tests\", kind: Module, description: \"mod tests\" })",
                     "(Test, NavigationTarget { file_id: FileId(0), full_range: 283..290, name: \"foo_test\", kind: Function })",
-                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 293..301, name: \"foo_test2\", kind: Function }, true)",
                     "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 293..301, name: \"tests2\", kind: Module, description: \"mod tests2\" }, true)",
+                    "(Test, NavigationTarget { file_id: FileId(0), full_range: 293..301, name: \"foo_test2\", kind: Function }, true)",
                     "(Bin, NavigationTarget { file_id: FileId(0), full_range: 302..314, name: \"main\", kind: Function })",
                 ]
             "#]],
@@ -1258,10 +1269,10 @@ foo!();
 "#,
             expect![[r#"
                 [
+                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 210..217, name: \"foo_tests\", kind: Module, description: \"mod foo_tests\" }, true)",
                     "(Test, NavigationTarget { file_id: FileId(0), full_range: 210..217, name: \"foo0\", kind: Function }, true)",
                     "(Test, NavigationTarget { file_id: FileId(0), full_range: 210..217, name: \"foo1\", kind: Function }, true)",
                     "(Test, NavigationTarget { file_id: FileId(0), full_range: 210..217, name: \"foo2\", kind: Function }, true)",
-                    "(TestMod, NavigationTarget { file_id: FileId(0), full_range: 210..217, name: \"foo_tests\", kind: Module, description: \"mod foo_tests\" }, true)",
                 ]
             "#]],
         );
@@ -1501,18 +1512,18 @@ mod tests {
                         file_id: FileId(
                             0,
                         ),
-                        full_range: 121..185,
-                        focus_range: 136..145,
-                        name: "foo2_test",
+                        full_range: 52..115,
+                        focus_range: 67..75,
+                        name: "foo_test",
                         kind: Function,
                     },
                     NavigationTarget {
                         file_id: FileId(
                             0,
                         ),
-                        full_range: 52..115,
-                        focus_range: 67..75,
-                        name: "foo_test",
+                        full_range: 121..185,
+                        focus_range: 136..145,
+                        name: "foo2_test",
                         kind: Function,
                     },
                 ]

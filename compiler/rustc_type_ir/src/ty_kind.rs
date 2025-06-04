@@ -8,12 +8,13 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 #[cfg(feature = "nightly")]
 use rustc_data_structures::unify::{NoError, UnifyKey, UnifyValue};
 #[cfg(feature = "nightly")]
-use rustc_macros::{Decodable, Encodable, HashStable_NoContext, TyDecodable, TyEncodable};
+use rustc_macros::{Decodable_NoContext, Encodable_NoContext, HashStable_NoContext};
 use rustc_type_ir_macros::{Lift_Generic, TypeFoldable_Generic, TypeVisitable_Generic};
 
 use self::TyKind::*;
 pub use self::closure::*;
 use crate::inherent::*;
+#[cfg(feature = "nightly")]
 use crate::visit::TypeVisitable;
 use crate::{self as ty, DebruijnIndex, Interner};
 
@@ -21,7 +22,10 @@ mod closure;
 
 /// Specifies how a trait object is represented.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "nightly", derive(Encodable, Decodable, HashStable_NoContext))]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
+)]
 pub enum DynKind {
     /// An unsized `dyn Trait` object
     Dyn,
@@ -35,7 +39,10 @@ pub enum DynKind {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-#[cfg_attr(feature = "nightly", derive(Encodable, Decodable, HashStable_NoContext))]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
+)]
 pub enum AliasTyKind {
     /// A projection `<Type as Trait>::AssocType`.
     /// Can get normalized away if monomorphic enough.
@@ -68,7 +75,10 @@ impl AliasTyKind {
 /// converted to this representation using `<dyn HirTyLowerer>::lower_ty`.
 #[cfg_attr(feature = "nightly", rustc_diagnostic_item = "IrTyKind")]
 #[derive_where(Clone, Copy, Hash, PartialEq, Eq; I: Interner)]
-#[cfg_attr(feature = "nightly", derive(TyEncodable, TyDecodable, HashStable_NoContext))]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
+)]
 pub enum TyKind<I: Interner> {
     /// The primitive boolean type. Written as `bool`.
     Bool,
@@ -340,7 +350,10 @@ impl<I: Interner> fmt::Debug for TyKind<I> {
 /// * For an opaque type, there is no explicit syntax.
 #[derive_where(Clone, Copy, Hash, PartialEq, Eq, Debug; I: Interner)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic, Lift_Generic)]
-#[cfg_attr(feature = "nightly", derive(TyDecodable, TyEncodable, HashStable_NoContext))]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Decodable_NoContext, Encodable_NoContext, HashStable_NoContext)
+)]
 pub struct AliasTy<I: Interner> {
     /// The parameters of the associated or opaque type.
     ///
@@ -463,7 +476,10 @@ impl<I: Interner> AliasTy<I> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "nightly", derive(Encodable, Decodable, HashStable_NoContext))]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
+)]
 pub enum IntTy {
     Isize,
     I8,
@@ -521,7 +537,10 @@ impl IntTy {
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
-#[cfg_attr(feature = "nightly", derive(Encodable, Decodable, HashStable_NoContext))]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
+)]
 pub enum UintTy {
     Usize,
     U8,
@@ -579,7 +598,10 @@ impl UintTy {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "nightly", derive(Encodable, Decodable, HashStable_NoContext))]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
+)]
 pub enum FloatTy {
     F16,
     F32,
@@ -679,7 +701,7 @@ rustc_index::newtype_index! {
 /// type variable for the element type since we won't know until it's
 /// used what the element type is supposed to be.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "nightly", derive(Encodable, Decodable))]
+#[cfg_attr(feature = "nightly", derive(Encodable_NoContext, Decodable_NoContext))]
 pub enum InferTy {
     /// A type variable.
     TyVar(TyVid),
@@ -859,7 +881,10 @@ impl fmt::Debug for InferTy {
 }
 
 #[derive_where(Clone, Copy, PartialEq, Eq, Hash, Debug; I: Interner)]
-#[cfg_attr(feature = "nightly", derive(TyEncodable, TyDecodable, HashStable_NoContext))]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
+)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic)]
 pub struct TypeAndMut<I: Interner> {
     pub ty: I::Ty,
@@ -867,7 +892,10 @@ pub struct TypeAndMut<I: Interner> {
 }
 
 #[derive_where(Clone, Copy, PartialEq, Eq, Hash; I: Interner)]
-#[cfg_attr(feature = "nightly", derive(TyEncodable, TyDecodable, HashStable_NoContext))]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
+)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic, Lift_Generic)]
 pub struct FnSig<I: Interner> {
     pub inputs_and_output: I::Tys,
@@ -1009,7 +1037,8 @@ impl<I: Interner> Deref for UnsafeBinderInner<I> {
 }
 
 #[cfg(feature = "nightly")]
-impl<I: Interner, E: crate::TyEncoder<I = I>> rustc_serialize::Encodable<E> for UnsafeBinderInner<I>
+impl<I: Interner, E: rustc_serialize::Encoder> rustc_serialize::Encodable<E>
+    for UnsafeBinderInner<I>
 where
     I::Ty: rustc_serialize::Encodable<E>,
     I::BoundVarKinds: rustc_serialize::Encodable<E>,
@@ -1021,7 +1050,8 @@ where
 }
 
 #[cfg(feature = "nightly")]
-impl<I: Interner, D: crate::TyDecoder<I = I>> rustc_serialize::Decodable<D> for UnsafeBinderInner<I>
+impl<I: Interner, D: rustc_serialize::Decoder> rustc_serialize::Decodable<D>
+    for UnsafeBinderInner<I>
 where
     I::Ty: TypeVisitable<I> + rustc_serialize::Decodable<D>,
     I::BoundVarKinds: rustc_serialize::Decodable<D>,
@@ -1037,7 +1067,10 @@ where
 
 // This is just a `FnSig` without the `FnHeader` fields.
 #[derive_where(Clone, Copy, Debug, PartialEq, Eq, Hash; I: Interner)]
-#[cfg_attr(feature = "nightly", derive(TyEncodable, TyDecodable, HashStable_NoContext))]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
+)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic, Lift_Generic)]
 pub struct FnSigTys<I: Interner> {
     pub inputs_and_output: I::Tys,
@@ -1086,7 +1119,10 @@ impl<I: Interner> ty::Binder<I, FnSigTys<I>> {
 }
 
 #[derive_where(Clone, Copy, Debug, PartialEq, Eq, Hash; I: Interner)]
-#[cfg_attr(feature = "nightly", derive(TyEncodable, TyDecodable, HashStable_NoContext))]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
+)]
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic, Lift_Generic)]
 pub struct FnHeader<I: Interner> {
     pub c_variadic: bool,

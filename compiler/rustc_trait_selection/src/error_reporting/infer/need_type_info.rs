@@ -18,8 +18,7 @@ use rustc_middle::ty::{
     TypeFoldable, TypeFolder, TypeSuperFoldable, TypeckResults,
 };
 use rustc_span::{BytePos, DUMMY_SP, FileName, Ident, Span, sym};
-use rustc_type_ir::inherent::*;
-use rustc_type_ir::visit::TypeVisitableExt;
+use rustc_type_ir::TypeVisitableExt;
 use tracing::{debug, instrument, warn};
 
 use super::nice_region_error::placeholder_error::Highlighted;
@@ -138,7 +137,7 @@ impl InferenceDiagnosticsParentData {
 }
 
 impl IntoDiagArg for UnderspecifiedArgKind {
-    fn into_diag_arg(self) -> rustc_errors::DiagArgValue {
+    fn into_diag_arg(self, _: &mut Option<std::path::PathBuf>) -> rustc_errors::DiagArgValue {
         let kind = match self {
             Self::Type { .. } => "type",
             Self::Const { is_parameter: true } => "const_with_param",
@@ -217,7 +216,7 @@ impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for ClosureEraser<'a, 'tcx> {
                                 // `_` because then we'd end up with `Vec<_, _>`, instead of
                                 // `Vec<_>`.
                                 arg
-                            } else if let GenericArgKind::Type(_) = arg.kind() {
+                            } else if let GenericArgKind::Type(_) = arg.unpack() {
                                 // We don't replace lifetime or const params, only type params.
                                 self.new_infer().into()
                             } else {
@@ -489,7 +488,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         };
 
         let mut local_visitor = FindInferSourceVisitor::new(self, typeck_results, arg);
-        if let Some(body) = self.tcx.hir().maybe_body_owned_by(
+        if let Some(body) = self.tcx.hir_maybe_body_owned_by(
             self.tcx.typeck_root_def_id(body_def_id.to_def_id()).expect_local(),
         ) {
             let expr = body.value;
@@ -1075,7 +1074,7 @@ impl<'a, 'tcx> FindInferSourceVisitor<'a, 'tcx> {
         &self,
         path: &'tcx hir::Path<'tcx>,
         args: GenericArgsRef<'tcx>,
-    ) -> impl Iterator<Item = InsertableGenericArgs<'tcx>> + 'a {
+    ) -> impl Iterator<Item = InsertableGenericArgs<'tcx>> + 'tcx {
         let tcx = self.tecx.tcx;
         let have_turbofish = path.segments.iter().any(|segment| {
             segment.args.is_some_and(|args| args.args.iter().any(|arg| arg.is_ty_or_const()))
@@ -1202,8 +1201,8 @@ impl<'a, 'tcx> FindInferSourceVisitor<'a, 'tcx> {
 impl<'a, 'tcx> Visitor<'tcx> for FindInferSourceVisitor<'a, 'tcx> {
     type NestedFilter = nested_filter::OnlyBodies;
 
-    fn nested_visit_map(&mut self) -> Self::Map {
-        self.tecx.tcx.hir()
+    fn maybe_tcx(&mut self) -> Self::MaybeTyCtxt {
+        self.tecx.tcx
     }
 
     fn visit_local(&mut self, local: &'tcx LetStmt<'tcx>) {
@@ -1320,7 +1319,7 @@ impl<'a, 'tcx> Visitor<'tcx> for FindInferSourceVisitor<'a, 'tcx> {
             {
                 let output = args.as_closure().sig().output().skip_binder();
                 if self.generic_arg_contains_target(output.into()) {
-                    let body = self.tecx.tcx.hir().body(body);
+                    let body = self.tecx.tcx.hir_body(body);
                     let should_wrap_expr = if matches!(body.value.kind, ExprKind::Block(..)) {
                         None
                     } else {
@@ -1352,7 +1351,7 @@ impl<'a, 'tcx> Visitor<'tcx> for FindInferSourceVisitor<'a, 'tcx> {
             && !has_impl_trait(def_id)
             // FIXME(fn_delegation): In delegation item argument spans are equal to last path
             // segment. This leads to ICE's when emitting `multipart_suggestion`.
-            && tcx.hir().opt_delegation_sig_id(expr.hir_id.owner.def_id).is_none()
+            && tcx.hir_opt_delegation_sig_id(expr.hir_id.owner.def_id).is_none()
         {
             let successor =
                 method_args.get(0).map_or_else(|| (")", span.hi()), |arg| (", ", arg.span.lo()));

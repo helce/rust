@@ -333,6 +333,11 @@ lint_identifier_uncommon_codepoints = identifier contains {$codepoints_len ->
         *[other] {" "}{$identifier_type}
     } Unicode general security profile
 
+lint_if_let_dtor = {$dtor_kind ->
+    [dyn] value may invoke a custom destructor because it contains a trait object
+    *[concrete] value invokes this custom destructor
+    }
+
 lint_if_let_rescope = `if let` assigns a shorter lifetime since Edition 2024
     .label = this value has a significant drop implementation which may observe a major change in drop order and requires your discretion
     .help = the value is now dropped here in Edition 2024
@@ -439,11 +444,11 @@ lint_invalid_crate_type_value = invalid `crate_type` value
     .suggestion = did you mean
 
 # FIXME: we should ordinalize $valid_up_to when we add support for doing so
-lint_invalid_from_utf8_checked = calls to `{$method}` with a invalid literal always return an error
+lint_invalid_from_utf8_checked = calls to `{$method}` with an invalid literal always return an error
     .label = the literal was valid UTF-8 up to the {$valid_up_to} bytes
 
 # FIXME: we should ordinalize $valid_up_to when we add support for doing so
-lint_invalid_from_utf8_unchecked = calls to `{$method}` with a invalid literal are undefined behavior
+lint_invalid_from_utf8_unchecked = calls to `{$method}` with an invalid literal are undefined behavior
     .label = the literal was valid UTF-8 up to the {$valid_up_to} bytes
 
 lint_invalid_nan_comparisons_eq_ne = incorrect NaN comparison, NaN cannot be directly compared to itself
@@ -630,7 +635,8 @@ lint_opaque_hidden_inferred_bound_sugg = add this bound
 lint_or_patterns_back_compat = the meaning of the `pat` fragment specifier is changing in Rust 2021, which may affect this macro
     .suggestion = use pat_param to preserve semantics
 
-lint_out_of_scope_macro_calls = cannot find macro `{$path}` in this scope
+lint_out_of_scope_macro_calls = cannot find macro `{$path}` in the current scope when looking from {$location}
+    .label = not found from {$location}
     .help = import `macro_rules` with `use` to make it callable above its definition
 
 lint_overflowing_bin_hex = literal out of range for `{$ty}`
@@ -791,6 +797,9 @@ lint_tykind_kind = usage of `ty::TyKind::<kind>`
     .suggestion = try using `ty::<kind>` directly
 
 lint_type_ir_inherent_usage = do not use `rustc_type_ir::inherent` unless you're inside of the trait solver
+    .note = the method or struct you're looking for is likely defined somewhere else downstream in the compiler
+
+lint_type_ir_trait_usage = do not use `rustc_type_ir::Interner` or `rustc_type_ir::InferCtxtLike` unless you're inside of the trait solver
     .note = the method or struct you're looking for is likely defined somewhere else downstream in the compiler
 
 lint_undropped_manually_drops = calls to `std::mem::drop` with `std::mem::ManuallyDrop` instead of the inner value does nothing

@@ -67,6 +67,11 @@ impl Limit {
         Limit(value)
     }
 
+    /// Create a new unlimited limit.
+    pub fn unlimited() -> Self {
+        Limit(usize::MAX)
+    }
+
     /// Check that `value` is within the limit. Ensures that the same comparisons are used
     /// throughout the compiler, as mismatches can cause ICEs, see #72540.
     #[inline]
@@ -104,8 +109,8 @@ impl Mul<usize> for Limit {
 }
 
 impl rustc_errors::IntoDiagArg for Limit {
-    fn into_diag_arg(self) -> rustc_errors::DiagArgValue {
-        self.to_string().into_diag_arg()
+    fn into_diag_arg(self, _: &mut Option<std::path::PathBuf>) -> rustc_errors::DiagArgValue {
+        self.to_string().into_diag_arg(&mut None)
     }
 }
 
@@ -119,6 +124,8 @@ pub struct Limits {
     pub move_size_limit: Limit,
     /// The maximum length of types during monomorphization.
     pub type_length_limit: Limit,
+    /// The maximum pattern complexity allowed (internal only).
+    pub pattern_complexity_limit: Limit,
 }
 
 pub struct CompilerIO {
@@ -136,7 +143,6 @@ pub struct Session {
     pub target: Target,
     pub host: Target,
     pub opts: config::Options,
-    pub host_tlib_path: Arc<SearchPath>,
     pub target_tlib_path: Arc<SearchPath>,
     pub psess: ParseSess,
     pub sysroot: PathBuf,
@@ -580,6 +586,14 @@ impl Session {
             .or(self.target.options.default_visibility)
             .unwrap_or(SymbolVisibility::Interposable)
     }
+
+    pub fn staticlib_components(&self, verbatim: bool) -> (&str, &str) {
+        if verbatim {
+            ("", "")
+        } else {
+            (&*self.target.staticlib_prefix, &*self.target.staticlib_suffix)
+        }
+    }
 }
 
 // JUSTIFICATION: defn of the suggested wrapper fns
@@ -906,7 +920,7 @@ fn default_emitter(
     let source_map = if sopts.unstable_opts.link_only { None } else { Some(source_map) };
 
     match sopts.error_format {
-        config::ErrorOutputType::HumanReadable(kind, color_config) => {
+        config::ErrorOutputType::HumanReadable { kind, color_config } => {
             let short = kind.short();
 
             if let HumanReadableErrorType::AnnotateSnippet = kind {
@@ -923,7 +937,6 @@ fn default_emitter(
                     .fluent_bundle(bundle)
                     .sm(source_map)
                     .short_message(short)
-                    .teach(sopts.unstable_opts.teach)
                     .diagnostic_width(sopts.diagnostic_width)
                     .macro_backtrace(macro_backtrace)
                     .track_diagnostics(track_diagnostics)
@@ -1012,8 +1025,7 @@ pub fn build_session(
 
     let self_profiler = if let SwitchWithOptPath::Enabled(ref d) = sopts.unstable_opts.self_profile
     {
-        let directory =
-            if let Some(ref directory) = d { directory } else { std::path::Path::new(".") };
+        let directory = if let Some(directory) = d { directory } else { std::path::Path::new(".") };
 
         let profiler = SelfProfiler::new(
             directory,
@@ -1037,6 +1049,7 @@ pub fn build_session(
 
     let host_triple = config::host_tuple();
     let target_triple = sopts.target_triple.tuple();
+    // FIXME use host sysroot?
     let host_tlib_path = Arc::new(SearchPath::from_sysroot_and_triple(&sysroot, host_triple));
     let target_tlib_path = if host_triple == target_triple {
         // Use the same `SearchPath` if host and target triple are identical to avoid unnecessary
@@ -1065,7 +1078,6 @@ pub fn build_session(
         target,
         host,
         opts: sopts,
-        host_tlib_path,
         target_tlib_path,
         psess,
         sysroot,
@@ -1424,7 +1436,7 @@ fn mk_emitter(output: ErrorOutputType) -> Box<DynEmitter> {
     let fallback_bundle =
         fallback_fluent_bundle(vec![rustc_errors::DEFAULT_LOCALE_RESOURCE], false);
     let emitter: Box<DynEmitter> = match output {
-        config::ErrorOutputType::HumanReadable(kind, color_config) => {
+        config::ErrorOutputType::HumanReadable { kind, color_config } => {
             let short = kind.short();
             Box::new(
                 HumanEmitter::new(stderr_destination(color_config), fallback_bundle)

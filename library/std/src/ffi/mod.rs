@@ -201,5 +201,5 @@ pub use self::c_str::{CStr, CString};
 #[doc(inline)]
 pub use self::os_str::{OsStr, OsString};
 
-#[unstable(feature = "os_str_display", issue = "120048")]
+#[stable(feature = "os_str_display", since = "1.87.0")]
 pub mod os_str;

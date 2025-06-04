@@ -47,10 +47,10 @@ pub struct UnsupportedUnion {
 // FIXME(autodiff): I should get used somewhere
 #[derive(Diagnostic)]
 #[diag(middle_autodiff_unsafe_inner_const_ref)]
-pub struct AutodiffUnsafeInnerConstRef {
+pub struct AutodiffUnsafeInnerConstRef<'tcx> {
     #[primary_span]
     pub span: Span,
-    pub ty: String,
+    pub ty: Ty<'tcx>,
 }
 
 #[derive(Subdiagnostic)]
@@ -65,16 +65,6 @@ pub enum TypeMismatchReason {
         #[primary_span]
         span: Span,
     },
-}
-
-#[derive(Diagnostic)]
-#[diag(middle_limit_invalid)]
-pub(crate) struct LimitInvalid<'a> {
-    #[primary_span]
-    pub span: Span,
-    #[label]
-    pub value_span: Span,
-    pub error_str: &'a str,
 }
 
 #[derive(Diagnostic)]
@@ -142,19 +132,19 @@ impl fmt::Debug for CustomSubdiagnostic<'_> {
 
 #[derive(Diagnostic)]
 pub enum LayoutError<'tcx> {
-    #[diag(middle_unknown_layout)]
+    #[diag(middle_layout_unknown)]
     Unknown { ty: Ty<'tcx> },
 
-    #[diag(middle_too_generic)]
+    #[diag(middle_layout_too_generic)]
     TooGeneric { ty: Ty<'tcx> },
 
-    #[diag(middle_values_too_big)]
+    #[diag(middle_layout_size_overflow)]
     Overflow { ty: Ty<'tcx> },
 
-    #[diag(middle_cannot_be_normalized)]
+    #[diag(middle_layout_normalization_failure)]
     NormalizationFailure { ty: Ty<'tcx>, failure_ty: String },
 
-    #[diag(middle_cycle)]
+    #[diag(middle_layout_cycle)]
     Cycle,
 
     #[diag(middle_layout_references_error)]

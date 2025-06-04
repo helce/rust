@@ -601,8 +601,7 @@ impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for NonExhaustivePatternsTypeNo
             let def_span = self
                 .cx
                 .tcx
-                .hir()
-                .get_if_local(def.did())
+                .hir_get_if_local(def.did())
                 .and_then(|node| node.ident())
                 .map(|ident| ident.span)
                 .unwrap_or_else(|| self.cx.tcx.def_span(def.did()));
@@ -614,9 +613,9 @@ impl<'a, G: EmissionGuarantee> Diagnostic<'a, G> for NonExhaustivePatternsTypeNo
             diag.span_note(span, fluent::mir_build_def_note);
         }
 
-        let is_variant_list_non_exhaustive = matches!(self.ty.kind(),
-            ty::Adt(def, _) if def.is_variant_list_non_exhaustive() && !def.did().is_local());
-        if is_variant_list_non_exhaustive {
+        let is_non_exhaustive = matches!(self.ty.kind(),
+            ty::Adt(def, _) if def.variant_list_has_applicable_non_exhaustive());
+        if is_non_exhaustive {
             diag.note(fluent::mir_build_non_exhaustive_type_note);
         } else {
             diag.note(fluent::mir_build_type_note);
@@ -829,7 +828,7 @@ pub(crate) struct IrrefutableLetPatternsWhileLet {
 
 #[derive(Diagnostic)]
 #[diag(mir_build_borrow_of_moved_value)]
-pub(crate) struct BorrowOfMovedValue {
+pub(crate) struct BorrowOfMovedValue<'tcx> {
     #[primary_span]
     #[label]
     #[label(mir_build_occurs_because_label)]
@@ -837,7 +836,7 @@ pub(crate) struct BorrowOfMovedValue {
     #[label(mir_build_value_borrowed_label)]
     pub(crate) conflicts_ref: Vec<Span>,
     pub(crate) name: Ident,
-    pub(crate) ty: String,
+    pub(crate) ty: Ty<'tcx>,
     #[suggestion(code = "ref ", applicability = "machine-applicable")]
     pub(crate) suggest_borrowing: Option<Span>,
 }
@@ -1113,9 +1112,6 @@ pub(crate) struct Rust2024IncompatiblePatSugg {
     pub(crate) suggestion: Vec<(Span, String)>,
     pub(crate) ref_pattern_count: usize,
     pub(crate) binding_mode_count: usize,
-    /// Internal state: the ref-mutability of the default binding mode at the subpattern being
-    /// lowered, with the span where it was introduced. `None` for a by-value default mode.
-    pub(crate) default_mode_span: Option<(Span, ty::Mutability)>,
     /// Labels for where incompatibility-causing by-ref default binding modes were introduced.
     pub(crate) default_mode_labels: FxIndexMap<Span, ty::Mutability>,
 }

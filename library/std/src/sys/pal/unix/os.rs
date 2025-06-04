@@ -46,6 +46,7 @@ unsafe extern "C" {
         any(
             target_os = "netbsd",
             target_os = "openbsd",
+            target_os = "cygwin",
             target_os = "android",
             target_os = "redox",
             target_os = "nuttx",
@@ -118,7 +119,12 @@ pub fn error_string(errno: i32) -> String {
     unsafe extern "C" {
         #[cfg_attr(
             all(
-                any(target_os = "linux", target_os = "hurd", target_env = "newlib"),
+                any(
+                    target_os = "linux",
+                    target_os = "hurd",
+                    target_env = "newlib",
+                    target_os = "cygwin"
+                ),
                 not(target_env = "ohos")
             ),
             link_name = "__xpg_strerror_r"
@@ -260,7 +266,7 @@ pub fn current_exe() -> io::Result<PathBuf> {
 
     let exe_path = env::args().next().ok_or(io::const_error!(
         ErrorKind::NotFound,
-        "an executable path was not found because no arguments were provided through argv"
+        "an executable path was not found because no arguments were provided through argv",
     ))?;
     let path = PathBuf::from(exe_path);
     if path.is_absolute() {
@@ -382,9 +388,7 @@ pub fn current_exe() -> io::Result<PathBuf> {
         cvt(libc::sysctl(mib, 4, argv.as_mut_ptr() as *mut _, &mut argv_len, ptr::null_mut(), 0))?;
         argv.set_len(argv_len as usize);
         if argv[0].is_null() {
-            return Err(
-                io::const_error!(io::ErrorKind::Uncategorized, "no current exe available",),
-            );
+            return Err(io::const_error!(io::ErrorKind::Uncategorized, "no current exe available"));
         }
         let argv0 = CStr::from_ptr(argv[0]).to_bytes();
         if argv0[0] == b'.' || argv0.iter().any(|b| *b == b'/') {
@@ -397,6 +401,7 @@ pub fn current_exe() -> io::Result<PathBuf> {
 
 #[cfg(any(
     target_os = "linux",
+    target_os = "cygwin",
     target_os = "hurd",
     target_os = "android",
     target_os = "nuttx",
@@ -477,7 +482,7 @@ pub fn current_exe() -> io::Result<PathBuf> {
         );
         if result != libc::B_OK {
             use crate::io::ErrorKind;
-            Err(io::const_error!(ErrorKind::Uncategorized, "Error getting executable path"))
+            Err(io::const_error!(ErrorKind::Uncategorized, "error getting executable path"))
         } else {
             // find_path adds the null terminator.
             let name = CStr::from_ptr(name.as_ptr()).to_bytes();
@@ -486,7 +491,12 @@ pub fn current_exe() -> io::Result<PathBuf> {
     }
 }
 
-#[cfg(any(target_os = "redox", target_os = "rtems"))]
+#[cfg(target_os = "redox")]
+pub fn current_exe() -> io::Result<PathBuf> {
+    crate::fs::read_to_string("/scheme/sys/exe").map(PathBuf::from)
+}
+
+#[cfg(target_os = "rtems")]
 pub fn current_exe() -> io::Result<PathBuf> {
     crate::fs::read_to_string("sys:exe").map(PathBuf::from)
 }
@@ -494,7 +504,7 @@ pub fn current_exe() -> io::Result<PathBuf> {
 #[cfg(target_os = "l4re")]
 pub fn current_exe() -> io::Result<PathBuf> {
     use crate::io::ErrorKind;
-    Err(io::const_error!(ErrorKind::Unsupported, "Not yet implemented!"))
+    Err(io::const_error!(ErrorKind::Unsupported, "not yet implemented!"))
 }
 
 #[cfg(target_os = "vxworks")]
@@ -526,7 +536,7 @@ pub fn current_exe() -> io::Result<PathBuf> {
 
     let exe_path = env::args().next().ok_or(io::const_error!(
         ErrorKind::Uncategorized,
-        "an executable path was not found because no arguments were provided through argv"
+        "an executable path was not found because no arguments were provided through argv",
     ))?;
     let path = PathBuf::from(exe_path);
 

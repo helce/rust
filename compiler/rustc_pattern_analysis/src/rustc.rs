@@ -15,7 +15,7 @@ use rustc_middle::ty::{
 };
 use rustc_middle::{bug, span_bug};
 use rustc_session::lint;
-use rustc_span::{DUMMY_SP, ErrorGuaranteed, Span};
+use rustc_span::{DUMMY_SP, ErrorGuaranteed, Span, sym};
 
 use crate::constructor::Constructor::*;
 use crate::constructor::{
@@ -25,7 +25,7 @@ use crate::lints::lint_nonexhaustive_missing_variants;
 use crate::pat_column::PatternColumn;
 use crate::rustc::print::EnumInfo;
 use crate::usefulness::{PlaceValidity, compute_match_usefulness};
-use crate::{Captures, PatCx, PrivateUninhabitedField, errors};
+use crate::{PatCx, PrivateUninhabitedField, errors};
 
 mod print;
 
@@ -150,9 +150,7 @@ impl<'p, 'tcx: 'p> RustcPatCtxt<'p, 'tcx> {
     /// Returns whether the given type is an enum from another crate declared `#[non_exhaustive]`.
     pub fn is_foreign_non_exhaustive_enum(&self, ty: RevealedTy<'tcx>) -> bool {
         match ty.kind() {
-            ty::Adt(def, ..) => {
-                def.is_enum() && def.is_variant_list_non_exhaustive() && !def.did().is_local()
-            }
+            ty::Adt(def, ..) => def.variant_list_has_applicable_non_exhaustive(),
             _ => false,
         }
     }
@@ -175,8 +173,7 @@ impl<'p, 'tcx: 'p> RustcPatCtxt<'p, 'tcx> {
         &self,
         ty: RevealedTy<'tcx>,
         variant: &'tcx VariantDef,
-    ) -> impl Iterator<Item = (&'tcx FieldDef, RevealedTy<'tcx>)> + Captures<'p> + Captures<'_>
-    {
+    ) -> impl Iterator<Item = (&'tcx FieldDef, RevealedTy<'tcx>)> {
         let ty::Adt(_, args) = ty.kind() else { bug!() };
         variant.fields.iter().map(move |field| {
             let ty = field.ty(self.tcx, args);
@@ -203,13 +200,11 @@ impl<'p, 'tcx: 'p> RustcPatCtxt<'p, 'tcx> {
 
     /// Returns the types of the fields for a given constructor. The result must have a length of
     /// `ctor.arity()`.
-    pub(crate) fn ctor_sub_tys<'a>(
-        &'a self,
-        ctor: &'a Constructor<'p, 'tcx>,
+    pub(crate) fn ctor_sub_tys(
+        &self,
+        ctor: &Constructor<'p, 'tcx>,
         ty: RevealedTy<'tcx>,
-    ) -> impl Iterator<Item = (RevealedTy<'tcx>, PrivateUninhabitedField)>
-    + ExactSizeIterator
-    + Captures<'a> {
+    ) -> impl Iterator<Item = (RevealedTy<'tcx>, PrivateUninhabitedField)> + ExactSizeIterator {
         fn reveal_and_alloc<'a, 'tcx>(
             cx: &'a RustcPatCtxt<'_, 'tcx>,
             iter: impl Iterator<Item = Ty<'tcx>>,
@@ -235,7 +230,11 @@ impl<'p, 'tcx: 'p> RustcPatCtxt<'p, 'tcx> {
                             let is_visible =
                                 adt.is_enum() || field.vis.is_accessible_from(cx.module, cx.tcx);
                             let is_uninhabited = cx.is_uninhabited(*ty);
-                            let skip = is_uninhabited && !is_visible;
+                            let is_unstable =
+                                cx.tcx.lookup_stability(field.did).is_some_and(|stab| {
+                                    stab.is_unstable() && stab.feature != sym::rustc_private
+                                });
+                            let skip = is_uninhabited && (!is_visible || is_unstable);
                             (ty, PrivateUninhabitedField(skip))
                         });
                         cx.dropless_arena.alloc_from_iter(tys)
@@ -936,12 +935,11 @@ impl<'p, 'tcx: 'p> PatCx for RustcPatCtxt<'p, 'tcx> {
     fn ctor_arity(&self, ctor: &crate::constructor::Constructor<Self>, ty: &Self::Ty) -> usize {
         self.ctor_arity(ctor, *ty)
     }
-    fn ctor_sub_tys<'a>(
-        &'a self,
-        ctor: &'a crate::constructor::Constructor<Self>,
-        ty: &'a Self::Ty,
-    ) -> impl Iterator<Item = (Self::Ty, PrivateUninhabitedField)> + ExactSizeIterator + Captures<'a>
-    {
+    fn ctor_sub_tys(
+        &self,
+        ctor: &crate::constructor::Constructor<Self>,
+        ty: &Self::Ty,
+    ) -> impl Iterator<Item = (Self::Ty, PrivateUninhabitedField)> + ExactSizeIterator {
         self.ctor_sub_tys(ctor, *ty)
     }
     fn ctors_for_ty(
@@ -1084,12 +1082,16 @@ pub fn analyze_match<'p, 'tcx>(
     tycx: &RustcPatCtxt<'p, 'tcx>,
     arms: &[MatchArm<'p, 'tcx>],
     scrut_ty: Ty<'tcx>,
-    pattern_complexity_limit: Option<usize>,
 ) -> Result<UsefulnessReport<'p, 'tcx>, ErrorGuaranteed> {
     let scrut_ty = tycx.reveal_opaque_ty(scrut_ty);
     let scrut_validity = PlaceValidity::from_bool(tycx.known_valid_scrutinee);
-    let report =
-        compute_match_usefulness(tycx, arms, scrut_ty, scrut_validity, pattern_complexity_limit)?;
+    let report = compute_match_usefulness(
+        tycx,
+        arms,
+        scrut_ty,
+        scrut_validity,
+        tycx.tcx.pattern_complexity_limit().0,
+    )?;
 
     // Run the non_exhaustive_omitted_patterns lint. Only run on refutable patterns to avoid hitting
     // `if let`s. Only run if the match is exhaustive otherwise the error is redundant.

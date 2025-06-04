@@ -872,8 +872,14 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
                 self.simplify_place_projection(place, location);
                 return self.new_pointer(*place, AddressKind::Address(mutbl));
             }
-            Rvalue::WrapUnsafeBinder(ref mut op, _) => {
-                return self.simplify_operand(op, location);
+            Rvalue::WrapUnsafeBinder(ref mut op, ty) => {
+                let value = self.simplify_operand(op, location)?;
+                Value::Cast {
+                    kind: CastKind::Transmute,
+                    value,
+                    from: op.ty(self.local_decls, self.tcx),
+                    to: ty,
+                }
             }
 
             // Operations.
@@ -1259,7 +1265,7 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
 
         let layout = self.ecx.layout_of(lhs_ty).ok()?;
 
-        let as_bits = |value| {
+        let as_bits = |value: VnIndex| {
             let constant = self.evaluated[value].as_ref()?;
             if layout.backend_repr.is_scalar() {
                 let scalar = self.ecx.read_scalar(constant).discard_err()?;
@@ -1558,13 +1564,16 @@ impl<'body, 'tcx> VnState<'body, 'tcx> {
             return true;
         };
 
+        if layout.uninhabited {
+            return true;
+        }
+
         match layout.backend_repr {
-            BackendRepr::Uninhabited => true,
             BackendRepr::Scalar(a) => !a.is_always_valid(&self.ecx),
             BackendRepr::ScalarPair(a, b) => {
                 !a.is_always_valid(&self.ecx) || !b.is_always_valid(&self.ecx)
             }
-            BackendRepr::Vector { .. } | BackendRepr::Memory { .. } => false,
+            BackendRepr::SimdVector { .. } | BackendRepr::Memory { .. } => false,
         }
     }
 

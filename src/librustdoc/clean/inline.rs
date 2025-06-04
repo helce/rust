@@ -151,7 +151,7 @@ pub(crate) fn try_inline(
     let mut item =
         crate::clean::generate_item_with_correct_attrs(cx, kind, did, name, import_def_id, None);
     // The visibility needs to reflect the one from the reexport and not from the "source" DefId.
-    item.inline_stmt_id = import_def_id;
+    item.inner.inline_stmt_id = import_def_id;
     ret.push(item);
     Some(ret)
 }
@@ -181,7 +181,7 @@ pub(crate) fn try_inline_glob(
                 .filter_map(|child| child.res.opt_def_id())
                 .filter(|def_id| !cx.tcx.is_doc_hidden(def_id))
                 .collect();
-            let attrs = cx.tcx.hir().attrs(import.hir_id());
+            let attrs = cx.tcx.hir_attrs(import.hir_id());
             let mut items = build_module_items(
                 cx,
                 did,
@@ -211,17 +211,7 @@ pub(crate) fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> &'hir [hir:
 }
 
 pub(crate) fn item_relative_path(tcx: TyCtxt<'_>, def_id: DefId) -> Vec<Symbol> {
-    tcx.def_path(def_id)
-        .data
-        .into_iter()
-        .filter_map(|elem| {
-            // extern blocks (and a few others things) have an empty name.
-            match elem.data.get_opt_name() {
-                Some(s) if !s.is_empty() => Some(s),
-                _ => None,
-            }
-        })
-        .collect()
+    tcx.def_path(def_id).data.into_iter().filter_map(|elem| elem.data.get_opt_name()).collect()
 }
 
 /// Record an external fully qualified name in the external_paths cache.
@@ -455,7 +445,7 @@ pub(crate) fn build_impl(
     }
 
     let impl_item = match did.as_local() {
-        Some(did) => match &tcx.hir().expect_item(did).kind {
+        Some(did) => match &tcx.hir_expect_item(did).kind {
             hir::ItemKind::Impl(impl_) => Some(impl_),
             _ => panic!("`DefID` passed to `build_impl` is not an `impl"),
         },
@@ -488,7 +478,7 @@ pub(crate) fn build_impl(
             impl_
                 .items
                 .iter()
-                .map(|item| tcx.hir().impl_item(item.id))
+                .map(|item| tcx.hir_impl_item(item.id))
                 .filter(|item| {
                     // Filter out impl items whose corresponding trait item has `doc(hidden)`
                     // not to document such impl items.
@@ -563,11 +553,13 @@ pub(crate) fn build_impl(
     // Return if the trait itself or any types of the generic parameters are doc(hidden).
     let mut stack: Vec<&Type> = vec![&for_];
 
-    if let Some(did) = trait_.as_ref().map(|t| t.def_id()) {
-        if !document_hidden && tcx.is_doc_hidden(did) {
-            return;
-        }
+    if let Some(did) = trait_.as_ref().map(|t| t.def_id())
+        && !document_hidden
+        && tcx.is_doc_hidden(did)
+    {
+        return;
     }
+
     if let Some(generics) = trait_.as_ref().and_then(|t| t.generics()) {
         stack.extend(generics);
     }
@@ -663,11 +655,11 @@ fn build_module_items(
                 // Primitive types can't be inlined so generate an import instead.
                 let prim_ty = clean::PrimitiveType::from(p);
                 items.push(clean::Item {
-                    name: None,
-                    // We can use the item's `DefId` directly since the only information ever used
-                    // from it is `DefId.krate`.
-                    item_id: ItemId::DefId(did),
                     inner: Box::new(clean::ItemInner {
+                        name: None,
+                        // We can use the item's `DefId` directly since the only information ever
+                        // used from it is `DefId.krate`.
+                        item_id: ItemId::DefId(did),
                         attrs: Default::default(),
                         stability: None,
                         kind: clean::ImportItem(clean::Import::new_simple(
@@ -687,9 +679,9 @@ fn build_module_items(
                             },
                             true,
                         )),
+                        cfg: None,
+                        inline_stmt_id: None,
                     }),
-                    cfg: None,
-                    inline_stmt_id: None,
                 });
             } else if let Some(i) = try_inline(cx, res, item.ident.name, attrs, visited) {
                 items.extend(i)
@@ -703,7 +695,7 @@ fn build_module_items(
 pub(crate) fn print_inlined_const(tcx: TyCtxt<'_>, did: DefId) -> String {
     if let Some(did) = did.as_local() {
         let hir_id = tcx.local_def_id_to_hir_id(did);
-        rustc_hir_pretty::id_to_string(&tcx.hir(), hir_id)
+        rustc_hir_pretty::id_to_string(&tcx, hir_id)
     } else {
         tcx.rendered_const(did).clone()
     }

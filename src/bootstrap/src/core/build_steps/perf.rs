@@ -147,7 +147,7 @@ pub fn perf(builder: &Builder<'_>, args: &PerfArgs) {
     };
     if is_profiling && builder.build.config.rust_debuginfo_level_rustc == DebuginfoLevel::None {
         builder.info(r#"WARNING: You are compiling rustc without debuginfo, this will make profiling less useful.
-Consider setting `rust.debuginfo-level = 1` in `config.toml`."#);
+Consider setting `rust.debuginfo-level = 1` in `bootstrap.toml`."#);
     }
 
     let compiler = builder.compiler(builder.top_stage, builder.config.build);
@@ -166,7 +166,7 @@ Consider setting `rust.debuginfo-level = 1` in `config.toml`."#);
     let results_dir = rustc_perf_dir.join("results");
     builder.create_dir(&results_dir);
 
-    let mut cmd = command(collector);
+    let mut cmd = command(collector.tool_path);
 
     // We need to set the working directory to `src/tools/rustc-perf`, so that it can find the directory
     // with compile-time benchmarks.
