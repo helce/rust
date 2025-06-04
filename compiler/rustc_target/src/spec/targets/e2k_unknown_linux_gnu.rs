@@ -1,9 +1,9 @@
-use crate::spec::{base, Cc, LinkerFlavor, Lld, Target, TargetOptions};
+use crate::spec::{base, Cc, LinkerFlavor, Lld, Target, TargetMetadata, TargetOptions};
 
 pub fn target() -> Target {
     Target {
         llvm_target: "e2k-unknown-linux-gnu".into(),
-        metadata: crate::spec::TargetMetadata {
+        metadata: TargetMetadata {
             description: Some("64-bit Linux (kernel 5.10+, glibc 2.35+)".into()),
             tier: Some(2),
             host_tools: Some(false),
