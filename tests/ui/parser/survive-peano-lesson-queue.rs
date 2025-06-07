@@ -1,5 +1,4 @@
 //@ build-pass
-//@ ignore-e2k psm stack_manipulation is unsupported
 // ignore-tidy-filelength
 // ignore-tidy-linelength
 // some very lightly modified generated code from issue rust-lang/rust#122715

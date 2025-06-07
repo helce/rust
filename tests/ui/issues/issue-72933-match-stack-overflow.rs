@@ -1,5 +1,4 @@
 //@ build-pass
-//@ ignore-e2k psm stack_manipulation is unsupported
 // ignore-tidy-filelength
 #![crate_type="rlib"]
 
