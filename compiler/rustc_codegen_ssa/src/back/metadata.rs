@@ -214,7 +214,7 @@ pub(crate) fn create_object_file(sess: &Session) -> Option<write::Object<'static
 
     let mut file = write::Object::new(binary_format, architecture, endianness);
     file.set_sub_architecture(sub_architecture);
-    if sess.target.is_like_osx {
+    if sess.target.is_like_darwin {
         if macho_is_arm64e(&sess.target) {
             file.set_macho_cpu_subtype(object::macho::CPU_SUBTYPE_ARM64E);
         }
@@ -270,43 +270,59 @@ pub(super) fn elf_os_abi(sess: &Session) -> u8 {
 
 pub(super) fn elf_e_flags(architecture: Architecture, sess: &Session) -> u32 {
     match architecture {
-        Architecture::Mips => {
-            let arch = match sess.target.options.cpu.as_ref() {
-                "mips1" => elf::EF_MIPS_ARCH_1,
-                "mips2" => elf::EF_MIPS_ARCH_2,
+        Architecture::Mips | Architecture::Mips64 | Architecture::Mips64_N32 => {
+            // "N32" indicates an "ILP32" data model on a 64-bit MIPS CPU
+            // like SPARC's "v8+", x86_64's "x32", or the watchOS "arm64_32".
+            let is_32bit = architecture == Architecture::Mips;
+            let mut e_flags = match sess.target.options.cpu.as_ref() {
+                "mips1" if is_32bit => elf::EF_MIPS_ARCH_1,
+                "mips2" if is_32bit => elf::EF_MIPS_ARCH_2,
                 "mips3" => elf::EF_MIPS_ARCH_3,
                 "mips4" => elf::EF_MIPS_ARCH_4,
                 "mips5" => elf::EF_MIPS_ARCH_5,
-                s if s.contains("r6") => elf::EF_MIPS_ARCH_32R6,
-                _ => elf::EF_MIPS_ARCH_32R2,
+                "mips32r2" if is_32bit => elf::EF_MIPS_ARCH_32R2,
+                "mips32r6" if is_32bit => elf::EF_MIPS_ARCH_32R6,
+                "mips64r2" if !is_32bit => elf::EF_MIPS_ARCH_64R2,
+                "mips64r6" if !is_32bit => elf::EF_MIPS_ARCH_64R6,
+                s if s.starts_with("mips32") && !is_32bit => {
+                    sess.dcx().fatal(format!("invalid CPU `{}` for 64-bit MIPS target", s))
+                }
+                s if s.starts_with("mips64") && is_32bit => {
+                    sess.dcx().fatal(format!("invalid CPU `{}` for 32-bit MIPS target", s))
+                }
+                _ if is_32bit => elf::EF_MIPS_ARCH_32R2,
+                _ => elf::EF_MIPS_ARCH_64R2,
             };
 
-            let mut e_flags = elf::EF_MIPS_CPIC | arch;
-
-            // If the ABI is explicitly given, use it or default to O32.
-            match sess.target.options.llvm_abiname.to_lowercase().as_str() {
-                "n32" => e_flags |= elf::EF_MIPS_ABI2,
-                "o32" => e_flags |= elf::EF_MIPS_ABI_O32,
-                _ => e_flags |= elf::EF_MIPS_ABI_O32,
+            // If the ABI is explicitly given, use it, or default to O32 on 32-bit MIPS,
+            // which is the only "true" 32-bit option that LLVM supports.
+            match sess.target.options.llvm_abiname.as_ref() {
+                "o32" if is_32bit => e_flags |= elf::EF_MIPS_ABI_O32,
+                "n32" if !is_32bit => e_flags |= elf::EF_MIPS_ABI2,
+                "n64" if !is_32bit => {}
+                "" if is_32bit => e_flags |= elf::EF_MIPS_ABI_O32,
+                "" => sess.dcx().fatal("LLVM ABI must be specifed for 64-bit MIPS targets"),
+                s if is_32bit => {
+                    sess.dcx().fatal(format!("invalid LLVM ABI `{}` for 32-bit MIPS target", s))
+                }
+                s => sess.dcx().fatal(format!("invalid LLVM ABI `{}` for 64-bit MIPS target", s)),
             };
 
             if sess.target.options.relocation_model != RelocModel::Static {
-                e_flags |= elf::EF_MIPS_PIC;
+                // PIC means position-independent code. CPIC means "calls PIC".
+                // CPIC was mutually exclusive with PIC according to
+                // the SVR4 MIPS ABI https://refspecs.linuxfoundation.org/elf/mipsabi.pdf
+                // and should have only appeared on static objects with dynamically calls.
+                // At some point someone (GCC?) decided to set CPIC even for PIC.
+                // Nowadays various things expect both set on the same object file
+                // and may even error if you mix CPIC and non-CPIC object files,
+                // despite that being the entire point of the CPIC ABI extension!
+                // As we are in Rome, we do as the Romans do.
+                e_flags |= elf::EF_MIPS_PIC | elf::EF_MIPS_CPIC;
             }
             if sess.target.options.cpu.contains("r6") {
                 e_flags |= elf::EF_MIPS_NAN2008;
             }
-            e_flags
-        }
-        Architecture::Mips64 => {
-            // copied from `mips64el-linux-gnuabi64-gcc foo.c -c`
-            let e_flags = elf::EF_MIPS_CPIC
-                | elf::EF_MIPS_PIC
-                | if sess.target.options.cpu.contains("r6") {
-                    elf::EF_MIPS_ARCH_64R6 | elf::EF_MIPS_NAN2008
-                } else {
-                    elf::EF_MIPS_ARCH_64R2
-                };
             e_flags
         }
         Architecture::Riscv32 | Architecture::Riscv64 => {
@@ -413,13 +429,13 @@ pub(super) fn elf_e_flags(architecture: Architecture, sess: &Session) -> u32 {
 fn macho_object_build_version_for_target(sess: &Session) -> object::write::MachOBuildVersion {
     /// The `object` crate demands "X.Y.Z encoded in nibbles as xxxx.yy.zz"
     /// e.g. minOS 14.0 = 0x000E0000, or SDK 16.2 = 0x00100200
-    fn pack_version((major, minor, patch): (u16, u8, u8)) -> u32 {
+    fn pack_version(apple::OSVersion { major, minor, patch }: apple::OSVersion) -> u32 {
         let (major, minor, patch) = (major as u32, minor as u32, patch as u32);
         (major << 16) | (minor << 8) | patch
     }
 
     let platform = apple::macho_platform(&sess.target);
-    let min_os = apple::deployment_target(sess);
+    let min_os = sess.apple_deployment_target();
 
     let mut build_version = object::write::MachOBuildVersion::default();
     build_version.platform = platform;
@@ -565,8 +581,8 @@ pub fn create_compressed_metadata_file(
     symbol_name: &str,
 ) -> Vec<u8> {
     let mut packed_metadata = rustc_metadata::METADATA_HEADER.to_vec();
-    packed_metadata.write_all(&(metadata.raw_data().len() as u64).to_le_bytes()).unwrap();
-    packed_metadata.extend(metadata.raw_data());
+    packed_metadata.write_all(&(metadata.stub_or_full().len() as u64).to_le_bytes()).unwrap();
+    packed_metadata.extend(metadata.stub_or_full());
 
     let Some(mut file) = create_object_file(sess) else {
         if sess.target.is_like_wasm {

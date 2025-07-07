@@ -7,7 +7,7 @@ use rustc_abi::{
 };
 use rustc_macros::HashStable_Generic;
 
-use crate::spec::{HasTargetSpec, HasWasmCAbiOpt, HasX86AbiOpt, RustcAbi, WasmCAbi};
+use crate::spec::{HasTargetSpec, HasWasmCAbiOpt, HasX86AbiOpt, WasmCAbi};
 
 mod aarch64;
 mod amdgpu;
@@ -145,6 +145,7 @@ pub struct ArgAttributes {
     /// (corresponding to LLVM's dereferenceable_or_null attributes, i.e., it is okay for this to be
     /// set on a null pointer, but all non-null pointers must be dereferenceable).
     pub pointee_size: Size,
+    /// The minimum alignment of the pointee, if any.
     pub pointee_align: Option<Align>,
 }
 
@@ -671,7 +672,7 @@ impl<'a, Ty> FnAbi<'a, Ty> {
                 }
             },
             "aarch64" | "arm64ec" => {
-                let kind = if cx.target_spec().is_like_osx {
+                let kind = if cx.target_spec().is_like_darwin {
                     aarch64::AbiKind::DarwinPCS
                 } else if cx.target_spec().is_like_windows {
                     aarch64::AbiKind::Win64
@@ -719,36 +720,18 @@ impl<'a, Ty> FnAbi<'a, Ty> {
         }
     }
 
-    pub fn adjust_for_rust_abi<C>(&mut self, cx: &C, abi: ExternAbi)
+    pub fn adjust_for_rust_abi<C>(&mut self, cx: &C)
     where
         Ty: TyAbiInterface<'a, C> + Copy,
         C: HasDataLayout + HasTargetSpec,
     {
         let spec = cx.target_spec();
         match &*spec.arch {
-            "x86" => x86::compute_rust_abi_info(cx, self, abi),
-            "riscv32" | "riscv64" => riscv::compute_rust_abi_info(cx, self, abi),
-            "loongarch64" => loongarch::compute_rust_abi_info(cx, self, abi),
+            "x86" => x86::compute_rust_abi_info(cx, self),
+            "riscv32" | "riscv64" => riscv::compute_rust_abi_info(cx, self),
+            "loongarch64" => loongarch::compute_rust_abi_info(cx, self),
             "aarch64" => aarch64::compute_rust_abi_info(cx, self),
             _ => {}
-        };
-
-        // Decides whether we can pass the given SIMD argument via `PassMode::Direct`.
-        // May only return `true` if the target will always pass those arguments the same way,
-        // no matter what the user does with `-Ctarget-feature`! In other words, whatever
-        // target features are required to pass a SIMD value in registers must be listed in
-        // the `abi_required_features` for the current target and ABI.
-        let can_pass_simd_directly = |arg: &ArgAbi<'_, Ty>| match &*spec.arch {
-            // On x86, if we have SSE2 (which we have by default for x86_64), we can always pass up
-            // to 128-bit-sized vectors.
-            "x86" if spec.rustc_abi == Some(RustcAbi::X86Sse2) => arg.layout.size.bits() <= 128,
-            "x86_64" if spec.rustc_abi != Some(RustcAbi::X86Softfloat) => {
-                // FIXME once https://github.com/bytecodealliance/wasmtime/issues/10254 is fixed
-                // accept vectors up to 128bit rather than vectors of exactly 128bit.
-                arg.layout.size.bits() == 128
-            }
-            // So far, we haven't implemented this logic for any other target.
-            _ => false,
         };
 
         for (arg_idx, arg) in self
@@ -850,12 +833,10 @@ impl<'a, Ty> FnAbi<'a, Ty> {
                     // target feature sets. Some more information about this
                     // issue can be found in #44367.
                     //
-                    // Note that the intrinsic ABI is exempt here as those are not
-                    // real functions anyway, and the backend expects very specific types.
-                    if abi != ExternAbi::RustIntrinsic
-                        && spec.simd_types_indirect
-                        && !can_pass_simd_directly(arg)
-                    {
+                    // We *could* do better in some cases, e.g. on x86_64 targets where SSE2 is
+                    // required. However, it turns out that that makes LLVM worse at optimizing this
+                    // code, so we pass things indirectly even there. See #139029 for more on that.
+                    if spec.simd_types_indirect {
                         arg.make_indirect();
                     }
                 }

@@ -33,6 +33,20 @@ function onEachBtwn(arr, func, funcBtwn) {
     }
 }
 
+/**
+ * Convert any `undefined` to `null`.
+ *
+ * @template T
+ * @param {T|undefined} x
+ * @returns {T|null}
+ */
+function undef2null(x) {
+    if (x !== undefined) {
+        return x;
+    }
+    return null;
+}
+
 // ==================== Core search logic begin ====================
 // This mapping table should match the discriminants of
 // `rustdoc::formats::item_type::ItemType` type in Rust.
@@ -338,7 +352,7 @@ function getFilteredNextElem(query, parserState, elems, isInGenerics) {
         // The type filter doesn't count as an element since it's a modifier.
         const typeFilterElem = elems.pop();
         checkExtraTypeFilterCharacters(start, parserState);
-        // typeFilterElem is not null. If it was, the elems.length check would have fired.
+        // typeFilterElem is not undefined. If it was, the elems.length check would have fired.
         // @ts-expect-error
         parserState.typeFilter = typeFilterElem.normalizedPathLast;
         parserState.pos += 1;
@@ -1312,10 +1326,9 @@ class NameTrie {
                 let sste;
                 if (substart >= 2) {
                     const tail = name.substring(substart - 2, substart + 1);
-                    if (tailTable.has(tail)) {
-                        // it's not undefined
-                        // @ts-expect-error
-                        sste = tailTable.get(tail);
+                    const entry = tailTable.get(tail);
+                    if (entry !== undefined) {
+                        sste = entry;
                     } else {
                         sste = [];
                         tailTable.set(tail, sste);
@@ -1339,10 +1352,9 @@ class NameTrie {
                 new Lev1TParametricDescription(name.length);
             this.searchLev(name, 0, levParams, results);
             const tail = name.substring(0, 3);
-            if (tailTable.has(tail)) {
-                // it's not undefined
-                // @ts-expect-error
-                for (const entry of tailTable.get(tail)) {
+            const list = tailTable.get(tail);
+            if (list !== undefined) {
+                for (const entry of list) {
                     entry.searchSubstringPrefix(name, 3, results);
                 }
             }
@@ -1601,10 +1613,8 @@ class DocSearch {
             return null;
         }
 
-        if (this.typeNameIdMap.has(name)) {
-            /** @type {{id: number, assocOnly: boolean}} */
-            // @ts-expect-error
-            const obj = this.typeNameIdMap.get(name);
+        const obj = this.typeNameIdMap.get(name);
+        if (obj !== undefined) {
             obj.assocOnly = !!(isAssocType && obj.assocOnly);
             return obj.id;
         } else {
@@ -2083,7 +2093,8 @@ class DocSearch {
                 descIndex += 1;
             }
 
-            // a String of one character item type codes
+            // see `RawSearchIndexCrate` in `rustdoc.d.ts` for a more
+            // up to date description of these fields
             const itemTypes = crateCorpus.t;
             // an array of (String) item names
             const itemNames = crateCorpus.n;
@@ -2100,8 +2111,6 @@ class DocSearch {
             const itemParentIdxDecoder = new VlqHexDecoder(crateCorpus.i, noop => noop);
             // a map Number, string for impl disambiguators
             const implDisambiguator = new Map(crateCorpus.b);
-            // an array of [(Number) item type,
-            //              (String) name]
             const rawPaths = crateCorpus.p;
             const aliases = crateCorpus.a;
             // an array of [(Number) item index,
@@ -2140,29 +2149,30 @@ class DocSearch {
             // convert `rawPaths` entries into object form
             // generate normalizedPaths for function search mode
             let len = rawPaths.length;
-            let lastPath = itemPaths.get(0);
+            let lastPath = undef2null(itemPaths.get(0));
             for (let i = 0; i < len; ++i) {
                 const elem = rawPaths[i];
                 const ty = elem[0];
                 const name = elem[1];
-                let path = null;
-                if (elem.length > 2 && elem[2] !== null) {
-                    // @ts-expect-error
-                    path = itemPaths.has(elem[2]) ? itemPaths.get(elem[2]) : lastPath;
-                    lastPath = path;
-                }
-                let exactPath = elem.length > 3 && elem[3] !== null ?
-                    // @ts-expect-error
-                    itemPaths.get(elem[3]) :
-                    path;
+                /**
+                 * @param {2|3} idx
+                 * @param {string|null} if_null
+                 * @param {string|null} if_not_found
+                 * @returns {string|null}
+                 */
+                const elemPath = (idx, if_null, if_not_found) => {
+                    if (elem.length > idx && elem[idx] !== undefined) {
+                        const p = itemPaths.get(elem[idx]);
+                        if (p !== undefined) {
+                            return p;
+                        }
+                        return if_not_found;
+                    }
+                    return if_null;
+                };
+                const path = elemPath(2, lastPath, null);
+                const exactPath = elemPath(3, path, path);
                 const unboxFlag = elem.length > 4 && !!elem[4];
-
-                if (path === undefined) {
-                    path = null;
-                }
-                if (exactPath === undefined) {
-                    exactPath = null;
-                }
 
                 lowercasePaths.push({ ty, name: name.toLowerCase(), path, exactPath, unboxFlag });
                 paths[i] = { ty, name, path, exactPath, unboxFlag };
@@ -2197,12 +2207,11 @@ class DocSearch {
                 }
                 const name = itemNames[i] === "" ? lastName : itemNames[i];
                 const word = itemNames[i] === "" ? lastWord : itemNames[i].toLowerCase();
-                /** @type {string} */
-                // @ts-expect-error
-                const path = itemPaths.has(i) ? itemPaths.get(i) : lastPath;
-                const paramNames = itemParamNames.has(i) ?
-                    // @ts-expect-error
-                    itemParamNames.get(i).split(",") :
+                const pathU = itemPaths.get(i);
+                const path = pathU !== undefined ? pathU : lastPath;
+                const paramNameString = itemParamNames.get(i);
+                const paramNames = paramNameString !== undefined ?
+                    paramNameString.split(",") :
                     lastParamNames;
                 const type = itemFunctionDecoder.next();
                 if (type !== null) {
@@ -2244,8 +2253,7 @@ class DocSearch {
                     word,
                     normalizedName,
                     bitIndex,
-                    implDisambiguator: implDisambiguator.has(i) ?
-                        implDisambiguator.get(i) : null,
+                    implDisambiguator: undef2null(implDisambiguator.get(i)),
                 };
                 this.nameTrie.insert(normalizedName, id, this.tailTable);
                 id += 1;
@@ -2483,9 +2491,13 @@ class DocSearch {
             }
         } catch (err) {
             query = newParsedQuery(userQuery);
-            // is string list
-            // @ts-expect-error
-            query.error = err;
+            if (Array.isArray(err) && err.every(elem => typeof elem === "string")) {
+                query.error = err;
+            } else {
+                // rethrow the error if it isn't a string array
+                throw err;
+            }
+
             return query;
         }
         if (!query.literalSearch) {
@@ -2573,9 +2585,9 @@ class DocSearch {
             if ((elem.id === null && parsedQuery.totalElems > 1 && elem.typeFilter === -1
                 && elem.generics.length === 0 && elem.bindings.size === 0)
                 || elem.typeFilter === TY_GENERIC) {
-                if (genericSymbols.has(elem.normalizedPathLast)) {
-                    // @ts-expect-error
-                    elem.id = genericSymbols.get(elem.normalizedPathLast);
+                const id = genericSymbols.get(elem.normalizedPathLast);
+                if (id !== undefined) {
+                    elem.id = id;
                 } else {
                     elem.id = -(genericSymbols.size + 1);
                     genericSymbols.set(elem.normalizedPathLast, elem.id);
@@ -2767,15 +2779,28 @@ class DocSearch {
             for (const result of results) {
                 if (result.id !== -1) {
                     const res = buildHrefAndPath(this.searchIndex[result.id]);
+                    // many of these properties don't strictly need to be
+                    // copied over, but copying them over satisfies tsc,
+                    // and hopefully plays nice with the shape optimization
+                    // of the browser engine.
+                    /** @type {rustdoc.ResultObject} */
                     const obj = Object.assign({
+                        parent: result.parent,
+                        type: result.type,
                         dist: result.dist,
+                        path_dist: result.path_dist,
+                        index: result.index,
+                        desc: result.desc,
+                        item: result.item,
                         displayPath: pathSplitter(res[0]),
+                        fullPath: "",
+                        href: "",
+                        displayTypeSignature: null,
                     }, this.searchIndex[result.id]);
 
                     // To be sure than it some items aren't considered as duplicate.
-                    // @ts-expect-error
                     obj.fullPath = res[2] + "|" + obj.ty;
-                    // @ts-expect-error
+
                     if (duplicates.has(obj.fullPath)) {
                         continue;
                     }
@@ -2788,18 +2813,15 @@ class DocSearch {
                     if (duplicates.has(res[2] + "|" + TY_IMPORT)) {
                         continue;
                     }
-                    // @ts-expect-error
                     duplicates.add(obj.fullPath);
                     duplicates.add(res[2]);
 
                     if (typeInfo !== null) {
-                        // @ts-expect-error
                         obj.displayTypeSignature =
                             // @ts-expect-error
                             this.formatDisplayTypeSignature(obj, typeInfo);
                     }
 
-                    // @ts-expect-error
                     obj.href = res[1];
                     out.push(obj);
                     if (out.length >= MAX_RESULTS) {
@@ -2807,7 +2829,6 @@ class DocSearch {
                     }
                 }
             }
-            // @ts-expect-error
             return out;
         };
 
@@ -2820,11 +2841,7 @@ class DocSearch {
          *
          * @param {rustdoc.ResultObject} obj
          * @param {"sig"|"elems"|"returned"|null} typeInfo
-         * @returns {Promise<{
-         *   "type": Array<string>,
-         *   "mappedNames": Map<string, string>,
-         *   "whereClause": Map<string, Array<string>>,
-         * }>}
+         * @returns {Promise<rustdoc.DisplayTypeSignature>}
          */
         this.formatDisplayTypeSignature = async(obj, typeInfo) => {
             const objType = obj.type;
@@ -2886,7 +2903,7 @@ class DocSearch {
             const whereClause = new Map();
 
             const fnParamNames = obj.paramNames || [];
-            // @ts-expect-error
+            /** @type {string[]} */
             const queryParamNames = [];
             /**
              * Recursively writes a map of IDs to query generic names,
@@ -2919,7 +2936,7 @@ class DocSearch {
              * index 2 is not highlighted, etc.
              *
              * @param {{name?: string, highlighted?: boolean}} fnType - input
-             * @param {[string]} result
+             * @param {string[]} result
              */
             const pushText = (fnType, result) => {
                 // If !!(result.length % 2) == false, then pushing a new slot starts an even
@@ -2931,7 +2948,6 @@ class DocSearch {
                 // needs coerced to a boolean.
                 if (!!(result.length % 2) === !!fnType.highlighted) {
                     result.push("");
-                // @ts-expect-error
                 } else if (result.length === 0 && !!fnType.highlighted) {
                     result.push("");
                     result.push("");
@@ -2945,7 +2961,7 @@ class DocSearch {
              * or a trait bound on Fn, FnMut, or FnOnce.
              *
              * @param {rustdoc.HighlightedFunctionType} fnType - input
-             * @param {[string]} result
+             * @param {string[]} result
              */
             const writeHof = (fnType, result) => {
                 const hofOutput = fnType.bindings.get(this.typeNameIdOfOutput) || [];
@@ -2985,7 +3001,7 @@ class DocSearch {
              * Returns `false` if the supplied type isn't special.
              *
              * @param {rustdoc.HighlightedFunctionType} fnType
-             * @param {[string]} result
+             * @param {string[]} result
              */
             const writeSpecialPrimitive = (fnType, result) => {
                 if (fnType.id === this.typeNameIdOfArray || fnType.id === this.typeNameIdOfSlice ||
@@ -3032,7 +3048,7 @@ class DocSearch {
              * updating the where clause and generic type param map.
              *
              * @param {rustdoc.HighlightedFunctionType} fnType
-             * @param {[string]} result
+             * @param {string[]} result
              */
             const writeFn = (fnType, result) => {
                 if (fnType.id !== null && fnType.id < 0) {
@@ -3050,7 +3066,6 @@ class DocSearch {
                         for (const [queryId, fnId] of mgens) {
                             if (fnId === fnType.id) {
                                 mappedNames.set(
-                                    // @ts-expect-error
                                     queryParamNames[-1 - queryId],
                                     fnParamNames[-1 - fnType.id],
                                 );
@@ -3065,7 +3080,6 @@ class DocSearch {
                     const where = [];
                     onEachBtwn(
                         fnType.generics,
-                        // @ts-expect-error
                         nested => writeFn(nested, where),
                         // @ts-expect-error
                         () => pushText({ name: " + ", highlighted: false }, where),
@@ -3100,7 +3114,6 @@ class DocSearch {
                                     // shown in the where clause and name mapping output, but is
                                     // redundant in this spot
                                     for (const value of values) {
-                                        // @ts-expect-error
                                         writeFn(value, []);
                                     }
                                     return true;
@@ -3142,26 +3155,22 @@ class DocSearch {
                     }
                 }
             };
-            // @ts-expect-error
+            /** @type {string[]} */
             const type = [];
             onEachBtwn(
                 fnInputs,
-                // @ts-expect-error
                 fnType => writeFn(fnType, type),
                 // @ts-expect-error
                 () => pushText({ name: ", ",  highlighted: false }, type),
             );
-            // @ts-expect-error
             pushText({ name: " -> ", highlighted: false }, type);
             onEachBtwn(
                 fnOutput,
-                // @ts-expect-error
                 fnType => writeFn(fnType, type),
                 // @ts-expect-error
                 () => pushText({ name: ", ",  highlighted: false }, type),
             );
 
-            // @ts-expect-error
             return {type, mappedNames, whereClause};
         };
 
@@ -3476,8 +3485,7 @@ class DocSearch {
                         }
                     }
                 }
-                // @ts-expect-error
-                return false;
+                return null;
             }
 
             // Multiple element recursive case
@@ -3533,7 +3541,7 @@ class DocSearch {
                 }
                 /** @type {rustdoc.HighlightedFunctionType[]|null} */
                 let unifiedGenerics = [];
-                // @ts-expect-error
+                /** @type {null|Map<number, number>} */
                 let unifiedGenericsMgens = null;
                 /** @type {rustdoc.HighlightedFunctionType[]|null} */
                 const passesUnification = unifyFunctionTypes(
@@ -3587,7 +3595,6 @@ class DocSearch {
                                 // @ts-expect-error
                                 queryElem.bindings.get(k),
                                 whereClause,
-                                // @ts-expect-error
                                 unifiedGenericsMgens,
                                 solutionCb,
                                 unboxingDepth,
@@ -3985,7 +3992,7 @@ class DocSearch {
                     }
                     const fnTypeBindings = fnType.bindings.get(name);
                     mgensSolutionSet = mgensSolutionSet.flatMap(mgens => {
-                        // @ts-expect-error
+                        /** @type{Array<Map<number, number> | null>} */
                         const newSolutions = [];
                         unifyFunctionTypes(
                             // @ts-expect-error
@@ -4001,7 +4008,6 @@ class DocSearch {
                             },
                             unboxingDepth,
                         );
-                        // @ts-expect-error
                         return newSolutions;
                     });
                 }
@@ -4249,6 +4255,7 @@ class DocSearch {
             return false;
         }
 
+        // this does not yet have a type in `rustdoc.d.ts`.
         // @ts-expect-error
         function createAliasFromItem(item) {
             return {

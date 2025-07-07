@@ -8,9 +8,9 @@ use std::sync::Arc;
 use rustc_ast::expand::StrippedCfgItem;
 use rustc_ast::{self as ast, Crate, NodeId, attr};
 use rustc_ast_pretty::pprust;
-use rustc_attr_parsing::{AttributeKind, StabilityLevel, find_attr};
+use rustc_attr_parsing::StabilityLevel;
 use rustc_data_structures::intern::Interned;
-use rustc_errors::{Applicability, StashKey};
+use rustc_errors::{Applicability, DiagCtxtHandle, StashKey};
 use rustc_expand::base::{
     DeriveResolution, Indeterminate, ResolverExpand, SyntaxExtension, SyntaxExtensionKind,
 };
@@ -124,14 +124,21 @@ fn fast_print_path(path: &ast::Path) -> Symbol {
 }
 
 pub(crate) fn registered_tools(tcx: TyCtxt<'_>, (): ()) -> RegisteredTools {
-    let mut registered_tools = RegisteredTools::default();
     let (_, pre_configured_attrs) = &*tcx.crate_for_resolver(()).borrow();
+    registered_tools_ast(tcx.dcx(), pre_configured_attrs)
+}
+
+pub fn registered_tools_ast(
+    dcx: DiagCtxtHandle<'_>,
+    pre_configured_attrs: &[ast::Attribute],
+) -> RegisteredTools {
+    let mut registered_tools = RegisteredTools::default();
     for attr in attr::filter_by_name(pre_configured_attrs, sym::register_tool) {
         for meta_item_inner in attr.meta_item_list().unwrap_or_default() {
             match meta_item_inner.ident() {
                 Some(ident) => {
                     if let Some(old_ident) = registered_tools.replace(ident) {
-                        tcx.dcx().emit_err(errors::ToolWasAlreadyRegistered {
+                        dcx.emit_err(errors::ToolWasAlreadyRegistered {
                             span: ident.span,
                             tool: ident,
                             old_ident_span: old_ident.span,
@@ -139,7 +146,7 @@ pub(crate) fn registered_tools(tcx: TyCtxt<'_>, (): ()) -> RegisteredTools {
                     }
                 }
                 None => {
-                    tcx.dcx().emit_err(errors::ToolOnlyAcceptsIdentifiers {
+                    dcx.emit_err(errors::ToolOnlyAcceptsIdentifiers {
                         span: meta_item_inner.span(),
                         tool: sym::register_tool,
                     });
@@ -316,8 +323,7 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
     }
 
     fn record_macro_rule_usage(&mut self, id: NodeId, rule_i: usize) {
-        let did = self.local_def_id(id);
-        if let Some(rules) = self.unused_macro_rules.get_mut(&did) {
+        if let Some(rules) = self.unused_macro_rules.get_mut(&id) {
             rules.remove(&rule_i);
         }
     }
@@ -330,15 +336,12 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
                 ident.span,
                 BuiltinLintDiag::UnusedMacroDefinition(ident.name),
             );
+            // Do not report unused individual rules if the entire macro is unused
+            self.unused_macro_rules.swap_remove(&node_id);
         }
 
-        for (&def_id, unused_arms) in self.unused_macro_rules.iter() {
+        for (&node_id, unused_arms) in self.unused_macro_rules.iter() {
             for (&arm_i, &(ident, rule_span)) in unused_arms.to_sorted_stable_ord() {
-                if self.unused_macros.contains_key(&def_id) {
-                    // We already lint the entire macro as unused
-                    continue;
-                }
-                let node_id = self.def_id_to_node_id[def_id];
                 self.lint_buffer.buffer_lint(
                     UNUSED_MACRO_RULES,
                     node_id,
@@ -459,11 +462,11 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
     }
 
     fn declare_proc_macro(&mut self, id: NodeId) {
-        self.proc_macros.push(id)
+        self.proc_macros.push(self.local_def_id(id))
     }
 
-    fn append_stripped_cfg_item(&mut self, parent_node: NodeId, name: Ident, cfg: ast::MetaItem) {
-        self.stripped_cfg_items.push(StrippedCfgItem { parent_module: parent_node, name, cfg });
+    fn append_stripped_cfg_item(&mut self, parent_node: NodeId, ident: Ident, cfg: ast::MetaItem) {
+        self.stripped_cfg_items.push(StrippedCfgItem { parent_module: parent_node, ident, cfg });
     }
 
     fn registered_tools(&self) -> &RegisteredTools {
@@ -925,7 +928,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                             .invocation_parents
                             .get(&parent_scope.expansion)
                             .map_or(ast::CRATE_NODE_ID, |parent| {
-                                self.def_id_to_node_id[parent.parent_def]
+                                self.def_id_to_node_id(parent.parent_def)
                             });
                         self.lint_buffer.buffer_lint(
                             LEGACY_DERIVE_HELPERS,
@@ -1124,13 +1127,6 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             node_id,
             edition,
         );
-
-        // The #[rustc_macro_edition_2021] attribute is used by the pin!() macro
-        // as a temporary workaround for a regression in expressiveness in Rust 2024.
-        // See https://github.com/rust-lang/rust/issues/138718.
-        if find_attr!(attrs.iter(), AttributeKind::RustcMacroEdition2021) {
-            ext.edition = Edition::Edition2021;
-        }
 
         if let Some(builtin_name) = ext.builtin_name {
             // The macro was marked with `#[rustc_builtin_macro]`.

@@ -58,7 +58,7 @@ walkdir = "2.4"
 xz2 = "0.1"
 
 # Dependencies needed by the build-metrics feature
-sysinfo = { version = "0.33.0", default-features = false, optional = true, features = ["system"] }
+sysinfo = { version = "0.35.0", default-features = false, optional = true, features = ["system"] }
 
 # Dependencies needed by the `tracing` feature
 tracing = { version = "0.1", optional = true, features = ["attributes"] }
@@ -83,6 +83,7 @@ features = [
 
 [dev-dependencies]
 pretty_assertions = "1.4"
+tempfile = "3.15.0"
 
 # We care a lot about bootstrap's compile times, so don't include debuginfo for
 # dependencies, only bootstrap itself.

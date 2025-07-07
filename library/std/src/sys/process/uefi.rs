@@ -1,5 +1,6 @@
-use r_efi::protocols::simple_text_output;
+use r_efi::protocols::{simple_text_input, simple_text_output};
 
+use super::env::{CommandEnv, CommandEnvs};
 use crate::collections::BTreeMap;
 pub use crate::ffi::OsString as EnvKey;
 use crate::ffi::{OsStr, OsString};
@@ -10,7 +11,6 @@ use crate::sys::pal::helpers;
 use crate::sys::pal::os::error_string;
 use crate::sys::pipe::AnonPipe;
 use crate::sys::unsupported;
-use crate::sys_common::process::{CommandEnv, CommandEnvs};
 use crate::{fmt, io};
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -23,6 +23,7 @@ pub struct Command {
     args: Vec<OsString>,
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
+    stdin: Option<Stdio>,
     env: CommandEnv,
 }
 
@@ -48,6 +49,7 @@ impl Command {
             args: Vec::new(),
             stdout: None,
             stderr: None,
+            stdin: None,
             env: Default::default(),
         }
     }
@@ -64,8 +66,8 @@ impl Command {
         panic!("unsupported")
     }
 
-    pub fn stdin(&mut self, _stdin: Stdio) {
-        panic!("unsupported")
+    pub fn stdin(&mut self, stdin: Stdio) {
+        self.stdin = Some(stdin);
     }
 
     pub fn stdout(&mut self, stdout: Stdio) {
@@ -122,62 +124,87 @@ impl Command {
         }
     }
 
-    pub fn output(&mut self) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
-        let mut cmd = uefi_command_internal::Image::load_image(&self.prog)?;
-
-        // UEFI adds the bin name by default
-        if !self.args.is_empty() {
-            let args = uefi_command_internal::create_args(&self.prog, &self.args);
-            cmd.set_args(args);
-        }
-
-        // Setup Stdout
-        let stdout = self.stdout.unwrap_or(Stdio::MakePipe);
-        let stdout = Self::create_pipe(stdout)?;
-        if let Some(con) = stdout {
-            cmd.stdout_init(con)
-        } else {
-            cmd.stdout_inherit()
-        };
-
-        // Setup Stderr
-        let stderr = self.stderr.unwrap_or(Stdio::MakePipe);
-        let stderr = Self::create_pipe(stderr)?;
-        if let Some(con) = stderr {
-            cmd.stderr_init(con)
-        } else {
-            cmd.stderr_inherit()
-        };
-
-        let env = env_changes(&self.env);
-
-        // Set any new vars
-        if let Some(e) = &env {
-            for (k, (_, v)) in e {
-                match v {
-                    Some(v) => unsafe { crate::env::set_var(k, v) },
-                    None => unsafe { crate::env::remove_var(k) },
-                }
+    fn create_stdin(
+        s: Stdio,
+    ) -> io::Result<Option<helpers::OwnedProtocol<uefi_command_internal::InputProtocol>>> {
+        match s {
+            Stdio::Null => unsafe {
+                helpers::OwnedProtocol::create(
+                    uefi_command_internal::InputProtocol::null(),
+                    simple_text_input::PROTOCOL_GUID,
+                )
             }
+            .map(Some),
+            Stdio::Inherit => Ok(None),
+            Stdio::MakePipe => unsupported(),
         }
-
-        let stat = cmd.start_image()?;
-
-        // Rollback any env changes
-        if let Some(e) = env {
-            for (k, (v, _)) in e {
-                match v {
-                    Some(v) => unsafe { crate::env::set_var(k, v) },
-                    None => unsafe { crate::env::remove_var(k) },
-                }
-            }
-        }
-
-        let stdout = cmd.stdout()?;
-        let stderr = cmd.stderr()?;
-
-        Ok((ExitStatus(stat), stdout, stderr))
     }
+}
+
+pub fn output(command: &mut Command) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    let mut cmd = uefi_command_internal::Image::load_image(&command.prog)?;
+
+    // UEFI adds the bin name by default
+    if !command.args.is_empty() {
+        let args = uefi_command_internal::create_args(&command.prog, &command.args);
+        cmd.set_args(args);
+    }
+
+    // Setup Stdout
+    let stdout = command.stdout.unwrap_or(Stdio::MakePipe);
+    let stdout = Command::create_pipe(stdout)?;
+    if let Some(con) = stdout {
+        cmd.stdout_init(con)
+    } else {
+        cmd.stdout_inherit()
+    };
+
+    // Setup Stderr
+    let stderr = command.stderr.unwrap_or(Stdio::MakePipe);
+    let stderr = Command::create_pipe(stderr)?;
+    if let Some(con) = stderr {
+        cmd.stderr_init(con)
+    } else {
+        cmd.stderr_inherit()
+    };
+
+    // Setup Stdin
+    let stdin = command.stdin.unwrap_or(Stdio::Null);
+    let stdin = Command::create_stdin(stdin)?;
+    if let Some(con) = stdin {
+        cmd.stdin_init(con)
+    } else {
+        cmd.stdin_inherit()
+    };
+
+    let env = env_changes(&command.env);
+
+    // Set any new vars
+    if let Some(e) = &env {
+        for (k, (_, v)) in e {
+            match v {
+                Some(v) => unsafe { crate::env::set_var(k, v) },
+                None => unsafe { crate::env::remove_var(k) },
+            }
+        }
+    }
+
+    let stat = cmd.start_image()?;
+
+    // Rollback any env changes
+    if let Some(e) = env {
+        for (k, (v, _)) in e {
+            match v {
+                Some(v) => unsafe { crate::env::set_var(k, v) },
+                None => unsafe { crate::env::remove_var(k) },
+            }
+        }
+    }
+
+    let stdout = cmd.stdout()?;
+    let stderr = cmd.stderr()?;
+
+    Ok((ExitStatus(stat), stdout, stderr))
 }
 
 impl From<AnonPipe> for Stdio {
@@ -334,7 +361,7 @@ impl<'a> fmt::Debug for CommandArgs<'a> {
 
 #[allow(dead_code)]
 mod uefi_command_internal {
-    use r_efi::protocols::{loaded_image, simple_text_output};
+    use r_efi::protocols::{loaded_image, simple_text_input, simple_text_output};
 
     use crate::ffi::{OsStr, OsString};
     use crate::io::{self, const_error};
@@ -350,6 +377,7 @@ mod uefi_command_internal {
         handle: NonNull<crate::ffi::c_void>,
         stdout: Option<helpers::OwnedProtocol<PipeProtocol>>,
         stderr: Option<helpers::OwnedProtocol<PipeProtocol>>,
+        stdin: Option<helpers::OwnedProtocol<InputProtocol>>,
         st: OwnedTable<r_efi::efi::SystemTable>,
         args: Option<(*mut u16, usize)>,
     }
@@ -384,7 +412,14 @@ mod uefi_command_internal {
                     helpers::open_protocol(child_handle, loaded_image::PROTOCOL_GUID).unwrap();
                 let st = OwnedTable::from_table(unsafe { (*loaded_image.as_ptr()).system_table });
 
-                Ok(Self { handle: child_handle, stdout: None, stderr: None, st, args: None })
+                Ok(Self {
+                    handle: child_handle,
+                    stdout: None,
+                    stderr: None,
+                    stdin: None,
+                    st,
+                    args: None,
+                })
             }
         }
 
@@ -445,6 +480,17 @@ mod uefi_command_internal {
             }
         }
 
+        fn set_stdin(
+            &mut self,
+            handle: r_efi::efi::Handle,
+            protocol: *mut simple_text_input::Protocol,
+        ) {
+            unsafe {
+                (*self.st.as_mut_ptr()).console_in_handle = handle;
+                (*self.st.as_mut_ptr()).con_in = protocol;
+            }
+        }
+
         pub fn stdout_init(&mut self, protocol: helpers::OwnedProtocol<PipeProtocol>) {
             self.set_stdout(
                 protocol.handle().as_ptr(),
@@ -469,6 +515,19 @@ mod uefi_command_internal {
         pub fn stderr_inherit(&mut self) {
             let st: NonNull<r_efi::efi::SystemTable> = system_table().cast();
             unsafe { self.set_stderr((*st.as_ptr()).standard_error_handle, (*st.as_ptr()).std_err) }
+        }
+
+        pub(crate) fn stdin_init(&mut self, protocol: helpers::OwnedProtocol<InputProtocol>) {
+            self.set_stdin(
+                protocol.handle().as_ptr(),
+                protocol.as_ref() as *const InputProtocol as *mut simple_text_input::Protocol,
+            );
+            self.stdin = Some(protocol);
+        }
+
+        pub(crate) fn stdin_inherit(&mut self) {
+            let st: NonNull<r_efi::efi::SystemTable> = system_table().cast();
+            unsafe { self.set_stdin((*st.as_ptr()).console_in_handle, (*st.as_ptr()).con_in) }
         }
 
         pub fn stderr(&self) -> io::Result<Vec<u8>> {
@@ -718,6 +777,56 @@ mod uefi_command_internal {
         fn drop(&mut self) {
             unsafe {
                 let _ = Box::from_raw(self.mode);
+            }
+        }
+    }
+
+    #[repr(C)]
+    pub(crate) struct InputProtocol {
+        reset: simple_text_input::ProtocolReset,
+        read_key_stroke: simple_text_input::ProtocolReadKeyStroke,
+        wait_for_key: r_efi::efi::Event,
+    }
+
+    impl InputProtocol {
+        pub(crate) fn null() -> Self {
+            let evt = helpers::OwnedEvent::new(
+                r_efi::efi::EVT_NOTIFY_WAIT,
+                r_efi::efi::TPL_CALLBACK,
+                Some(Self::empty_notify),
+                None,
+            )
+            .unwrap();
+
+            Self {
+                reset: Self::null_reset,
+                read_key_stroke: Self::null_read_key,
+                wait_for_key: evt.into_raw(),
+            }
+        }
+
+        extern "efiapi" fn null_reset(
+            _: *mut simple_text_input::Protocol,
+            _: r_efi::efi::Boolean,
+        ) -> r_efi::efi::Status {
+            r_efi::efi::Status::SUCCESS
+        }
+
+        extern "efiapi" fn null_read_key(
+            _: *mut simple_text_input::Protocol,
+            _: *mut simple_text_input::InputKey,
+        ) -> r_efi::efi::Status {
+            r_efi::efi::Status::UNSUPPORTED
+        }
+
+        extern "efiapi" fn empty_notify(_: r_efi::efi::Event, _: *mut crate::ffi::c_void) {}
+    }
+
+    impl Drop for InputProtocol {
+        fn drop(&mut self) {
+            // Close wait_for_key
+            unsafe {
+                let _ = helpers::OwnedEvent::from_raw(self.wait_for_key);
             }
         }
     }

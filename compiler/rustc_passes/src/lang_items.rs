@@ -19,7 +19,8 @@ use rustc_session::cstore::ExternCrate;
 use rustc_span::Span;
 
 use crate::errors::{
-    DuplicateLangItem, IncorrectTarget, LangItemOnIncorrectTarget, UnknownLangItem,
+    DuplicateLangItem, IncorrectCrateType, IncorrectTarget, LangItemOnIncorrectTarget,
+    UnknownLangItem,
 };
 use crate::weak_lang_items;
 
@@ -236,6 +237,10 @@ impl<'ast, 'tcx> LanguageItemCollector<'ast, 'tcx> {
             }
         }
 
+        if self.tcx.crate_types().contains(&rustc_session::config::CrateType::Sdylib) {
+            self.tcx.dcx().emit_err(IncorrectCrateType { span: attr_span });
+        }
+
         self.collect_item(lang_item, item_def_id.to_def_id(), Some(item_span));
     }
 }
@@ -268,22 +273,22 @@ fn get_lang_items(tcx: TyCtxt<'_>, (): ()) -> LanguageItems {
 impl<'ast, 'tcx> visit::Visitor<'ast> for LanguageItemCollector<'ast, 'tcx> {
     fn visit_item(&mut self, i: &'ast ast::Item) {
         let target = match &i.kind {
-            ast::ItemKind::ExternCrate(_) => Target::ExternCrate,
+            ast::ItemKind::ExternCrate(..) => Target::ExternCrate,
             ast::ItemKind::Use(_) => Target::Use,
             ast::ItemKind::Static(_) => Target::Static,
             ast::ItemKind::Const(_) => Target::Const,
             ast::ItemKind::Fn(_) | ast::ItemKind::Delegation(..) => Target::Fn,
-            ast::ItemKind::Mod(_, _) => Target::Mod,
+            ast::ItemKind::Mod(..) => Target::Mod,
             ast::ItemKind::ForeignMod(_) => Target::ForeignFn,
             ast::ItemKind::GlobalAsm(_) => Target::GlobalAsm,
             ast::ItemKind::TyAlias(_) => Target::TyAlias,
-            ast::ItemKind::Enum(_, _) => Target::Enum,
-            ast::ItemKind::Struct(_, _) => Target::Struct,
-            ast::ItemKind::Union(_, _) => Target::Union,
+            ast::ItemKind::Enum(..) => Target::Enum,
+            ast::ItemKind::Struct(..) => Target::Struct,
+            ast::ItemKind::Union(..) => Target::Union,
             ast::ItemKind::Trait(_) => Target::Trait,
-            ast::ItemKind::TraitAlias(_, _) => Target::TraitAlias,
+            ast::ItemKind::TraitAlias(..) => Target::TraitAlias,
             ast::ItemKind::Impl(_) => Target::Impl,
-            ast::ItemKind::MacroDef(_) => Target::MacroDef,
+            ast::ItemKind::MacroDef(..) => Target::MacroDef,
             ast::ItemKind::MacCall(_) | ast::ItemKind::DelegationMac(_) => {
                 unreachable!("macros should have been expanded")
             }

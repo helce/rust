@@ -101,13 +101,13 @@ pub trait Step: 'static + Clone + Debug + PartialEq + Eq + Hash {
     /// Primary function to implement `Step` logic.
     ///
     /// This function can be triggered in two ways:
-    ///     1. Directly from [`Builder::execute_cli`].
-    ///     2. Indirectly by being called from other `Step`s using [`Builder::ensure`].
+    /// 1. Directly from [`Builder::execute_cli`].
+    /// 2. Indirectly by being called from other `Step`s using [`Builder::ensure`].
     ///
-    /// When called with [`Builder::execute_cli`] (as done by `Build::build`), this function executed twice:
-    ///     - First in "dry-run" mode to validate certain things (like cyclic Step invocations,
-    ///         directory creation, etc) super quickly.
-    ///     - Then it's called again to run the actual, very expensive process.
+    /// When called with [`Builder::execute_cli`] (as done by `Build::build`), this function is executed twice:
+    /// - First in "dry-run" mode to validate certain things (like cyclic Step invocations,
+    ///   directory creation, etc) super quickly.
+    /// - Then it's called again to run the actual, very expensive process.
     ///
     /// When triggered indirectly from other `Step`s, it may still run twice (as dry-run and real mode)
     /// depending on the `Step::run` implementation of the caller.
@@ -961,6 +961,7 @@ impl<'a> Builder<'a> {
                 check::RunMakeSupport,
                 check::Compiletest,
                 check::FeaturesStatusDump,
+                check::CoverageDump,
             ),
             Kind::Test => describe!(
                 crate::core::build_steps::toolstate::ToolStateCheck,
@@ -1114,6 +1115,8 @@ impl<'a> Builder<'a> {
                 run::UnicodeTableGenerator,
                 run::FeaturesStatusDump,
                 run::CyclicStep,
+                run::CoverageDump,
+                run::Rustfmt,
             ),
             Kind::Setup => {
                 describe!(setup::Profile, setup::Hook, setup::Link, setup::Editor)
@@ -1276,7 +1279,6 @@ impl<'a> Builder<'a> {
             ),
         ),
     )]
-
     /// FIXME: This function is unnecessary (and dangerous, see <https://github.com/rust-lang/rust/issues/137469>).
     /// We already have uplifting logic for the compiler, so remove this.
     pub fn compiler_for(
@@ -1480,7 +1482,7 @@ impl<'a> Builder<'a> {
             cmd.arg("-Dwarnings");
         }
         cmd.arg("-Znormalize-docs");
-        cmd.args(linker_args(self, compiler.host, LldThreads::Yes, compiler.stage));
+        cmd.args(linker_args(self, compiler.host, LldThreads::Yes));
         cmd
     }
 
@@ -1535,7 +1537,7 @@ impl<'a> Builder<'a> {
             let out = step.clone().run(self);
             let dur = start.elapsed();
             let deps = self.time_spent_on_dependencies.replace(parent + dur);
-            (out, dur - deps)
+            (out, dur.saturating_sub(deps))
         };
 
         if self.config.print_step_timings && !self.config.dry_run() {

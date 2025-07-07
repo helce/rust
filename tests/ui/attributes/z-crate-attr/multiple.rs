@@ -1,3 +1,3 @@
 //@ compile-flags: -Zcrate-attr=feature(foo),feature(bar)
-//@ error-pattern:invalid crate attr
+//~? ERROR expected `]`
 fn main() {}

@@ -139,12 +139,11 @@ impl<'tcx> LateLintPass<'tcx> for MissingConstForFn {
         // Const fns are not allowed as methods in a trait.
         {
             let parent = cx.tcx.hir_get_parent_item(hir_id).def_id;
-            if parent != CRATE_DEF_ID {
-                if let hir::Node::Item(item) = cx.tcx.hir_node_by_def_id(parent) {
-                    if let hir::ItemKind::Trait(..) = &item.kind {
-                        return;
-                    }
-                }
+            if parent != CRATE_DEF_ID
+                && let hir::Node::Item(item) = cx.tcx.hir_node_by_def_id(parent)
+                && let hir::ItemKind::Trait(..) = &item.kind
+            {
+                return;
             }
         }
 
@@ -198,7 +197,7 @@ fn fn_inputs_has_impl_trait_ty(cx: &LateContext<'_>, def_id: LocalDefId) -> bool
     inputs.iter().any(|input| {
         matches!(
             input.kind(),
-            ty::Alias(ty::AliasTyKind::Weak, alias_ty) if cx.tcx.type_of(alias_ty.def_id).skip_binder().is_impl_trait()
+            ty::Alias(ty::AliasTyKind::Free, alias_ty) if cx.tcx.type_of(alias_ty.def_id).skip_binder().is_impl_trait()
         )
     })
 }

@@ -59,8 +59,13 @@ fn filter_assoc_items_by_name_and_namespace(
     ident: Ident,
     ns: Namespace,
 ) -> impl Iterator<Item = &ty::AssocItem> {
-    tcx.associated_items(assoc_items_of).filter_by_name_unhygienic(ident.name).filter(move |item| {
-        item.kind.namespace() == ns && tcx.hygienic_eq(ident, item.ident(tcx), assoc_items_of)
+    let iter: Box<dyn Iterator<Item = &ty::AssocItem>> = if !ident.name.is_empty() {
+        Box::new(tcx.associated_items(assoc_items_of).filter_by_name_unhygienic(ident.name))
+    } else {
+        Box::new([].iter())
+    };
+    iter.filter(move |item| {
+        item.namespace() == ns && tcx.hygienic_eq(ident, item.ident(tcx), assoc_items_of)
     })
 }
 
@@ -491,12 +496,21 @@ impl<'tcx> LinkCollector<'_, 'tcx> {
 
         // Try looking for methods and associated items.
         // NB: `path_root` could be empty when resolving in the root namespace (e.g. `::std`).
-        let (path_root, item_str) = path_str.rsplit_once("::").ok_or_else(|| {
-            // If there's no `::`, it's not an associated item.
-            // So we can be sure that `rustc_resolve` was accurate when it said it wasn't resolved.
-            debug!("found no `::`, assuming {path_str} was correctly not in scope");
-            UnresolvedPath { item_id, module_id, partial_res: None, unresolved: path_str.into() }
-        })?;
+        let (path_root, item_str) = match path_str.rsplit_once("::") {
+            Some(res @ (_path_root, item_str)) if !item_str.is_empty() => res,
+            _ => {
+                // If there's no `::`, or the `::` is at the end (e.g. `String::`) it's not an
+                // associated item. So we can be sure that `rustc_resolve` was accurate when it
+                // said it wasn't resolved.
+                debug!("`::` missing or at end, assuming {path_str} was not in scope");
+                return Err(UnresolvedPath {
+                    item_id,
+                    module_id,
+                    partial_res: None,
+                    unresolved: path_str.into(),
+                });
+            }
+        };
         let item_name = Symbol::intern(item_str);
 
         // FIXME(#83862): this arbitrarily gives precedence to primitives over modules to support
@@ -743,7 +757,7 @@ impl<'tcx> LinkCollector<'_, 'tcx> {
                 ns,
             )
             .map(|item| {
-                let res = Res::Def(item.kind.as_def_kind(), item.def_id);
+                let res = Res::Def(item.as_def_kind(), item.def_id);
                 (res, item.def_id)
             })
             .collect::<Vec<_>>(),

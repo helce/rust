@@ -865,10 +865,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // `&'name Ty` -> `&'name mut Ty` or `&Ty` -> `&mut Ty`
                 vec![(
                     ty_ref.1.ty.span.shrink_to_lo(),
-                    format!(
-                        "{}mut ",
-                        if ty_ref.0.ident.span.lo() == ty_ref.0.ident.span.hi() { "" } else { " " },
-                    ),
+                    format!("{}mut ", if ty_ref.0.ident.span.is_empty() { "" } else { " " },),
                 )]
             };
             sugg.extend([
@@ -999,10 +996,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let container = with_no_trimmed_paths!(self.tcx.def_path_str(container_id));
         for def_id in pick.import_ids {
             let hir_id = self.tcx.local_def_id_to_hir_id(def_id);
-            path_span.push_span_label(
-                self.tcx.hir().span(hir_id),
-                format!("`{container}` imported here"),
-            );
+            path_span
+                .push_span_label(self.tcx.hir_span(hir_id), format!("`{container}` imported here"));
         }
         let tail = with_no_trimmed_paths!(match &other_methods_in_scope[..] {
             [] => return,
@@ -1094,14 +1089,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     /// This function checks whether the method is not static and does not accept other parameters than `self`.
     fn has_only_self_parameter(&self, method: &AssocItem) -> bool {
-        match method.kind {
-            ty::AssocKind::Fn => {
-                method.fn_has_self_parameter
-                    && self.tcx.fn_sig(method.def_id).skip_binder().inputs().skip_binder().len()
-                        == 1
-            }
-            _ => false,
-        }
+        method.is_method()
+            && self.tcx.fn_sig(method.def_id).skip_binder().inputs().skip_binder().len() == 1
     }
 
     /// If the given `HirId` corresponds to a block with a trailing expression, return that expression

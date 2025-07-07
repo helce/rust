@@ -190,7 +190,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
     where
         T: TypeFoldable<TyCtxt<'tcx>>,
     {
-        fold_regions(tcx, ty, |region, _| match *region {
+        fold_regions(tcx, ty, |region, _| match region.kind() {
             ty::ReVar(vid) => self.to_error_region(vid).unwrap_or(region),
             _ => region,
         })
@@ -198,7 +198,8 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
 
     /// Returns `true` if a closure is inferred to be an `FnMut` closure.
     fn is_closure_fn_mut(&self, fr: RegionVid) -> bool {
-        if let Some(ty::ReLateParam(late_param)) = self.to_error_region(fr).as_deref()
+        if let Some(r) = self.to_error_region(fr)
+            && let ty::ReLateParam(late_param) = r.kind()
             && let ty::LateParamRegionKind::ClosureEnv = late_param.kind
             && let DefiningTy::Closure(_, args) = self.regioncx.universal_regions().defining_ty
         {
@@ -404,7 +405,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     let universe = placeholder.universe;
                     let universe_info = self.regioncx.universe_info(universe);
 
-                    universe_info.report_error(self, placeholder, error_element, cause);
+                    universe_info.report_erroneous_element(self, placeholder, error_element, cause);
                 }
 
                 RegionErrorKind::RegionError { fr_origin, longer_fr, shorter_fr, is_reported } => {
@@ -628,7 +629,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
 
             if let Some(def_hir) = defined_hir {
                 let upvars_map = self.infcx.tcx.upvars_mentioned(def_id).unwrap();
-                let upvar_def_span = self.infcx.tcx.hir().span(def_hir);
+                let upvar_def_span = self.infcx.tcx.hir_span(def_hir);
                 let upvar_span = upvars_map.get(&def_hir).unwrap().span;
                 diag.subdiagnostic(VarHereDenote::Defined { span: upvar_def_span });
                 diag.subdiagnostic(VarHereDenote::Captured { span: upvar_span });
@@ -832,7 +833,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         if let (Some(f), Some(outlived_f)) =
             (self.to_error_region(fr), self.to_error_region(outlived_fr))
         {
-            if *outlived_f != ty::ReStatic {
+            if outlived_f.kind() != ty::ReStatic {
                 return;
             }
             let suitable_region = self.infcx.tcx.is_suitable_region(self.mir_def_id(), f);
@@ -887,7 +888,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                     // Skip `async` desugaring `impl Future`.
                 }
                 if let TyKind::TraitObject(_, lt) = alias_ty.kind {
-                    if lt.res == hir::LifetimeName::ImplicitObjectLifetimeDefault {
+                    if lt.kind == hir::LifetimeKind::ImplicitObjectLifetimeDefault {
                         spans_suggs.push((lt.ident.span.shrink_to_hi(), " + 'a".to_string()));
                     } else {
                         spans_suggs.push((lt.ident.span, "'a".to_string()));

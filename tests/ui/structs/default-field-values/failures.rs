@@ -1,3 +1,5 @@
+//@ dont-require-annotations: HELP
+
 #![feature(default_field_values)]
 
 #[derive(Debug)]
@@ -50,15 +52,16 @@ enum E {
 fn main () {
     let _ = Foo { .. }; // ok
     let _ = Foo::default(); // ok
-    let _ = Bar { .. }; //~ ERROR mandatory field
+    let _ = Bar { .. }; //~ ERROR missing field
+    let _ = Bar { baz: 0, .. }; //~ ERROR missing field
     let _ = Bar::default(); // silenced
     let _ = Bar { bar: S, .. }; // ok
     let _ = Qux::<4> { .. };
     let _ = Rak(..); //~ ERROR E0308
-    //~^ you might have meant to use `..` to skip providing
+    //~^ HELP you might have meant to use `..` to skip providing
     let _ = Rak(0, ..); //~ ERROR E0061
-    //~^ you might have meant to use `..` to skip providing
+    //~^ HELP you might have meant to use `..` to skip providing
     let _ = Rak(.., 0); //~ ERROR E0061
-    //~^ you might have meant to use `..` to skip providing
+    //~^ HELP you might have meant to use `..` to skip providing
     let _ = Rak { .. }; // ok
 }

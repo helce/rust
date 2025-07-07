@@ -112,9 +112,8 @@ impl Cargo {
         let mut cargo = builder.cargo(compiler, mode, source_type, target, cmd_kind);
 
         match cmd_kind {
-            // No need to configure the target linker for these command types,
-            // as they don't invoke rustc at all.
-            Kind::Clean | Kind::Suggest | Kind::Format | Kind::Setup => {}
+            // No need to configure the target linker for these command types.
+            Kind::Clean | Kind::Check | Kind::Suggest | Kind::Format | Kind::Setup => {}
             _ => {
                 cargo.configure_linker(builder);
             }
@@ -205,6 +204,8 @@ impl Cargo {
         self
     }
 
+    // FIXME(onur-ozkan): Add coverage to make sure modifications to this function
+    // doesn't cause cache invalidations (e.g., #130108).
     fn configure_linker(&mut self, builder: &Builder<'_>) -> &mut Cargo {
         let target = self.target;
         let compiler = self.compiler;
@@ -260,7 +261,7 @@ impl Cargo {
             }
         }
 
-        for arg in linker_args(builder, compiler.host, LldThreads::Yes, 0) {
+        for arg in linker_args(builder, compiler.host, LldThreads::Yes) {
             self.hostflags.arg(&arg);
         }
 
@@ -270,10 +271,10 @@ impl Cargo {
         }
         // We want to set -Clinker using Cargo, therefore we only call `linker_flags` and not
         // `linker_args` here.
-        for flag in linker_flags(builder, target, LldThreads::Yes, compiler.stage) {
+        for flag in linker_flags(builder, target, LldThreads::Yes) {
             self.rustflags.arg(&flag);
         }
-        for arg in linker_args(builder, target, LldThreads::Yes, compiler.stage) {
+        for arg in linker_args(builder, target, LldThreads::Yes) {
             self.rustdocflags.arg(&arg);
         }
 
@@ -872,11 +873,15 @@ impl Builder<'_> {
         }
         cargo.env(
             profile_var("DEBUG_ASSERTIONS"),
-            if mode == Mode::Std {
-                self.config.std_debug_assertions.to_string()
-            } else {
-                self.config.rustc_debug_assertions.to_string()
-            },
+            match mode {
+                Mode::Std => self.config.std_debug_assertions,
+                Mode::Rustc => self.config.rustc_debug_assertions,
+                Mode::Codegen => self.config.rustc_debug_assertions,
+                Mode::ToolBootstrap => self.config.tools_debug_assertions,
+                Mode::ToolStd => self.config.tools_debug_assertions,
+                Mode::ToolRustc => self.config.tools_debug_assertions,
+            }
+            .to_string(),
         );
         cargo.env(
             profile_var("OVERFLOW_CHECKS"),

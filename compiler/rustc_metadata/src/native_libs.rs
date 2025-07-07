@@ -73,7 +73,7 @@ pub fn walk_native_lib_search_dirs<R>(
         || sess.target.os == "linux"
         || sess.target.os == "fuchsia"
         || sess.target.is_like_aix
-        || sess.target.is_like_osx && !sess.opts.unstable_opts.sanitizer.is_empty()
+        || sess.target.is_like_darwin && !sess.opts.unstable_opts.sanitizer.is_empty()
     {
         f(&sess.target_tlib_path.dir, false)?;
     }
@@ -207,7 +207,7 @@ impl<'tcx> Collector<'tcx> {
 
         let sess = self.tcx.sess;
 
-        if matches!(abi, ExternAbi::Rust | ExternAbi::RustIntrinsic) {
+        if matches!(abi, ExternAbi::Rust) {
             return;
         }
 
@@ -226,8 +226,8 @@ impl<'tcx> Collector<'tcx> {
             let mut wasm_import_module = None;
             let mut import_name_type = None;
             for item in items.iter() {
-                match item.name_or_empty() {
-                    sym::name => {
+                match item.name() {
+                    Some(sym::name) => {
                         if name.is_some() {
                             sess.dcx().emit_err(errors::MultipleNamesInLink { span: item.span() });
                             continue;
@@ -242,7 +242,7 @@ impl<'tcx> Collector<'tcx> {
                         }
                         name = Some((link_name, span));
                     }
-                    sym::kind => {
+                    Some(sym::kind) => {
                         if kind.is_some() {
                             sess.dcx().emit_err(errors::MultipleKindsInLink { span: item.span() });
                             continue;
@@ -257,7 +257,7 @@ impl<'tcx> Collector<'tcx> {
                             "static" => NativeLibKind::Static { bundle: None, whole_archive: None },
                             "dylib" => NativeLibKind::Dylib { as_needed: None },
                             "framework" => {
-                                if !sess.target.is_like_osx {
+                                if !sess.target.is_like_darwin {
                                     sess.dcx().emit_err(errors::LinkFrameworkApple { span });
                                 }
                                 NativeLibKind::Framework { as_needed: None }
@@ -304,7 +304,7 @@ impl<'tcx> Collector<'tcx> {
                         };
                         kind = Some(link_kind);
                     }
-                    sym::modifiers => {
+                    Some(sym::modifiers) => {
                         if modifiers.is_some() {
                             sess.dcx()
                                 .emit_err(errors::MultipleLinkModifiers { span: item.span() });
@@ -316,7 +316,7 @@ impl<'tcx> Collector<'tcx> {
                         };
                         modifiers = Some((link_modifiers, item.name_value_literal_span().unwrap()));
                     }
-                    sym::cfg => {
+                    Some(sym::cfg) => {
                         if cfg.is_some() {
                             sess.dcx().emit_err(errors::MultipleCfgs { span: item.span() });
                             continue;
@@ -346,7 +346,7 @@ impl<'tcx> Collector<'tcx> {
                         }
                         cfg = Some(link_cfg.clone());
                     }
-                    sym::wasm_import_module => {
+                    Some(sym::wasm_import_module) => {
                         if wasm_import_module.is_some() {
                             sess.dcx().emit_err(errors::MultipleWasmImport { span: item.span() });
                             continue;
@@ -357,7 +357,7 @@ impl<'tcx> Collector<'tcx> {
                         };
                         wasm_import_module = Some((link_wasm_import_module, item.span()));
                     }
-                    sym::import_name_type => {
+                    Some(sym::import_name_type) => {
                         if import_name_type.is_some() {
                             sess.dcx()
                                 .emit_err(errors::MultipleImportNameType { span: item.span() });
@@ -531,7 +531,7 @@ impl<'tcx> Collector<'tcx> {
         let mut renames = FxHashSet::default();
         for lib in &self.tcx.sess.opts.libs {
             if let NativeLibKind::Framework { .. } = lib.kind
-                && !self.tcx.sess.target.is_like_osx
+                && !self.tcx.sess.target.is_like_darwin
             {
                 // Cannot check this when parsing options because the target is not yet available.
                 self.tcx.dcx().emit_err(errors::LibFrameworkApple);

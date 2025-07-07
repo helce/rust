@@ -1,4 +1,5 @@
 use crate::ffi::{CStr, OsStr, OsString, c_char};
+use crate::fs::TryLockError;
 use crate::io::{self, BorrowedCursor, Error, ErrorKind, IoSlice, IoSliceMut, SeekFrom};
 use crate::os::hermit::ffi::OsStringExt;
 use crate::os::hermit::hermit_abi::{
@@ -9,10 +10,10 @@ use crate::os::hermit::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, Raw
 use crate::path::{Path, PathBuf};
 use crate::sync::Arc;
 use crate::sys::common::small_c_string::run_path_with_cstr;
+use crate::sys::fd::FileDesc;
 pub use crate::sys::fs::common::{copy, exists};
-use crate::sys::pal::fd::FileDesc;
 use crate::sys::time::SystemTime;
-use crate::sys::{cvt, unsupported};
+use crate::sys::{cvt, unsupported, unsupported_err};
 use crate::sys_common::{AsInner, AsInnerMut, FromInner, IntoInner};
 use crate::{fmt, mem};
 
@@ -366,12 +367,12 @@ impl File {
         unsupported()
     }
 
-    pub fn try_lock(&self) -> io::Result<bool> {
-        unsupported()
+    pub fn try_lock(&self) -> Result<(), TryLockError> {
+        Err(TryLockError::Error(unsupported_err()))
     }
 
-    pub fn try_lock_shared(&self) -> io::Result<bool> {
-        unsupported()
+    pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
+        Err(TryLockError::Error(unsupported_err()))
     }
 
     pub fn unlock(&self) -> io::Result<()> {

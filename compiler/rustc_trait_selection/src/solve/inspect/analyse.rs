@@ -292,7 +292,7 @@ impl<'a, 'tcx> InspectGoal<'a, 'tcx> {
                 inspect::ProbeStep::NestedProbe(ref probe) => {
                     match probe.kind {
                         // These never assemble candidates for the goal we're trying to solve.
-                        inspect::ProbeKind::UpcastProjectionCompatibility
+                        inspect::ProbeKind::ProjectionCompatibility
                         | inspect::ProbeKind::ShadowedEnvProbing => continue,
 
                         inspect::ProbeKind::NormalizedSelfTyAssembly
@@ -314,8 +314,10 @@ impl<'a, 'tcx> InspectGoal<'a, 'tcx> {
         }
 
         match probe.kind {
-            inspect::ProbeKind::UpcastProjectionCompatibility
-            | inspect::ProbeKind::ShadowedEnvProbing => bug!(),
+            inspect::ProbeKind::ProjectionCompatibility
+            | inspect::ProbeKind::ShadowedEnvProbing => {
+                bug!()
+            }
 
             inspect::ProbeKind::NormalizedSelfTyAssembly | inspect::ProbeKind::UnsizeAssembly => {}
 
@@ -380,7 +382,7 @@ impl<'a, 'tcx> InspectGoal<'a, 'tcx> {
             if let Some(term_hack) = normalizes_to_term_hack {
                 infcx
                     .probe(|_| term_hack.constrain(infcx, DUMMY_SP, uncanonicalized_goal.param_env))
-                    .map(|certainty| ok.value.certainty.unify_with(certainty))
+                    .map(|certainty| ok.value.certainty.and(certainty))
             } else {
                 Ok(ok.value.certainty)
             }

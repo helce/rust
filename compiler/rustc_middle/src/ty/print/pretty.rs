@@ -6,7 +6,7 @@ use std::ops::{Deref, DerefMut};
 use rustc_abi::{ExternAbi, Size};
 use rustc_apfloat::Float;
 use rustc_apfloat::ieee::{Double, Half, Quad, Single};
-use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
+use rustc_data_structures::fx::{FxIndexMap, IndexEntry};
 use rustc_data_structures::unord::UnordMap;
 use rustc_hir as hir;
 use rustc_hir::LangItem;
@@ -63,6 +63,7 @@ thread_local! {
     static FORCE_TRIMMED_PATH: Cell<bool> = const { Cell::new(false) };
     static REDUCED_QUERIES: Cell<bool> = const { Cell::new(false) };
     static NO_VISIBLE_PATH: Cell<bool> = const { Cell::new(false) };
+    static NO_VISIBLE_PATH_IF_DOC_HIDDEN: Cell<bool> = const { Cell::new(false) };
     static RTN_MODE: Cell<RtnMode> = const { Cell::new(RtnMode::ForDiagnostic) };
 }
 
@@ -134,6 +135,8 @@ define_helper!(
     /// Prevent selection of visible paths. `Display` impl of DefId will prefer
     /// visible (public) reexports of types as paths.
     fn with_no_visible_paths(NoVisibleGuard, NO_VISIBLE_PATH);
+    /// Prevent selection of visible paths if the paths are through a doc hidden path.
+    fn with_no_visible_paths_if_doc_hidden(NoVisibleIfDocHiddenGuard, NO_VISIBLE_PATH_IF_DOC_HIDDEN);
 );
 
 #[must_use]
@@ -569,6 +572,10 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             return Ok(false);
         };
 
+        if self.tcx().is_doc_hidden(visible_parent) && with_no_visible_paths_if_doc_hidden() {
+            return Ok(false);
+        }
+
         let actual_parent = self.tcx().opt_parent(def_id);
         debug!(
             "try_print_visible_def_path: visible_parent={:?} actual_parent={:?}",
@@ -613,7 +620,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             // the children of the visible parent (as was done when computing
             // `visible_parent_map`), looking for the specific child we currently have and then
             // have access to the re-exported name.
-            DefPathData::TypeNs(Some(ref mut name)) if Some(visible_parent) != actual_parent => {
+            DefPathData::TypeNs(ref mut name) if Some(visible_parent) != actual_parent => {
                 // Item might be re-exported several times, but filter for the one
                 // that's public and whose identifier isn't `_`.
                 let reexport = self
@@ -634,7 +641,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             }
             // Re-exported `extern crate` (#43189).
             DefPathData::CrateRoot => {
-                data = DefPathData::TypeNs(Some(self.tcx().crate_name(def_id.krate)));
+                data = DefPathData::TypeNs(self.tcx().crate_name(def_id.krate));
             }
             _ => {}
         }
@@ -813,7 +820,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             ty::Foreign(def_id) => {
                 p!(print_def_path(def_id, &[]));
             }
-            ty::Alias(ty::Projection | ty::Inherent | ty::Weak, ref data) => {
+            ty::Alias(ty::Projection | ty::Inherent | ty::Free, ref data) => {
                 p!(print(data))
             }
             ty::Placeholder(placeholder) => match placeholder.bound.kind {
@@ -1207,7 +1214,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                             && assoc
                                 .trait_container(tcx)
                                 .is_some_and(|def_id| tcx.is_lang_item(def_id, LangItem::Coroutine))
-                            && assoc.name == rustc_span::sym::Return
+                            && assoc.opt_name() == Some(rustc_span::sym::Return)
                         {
                             if let ty::Coroutine(_, args) = args.type_at(0).kind() {
                                 let return_ty = args.as_coroutine().return_ty();
@@ -1230,7 +1237,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                             p!(", ");
                         }
 
-                        p!(write("{} = ", tcx.associated_item(assoc_item_def_id).name));
+                        p!(write("{} = ", tcx.associated_item(assoc_item_def_id).name()));
 
                         match term.unpack() {
                             TermKind::Ty(ty) => p!(print(ty)),
@@ -2520,7 +2527,7 @@ impl<'tcx> PrettyPrinter<'tcx> for FmtPrinter<'_, 'tcx> {
 
         let identify_regions = self.tcx.sess.opts.unstable_opts.identify_regions;
 
-        match *region {
+        match region.kind() {
             ty::ReEarlyParam(ref data) => data.has_name(),
 
             ty::ReLateParam(ty::LateParamRegion { kind, .. }) => kind.is_named(),
@@ -2590,7 +2597,7 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
         // the user might want to diagnose an error, but there is basically no way
         // to fit that into a short string. Hence the recommendation to use
         // `explain_region()` or `note_and_explain_region()`.
-        match *region {
+        match region.kind() {
             ty::ReEarlyParam(data) => {
                 p!(write("{}", data.name));
                 return Ok(());
@@ -2680,7 +2687,7 @@ impl<'a, 'tcx> ty::TypeFolder<TyCtxt<'tcx>> for RegionFolder<'a, 'tcx> {
 
     fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
         let name = &mut self.name;
-        let region = match *r {
+        let region = match r.kind() {
             ty::ReBound(db, br) if db >= self.current_index => {
                 *self.region_map.entry(br).or_insert_with(|| name(Some(db), self.current_index, br))
             }
@@ -2704,7 +2711,7 @@ impl<'a, 'tcx> ty::TypeFolder<TyCtxt<'tcx>> for RegionFolder<'a, 'tcx> {
             }
             _ => return r,
         };
-        if let ty::ReBound(debruijn1, br) = *region {
+        if let ty::ReBound(debruijn1, br) = region.kind() {
             assert_eq!(debruijn1, ty::INNERMOST);
             ty::Region::new_bound(self.tcx, self.current_index, br)
         } else {
@@ -2927,7 +2934,7 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
 
     fn prepare_region_info<T>(&mut self, value: &ty::Binder<'tcx, T>)
     where
-        T: TypeVisitable<TyCtxt<'tcx>>,
+        T: TypeFoldable<TyCtxt<'tcx>>,
     {
         struct RegionNameCollector<'tcx> {
             used_region_names: FxHashSet<Symbol>,
@@ -3188,7 +3195,7 @@ define_print! {
 
     ty::AliasTerm<'tcx> {
         match self.kind(cx.tcx()) {
-            ty::AliasTermKind::InherentTy => p!(pretty_print_inherent_projection(*self)),
+            ty::AliasTermKind::InherentTy | ty::AliasTermKind::InherentConst => p!(pretty_print_inherent_projection(*self)),
             ty::AliasTermKind::ProjectionTy => {
                 if !(cx.should_print_verbose() || with_reduced_queries())
                     && cx.tcx().is_impl_trait_in_trait(self.def_id)
@@ -3198,7 +3205,8 @@ define_print! {
                     p!(print_def_path(self.def_id, self.args));
                 }
             }
-            | ty::AliasTermKind::WeakTy
+            ty::AliasTermKind::FreeTy
+            | ty::AliasTermKind::FreeConst
             | ty::AliasTermKind::OpaqueTy
             | ty::AliasTermKind::UnevaluatedConst
             | ty::AliasTermKind::ProjectionConst => {
@@ -3240,7 +3248,7 @@ define_print! {
             ty::ClauseKind::ConstArgHasType(ct, ty) => {
                 p!("the constant `", print(ct), "` has type `", print(ty), "`")
             },
-            ty::ClauseKind::WellFormed(arg) => p!(print(arg), " well-formed"),
+            ty::ClauseKind::WellFormed(term) => p!(print(term), " well-formed"),
             ty::ClauseKind::ConstEvaluatable(ct) => {
                 p!("the constant `", print(ct), "` can be evaluated")
             }
@@ -3284,7 +3292,7 @@ define_print! {
     }
 
     ty::ExistentialProjection<'tcx> {
-        let name = cx.tcx().associated_item(self.def_id).name;
+        let name = cx.tcx().associated_item(self.def_id).name();
         // The args don't contain the self ty (as it has been erased) but the corresp.
         // generics do as the trait always has a self ty param. We need to offset.
         let args = &self.args[cx.tcx().generics_of(self.def_id).parent_count - 1..];
@@ -3489,8 +3497,8 @@ pub fn trimmed_def_paths(tcx: TyCtxt<'_>, (): ()) -> DefIdMap<Symbol> {
 
     // Once constructed, unique namespace+symbol pairs will have a `Some(_)` entry, while
     // non-unique pairs will have a `None` entry.
-    let unique_symbols_rev: &mut FxHashMap<(Namespace, Symbol), Option<DefId>> =
-        &mut FxHashMap::default();
+    let unique_symbols_rev: &mut FxIndexMap<(Namespace, Symbol), Option<DefId>> =
+        &mut FxIndexMap::default();
 
     for symbol_set in tcx.resolutions(()).glob_map.values() {
         for symbol in symbol_set {
@@ -3500,27 +3508,23 @@ pub fn trimmed_def_paths(tcx: TyCtxt<'_>, (): ()) -> DefIdMap<Symbol> {
         }
     }
 
-    for_each_def(tcx, |ident, ns, def_id| {
-        use std::collections::hash_map::Entry::{Occupied, Vacant};
-
-        match unique_symbols_rev.entry((ns, ident.name)) {
-            Occupied(mut v) => match v.get() {
-                None => {}
-                Some(existing) => {
-                    if *existing != def_id {
-                        v.insert(None);
-                    }
+    for_each_def(tcx, |ident, ns, def_id| match unique_symbols_rev.entry((ns, ident.name)) {
+        IndexEntry::Occupied(mut v) => match v.get() {
+            None => {}
+            Some(existing) => {
+                if *existing != def_id {
+                    v.insert(None);
                 }
-            },
-            Vacant(v) => {
-                v.insert(Some(def_id));
             }
+        },
+        IndexEntry::Vacant(v) => {
+            v.insert(Some(def_id));
         }
     });
 
     // Put the symbol from all the unique namespace+symbol pairs into `map`.
     let mut map: DefIdMap<Symbol> = Default::default();
-    for ((_, symbol), opt_def_id) in unique_symbols_rev.drain() {
+    for ((_, symbol), opt_def_id) in unique_symbols_rev.drain(..) {
         use std::collections::hash_map::Entry::{Occupied, Vacant};
 
         if let Some(def_id) = opt_def_id {

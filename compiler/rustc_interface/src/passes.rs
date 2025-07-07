@@ -7,6 +7,7 @@ use std::{env, fs, iter};
 
 use rustc_ast as ast;
 use rustc_codegen_ssa::traits::CodegenBackend;
+use rustc_data_structures::jobserver::Proxy;
 use rustc_data_structures::parallel;
 use rustc_data_structures::steal::Steal;
 use rustc_data_structures::sync::{AppendOnlyIndexVec, FreezeLock, WorkerLocal};
@@ -30,10 +31,11 @@ use rustc_resolve::Resolver;
 use rustc_session::config::{CrateType, Input, OutFileName, OutputFilenames, OutputType};
 use rustc_session::cstore::Untracked;
 use rustc_session::output::{collect_crate_types, filename_for_input};
+use rustc_session::parse::feature_err;
 use rustc_session::search_paths::PathKind;
 use rustc_session::{Limit, Session};
 use rustc_span::{
-    ErrorGuaranteed, FileName, SourceFileHash, SourceFileHashAlgorithm, Span, Symbol, sym,
+    DUMMY_SP, ErrorGuaranteed, FileName, SourceFileHash, SourceFileHashAlgorithm, Span, Symbol, sym,
 };
 use rustc_target::spec::PanicStrategy;
 use rustc_trait_selection::traits;
@@ -236,6 +238,7 @@ fn configure_and_expand(
             sess,
             features,
             &krate,
+            tcx.is_sdylib_interface_build(),
             resolver.lint_buffer(),
         )
     });
@@ -251,6 +254,9 @@ fn configure_and_expand(
         if is_proc_macro_crate {
             sess.dcx().emit_err(errors::MixedProcMacroCrate);
         }
+    }
+    if crate_types.contains(&CrateType::Sdylib) && !tcx.features().export_stable() {
+        feature_err(sess, sym::export_stable, DUMMY_SP, "`sdylib` crate type is unstable").emit();
     }
 
     if is_proc_macro_crate && sess.panic_strategy() == PanicStrategy::Abort {
@@ -741,6 +747,25 @@ pub fn write_dep_info(tcx: TyCtxt<'_>) {
     }
 }
 
+pub fn write_interface<'tcx>(tcx: TyCtxt<'tcx>) {
+    if !tcx.crate_types().contains(&rustc_session::config::CrateType::Sdylib) {
+        return;
+    }
+    let _timer = tcx.sess.timer("write_interface");
+    let (_, krate) = &*tcx.resolver_for_lowering().borrow();
+
+    let krate = rustc_ast_pretty::pprust::print_crate_as_interface(
+        krate,
+        tcx.sess.psess.edition,
+        &tcx.sess.psess.attr_id_generator,
+    );
+    let export_output = tcx.output_filenames(()).interface_path();
+    let mut file = fs::File::create_buffered(export_output).unwrap();
+    if let Err(err) = write!(file, "{}", krate) {
+        tcx.dcx().fatal(format!("error writing interface file: {}", err));
+    }
+}
+
 pub static DEFAULT_QUERY_PROVIDERS: LazyLock<Providers> = LazyLock::new(|| {
     let providers = &mut Providers::default();
     providers.analysis = analysis;
@@ -800,6 +825,7 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
         sess.opts.cg.metadata.clone(),
         sess.cfg_version,
     );
+
     let outputs = util::build_output_filenames(&pre_configured_attrs, sess);
 
     let dep_type = DepsType { dep_names: rustc_query_impl::dep_kind_names() };
@@ -840,12 +866,13 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
         dyn for<'tcx> FnOnce(
             &'tcx Session,
             CurrentGcx,
+            Arc<Proxy>,
             &'tcx OnceLock<GlobalCtxt<'tcx>>,
             &'tcx WorkerLocal<Arena<'tcx>>,
             &'tcx WorkerLocal<rustc_hir::Arena<'tcx>>,
             F,
         ) -> T,
-    > = Box::new(move |sess, current_gcx, gcx_cell, arena, hir_arena, f| {
+    > = Box::new(move |sess, current_gcx, jobserver_proxy, gcx_cell, arena, hir_arena, f| {
         TyCtxt::create_global_ctxt(
             gcx_cell,
             sess,
@@ -864,6 +891,7 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
             ),
             providers.hooks,
             current_gcx,
+            jobserver_proxy,
             |tcx| {
                 let feed = tcx.create_crate_num(stable_crate_id).unwrap();
                 assert_eq!(feed.key(), LOCAL_CRATE);
@@ -886,7 +914,15 @@ pub fn create_and_enter_global_ctxt<T, F: for<'tcx> FnOnce(TyCtxt<'tcx>) -> T>(
         )
     });
 
-    inner(&compiler.sess, compiler.current_gcx.clone(), &gcx_cell, &arena, &hir_arena, f)
+    inner(
+        &compiler.sess,
+        compiler.current_gcx.clone(),
+        Arc::clone(&compiler.jobserver_proxy),
+        &gcx_cell,
+        &arena,
+        &hir_arena,
+        f,
+    )
 }
 
 /// Runs all analyses that we guarantee to run, even if errors were reported in earlier analyses.
@@ -899,6 +935,12 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
     // is not defined. So we need to cfg it out.
     #[cfg(all(not(doc), debug_assertions))]
     rustc_passes::hir_id_validator::check_crate(tcx);
+
+    // Prefetch this to prevent multiple threads from blocking on it later.
+    // This is needed since the `hir_id_validator::check_crate` call above is not guaranteed
+    // to use `hir_crate`.
+    tcx.ensure_done().hir_crate(());
+
     let sess = tcx.sess;
     sess.time("misc_checking_1", || {
         parallel!(
@@ -912,6 +954,8 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
                 CStore::from_tcx(tcx).report_unused_deps(tcx);
             },
             {
+                tcx.ensure_ok().exportable_items(LOCAL_CRATE);
+                tcx.ensure_ok().stable_order_of_exportable_impls(LOCAL_CRATE);
                 tcx.par_hir_for_each_module(|module| {
                     tcx.ensure_ok().check_mod_loops(module);
                     tcx.ensure_ok().check_mod_attrs(module);
@@ -955,7 +999,9 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
             // Run unsafety check because it's responsible for stealing and
             // deallocating THIR.
             tcx.ensure_ok().check_unsafety(def_id);
-            tcx.ensure_ok().mir_borrowck(def_id)
+            if !tcx.is_typeck_child(def_id.to_def_id()) {
+                tcx.ensure_ok().mir_borrowck(def_id)
+            }
         });
     });
     sess.time("MIR_effect_checking", || {
@@ -976,14 +1022,16 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
         tcx.par_hir_body_owners(|def_id| {
             if tcx.is_coroutine(def_id.to_def_id()) {
                 tcx.ensure_ok().mir_coroutine_witnesses(def_id);
-                tcx.ensure_ok().check_coroutine_obligations(
+                let _ = tcx.ensure_ok().check_coroutine_obligations(
                     tcx.typeck_root_def_id(def_id.to_def_id()).expect_local(),
                 );
-                // Eagerly check the unsubstituted layout for cycles.
-                tcx.ensure_ok().layout_of(
-                    ty::TypingEnv::post_analysis(tcx, def_id.to_def_id())
-                        .as_query_input(tcx.type_of(def_id).instantiate_identity()),
-                );
+                if !tcx.is_async_drop_in_place_coroutine(def_id.to_def_id()) {
+                    // Eagerly check the unsubstituted layout for cycles.
+                    tcx.ensure_ok().layout_of(
+                        ty::TypingEnv::post_analysis(tcx, def_id.to_def_id())
+                            .as_query_input(tcx.type_of(def_id).instantiate_identity()),
+                    );
+                }
             }
         });
     });
@@ -1067,48 +1115,18 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
     });
 }
 
-/// Check for the `#[rustc_error]` annotation, which forces an error in codegen. This is used
-/// to write UI tests that actually test that compilation succeeds without reporting
-/// an error.
-fn check_for_rustc_errors_attr(tcx: TyCtxt<'_>) {
-    let Some((def_id, _)) = tcx.entry_fn(()) else { return };
-    for attr in tcx.get_attrs(def_id, sym::rustc_error) {
-        match attr.meta_item_list() {
-            // Check if there is a `#[rustc_error(delayed_bug_from_inside_query)]`.
-            Some(list)
-                if list.iter().any(|list_item| {
-                    matches!(
-                        list_item.ident().map(|i| i.name),
-                        Some(sym::delayed_bug_from_inside_query)
-                    )
-                }) =>
-            {
-                tcx.ensure_ok().trigger_delayed_bug(def_id);
-            }
-
-            // Bare `#[rustc_error]`.
-            None => {
-                tcx.dcx().emit_fatal(errors::RustcErrorFatal { span: tcx.def_span(def_id) });
-            }
-
-            // Some other attribute.
-            Some(_) => {
-                tcx.dcx().emit_warn(errors::RustcErrorUnexpectedAnnotation {
-                    span: tcx.def_span(def_id),
-                });
-            }
-        }
-    }
-}
-
 /// Runs the codegen backend, after which the AST and analysis can
 /// be discarded.
 pub(crate) fn start_codegen<'tcx>(
     codegen_backend: &dyn CodegenBackend,
     tcx: TyCtxt<'tcx>,
 ) -> Box<dyn Any> {
-    // Hook for UI tests.
-    check_for_rustc_errors_attr(tcx);
+    // Hook for tests.
+    if let Some((def_id, _)) = tcx.entry_fn(())
+        && tcx.has_attr(def_id, sym::rustc_delayed_bug_from_inside_query)
+    {
+        tcx.ensure_ok().trigger_delayed_bug(def_id);
+    }
 
     // Don't run this test assertions when not doing codegen. Compiletest tries to build
     // build-fail tests in check mode first and expects it to not give an error in that case.

@@ -37,6 +37,7 @@
 #![feature(str_as_str)]
 #![feature(strict_provenance_lints)]
 #![feature(vec_deque_pop_if)]
+#![feature(vec_deque_truncate_front)]
 #![feature(unique_rc_arc)]
 #![feature(macro_metavar_expr_concat)]
 #![allow(internal_features)]
@@ -63,6 +64,7 @@ mod fmt;
 mod heap;
 mod linked_list;
 mod misc_tests;
+mod num;
 mod rc;
 mod slice;
 mod sort;

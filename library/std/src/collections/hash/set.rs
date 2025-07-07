@@ -293,7 +293,6 @@ impl<T, S> HashSet<T, S> {
     /// Splitting a set into even and odd values, reusing the original set:
     ///
     /// ```
-    /// #![feature(hash_extract_if)]
     /// use std::collections::HashSet;
     ///
     /// let mut set: HashSet<i32> = (0..8).collect();
@@ -309,7 +308,7 @@ impl<T, S> HashSet<T, S> {
     /// ```
     #[inline]
     #[rustc_lint_query_instability]
-    #[unstable(feature = "hash_extract_if", issue = "59618")]
+    #[stable(feature = "hash_extract_if", since = "1.88.0")]
     pub fn extract_if<F>(&mut self, pred: F) -> ExtractIf<'_, T, F>
     where
         F: FnMut(&T) -> bool,
@@ -1385,19 +1384,14 @@ pub struct Drain<'a, K: 'a> {
 /// # Examples
 ///
 /// ```
-/// #![feature(hash_extract_if)]
-///
 /// use std::collections::HashSet;
 ///
 /// let mut a = HashSet::from([1, 2, 3]);
 ///
 /// let mut extract_ifed = a.extract_if(|v| v % 2 == 0);
 /// ```
-#[unstable(feature = "hash_extract_if", issue = "59618")]
-pub struct ExtractIf<'a, K, F>
-where
-    F: FnMut(&K) -> bool,
-{
+#[stable(feature = "hash_extract_if", since = "1.88.0")]
+pub struct ExtractIf<'a, K, F> {
     base: base::ExtractIf<'a, K, F>,
 }
 
@@ -1676,7 +1670,7 @@ impl<K: fmt::Debug> fmt::Debug for Drain<'_, K> {
     }
 }
 
-#[unstable(feature = "hash_extract_if", issue = "59618")]
+#[stable(feature = "hash_extract_if", since = "1.88.0")]
 impl<K, F> Iterator for ExtractIf<'_, K, F>
 where
     F: FnMut(&K) -> bool,
@@ -1693,13 +1687,13 @@ where
     }
 }
 
-#[unstable(feature = "hash_extract_if", issue = "59618")]
+#[stable(feature = "hash_extract_if", since = "1.88.0")]
 impl<K, F> FusedIterator for ExtractIf<'_, K, F> where F: FnMut(&K) -> bool {}
 
-#[unstable(feature = "hash_extract_if", issue = "59618")]
-impl<'a, K, F> fmt::Debug for ExtractIf<'a, K, F>
+#[stable(feature = "hash_extract_if", since = "1.88.0")]
+impl<K, F> fmt::Debug for ExtractIf<'_, K, F>
 where
-    F: FnMut(&K) -> bool,
+    K: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExtractIf").finish_non_exhaustive()

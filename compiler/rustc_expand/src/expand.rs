@@ -7,13 +7,12 @@ use std::{iter, mem};
 use rustc_ast as ast;
 use rustc_ast::mut_visit::*;
 use rustc_ast::ptr::P;
-use rustc_ast::token::{self, Delimiter};
 use rustc_ast::tokenstream::TokenStream;
 use rustc_ast::visit::{self, AssocCtxt, Visitor, VisitorResult, try_visit, walk_list};
 use rustc_ast::{
     AssocItemKind, AstNodeWrapper, AttrArgs, AttrStyle, AttrVec, ExprKind, ForeignItemKind,
     HasAttrs, HasNodeId, Inline, ItemKind, MacStmtStyle, MetaItemInner, MetaItemKind, ModKind,
-    NodeId, PatKind, StmtKind, TyKind,
+    NodeId, PatKind, StmtKind, TyKind, token,
 };
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::flat_map_in_place::FlatMapInPlace;
@@ -744,6 +743,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                                     item_inner.kind,
                                     ItemKind::Mod(
                                         _,
+                                        _,
                                         ModKind::Unloaded | ModKind::Loaded(_, Inline::No, _, _),
                                     )
                                 ) =>
@@ -911,7 +911,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
         impl<'ast, 'a> Visitor<'ast> for GateProcMacroInput<'a> {
             fn visit_item(&mut self, item: &'ast ast::Item) {
                 match &item.kind {
-                    ItemKind::Mod(_, mod_kind)
+                    ItemKind::Mod(_, _, mod_kind)
                         if !matches!(mod_kind, ModKind::Loaded(_, Inline::Yes, _, _)) =>
                     {
                         feature_err(
@@ -1003,7 +1003,7 @@ pub fn parse_ast_fragment<'a>(
         AstFragmentKind::Stmts => {
             let mut stmts = SmallVec::new();
             // Won't make progress on a `}`.
-            while this.token != token::Eof && this.token != token::CloseDelim(Delimiter::Brace) {
+            while this.token != token::Eof && this.token != token::CloseBrace {
                 if let Some(stmt) = this.parse_full_stmt(AttemptLocalParseRecovery::Yes)? {
                     stmts.push(stmt);
                 }
@@ -1168,9 +1168,9 @@ trait InvocationCollectorNode: HasAttrs + HasNodeId + Sized {
         collector.cx.dcx().emit_err(RemoveNodeNotSupported { span, descr: Self::descr() });
     }
 
-    /// All of the names (items) declared by this node.
+    /// All of the identifiers (items) declared by this node.
     /// This is an approximation and should only be used for diagnostics.
-    fn declared_names(&self) -> Vec<Ident> {
+    fn declared_idents(&self) -> Vec<Ident> {
         vec![]
     }
 }
@@ -1221,9 +1221,8 @@ impl InvocationCollectorNode for P<ast::Item> {
         }
 
         // Work around borrow checker not seeing through `P`'s deref.
-        let (ident, span, mut attrs) = (node.ident, node.span, mem::take(&mut node.attrs));
-        let ItemKind::Mod(_, mod_kind) = &mut node.kind else { unreachable!() };
-
+        let (span, mut attrs) = (node.span, mem::take(&mut node.attrs));
+        let ItemKind::Mod(_, ident, ref mut mod_kind) = node.kind else { unreachable!() };
         let ecx = &mut collector.cx;
         let (file_path, dir_path, dir_ownership) = match mod_kind {
             ModKind::Loaded(_, inline, _, _) => {
@@ -1305,7 +1304,8 @@ impl InvocationCollectorNode for P<ast::Item> {
         collector.cx.current_expansion.module = orig_module;
         res
     }
-    fn declared_names(&self) -> Vec<Ident> {
+
+    fn declared_idents(&self) -> Vec<Ident> {
         if let ItemKind::Use(ut) = &self.kind {
             fn collect_use_tree_leaves(ut: &ast::UseTree, idents: &mut Vec<Ident>) {
                 match &ut.kind {
@@ -1324,7 +1324,7 @@ impl InvocationCollectorNode for P<ast::Item> {
             return idents;
         }
 
-        vec![self.ident]
+        if let Some(ident) = self.kind.ident() { vec![ident] } else { vec![] }
     }
 }
 
@@ -1844,11 +1844,11 @@ fn build_single_delegations<'a, Node: InvocationCollectorNode>(
             id: ast::DUMMY_NODE_ID,
             span: if from_glob { item_span } else { ident.span },
             vis: item.vis.clone(),
-            ident: rename.unwrap_or(ident),
             kind: Node::delegation_item_kind(Box::new(ast::Delegation {
                 id: ast::DUMMY_NODE_ID,
                 qself: deleg.qself.clone(),
                 path,
+                ident: rename.unwrap_or(ident),
                 rename,
                 body: deleg.body.clone(),
                 from_glob,
@@ -1983,7 +1983,11 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
         let mut span: Option<Span> = None;
         while let Some(attr) = attrs.next() {
             rustc_ast_passes::feature_gate::check_attribute(attr, self.cx.sess, features);
-            validate_attr::check_attr(&self.cx.sess.psess, attr);
+            validate_attr::check_attr(
+                &self.cx.sess.psess,
+                attr,
+                self.cx.current_expansion.lint_node_id,
+            );
 
             let current_span = if let Some(sp) = span { sp.to(attr.span) } else { attr.span };
             span = Some(current_span);
@@ -2052,25 +2056,25 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
     ) -> Node::OutputTy {
         loop {
             return match self.take_first_attr(&mut node) {
-                Some((attr, pos, derives)) => match attr.name_or_empty() {
-                    sym::cfg => {
+                Some((attr, pos, derives)) => match attr.name() {
+                    Some(sym::cfg) => {
                         let (res, meta_item) = self.expand_cfg_true(&mut node, attr, pos);
                         if res {
                             continue;
                         }
 
                         if let Some(meta_item) = meta_item {
-                            for name in node.declared_names() {
+                            for ident in node.declared_idents() {
                                 self.cx.resolver.append_stripped_cfg_item(
                                     self.cx.current_expansion.lint_node_id,
-                                    name,
+                                    ident,
                                     meta_item.clone(),
                                 )
                             }
                         }
                         Default::default()
                     }
-                    sym::cfg_attr => {
+                    Some(sym::cfg_attr) => {
                         self.expand_cfg_attr(&mut node, &attr, pos);
                         continue;
                     }
@@ -2143,8 +2147,8 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
     ) {
         loop {
             return match self.take_first_attr(node) {
-                Some((attr, pos, derives)) => match attr.name_or_empty() {
-                    sym::cfg => {
+                Some((attr, pos, derives)) => match attr.name() {
+                    Some(sym::cfg) => {
                         let span = attr.span;
                         if self.expand_cfg_true(node, attr, pos).0 {
                             continue;
@@ -2153,7 +2157,7 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
                         node.expand_cfg_false(self, pos, span);
                         continue;
                     }
-                    sym::cfg_attr => {
+                    Some(sym::cfg_attr) => {
                         self.expand_cfg_attr(node, &attr, pos);
                         continue;
                     }

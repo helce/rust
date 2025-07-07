@@ -1,3 +1,3 @@
 //@ compile-flags: '-Zcrate-attr=feature(yeet_expr)]fn main(){}#[inline'
-//@ error-pattern:unexpected closing delimiter
-fn foo() {}
+//~? ERROR unexpected token
+fn foo() {} //~ ERROR `main` function not found

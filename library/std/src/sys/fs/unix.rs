@@ -12,10 +12,11 @@ use libc::c_char;
     all(target_os = "linux", not(target_env = "musl")),
     target_os = "android",
     target_os = "fuchsia",
-    target_os = "hurd"
+    target_os = "hurd",
+    target_os = "illumos",
 ))]
 use libc::dirfd;
-#[cfg(target_os = "fuchsia")]
+#[cfg(any(target_os = "fuchsia", target_os = "illumos"))]
 use libc::fstatat as fstatat64;
 #[cfg(any(all(target_os = "linux", not(target_env = "musl")), target_os = "hurd"))]
 use libc::fstatat64;
@@ -74,6 +75,7 @@ use libc::{dirent64, fstat64, ftruncate64, lseek64, lstat64, off64_t, open64, st
 
 use crate::ffi::{CStr, OsStr, OsString};
 use crate::fmt::{self, Write as _};
+use crate::fs::TryLockError;
 use crate::io::{self, BorrowedCursor, Error, IoSlice, IoSliceMut, SeekFrom};
 use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd};
 use crate::os::unix::prelude::*;
@@ -146,24 +148,24 @@ cfg_has_statx! {{
         flags: i32,
         mask: u32,
     ) -> Option<io::Result<FileAttr>> {
-        use crate::sync::atomic::{AtomicU8, Ordering};
+        use crate::sync::atomic::{Atomic, AtomicU8, Ordering};
 
         // Linux kernel prior to 4.11 or glibc prior to glibc 2.28 don't support `statx`.
         // We check for it on first failure and remember availability to avoid having to
         // do it again.
         #[repr(u8)]
         enum STATX_STATE{ Unknown = 0, Present, Unavailable }
-        static STATX_SAVED_STATE: AtomicU8 = AtomicU8::new(STATX_STATE::Unknown as u8);
+        static STATX_SAVED_STATE: Atomic<u8> = AtomicU8::new(STATX_STATE::Unknown as u8);
 
-        syscall! {
+        syscall!(
             fn statx(
                 fd: c_int,
                 pathname: *const c_char,
                 flags: c_int,
                 mask: libc::c_uint,
-                statxbuf: *mut libc::statx
-            ) -> c_int
-        }
+                statxbuf: *mut libc::statx,
+            ) -> c_int;
+        );
 
         let statx_availability = STATX_SAVED_STATE.load(Ordering::Relaxed);
         if statx_availability == STATX_STATE::Unavailable as u8 {
@@ -892,7 +894,8 @@ impl DirEntry {
             all(target_os = "linux", not(target_env = "musl")),
             target_os = "android",
             target_os = "fuchsia",
-            target_os = "hurd"
+            target_os = "hurd",
+            target_os = "illumos",
         ),
         not(miri) // no dirfd on Miri
     ))]
@@ -922,11 +925,12 @@ impl DirEntry {
             target_os = "android",
             target_os = "fuchsia",
             target_os = "hurd",
+            target_os = "illumos",
         )),
         miri
     ))]
     pub fn metadata(&self) -> io::Result<FileAttr> {
-        lstat(&self.path())
+        run_path_with_cstr(&self.path(), &lstat)
     }
 
     #[cfg(any(
@@ -1307,15 +1311,17 @@ impl File {
         target_os = "netbsd",
         target_vendor = "apple",
     ))]
-    pub fn try_lock(&self) -> io::Result<bool> {
+    pub fn try_lock(&self) -> Result<(), TryLockError> {
         let result = cvt(unsafe { libc::flock(self.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) });
-        if let Err(ref err) = result {
+        if let Err(err) = result {
             if err.kind() == io::ErrorKind::WouldBlock {
-                return Ok(false);
+                Err(TryLockError::WouldBlock)
+            } else {
+                Err(TryLockError::Error(err))
             }
+        } else {
+            Ok(())
         }
-        result?;
-        return Ok(true);
     }
 
     #[cfg(not(any(
@@ -1325,8 +1331,11 @@ impl File {
         target_os = "netbsd",
         target_vendor = "apple",
     )))]
-    pub fn try_lock(&self) -> io::Result<bool> {
-        Err(io::const_error!(io::ErrorKind::Unsupported, "try_lock() not supported"))
+    pub fn try_lock(&self) -> Result<(), TryLockError> {
+        Err(TryLockError::Error(io::const_error!(
+            io::ErrorKind::Unsupported,
+            "try_lock() not supported"
+        )))
     }
 
     #[cfg(any(
@@ -1336,15 +1345,17 @@ impl File {
         target_os = "netbsd",
         target_vendor = "apple",
     ))]
-    pub fn try_lock_shared(&self) -> io::Result<bool> {
+    pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
         let result = cvt(unsafe { libc::flock(self.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) });
-        if let Err(ref err) = result {
+        if let Err(err) = result {
             if err.kind() == io::ErrorKind::WouldBlock {
-                return Ok(false);
+                Err(TryLockError::WouldBlock)
+            } else {
+                Err(TryLockError::Error(err))
             }
+        } else {
+            Ok(())
         }
-        result?;
-        return Ok(true);
     }
 
     #[cfg(not(any(
@@ -1354,8 +1365,11 @@ impl File {
         target_os = "netbsd",
         target_vendor = "apple",
     )))]
-    pub fn try_lock_shared(&self) -> io::Result<bool> {
-        Err(io::const_error!(io::ErrorKind::Unsupported, "try_lock_shared() not supported"))
+    pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
+        Err(TryLockError::Error(io::const_error!(
+            io::ErrorKind::Unsupported,
+            "try_lock_shared() not supported"
+        )))
     }
 
     #[cfg(any(
@@ -1463,20 +1477,6 @@ impl File {
         Ok(())
     }
 
-    // FIXME(#115199): Rust currently omits weak function definitions
-    // and its metadata from LLVM IR.
-    #[cfg_attr(
-        any(
-            target_os = "android",
-            all(
-                target_os = "linux",
-                target_env = "gnu",
-                target_pointer_width = "32",
-                not(target_arch = "riscv32")
-            )
-        ),
-        no_sanitize(cfi)
-    )]
     pub fn set_times(&self, times: FileTimes) -> io::Result<()> {
         #[cfg(not(any(
             target_os = "redox",
@@ -1540,7 +1540,9 @@ impl File {
                 let times = [to_timespec(times.accessed)?, to_timespec(times.modified)?];
                 // futimens requires Android API level 19
                 cvt(unsafe {
-                    weak!(fn futimens(c_int, *const libc::timespec) -> c_int);
+                    weak!(
+                        fn futimens(fd: c_int, times: *const libc::timespec) -> c_int;
+                    );
                     match futimens.get() {
                         Some(futimens) => futimens(self.as_raw_fd(), times.as_ptr()),
                         None => return Err(io::const_error!(
@@ -1556,7 +1558,9 @@ impl File {
                     use crate::sys::{time::__timespec64, weak::weak};
 
                     // Added in glibc 2.34
-                    weak!(fn __futimens64(libc::c_int, *const __timespec64) -> libc::c_int);
+                    weak!(
+                        fn __futimens64(fd: c_int, times: *const __timespec64) -> c_int;
+                    );
 
                     if let Some(futimens64) = __futimens64.get() {
                         let to_timespec = |time: Option<SystemTime>| time.map(|time| time.t.to_timespec64())
@@ -1653,7 +1657,7 @@ impl fmt::Debug for File {
         fn get_path(fd: c_int) -> Option<PathBuf> {
             let mut p = PathBuf::from("/proc/self/fd");
             p.push(&fd.to_string());
-            readlink(&p).ok()
+            run_path_with_cstr(&p, &readlink).ok()
         }
 
         #[cfg(any(target_vendor = "apple", target_os = "netbsd"))]
@@ -1671,7 +1675,7 @@ impl fmt::Debug for File {
                         // fallback to procfs as last resort
                         let mut p = PathBuf::from("/proc/self/fd");
                         p.push(&fd.to_string());
-                        return readlink(&p).ok();
+                        return run_path_with_cstr(&p, &readlink).ok()
                     } else {
                         return None;
                     }
@@ -1826,127 +1830,106 @@ pub fn readdir(path: &Path) -> io::Result<ReadDir> {
     }
 }
 
-pub fn unlink(p: &Path) -> io::Result<()> {
-    run_path_with_cstr(p, &|p| cvt(unsafe { libc::unlink(p.as_ptr()) }).map(|_| ()))
+pub fn unlink(p: &CStr) -> io::Result<()> {
+    cvt(unsafe { libc::unlink(p.as_ptr()) }).map(|_| ())
 }
 
-pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
-    run_path_with_cstr(old, &|old| {
-        run_path_with_cstr(new, &|new| {
-            cvt(unsafe { libc::rename(old.as_ptr(), new.as_ptr()) }).map(|_| ())
-        })
-    })
+pub fn rename(old: &CStr, new: &CStr) -> io::Result<()> {
+    cvt(unsafe { libc::rename(old.as_ptr(), new.as_ptr()) }).map(|_| ())
 }
 
-pub fn set_perm(p: &Path, perm: FilePermissions) -> io::Result<()> {
-    run_path_with_cstr(p, &|p| cvt_r(|| unsafe { libc::chmod(p.as_ptr(), perm.mode) }).map(|_| ()))
+pub fn set_perm(p: &CStr, perm: FilePermissions) -> io::Result<()> {
+    cvt_r(|| unsafe { libc::chmod(p.as_ptr(), perm.mode) }).map(|_| ())
 }
 
-pub fn rmdir(p: &Path) -> io::Result<()> {
-    run_path_with_cstr(p, &|p| cvt(unsafe { libc::rmdir(p.as_ptr()) }).map(|_| ()))
+pub fn rmdir(p: &CStr) -> io::Result<()> {
+    cvt(unsafe { libc::rmdir(p.as_ptr()) }).map(|_| ())
 }
 
-pub fn readlink(p: &Path) -> io::Result<PathBuf> {
-    run_path_with_cstr(p, &|c_path| {
-        let p = c_path.as_ptr();
+pub fn readlink(c_path: &CStr) -> io::Result<PathBuf> {
+    let p = c_path.as_ptr();
 
-        let mut buf = Vec::with_capacity(256);
+    let mut buf = Vec::with_capacity(256);
 
-        loop {
-            let buf_read =
-                cvt(unsafe { libc::readlink(p, buf.as_mut_ptr() as *mut _, buf.capacity()) })?
-                    as usize;
+    loop {
+        let buf_read =
+            cvt(unsafe { libc::readlink(p, buf.as_mut_ptr() as *mut _, buf.capacity()) })? as usize;
 
-            unsafe {
-                buf.set_len(buf_read);
-            }
-
-            if buf_read != buf.capacity() {
-                buf.shrink_to_fit();
-
-                return Ok(PathBuf::from(OsString::from_vec(buf)));
-            }
-
-            // Trigger the internal buffer resizing logic of `Vec` by requiring
-            // more space than the current capacity. The length is guaranteed to be
-            // the same as the capacity due to the if statement above.
-            buf.reserve(1);
-        }
-    })
-}
-
-pub fn symlink(original: &Path, link: &Path) -> io::Result<()> {
-    run_path_with_cstr(original, &|original| {
-        run_path_with_cstr(link, &|link| {
-            cvt(unsafe { libc::symlink(original.as_ptr(), link.as_ptr()) }).map(|_| ())
-        })
-    })
-}
-
-pub fn link(original: &Path, link: &Path) -> io::Result<()> {
-    run_path_with_cstr(original, &|original| {
-        run_path_with_cstr(link, &|link| {
-            cfg_if::cfg_if! {
-                if #[cfg(any(target_os = "vxworks", target_os = "redox", target_os = "android", target_os = "espidf", target_os = "horizon", target_os = "vita", target_env = "nto70"))] {
-                    // VxWorks, Redox and ESP-IDF lack `linkat`, so use `link` instead. POSIX leaves
-                    // it implementation-defined whether `link` follows symlinks, so rely on the
-                    // `symlink_hard_link` test in library/std/src/fs/tests.rs to check the behavior.
-                    // Android has `linkat` on newer versions, but we happen to know `link`
-                    // always has the correct behavior, so it's here as well.
-                    cvt(unsafe { libc::link(original.as_ptr(), link.as_ptr()) })?;
-                } else {
-                    // Where we can, use `linkat` instead of `link`; see the comment above
-                    // this one for details on why.
-                    cvt(unsafe { libc::linkat(libc::AT_FDCWD, original.as_ptr(), libc::AT_FDCWD, link.as_ptr(), 0) })?;
-                }
-            }
-            Ok(())
-        })
-    })
-}
-
-pub fn stat(p: &Path) -> io::Result<FileAttr> {
-    run_path_with_cstr(p, &|p| {
-        cfg_has_statx! {
-            if let Some(ret) = unsafe { try_statx(
-                libc::AT_FDCWD,
-                p.as_ptr(),
-                libc::AT_STATX_SYNC_AS_STAT,
-                libc::STATX_BASIC_STATS | libc::STATX_BTIME,
-            ) } {
-                return ret;
-            }
+        unsafe {
+            buf.set_len(buf_read);
         }
 
-        let mut stat: stat64 = unsafe { mem::zeroed() };
-        cvt(unsafe { stat64(p.as_ptr(), &mut stat) })?;
-        Ok(FileAttr::from_stat64(stat))
-    })
-}
+        if buf_read != buf.capacity() {
+            buf.shrink_to_fit();
 
-pub fn lstat(p: &Path) -> io::Result<FileAttr> {
-    run_path_with_cstr(p, &|p| {
-        cfg_has_statx! {
-            if let Some(ret) = unsafe { try_statx(
-                libc::AT_FDCWD,
-                p.as_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_SYNC_AS_STAT,
-                libc::STATX_BASIC_STATS | libc::STATX_BTIME,
-            ) } {
-                return ret;
-            }
+            return Ok(PathBuf::from(OsString::from_vec(buf)));
         }
 
-        let mut stat: stat64 = unsafe { mem::zeroed() };
-        cvt(unsafe { lstat64(p.as_ptr(), &mut stat) })?;
-        Ok(FileAttr::from_stat64(stat))
-    })
+        // Trigger the internal buffer resizing logic of `Vec` by requiring
+        // more space than the current capacity. The length is guaranteed to be
+        // the same as the capacity due to the if statement above.
+        buf.reserve(1);
+    }
 }
 
-pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
-    let r = run_path_with_cstr(p, &|path| unsafe {
-        Ok(libc::realpath(path.as_ptr(), ptr::null_mut()))
-    })?;
+pub fn symlink(original: &CStr, link: &CStr) -> io::Result<()> {
+    cvt(unsafe { libc::symlink(original.as_ptr(), link.as_ptr()) }).map(|_| ())
+}
+
+pub fn link(original: &CStr, link: &CStr) -> io::Result<()> {
+    cfg_if::cfg_if! {
+        if #[cfg(any(target_os = "vxworks", target_os = "redox", target_os = "android", target_os = "espidf", target_os = "horizon", target_os = "vita", target_env = "nto70"))] {
+            // VxWorks, Redox and ESP-IDF lack `linkat`, so use `link` instead. POSIX leaves
+            // it implementation-defined whether `link` follows symlinks, so rely on the
+            // `symlink_hard_link` test in library/std/src/fs/tests.rs to check the behavior.
+            // Android has `linkat` on newer versions, but we happen to know `link`
+            // always has the correct behavior, so it's here as well.
+            cvt(unsafe { libc::link(original.as_ptr(), link.as_ptr()) })?;
+        } else {
+            // Where we can, use `linkat` instead of `link`; see the comment above
+            // this one for details on why.
+            cvt(unsafe { libc::linkat(libc::AT_FDCWD, original.as_ptr(), libc::AT_FDCWD, link.as_ptr(), 0) })?;
+        }
+    }
+    Ok(())
+}
+
+pub fn stat(p: &CStr) -> io::Result<FileAttr> {
+    cfg_has_statx! {
+        if let Some(ret) = unsafe { try_statx(
+            libc::AT_FDCWD,
+            p.as_ptr(),
+            libc::AT_STATX_SYNC_AS_STAT,
+            libc::STATX_BASIC_STATS | libc::STATX_BTIME,
+        ) } {
+            return ret;
+        }
+    }
+
+    let mut stat: stat64 = unsafe { mem::zeroed() };
+    cvt(unsafe { stat64(p.as_ptr(), &mut stat) })?;
+    Ok(FileAttr::from_stat64(stat))
+}
+
+pub fn lstat(p: &CStr) -> io::Result<FileAttr> {
+    cfg_has_statx! {
+        if let Some(ret) = unsafe { try_statx(
+            libc::AT_FDCWD,
+            p.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_SYNC_AS_STAT,
+            libc::STATX_BASIC_STATS | libc::STATX_BTIME,
+        ) } {
+            return ret;
+        }
+    }
+
+    let mut stat: stat64 = unsafe { mem::zeroed() };
+    cvt(unsafe { lstat64(p.as_ptr(), &mut stat) })?;
+    Ok(FileAttr::from_stat64(stat))
+}
+
+pub fn canonicalize(path: &CStr) -> io::Result<PathBuf> {
+    let r = unsafe { libc::realpath(path.as_ptr(), ptr::null_mut()) };
     if r.is_null() {
         return Err(io::Error::last_os_error());
     }
@@ -2165,6 +2148,12 @@ pub fn chroot(dir: &Path) -> io::Result<()> {
     Err(io::const_error!(io::ErrorKind::Unsupported, "chroot not supported by vxworks"))
 }
 
+pub fn mkfifo(path: &Path, mode: u32) -> io::Result<()> {
+    run_path_with_cstr(path, &|path| {
+        cvt(unsafe { libc::mkfifo(path.as_ptr(), mode.try_into().unwrap()) }).map(|_| ())
+    })
+}
+
 pub use remove_dir_impl::remove_dir_all;
 
 // Fallback for REDOX, ESP-ID, Horizon, Vita, Vxworks and Miri
@@ -2324,19 +2313,19 @@ mod remove_dir_impl {
         Ok(())
     }
 
-    fn remove_dir_all_modern(p: &Path) -> io::Result<()> {
+    fn remove_dir_all_modern(p: &CStr) -> io::Result<()> {
         // We cannot just call remove_dir_all_recursive() here because that would not delete a passed
         // symlink. No need to worry about races, because remove_dir_all_recursive() does not recurse
         // into symlinks.
         let attr = lstat(p)?;
         if attr.file_type().is_symlink() {
-            crate::fs::remove_file(p)
+            super::unlink(p)
         } else {
-            run_path_with_cstr(p, &|p| remove_dir_all_recursive(None, &p))
+            remove_dir_all_recursive(None, &p)
         }
     }
 
     pub fn remove_dir_all(p: &Path) -> io::Result<()> {
-        remove_dir_all_modern(p)
+        run_path_with_cstr(p, &remove_dir_all_modern)
     }
 }

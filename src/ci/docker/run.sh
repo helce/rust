@@ -97,9 +97,8 @@ if [ -f "$docker_dir/$image/Dockerfile" ]; then
     docker --version
 
     REGISTRY=ghcr.io
-    # Hardcode username to reuse cache between auto and pr jobs
-    # FIXME: should be changed after move from rust-lang-ci
-    REGISTRY_USERNAME=rust-lang-ci
+    # Default to `rust-lang` to allow reusing the cache for local builds
+    REGISTRY_USERNAME=${GITHUB_REPOSITORY_OWNER:-rust-lang}
     # Tag used to push the final Docker image, so that it can be pulled by e.g. rustup
     IMAGE_TAG=${REGISTRY}/${REGISTRY_USERNAME}/rust-ci:${cksum}
     # Tag used to cache the Docker build
@@ -288,7 +287,7 @@ args="$args --privileged"
 # `LOCAL_USER_ID` (recognized in `src/ci/run.sh`) to ensure that files are all
 # read/written as the same user as the bare-metal user.
 if [ -f /.dockerenv ]; then
-  docker create -v /checkout --name checkout alpine:3.4 /bin/true
+  docker create -v /checkout --name checkout ghcr.io/rust-lang/alpine:3.4 /bin/true
   docker cp . checkout:/checkout
   args="$args --volumes-from checkout"
 else

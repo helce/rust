@@ -12,6 +12,7 @@ pub(crate) use graph::DepGraphData;
 pub use graph::{DepGraph, DepNodeIndex, TaskDepsRef, WorkProduct, WorkProductMap, hash_result};
 pub use query::DepGraphQuery;
 use rustc_data_structures::profiling::SelfProfilerRef;
+use rustc_data_structures::sync::DynSync;
 use rustc_session::Session;
 pub use serialized::{SerializedDepGraph, SerializedDepNodeIndex};
 use tracing::instrument;
@@ -89,7 +90,7 @@ pub trait DepContext: Copy {
     }
 }
 
-pub trait Deps {
+pub trait Deps: DynSync {
     /// Execute the operation with provided dependencies.
     fn with_deps<OP, R>(deps: TaskDepsRef<'_>, op: OP) -> R
     where
@@ -110,6 +111,9 @@ pub trait Deps {
 
     /// We use this to create a side effect node.
     const DEP_KIND_SIDE_EFFECT: DepKind;
+
+    /// We use this to create the anon node with zero dependencies.
+    const DEP_KIND_ANON_ZERO_DEPS: DepKind;
 
     /// This is the highest value a `DepKind` can have. It's used during encoding to
     /// pack information into the unused bits.

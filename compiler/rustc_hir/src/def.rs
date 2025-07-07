@@ -267,15 +267,12 @@ impl DefKind {
             | DefKind::ForeignTy
             | DefKind::TraitAlias
             | DefKind::TyParam
-            | DefKind::ExternCrate => DefPathData::TypeNs(Some(name.unwrap())),
+            | DefKind::ExternCrate => DefPathData::TypeNs(name.unwrap()),
 
-            // An associated type names will be missing for an RPITIT. It will
-            // later be given a name with `synthetic` in it, if necessary.
-            DefKind::AssocTy => DefPathData::TypeNs(name),
+            // An associated type name will be missing for an RPITIT (DefPathData::AnonAssocTy),
+            // but those provide their own DefPathData.
+            DefKind::AssocTy => DefPathData::TypeNs(name.unwrap()),
 
-            // It's not exactly an anon const, but wrt DefPathData, there
-            // is no difference.
-            DefKind::Static { nested: true, .. } => DefPathData::AnonConst,
             DefKind::Fn
             | DefKind::Const
             | DefKind::ConstParam
@@ -294,7 +291,7 @@ impl DefKind {
             DefKind::GlobalAsm => DefPathData::GlobalAsm,
             DefKind::Impl { .. } => DefPathData::Impl,
             DefKind::Closure => DefPathData::Closure,
-            DefKind::SyntheticCoroutineBody => DefPathData::Closure,
+            DefKind::SyntheticCoroutineBody => DefPathData::SyntheticCoroutineBody,
         }
     }
 

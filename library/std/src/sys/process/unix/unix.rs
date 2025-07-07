@@ -88,7 +88,7 @@ impl Command {
         // in its own process. Thus the parent drops the lock guard immediately.
         // The child calls `mem::forget` to leak the lock, which is crucial because
         // releasing a lock is not async-signal-safe.
-        let env_lock = sys::os::env_read_lock();
+        let env_lock = sys::env::env_read_lock();
         let pid = unsafe { self.do_fork()? };
 
         if pid == 0 {
@@ -162,11 +162,6 @@ impl Command {
         }
     }
 
-    pub fn output(&mut self) -> io::Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
-        let (proc, pipes) = self.spawn(Stdio::MakePipe, false)?;
-        crate::sys_common::process::wait_with_output(proc, pipes)
-    }
-
     // WatchOS and TVOS headers mark the `fork`/`exec*` functions with
     // `__WATCHOS_PROHIBITED __TVOS_PROHIBITED`, and indicate that the
     // `posix_spawn*` functions should be used instead. It isn't entirely clear
@@ -237,7 +232,7 @@ impl Command {
                     // Similar to when forking, we want to ensure that access to
                     // the environment is synchronized, so make sure to grab the
                     // environment lock before we try to exec.
-                    let _lock = sys::os::env_read_lock();
+                    let _lock = sys::env::env_read_lock();
 
                     let Err(e) = self.do_exec(theirs, envp.as_ref());
                     e
@@ -386,13 +381,13 @@ impl Command {
             impl Drop for Reset {
                 fn drop(&mut self) {
                     unsafe {
-                        *sys::os::environ() = self.0;
+                        *sys::env::environ() = self.0;
                     }
                 }
             }
 
-            _reset = Some(Reset(*sys::os::environ()));
-            *sys::os::environ() = envp.as_ptr();
+            _reset = Some(Reset(*sys::env::environ()));
+            *sys::env::environ() = envp.as_ptr();
         }
 
         libc::execvp(self.get_program_cstr().as_ptr(), self.get_argv().as_ptr());
@@ -415,6 +410,7 @@ impl Command {
         all(target_os = "linux", target_env = "musl"),
         target_os = "nto",
         target_vendor = "apple",
+        target_os = "cygwin",
     )))]
     fn posix_spawn(
         &mut self,
@@ -433,17 +429,15 @@ impl Command {
         all(target_os = "linux", target_env = "musl"),
         target_os = "nto",
         target_vendor = "apple",
+        target_os = "cygwin",
     ))]
-    // FIXME(#115199): Rust currently omits weak function definitions
-    // and its metadata from LLVM IR.
-    #[cfg_attr(target_os = "linux", no_sanitize(cfi))]
     fn posix_spawn(
         &mut self,
         stdio: &ChildPipes,
         envp: Option<&CStringArray>,
     ) -> io::Result<Option<Process>> {
         #[cfg(target_os = "linux")]
-        use core::sync::atomic::{AtomicU8, Ordering};
+        use core::sync::atomic::{Atomic, AtomicU8, Ordering};
 
         use crate::mem::MaybeUninit;
         use crate::sys::{self, cvt_nz, on_broken_pipe_flag_used};
@@ -461,20 +455,22 @@ impl Command {
             if #[cfg(target_os = "linux")] {
                 use crate::sys::weak::weak;
 
-                weak! {
+                weak!(
                     fn pidfd_spawnp(
-                        *mut libc::c_int,
-                        *const libc::c_char,
-                        *const libc::posix_spawn_file_actions_t,
-                        *const libc::posix_spawnattr_t,
-                        *const *mut libc::c_char,
-                        *const *mut libc::c_char
-                    ) -> libc::c_int
-                }
+                        pidfd: *mut libc::c_int,
+                        path: *const libc::c_char,
+                        file_actions: *const libc::posix_spawn_file_actions_t,
+                        attrp: *const libc::posix_spawnattr_t,
+                        argv: *const *mut libc::c_char,
+                        envp: *const *mut libc::c_char,
+                    ) -> libc::c_int;
+                );
 
-                weak! { fn pidfd_getpid(libc::c_int) -> libc::c_int }
+                weak!(
+                    fn pidfd_getpid(pidfd: libc::c_int) -> libc::c_int;
+                );
 
-                static PIDFD_SUPPORTED: AtomicU8 = AtomicU8::new(0);
+                static PIDFD_SUPPORTED: Atomic<u8> = AtomicU8::new(0);
                 const UNKNOWN: u8 = 0;
                 const SPAWN: u8 = 1;
                 // Obtaining a pidfd via the fork+exec path might work
@@ -585,7 +581,7 @@ impl Command {
         /// Some platforms can set a new working directory for a spawned process in the
         /// `posix_spawn` path. This function looks up the function pointer for adding
         /// such an action to a `posix_spawn_file_actions_t` struct.
-        #[cfg(not(all(target_os = "linux", target_env = "musl")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "musl"), target_os = "cygwin")))]
         fn get_posix_spawn_addchdir() -> Option<PosixSpawnAddChdirFn> {
             use crate::sys::weak::weak;
 
@@ -593,19 +589,19 @@ impl Command {
             // https://pubs.opengroup.org/onlinepubs/9799919799/functions/posix_spawn_file_actions_addchdir.html.
             // The _np version is more widely available, though, so try that first.
 
-            weak! {
+            weak!(
                 fn posix_spawn_file_actions_addchdir_np(
-                    *mut libc::posix_spawn_file_actions_t,
-                    *const libc::c_char
-                ) -> libc::c_int
-            }
+                    file_actions: *mut libc::posix_spawn_file_actions_t,
+                    path: *const libc::c_char,
+                ) -> libc::c_int;
+            );
 
-            weak! {
+            weak!(
                 fn posix_spawn_file_actions_addchdir(
-                    *mut libc::posix_spawn_file_actions_t,
-                    *const libc::c_char
-                ) -> libc::c_int
-            }
+                    file_actions: *mut libc::posix_spawn_file_actions_t,
+                    path: *const libc::c_char,
+                ) -> libc::c_int;
+            );
 
             posix_spawn_file_actions_addchdir_np
                 .get()
@@ -619,7 +615,9 @@ impl Command {
         /// Weak symbol lookup doesn't work with statically linked libcs, so in cases
         /// where static linking is possible we need to either check for the presence
         /// of the symbol at compile time or know about it upfront.
-        #[cfg(all(target_os = "linux", target_env = "musl"))]
+        ///
+        /// Cygwin doesn't support weak symbol, so just link it.
+        #[cfg(any(all(target_os = "linux", target_env = "musl"), target_os = "cygwin"))]
         fn get_posix_spawn_addchdir() -> Option<PosixSpawnAddChdirFn> {
             // Our minimum required musl supports this function, so we can just use it.
             Some(libc::posix_spawn_file_actions_addchdir_np)
@@ -736,8 +734,8 @@ impl Command {
             cvt_nz(libc::posix_spawnattr_setflags(attrs.0.as_mut_ptr(), flags as _))?;
 
             // Make sure we synchronize access to the global `environ` resource
-            let _env_lock = sys::os::env_read_lock();
-            let envp = envp.map(|c| c.as_ptr()).unwrap_or_else(|| *sys::os::environ() as *const _);
+            let _env_lock = sys::env::env_read_lock();
+            let envp = envp.map(|c| c.as_ptr()).unwrap_or_else(|| *sys::env::environ() as *const _);
 
             #[cfg(not(target_os = "nto"))]
             let spawn_fn = libc::posix_spawnp;

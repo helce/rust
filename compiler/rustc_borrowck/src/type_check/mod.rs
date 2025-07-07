@@ -45,7 +45,6 @@ use crate::borrow_set::BorrowSet;
 use crate::constraints::{OutlivesConstraint, OutlivesConstraintSet};
 use crate::diagnostics::UniverseInfo;
 use crate::member_constraints::MemberConstraintSet;
-use crate::opaque_types::ConcreteOpaqueTypes;
 use crate::polonius::legacy::{PoloniusFacts, PoloniusLocationTable};
 use crate::polonius::{PoloniusContext, PoloniusLivenessContext};
 use crate::region_infer::TypeTest;
@@ -53,7 +52,7 @@ use crate::region_infer::values::{LivenessValues, PlaceholderIndex, PlaceholderI
 use crate::session_diagnostics::{MoveUnsized, SimdIntrinsicArgConst};
 use crate::type_check::free_region_relations::{CreateResult, UniversalRegionRelations};
 use crate::universal_regions::{DefiningTy, UniversalRegions};
-use crate::{BorrowckInferCtxt, path_utils};
+use crate::{BorrowCheckRootCtxt, BorrowckInferCtxt, path_utils};
 
 macro_rules! span_mirbug {
     ($context:expr, $elem:expr, $($message:tt)*) => ({
@@ -102,6 +101,7 @@ mod relate_tys;
 /// - `move_data` -- move-data constructed when performing the maybe-init dataflow analysis
 /// - `location_map` -- map between MIR `Location` and `PointIndex`
 pub(crate) fn type_check<'a, 'tcx>(
+    root_cx: &mut BorrowCheckRootCtxt<'tcx>,
     infcx: &BorrowckInferCtxt<'tcx>,
     body: &Body<'tcx>,
     promoted: &IndexSlice<Promoted, Body<'tcx>>,
@@ -112,9 +112,7 @@ pub(crate) fn type_check<'a, 'tcx>(
     flow_inits: ResultsCursor<'a, 'tcx, MaybeInitializedPlaces<'a, 'tcx>>,
     move_data: &MoveData<'tcx>,
     location_map: Rc<DenseLocationMap>,
-    concrete_opaque_types: &mut ConcreteOpaqueTypes<'tcx>,
 ) -> MirTypeckResults<'tcx> {
-    let implicit_region_bound = ty::Region::new_var(infcx.tcx, universal_regions.fr_fn_body);
     let mut constraints = MirTypeckRegionConstraints {
         placeholder_indices: PlaceholderIndices::default(),
         placeholder_index_to_region: IndexVec::default(),
@@ -130,13 +128,7 @@ pub(crate) fn type_check<'a, 'tcx>(
         region_bound_pairs,
         normalized_inputs_and_output,
         known_type_outlives_obligations,
-    } = free_region_relations::create(
-        infcx,
-        infcx.param_env,
-        implicit_region_bound,
-        universal_regions,
-        &mut constraints,
-    );
+    } = free_region_relations::create(infcx, infcx.param_env, universal_regions, &mut constraints);
 
     let pre_obligations = infcx.take_registered_region_obligations();
     assert!(
@@ -153,21 +145,20 @@ pub(crate) fn type_check<'a, 'tcx>(
     };
 
     let mut typeck = TypeChecker {
+        root_cx,
         infcx,
         last_span: body.span,
         body,
         promoted,
         user_type_annotations: &body.user_type_annotations,
-        region_bound_pairs,
-        known_type_outlives_obligations,
-        implicit_region_bound,
+        region_bound_pairs: &region_bound_pairs,
+        known_type_outlives_obligations: &known_type_outlives_obligations,
         reported_errors: Default::default(),
         universal_regions: &universal_region_relations.universal_regions,
         location_table,
         polonius_facts,
         borrow_set,
         constraints: &mut constraints,
-        concrete_opaque_types,
         polonius_liveness,
     };
 
@@ -215,6 +206,7 @@ enum FieldAccessError {
 /// way, it accrues region constraints -- these can later be used by
 /// NLL region checking.
 struct TypeChecker<'a, 'tcx> {
+    root_cx: &'a mut BorrowCheckRootCtxt<'tcx>,
     infcx: &'a BorrowckInferCtxt<'tcx>,
     last_span: Span,
     body: &'a Body<'tcx>,
@@ -224,16 +216,14 @@ struct TypeChecker<'a, 'tcx> {
     /// User type annotations are shared between the main MIR and the MIR of
     /// all of the promoted items.
     user_type_annotations: &'a CanonicalUserTypeAnnotations<'tcx>,
-    region_bound_pairs: RegionBoundPairs<'tcx>,
-    known_type_outlives_obligations: Vec<ty::PolyTypeOutlivesPredicate<'tcx>>,
-    implicit_region_bound: ty::Region<'tcx>,
+    region_bound_pairs: &'a RegionBoundPairs<'tcx>,
+    known_type_outlives_obligations: &'a [ty::PolyTypeOutlivesPredicate<'tcx>],
     reported_errors: FxIndexSet<(Ty<'tcx>, Span)>,
     universal_regions: &'a UniversalRegions<'tcx>,
     location_table: &'a PoloniusLocationTable,
     polonius_facts: &'a mut Option<PoloniusFacts>,
     borrow_set: &'a BorrowSet<'tcx>,
     constraints: &'a mut MirTypeckRegionConstraints<'tcx>,
-    concrete_opaque_types: &'a mut ConcreteOpaqueTypes<'tcx>,
     /// When using `-Zpolonius=next`, the liveness helper data used to create polonius constraints.
     polonius_liveness: Option<PoloniusLivenessContext>,
 }
@@ -422,10 +412,9 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         constraint_conversion::ConstraintConversion::new(
             self.infcx,
             self.universal_regions,
-            &self.region_bound_pairs,
-            self.implicit_region_bound,
+            self.region_bound_pairs,
             self.infcx.param_env,
-            &self.known_type_outlives_obligations,
+            self.known_type_outlives_obligations,
             locations,
             locations.span(self.body),
             category,
@@ -1568,11 +1557,15 @@ impl<'a, 'tcx> Visitor<'tcx> for TypeChecker<'a, 'tcx> {
                         }
                     }
                     CastKind::Transmute => {
-                        span_mirbug!(
-                            self,
-                            rvalue,
-                            "Unexpected CastKind::Transmute, which is not permitted in Analysis MIR",
-                        );
+                        let ty_from = op.ty(self.body, tcx);
+                        match ty_from.kind() {
+                            ty::Pat(base, _) if base == ty => {}
+                            _ => span_mirbug!(
+                                self,
+                                rvalue,
+                                "Unexpected CastKind::Transmute {ty_from:?} -> {ty:?}, which is not permitted in Analysis MIR",
+                            ),
+                        }
                     }
                 }
             }
@@ -2086,8 +2079,14 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 }
             }
             TerminatorKind::Unreachable => {}
-            TerminatorKind::Drop { target, unwind, .. }
-            | TerminatorKind::Assert { target, unwind, .. } => {
+            TerminatorKind::Drop { target, unwind, drop, .. } => {
+                self.assert_iscleanup(block_data, target, is_cleanup);
+                self.assert_iscleanup_unwind(block_data, unwind, is_cleanup);
+                if let Some(drop) = drop {
+                    self.assert_iscleanup(block_data, drop, is_cleanup);
+                }
+            }
+            TerminatorKind::Assert { target, unwind, .. } => {
                 self.assert_iscleanup(block_data, target, is_cleanup);
                 self.assert_iscleanup_unwind(block_data, unwind, is_cleanup);
             }
@@ -2503,18 +2502,13 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         args: GenericArgsRef<'tcx>,
         locations: Locations,
     ) -> ty::InstantiatedPredicates<'tcx> {
-        let closure_borrowck_results = tcx.mir_borrowck(def_id);
-        self.concrete_opaque_types
-            .extend_from_nested_body(tcx, &closure_borrowck_results.concrete_opaque_types);
-
-        if let Some(closure_requirements) = &closure_borrowck_results.closure_requirements {
+        if let Some(closure_requirements) = &self.root_cx.closure_requirements(def_id) {
             constraint_conversion::ConstraintConversion::new(
                 self.infcx,
                 self.universal_regions,
-                &self.region_bound_pairs,
-                self.implicit_region_bound,
+                self.region_bound_pairs,
                 self.infcx.param_env,
-                &self.known_type_outlives_obligations,
+                self.known_type_outlives_obligations,
                 locations,
                 self.body.span,             // irrelevant; will be overridden.
                 ConstraintCategory::Boring, // same as above.

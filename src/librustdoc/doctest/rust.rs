@@ -63,24 +63,23 @@ impl DocTestVisitor for RustCollector {
 pub(super) struct HirCollector<'tcx> {
     codes: ErrorCodes,
     tcx: TyCtxt<'tcx>,
-    enable_per_target_ignores: bool,
     collector: RustCollector,
 }
 
 impl<'tcx> HirCollector<'tcx> {
-    pub fn new(codes: ErrorCodes, enable_per_target_ignores: bool, tcx: TyCtxt<'tcx>) -> Self {
+    pub fn new(codes: ErrorCodes, tcx: TyCtxt<'tcx>) -> Self {
         let collector = RustCollector {
             source_map: tcx.sess.psess.clone_source_map(),
             cur_path: vec![],
             position: DUMMY_SP,
             tests: vec![],
         };
-        Self { codes, enable_per_target_ignores, tcx, collector }
+        Self { codes, tcx, collector }
     }
 
     pub fn collect_crate(mut self) -> Vec<ScrapedDocTest> {
         let tcx = self.tcx;
-        self.visit_testable(None, CRATE_DEF_ID, tcx.hir().span(CRATE_HIR_ID), |this| {
+        self.visit_testable(None, CRATE_DEF_ID, tcx.hir_span(CRATE_HIR_ID), |this| {
             tcx.hir_walk_toplevel_module(this)
         });
         self.collector.tests
@@ -131,7 +130,6 @@ impl HirCollector<'_> {
                 &doc,
                 &mut self.collector,
                 self.codes,
-                self.enable_per_target_ignores,
                 Some(&crate::html::markdown::ExtraInfo::new(self.tcx, def_id, span)),
             );
         }

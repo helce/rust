@@ -63,7 +63,7 @@ fn dummy() {
 // Malformed, where args?
 #[autodiff]
 pub fn f7(x: f64) {
-    //~^ ERROR autodiff must be applied to function
+    //~^ ERROR autodiff requires at least a name and mode
     unimplemented!()
 }
 
@@ -77,7 +77,7 @@ pub fn f8(x: f64) {
 // Invalid attribute syntax
 #[autodiff = ""]
 pub fn f9(x: f64) {
-    //~^ ERROR autodiff must be applied to function
+    //~^ ERROR autodiff requires at least a name and mode
     unimplemented!()
 }
 
@@ -174,6 +174,13 @@ fn f20(x: f32) -> f32 {
 #[autodiff(df21, Reverse, Active, Duplicated)]
 fn f21(x: f32) -> f32 {
     //~^^ ERROR invalid return activity Duplicated in Reverse Mode
+    unimplemented!()
+}
+
+struct DoesNotImplDefault;
+#[autodiff(df22, Forward, Dual)]
+pub fn f22() -> DoesNotImplDefault {
+    //~^^ ERROR the function or associated item `default` exists for tuple `(DoesNotImplDefault, DoesNotImplDefault)`, but its trait bounds were not satisfied
     unimplemented!()
 }
 

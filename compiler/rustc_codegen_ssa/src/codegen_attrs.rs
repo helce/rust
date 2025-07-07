@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use rustc_abi::ExternAbi;
 use rustc_ast::expand::autodiff_attrs::{AutoDiffAttrs, DiffActivity, DiffMode};
-use rustc_ast::{MetaItem, MetaItemInner, attr};
+use rustc_ast::{LitKind, MetaItem, MetaItemInner, attr};
 use rustc_attr_parsing::ReprAttr::ReprAlign;
 use rustc_attr_parsing::{AttributeKind, InlineAttr, InstructionSetAttr, OptimizeAttr};
 use rustc_data_structures::fx::FxHashMap;
@@ -87,6 +87,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
     let mut link_ordinal_span = None;
     let mut no_sanitize_span = None;
     let mut mixed_export_name_no_mangle_lint_state = MixedExportNameAndNoMangleState::default();
+    let mut no_mangle_span = None;
 
     for attr in attrs.iter() {
         // In some cases, attribute are only valid on functions, but it's the `check_attr`
@@ -114,7 +115,8 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                 AttributeKind::Repr(reprs) => {
                     codegen_fn_attrs.alignment = reprs
                         .iter()
-                        .find_map(|(r, _)| if let ReprAlign(x) = r { Some(*x) } else { None });
+                        .filter_map(|(r, _)| if let ReprAlign(x) = r { Some(*x) } else { None })
+                        .max();
                 }
 
                 _ => {}
@@ -138,6 +140,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
             }
             sym::naked => codegen_fn_attrs.flags |= CodegenFnAttrFlags::NAKED,
             sym::no_mangle => {
+                no_mangle_span = Some(attr.span());
                 if tcx.opt_item_name(did.to_def_id()).is_some() {
                     codegen_fn_attrs.flags |= CodegenFnAttrFlags::NO_MANGLE;
                     mixed_export_name_no_mangle_lint_state.track_no_mangle(
@@ -213,7 +216,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                         // somewhat, and is subject to change in the future (which
                         // is a good thing, because this would ideally be a bit
                         // more firmed up).
-                        let is_like_elf = !(tcx.sess.target.is_like_osx
+                        let is_like_elf = !(tcx.sess.target.is_like_darwin
                             || tcx.sess.target.is_like_windows
                             || tcx.sess.target.is_like_wasm);
                         codegen_fn_attrs.flags |= if is_like_elf {
@@ -345,20 +348,26 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                 no_sanitize_span = Some(attr.span());
                 if let Some(list) = attr.meta_item_list() {
                     for item in list.iter() {
-                        match item.name_or_empty() {
-                            sym::address => {
+                        match item.name() {
+                            Some(sym::address) => {
                                 codegen_fn_attrs.no_sanitize |=
                                     SanitizerSet::ADDRESS | SanitizerSet::KERNELADDRESS
                             }
-                            sym::cfi => codegen_fn_attrs.no_sanitize |= SanitizerSet::CFI,
-                            sym::kcfi => codegen_fn_attrs.no_sanitize |= SanitizerSet::KCFI,
-                            sym::memory => codegen_fn_attrs.no_sanitize |= SanitizerSet::MEMORY,
-                            sym::memtag => codegen_fn_attrs.no_sanitize |= SanitizerSet::MEMTAG,
-                            sym::shadow_call_stack => {
+                            Some(sym::cfi) => codegen_fn_attrs.no_sanitize |= SanitizerSet::CFI,
+                            Some(sym::kcfi) => codegen_fn_attrs.no_sanitize |= SanitizerSet::KCFI,
+                            Some(sym::memory) => {
+                                codegen_fn_attrs.no_sanitize |= SanitizerSet::MEMORY
+                            }
+                            Some(sym::memtag) => {
+                                codegen_fn_attrs.no_sanitize |= SanitizerSet::MEMTAG
+                            }
+                            Some(sym::shadow_call_stack) => {
                                 codegen_fn_attrs.no_sanitize |= SanitizerSet::SHADOWCALLSTACK
                             }
-                            sym::thread => codegen_fn_attrs.no_sanitize |= SanitizerSet::THREAD,
-                            sym::hwaddress => {
+                            Some(sym::thread) => {
+                                codegen_fn_attrs.no_sanitize |= SanitizerSet::THREAD
+                            }
+                            Some(sym::hwaddress) => {
                                 codegen_fn_attrs.no_sanitize |= SanitizerSet::HWADDRESS
                             }
                             _ => {
@@ -419,9 +428,9 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
                             continue;
                         };
 
-                        let attrib_to_write = match meta_item.name_or_empty() {
-                            sym::prefix_nops => &mut prefix,
-                            sym::entry_nops => &mut entry,
+                        let attrib_to_write = match meta_item.name() {
+                            Some(sym::prefix_nops) => &mut prefix,
+                            Some(sym::entry_nops) => &mut entry,
                             _ => {
                                 tcx.dcx().emit_err(errors::UnexpectedParameterName {
                                     span: item.span(),
@@ -604,7 +613,7 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
     if let Some((name, _)) = lang_items::extract(attrs)
         && let Some(lang_item) = LangItem::from_name(name)
     {
-        if WEAK_LANG_ITEMS.iter().any(|&l| l == lang_item) {
+        if WEAK_LANG_ITEMS.contains(&lang_item) {
             codegen_fn_attrs.flags |= CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL;
         }
         if let Some(link_name) = lang_item.link_name() {
@@ -613,6 +622,34 @@ fn codegen_fn_attrs(tcx: TyCtxt<'_>, did: LocalDefId) -> CodegenFnAttrs {
         }
     }
     check_link_name_xor_ordinal(tcx, &codegen_fn_attrs, link_ordinal_span);
+
+    if codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::RUSTC_STD_INTERNAL_SYMBOL)
+        && codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::NO_MANGLE)
+    {
+        let lang_item =
+            lang_items::extract(attrs).map_or(None, |(name, _span)| LangItem::from_name(name));
+        let mut err = tcx
+            .dcx()
+            .struct_span_err(
+                no_mangle_span.unwrap_or_default(),
+                "`#[no_mangle]` cannot be used on internal language items",
+            )
+            .with_note("Rustc requires this item to have a specific mangled name.")
+            .with_span_label(tcx.def_span(did), "should be the internal language item");
+        if let Some(lang_item) = lang_item {
+            if let Some(link_name) = lang_item.link_name() {
+                err = err
+                    .with_note("If you are trying to prevent mangling to ease debugging, many")
+                    .with_note(format!(
+                        "debuggers support a command such as `rbreak {link_name}` to"
+                    ))
+                    .with_note(format!(
+                        "match `.*{link_name}.*` instead of `break {link_name}` on a specific name"
+                    ))
+            }
+        }
+        err.emit();
+    }
 
     // Any linkage to LLVM intrinsics for now forcibly marks them all as never
     // unwinds since LLVM sometimes can't handle codegen which `invoke`s
@@ -785,8 +822,7 @@ impl<'a> MixedExportNameAndNoMangleState<'a> {
 fn autodiff_attrs(tcx: TyCtxt<'_>, id: DefId) -> Option<AutoDiffAttrs> {
     let attrs = tcx.get_attrs(id, sym::rustc_autodiff);
 
-    let attrs =
-        attrs.filter(|attr| attr.name_or_empty() == sym::rustc_autodiff).collect::<Vec<_>>();
+    let attrs = attrs.filter(|attr| attr.has_name(sym::rustc_autodiff)).collect::<Vec<_>>();
 
     // check for exactly one autodiff attribute on placeholder functions.
     // There should only be one, since we generate a new placeholder per ad macro.
@@ -805,8 +841,8 @@ fn autodiff_attrs(tcx: TyCtxt<'_>, id: DefId) -> Option<AutoDiffAttrs> {
         return Some(AutoDiffAttrs::source());
     }
 
-    let [mode, input_activities @ .., ret_activity] = &list[..] else {
-        span_bug!(attr.span(), "rustc_autodiff attribute must contain mode and activities");
+    let [mode, width_meta, input_activities @ .., ret_activity] = &list[..] else {
+        span_bug!(attr.span(), "rustc_autodiff attribute must contain mode, width and activities");
     };
     let mode = if let MetaItemInner::MetaItem(MetaItem { path: p1, .. }) = mode {
         p1.segments.first().unwrap().ident
@@ -820,6 +856,30 @@ fn autodiff_attrs(tcx: TyCtxt<'_>, id: DefId) -> Option<AutoDiffAttrs> {
         "Reverse" => DiffMode::Reverse,
         _ => {
             span_bug!(mode.span, "rustc_autodiff attribute contains invalid mode");
+        }
+    };
+
+    let width: u32 = match width_meta {
+        MetaItemInner::MetaItem(MetaItem { path: p1, .. }) => {
+            let w = p1.segments.first().unwrap().ident;
+            match w.as_str().parse() {
+                Ok(val) => val,
+                Err(_) => {
+                    span_bug!(w.span, "rustc_autodiff width should fit u32");
+                }
+            }
+        }
+        MetaItemInner::Lit(lit) => {
+            if let LitKind::Int(val, _) = lit.kind {
+                match val.get().try_into() {
+                    Ok(val) => val,
+                    Err(_) => {
+                        span_bug!(lit.span, "rustc_autodiff width should fit u32");
+                    }
+                }
+            } else {
+                span_bug!(lit.span, "rustc_autodiff width should be an integer");
+            }
         }
     };
 
@@ -860,7 +920,7 @@ fn autodiff_attrs(tcx: TyCtxt<'_>, id: DefId) -> Option<AutoDiffAttrs> {
         }
     }
 
-    Some(AutoDiffAttrs { mode, ret_activity, input_activity: arg_activities })
+    Some(AutoDiffAttrs { mode, width, ret_activity, input_activity: arg_activities })
 }
 
 pub(crate) fn provide(providers: &mut Providers) {

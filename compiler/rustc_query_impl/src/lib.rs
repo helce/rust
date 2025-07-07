@@ -3,7 +3,6 @@
 // tidy-alphabetical-start
 #![allow(internal_features)]
 #![allow(unused_parens)]
-#![cfg_attr(doc, recursion_limit = "256")] // FIXME(nnethercote): will be removed by #124141
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
 #![feature(min_specialization)]
@@ -235,7 +234,7 @@ pub fn query_system<'a>(
     }
 }
 
-rustc_middle::rustc_query_append! { define_queries! }
+rustc_middle::rustc_with_all_queries! { define_queries! }
 
 pub fn provide(providers: &mut rustc_middle::util::Providers) {
     providers.hooks.alloc_self_profile_query_strings = alloc_self_profile_query_strings;

@@ -15,7 +15,7 @@ use crate::core::build_steps::doc::DocumentationFormat;
 use crate::core::build_steps::gcc::{Gcc, add_cg_gcc_cargo_flags};
 use crate::core::build_steps::llvm::get_llvm_version;
 use crate::core::build_steps::synthetic_targets::MirOptPanicAbortSyntheticTarget;
-use crate::core::build_steps::tool::{self, SourceType, Tool};
+use crate::core::build_steps::tool::{self, COMPILETEST_ALLOW_FEATURES, SourceType, Tool};
 use crate::core::build_steps::toolstate::ToolState;
 use crate::core::build_steps::{compile, dist, llvm};
 use crate::core::builder::{
@@ -54,6 +54,7 @@ impl Step for CrateBootstrap {
         run.path("src/tools/jsondoclint")
             .path("src/tools/suggest-tests")
             .path("src/tools/replace-version-placeholder")
+            .path("src/tools/coverage-dump")
             // We want `./x test tidy` to _run_ the tidy tool, not its tests.
             // So we need a separate alias to test the tidy tool itself.
             .alias("tidyselftest")
@@ -261,13 +262,7 @@ impl Step for Cargotest {
             .args(builder.config.test_args())
             .env("RUSTC", builder.rustc(compiler))
             .env("RUSTDOC", builder.rustdoc(compiler));
-        add_rustdoc_cargo_linker_args(
-            &mut cmd,
-            builder,
-            compiler.host,
-            LldThreads::No,
-            compiler.stage,
-        );
+        add_rustdoc_cargo_linker_args(&mut cmd, builder, compiler.host, LldThreads::No);
         cmd.delay_failure().run(builder);
     }
 }
@@ -727,7 +722,7 @@ impl Step for CompiletestTest {
             SourceType::InTree,
             &[],
         );
-        cargo.allow_features("test");
+        cargo.allow_features(COMPILETEST_ALLOW_FEATURES);
         run_cargo_test(cargo, &[], &[], "compiletest self test", host, builder);
     }
 }
@@ -845,7 +840,7 @@ impl Step for RustdocTheme {
             .env("CFG_RELEASE_CHANNEL", &builder.config.channel)
             .env("RUSTDOC_REAL", builder.rustdoc(self.compiler))
             .env("RUSTC_BOOTSTRAP", "1");
-        cmd.args(linker_args(builder, self.compiler.host, LldThreads::No, self.compiler.stage));
+        cmd.args(linker_args(builder, self.compiler.host, LldThreads::No));
 
         cmd.delay_failure().run(builder);
     }
@@ -1021,13 +1016,7 @@ impl Step for RustdocGUI {
         cmd.env("RUSTDOC", builder.rustdoc(self.compiler))
             .env("RUSTC", builder.rustc(self.compiler));
 
-        add_rustdoc_cargo_linker_args(
-            &mut cmd,
-            builder,
-            self.compiler.host,
-            LldThreads::No,
-            self.compiler.stage,
-        );
+        add_rustdoc_cargo_linker_args(&mut cmd, builder, self.compiler.host, LldThreads::No);
 
         for path in &builder.paths {
             if let Some(p) = helpers::is_valid_test_suite_arg(path, "tests/rustdoc-gui", builder) {
@@ -1624,19 +1613,11 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
             builder.tool_exe(Tool::RunMakeSupport);
         }
 
-        // Also provide `rust_test_helpers` for the host.
-        builder.ensure(TestHelpers { target: compiler.host });
-
         // ensure that `libproc_macro` is available on the host.
         if suite == "mir-opt" {
             builder.ensure(compile::Std::new(compiler, compiler.host).is_for_mir_opt_tests(true));
         } else {
             builder.ensure(compile::Std::new(compiler, compiler.host));
-        }
-
-        // As well as the target
-        if suite != "mir-opt" {
-            builder.ensure(TestHelpers { target });
         }
 
         let mut cmd = builder.tool_cmd(Tool::Compiletest);
@@ -1804,11 +1785,18 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
         }
 
         let mut hostflags = flags.clone();
-        hostflags.push(format!("-Lnative={}", builder.test_helpers_out(compiler.host).display()));
-        hostflags.extend(linker_flags(builder, compiler.host, LldThreads::No, compiler.stage));
+        hostflags.extend(linker_flags(builder, compiler.host, LldThreads::No));
 
         let mut targetflags = flags;
-        targetflags.push(format!("-Lnative={}", builder.test_helpers_out(target).display()));
+
+        // Provide `rust_test_helpers` for both host and target.
+        if suite == "ui" || suite == "incremental" {
+            builder.ensure(TestHelpers { target: compiler.host });
+            builder.ensure(TestHelpers { target });
+            hostflags
+                .push(format!("-Lnative={}", builder.test_helpers_out(compiler.host).display()));
+            targetflags.push(format!("-Lnative={}", builder.test_helpers_out(target).display()));
+        }
 
         for flag in hostflags {
             cmd.arg("--host-rustcflags").arg(flag);
@@ -1907,7 +1895,7 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
                     .arg(llvm_components.trim());
                 llvm_components_passed = true;
             }
-            if !builder.is_rust_llvm(target) {
+            if !builder.config.is_rust_llvm(target) {
                 cmd.arg("--system-llvm");
             }
 
@@ -2077,7 +2065,6 @@ NOTE: if you're sure you want to do this, please open an issue as to why. In the
         }
 
         let git_config = builder.config.git_config();
-        cmd.arg("--git-repository").arg(git_config.git_repository);
         cmd.arg("--nightly-branch").arg(git_config.nightly_branch);
         cmd.arg("--git-merge-commit-email").arg(git_config.git_merge_commit_email);
         cmd.force_coloring_in_ci();
@@ -2681,7 +2668,7 @@ impl Step for Crate {
             cargo
         } else {
             // Also prepare a sysroot for the target.
-            if !builder.is_builder_target(target) {
+            if !builder.config.is_host_target(target) {
                 builder.ensure(compile::Std::new(compiler, target).force_recompile(true));
                 builder.ensure(RemoteCopyLibs { compiler, target });
             }

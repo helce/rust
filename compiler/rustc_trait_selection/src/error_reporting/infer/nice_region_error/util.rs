@@ -42,7 +42,7 @@ pub fn find_param_with_region<'tcx>(
     anon_region: Region<'tcx>,
     replace_region: Region<'tcx>,
 ) -> Option<AnonymousParamInfo<'tcx>> {
-    let (id, kind) = match *anon_region {
+    let (id, kind) = match anon_region.kind() {
         ty::ReLateParam(late_param) => (late_param.scope, late_param.kind),
         ty::ReEarlyParam(ebr) => {
             let region_def = tcx.generics_of(generic_param_scope).region_param(ebr, tcx).def_id;
@@ -51,7 +51,6 @@ pub fn find_param_with_region<'tcx>(
         _ => return None, // not a free region
     };
 
-    let hir = &tcx.hir();
     let def_id = id.as_local()?;
 
     // FIXME: use def_kind
@@ -93,7 +92,7 @@ pub fn find_param_with_region<'tcx>(
             });
             found_anon_region.then(|| {
                 let ty_hir_id = fn_decl.inputs[index].hir_id;
-                let param_ty_span = hir.span(ty_hir_id);
+                let param_ty_span = tcx.hir_span(ty_hir_id);
                 let is_first = index == 0;
                 AnonymousParamInfo { param, param_ty: new_param_ty, param_ty_span, kind, is_first }
             })
@@ -159,6 +158,6 @@ impl<'a, 'tcx> NiceRegionError<'a, 'tcx> {
             && self
                 .tcx()
                 .opt_associated_item(scope_def_id.to_def_id())
-                .is_some_and(|i| i.fn_has_self_parameter)
+                .is_some_and(|i| i.is_method())
     }
 }

@@ -502,6 +502,7 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
             RemainderByZero(op) => RemainderByZero(eval_to_int(op)?),
             ResumedAfterReturn(coroutine_kind) => ResumedAfterReturn(*coroutine_kind),
             ResumedAfterPanic(coroutine_kind) => ResumedAfterPanic(*coroutine_kind),
+            ResumedAfterDrop(coroutine_kind) => ResumedAfterDrop(*coroutine_kind),
             MisalignedPointerDereference { required, found } => MisalignedPointerDereference {
                 required: eval_to_int(required)?,
                 found: eval_to_int(found)?,
@@ -546,7 +547,7 @@ impl<'tcx> interpret::Machine<'tcx> for CompileTimeMachine<'tcx> {
                         rustc_session::lint::builtin::LONG_RUNNING_CONST_EVAL,
                         hir_id,
                     )
-                    .0
+                    .level
                     .is_error();
                 let span = ecx.cur_span();
                 ecx.tcx.emit_node_span_lint(

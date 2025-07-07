@@ -15,10 +15,9 @@ use rustc_hir::lang_items::LangItem;
 use rustc_infer::infer::{DefineOpaqueTypes, HigherRankedType, InferOk};
 use rustc_infer::traits::ObligationCauseCode;
 use rustc_middle::traits::{BuiltinImplSource, SignatureMismatchData};
-use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt, Upcast};
+use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt, Upcast, elaborate};
 use rustc_middle::{bug, span_bug};
 use rustc_span::def_id::DefId;
-use rustc_type_ir::elaborate;
 use thin_vec::thin_vec;
 use tracing::{debug, instrument};
 
@@ -39,7 +38,12 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         obligation: &PolyTraitObligation<'tcx>,
         candidate: SelectionCandidate<'tcx>,
     ) -> Result<Selection<'tcx>, SelectionError<'tcx>> {
-        let mut impl_src = match candidate {
+        Ok(match candidate {
+            SizedCandidate { has_nested } => {
+                let data = self.confirm_builtin_candidate(obligation, has_nested);
+                ImplSource::Builtin(BuiltinImplSource::Misc, data)
+            }
+
             BuiltinCandidate { has_nested } => {
                 let data = self.confirm_builtin_candidate(obligation, has_nested);
                 ImplSource::Builtin(BuiltinImplSource::Misc, data)
@@ -134,15 +138,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             BikeshedGuaranteedNoDropCandidate => {
                 self.confirm_bikeshed_guaranteed_no_drop_candidate(obligation)
             }
-        };
-
-        // The obligations returned by confirmation are recursively evaluated
-        // so we need to make sure they have the correct depth.
-        for subobligation in impl_src.borrow_nested_obligations_mut() {
-            subobligation.set_depth_from_parent(obligation.recursion_depth);
-        }
-
-        Ok(impl_src)
+        })
     }
 
     fn confirm_projection_candidate(
@@ -320,7 +316,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     obligation.cause.clone(),
                     obligation.recursion_depth + 1,
                     obligation.param_env,
-                    obligation.predicate.rebind(trait_ref),
+                    trait_ref,
                 )
             };
 
@@ -346,7 +342,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
                     obligation.cause.clone(),
                     obligation.recursion_depth + 1,
                     obligation.param_env,
-                    obligation.predicate.rebind(outlives),
+                    outlives,
                 )
             };
 
@@ -407,10 +403,9 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             }
         }
 
-        let predicate = obligation.predicate.skip_binder();
+        let predicate = self.infcx.enter_forall_and_leak_universe(obligation.predicate);
 
         let mut assume = predicate.trait_ref.args.const_at(2);
-        // FIXME(mgca): We should shallowly normalize this.
         if self.tcx().features().generic_const_exprs() {
             assume = crate::traits::evaluate_const(self.infcx, assume, obligation.param_env)
         }
@@ -597,9 +592,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             // Associated types that require `Self: Sized` do not show up in the built-in
             // implementation of `Trait for dyn Trait`, and can be dropped here.
             .filter(|item| !tcx.generics_require_sized_self(item.def_id))
-            .filter_map(
-                |item| if item.kind == ty::AssocKind::Type { Some(item.def_id) } else { None },
-            )
+            .filter_map(|item| if item.is_type() { Some(item.def_id) } else { None })
             .collect();
 
         for assoc_type in assoc_types {
@@ -1093,26 +1086,36 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             {
                 // See `assemble_candidates_for_unsizing` for more info.
                 // We already checked the compatibility of auto traits within `assemble_candidates_for_unsizing`.
-                let iter = data_a
-                    .principal()
-                    .filter(|_| {
-                        // optionally drop the principal, if we're unsizing to no principal
-                        data_b.principal().is_some()
-                    })
-                    .map(|b| b.map_bound(ty::ExistentialPredicate::Trait))
-                    .into_iter()
-                    .chain(
+                let existential_predicates = if data_b.principal().is_some() {
+                    tcx.mk_poly_existential_predicates_from_iter(
                         data_a
-                            .projection_bounds()
-                            .map(|b| b.map_bound(ty::ExistentialPredicate::Projection)),
+                            .principal()
+                            .map(|b| b.map_bound(ty::ExistentialPredicate::Trait))
+                            .into_iter()
+                            .chain(
+                                data_a
+                                    .projection_bounds()
+                                    .map(|b| b.map_bound(ty::ExistentialPredicate::Projection)),
+                            )
+                            .chain(
+                                data_b
+                                    .auto_traits()
+                                    .map(ty::ExistentialPredicate::AutoTrait)
+                                    .map(ty::Binder::dummy),
+                            ),
                     )
-                    .chain(
+                } else {
+                    // If we're unsizing to a dyn type that has no principal, then drop
+                    // the principal and projections from the type. We use the auto traits
+                    // from the RHS type since as we noted that we've checked for auto
+                    // trait compatibility during unsizing.
+                    tcx.mk_poly_existential_predicates_from_iter(
                         data_b
                             .auto_traits()
                             .map(ty::ExistentialPredicate::AutoTrait)
                             .map(ty::Binder::dummy),
-                    );
-                let existential_predicates = tcx.mk_poly_existential_predicates_from_iter(iter);
+                    )
+                };
                 let source_trait = Ty::new_dynamic(tcx, existential_predicates, r_b, dyn_a);
 
                 // Require that the traits involved in this upcast are **equal**;
