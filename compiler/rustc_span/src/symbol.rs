@@ -871,6 +871,7 @@ symbols! {
         dyn_trait,
         dynamic_no_pic: "dynamic-no-pic",
         e,
+        e2k_target_feature,
         edition_panic,
         effects,
         eh_catch_typeinfo,

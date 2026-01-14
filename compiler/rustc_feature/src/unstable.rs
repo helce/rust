@@ -321,6 +321,7 @@ declare_features! (
     (unstable, avx512_target_feature, "1.27.0", Some(44839)),
     (unstable, bpf_target_feature, "1.54.0", Some(44839)),
     (unstable, csky_target_feature, "1.73.0", Some(44839)),
+    (unstable, e2k_target_feature, "1.88.0", Some(44839)),
     (unstable, ermsb_target_feature, "1.49.0", Some(44839)),
     (unstable, hexagon_target_feature, "1.27.0", Some(44839)),
     (unstable, lahfsahf_target_feature, "1.78.0", Some(44839)),
