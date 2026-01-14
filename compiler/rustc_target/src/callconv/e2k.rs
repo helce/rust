@@ -1,5 +1,12 @@
-use rustc_abi::{HasDataLayout, Reg, TyAbiInterface};
+use rustc_abi::{BackendRepr, HasDataLayout, Reg, TyAbiInterface};
 use crate::callconv::{ArgAbi, FnAbi, Uniform};
+
+fn is_e2k_aggregate<Ty>(arg: &ArgAbi<'_, Ty>) -> bool {
+    match arg.layout.backend_repr {
+        BackendRepr::SimdVector { .. } => true,
+        _ => arg.layout.is_aggregate(),
+    }
+}
 
 fn classify_ret<'a, Ty, C>(cx: &C, ret: &mut ArgAbi<'a, Ty>)
 where
@@ -11,8 +18,10 @@ where
         return;
     }
 
-    if ret.layout.is_aggregate() || ret.layout.size.bits() > 64 {
-        ret.cast_to(Uniform::new(Reg::i64(), ret.layout.size.align_to(Reg::i64().align(cx))));
+    if is_e2k_aggregate(ret) || ret.layout.size.bits() > 64 {
+        ret.cast_to(Uniform::new(
+            Reg::i64(), ret.layout.size.align_to(Reg::i64().align(cx))
+        ));
     } else {
         ret.extend_integer_width_to(64);
     }
@@ -28,8 +37,10 @@ where
         return;
     }
 
-    if arg.layout.is_aggregate() || arg.layout.size.bits() > 64 {
-        arg.cast_to(Uniform::new(Reg::i64(), arg.layout.size.align_to(Reg::i64().align(cx))));
+    if is_e2k_aggregate(arg) || arg.layout.size.bits() > 64 {
+        arg.cast_to(Uniform::new(
+            Reg::i64(), arg.layout.size.align_to(Reg::i64().align(cx))
+        ));
     } else {
         arg.extend_integer_width_to(64);
     }
