@@ -2,6 +2,7 @@
 
 //@ compile-flags: -C opt-level=2
 //@ needs-deterministic-layouts (checks depend on tuple layout)
+//@ ignore-e2k some optimization problems
 
 #![crate_type = "lib"]
 

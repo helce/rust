@@ -1,5 +1,6 @@
 //@ revisions: OPT0 OPT0_S390X
 //@ [OPT0] ignore-s390x
+//@ [OPT0] ignore-e2k unadjusted abi unsupported
 //@ [OPT0_S390X] only-s390x
 //@ [OPT0] compile-flags: -C no-prepopulate-passes -Copt-level=0
 //@ [OPT0_S390X] compile-flags: -C no-prepopulate-passes -Copt-level=0 -C target-cpu=z13

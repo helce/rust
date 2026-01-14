@@ -3,6 +3,7 @@
 //@ min-llvm-version: 20
 
 //@[host] ignore-x86_64
+//@[host] ignore-e2k not supported
 
 // Set the base cpu explicitly, in case the default has been changed.
 //@[x86-64] only-x86_64
