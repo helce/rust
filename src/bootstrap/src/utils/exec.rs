@@ -2,7 +2,6 @@
 //!
 //! This module provides a structured way to execute and manage commands efficiently,
 //! ensuring controlled failure handling and output management.
-
 use std::ffi::OsStr;
 use std::fmt::{Debug, Formatter};
 use std::path::Path;
@@ -11,7 +10,7 @@ use std::process::{Command, CommandArgs, CommandEnvs, ExitStatus, Output, Stdio}
 use build_helper::ci::CiEnv;
 use build_helper::drop_bomb::DropBomb;
 
-use crate::Build;
+use super::execution_context::{DeferredCommand, ExecutionContext};
 
 /// What should be done when the command fails.
 #[derive(Debug, Copy, Clone)]
@@ -73,7 +72,7 @@ pub struct BootstrapCommand {
     drop_bomb: DropBomb,
 }
 
-impl BootstrapCommand {
+impl<'a> BootstrapCommand {
     #[track_caller]
     pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
         Command::new(program).into()
@@ -120,12 +119,16 @@ impl BootstrapCommand {
         self
     }
 
+    pub fn stdin(&mut self, stdin: std::process::Stdio) -> &mut Self {
+        self.command.stdin(stdin);
+        self
+    }
+
     #[must_use]
     pub fn delay_failure(self) -> Self {
         Self { failure_behavior: BehaviorOnFailure::DelayFail, ..self }
     }
 
-    #[expect(dead_code)]
     pub fn fail_fast(self) -> Self {
         Self { failure_behavior: BehaviorOnFailure::Exit, ..self }
     }
@@ -143,20 +146,38 @@ impl BootstrapCommand {
     /// Run the command, while printing stdout and stderr.
     /// Returns true if the command has succeeded.
     #[track_caller]
-    pub fn run(&mut self, builder: &Build) -> bool {
-        builder.run(self, OutputMode::Print, OutputMode::Print).is_success()
+    pub fn run(&mut self, exec_ctx: impl AsRef<ExecutionContext>) -> bool {
+        exec_ctx.as_ref().run(self, OutputMode::Print, OutputMode::Print).is_success()
     }
 
     /// Run the command, while capturing and returning all its output.
     #[track_caller]
-    pub fn run_capture(&mut self, builder: &Build) -> CommandOutput {
-        builder.run(self, OutputMode::Capture, OutputMode::Capture)
+    pub fn run_capture(&mut self, exec_ctx: impl AsRef<ExecutionContext>) -> CommandOutput {
+        exec_ctx.as_ref().run(self, OutputMode::Capture, OutputMode::Capture)
     }
 
     /// Run the command, while capturing and returning stdout, and printing stderr.
     #[track_caller]
-    pub fn run_capture_stdout(&mut self, builder: &Build) -> CommandOutput {
-        builder.run(self, OutputMode::Capture, OutputMode::Print)
+    pub fn run_capture_stdout(&mut self, exec_ctx: impl AsRef<ExecutionContext>) -> CommandOutput {
+        exec_ctx.as_ref().run(self, OutputMode::Capture, OutputMode::Print)
+    }
+
+    /// Spawn the command in background, while capturing and returning all its output.
+    #[track_caller]
+    pub fn start_capture(
+        &'a mut self,
+        exec_ctx: impl AsRef<ExecutionContext>,
+    ) -> DeferredCommand<'a> {
+        exec_ctx.as_ref().start(self, OutputMode::Capture, OutputMode::Capture)
+    }
+
+    /// Spawn the command in background, while capturing and returning stdout, and printing stderr.
+    #[track_caller]
+    pub fn start_capture_stdout(
+        &'a mut self,
+        exec_ctx: impl AsRef<ExecutionContext>,
+    ) -> DeferredCommand<'a> {
+        exec_ctx.as_ref().start(self, OutputMode::Capture, OutputMode::Print)
     }
 
     /// Provides access to the stdlib Command inside.
@@ -280,7 +301,6 @@ impl CommandOutput {
         !self.is_success()
     }
 
-    #[expect(dead_code)]
     pub fn status(&self) -> Option<ExitStatus> {
         match self.status {
             CommandStatus::Finished(status) => Some(status),
@@ -332,16 +352,19 @@ impl Default for CommandOutput {
 
 /// Helper trait to format both Command and BootstrapCommand as a short execution line,
 /// without all the other details (e.g. environment variables).
+#[cfg(feature = "tracing")]
 pub trait FormatShortCmd {
     fn format_short_cmd(&self) -> String;
 }
 
+#[cfg(feature = "tracing")]
 impl FormatShortCmd for BootstrapCommand {
     fn format_short_cmd(&self) -> String {
         self.command.format_short_cmd()
     }
 }
 
+#[cfg(feature = "tracing")]
 impl FormatShortCmd for Command {
     fn format_short_cmd(&self) -> String {
         let program = Path::new(self.get_program());

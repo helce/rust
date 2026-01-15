@@ -6,7 +6,7 @@ use std::mem;
 use std::num::NonZero;
 use std::ops::Deref;
 
-use rustc_attr_parsing::{ConstStability, StabilityLevel};
+use rustc_attr_data_structures as attrs;
 use rustc_errors::{Diag, ErrorGuaranteed};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
@@ -356,10 +356,7 @@ impl<'mir, 'tcx> Checker<'mir, 'tcx> {
             hir::ConstContext::ConstFn => true,
             _ => {
                 // For indirect places, we are not creating a new permanent borrow, it's just as
-                // transient as the already existing one. For reborrowing references this is handled
-                // at the top of `visit_rvalue`, but for raw pointers we handle it here.
-                // Pointers/references to `static mut` and cases where the `*` is not the first
-                // projection also end up here.
+                // transient as the already existing one.
                 // Locals with StorageDead do not live beyond the evaluation and can
                 // thus safely be borrowed without being able to be leaked to the final
                 // value of the constant.
@@ -395,7 +392,7 @@ impl<'mir, 'tcx> Checker<'mir, 'tcx> {
         }
 
         let (infcx, param_env) = tcx.infer_ctxt().build_with_typing_env(self.body.typing_env(tcx));
-        let ocx = ObligationCtxt::new_with_diagnostics(&infcx);
+        let ocx = ObligationCtxt::new(&infcx);
 
         let body_id = self.body.source.def_id().expect_local();
         let host_polarity = match self.const_kind() {
@@ -466,16 +463,10 @@ impl<'mir, 'tcx> Checker<'mir, 'tcx> {
         );
     }
 
-    fn crate_inject_span(&self) -> Option<Span> {
-        self.tcx.hir_crate_items(()).definitions().next().and_then(|id| {
-            self.tcx.crate_level_attribute_injection_span(self.tcx.local_def_id_to_hir_id(id))
-        })
-    }
-
     /// Check the const stability of the given item (fn or trait).
     fn check_callee_stability(&mut self, def_id: DefId) {
         match self.tcx.lookup_const_stability(def_id) {
-            Some(ConstStability { level: StabilityLevel::Stable { .. }, .. }) => {
+            Some(attrs::ConstStability { level: attrs::StabilityLevel::Stable { .. }, .. }) => {
                 // All good.
             }
             None => {
@@ -491,8 +482,8 @@ impl<'mir, 'tcx> Checker<'mir, 'tcx> {
                     });
                 }
             }
-            Some(ConstStability {
-                level: StabilityLevel::Unstable { implied_by: implied_feature, issue, .. },
+            Some(attrs::ConstStability {
+                level: attrs::StabilityLevel::Unstable { implied_by: implied_feature, issue, .. },
                 feature,
                 ..
             }) => {
@@ -546,7 +537,6 @@ impl<'mir, 'tcx> Checker<'mir, 'tcx> {
                         feature,
                         feature_enabled,
                         safe_to_expose_on_stable: callee_safe_to_expose_on_stable,
-                        suggestion_span: self.crate_inject_span(),
                         is_function_call: self.tcx.def_kind(def_id) != DefKind::Trait,
                     });
                 }
@@ -589,12 +579,7 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
 
             Rvalue::Aggregate(kind, ..) => {
                 if let AggregateKind::Coroutine(def_id, ..) = kind.as_ref()
-                    && let Some(
-                        coroutine_kind @ hir::CoroutineKind::Desugared(
-                            hir::CoroutineDesugaring::Async,
-                            _,
-                        ),
-                    ) = self.tcx.coroutine_kind(def_id)
+                    && let Some(coroutine_kind) = self.tcx.coroutine_kind(def_id)
                 {
                     self.check_op(ops::Coroutine(coroutine_kind));
                 }
@@ -918,8 +903,8 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
                                 });
                             }
                         }
-                        Some(ConstStability {
-                            level: StabilityLevel::Unstable { .. },
+                        Some(attrs::ConstStability {
+                            level: attrs::StabilityLevel::Unstable { .. },
                             feature,
                             ..
                         }) => {
@@ -927,10 +912,12 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
                                 name: intrinsic.name,
                                 feature,
                                 const_stable_indirect: is_const_stable,
-                                suggestion: self.crate_inject_span(),
                             });
                         }
-                        Some(ConstStability { level: StabilityLevel::Stable { .. }, .. }) => {
+                        Some(attrs::ConstStability {
+                            level: attrs::StabilityLevel::Stable { .. },
+                            ..
+                        }) => {
                             // All good. Note that a `#[rustc_const_stable]` intrinsic (meaning it
                             // can be *directly* invoked from stable const code) does not always
                             // have the `#[rustc_intrinsic_const_stable_indirect]` attribute (which controls

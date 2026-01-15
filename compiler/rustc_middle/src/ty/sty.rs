@@ -15,6 +15,7 @@ use rustc_hir::def_id::DefId;
 use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, extension};
 use rustc_span::{DUMMY_SP, Span, Symbol, sym};
 use rustc_type_ir::TyKind::*;
+use rustc_type_ir::solve::SizedTraitKind;
 use rustc_type_ir::walk::TypeWalker;
 use rustc_type_ir::{self as ir, BoundVar, CollectAndApply, DynKind, TypeVisitableExt, elaborate};
 use tracing::instrument;
@@ -593,7 +594,7 @@ impl<'tcx> Ty<'tcx> {
         ty: Ty<'tcx>,
         mutbl: ty::Mutability,
     ) -> Ty<'tcx> {
-        let pin = tcx.adt_def(tcx.require_lang_item(LangItem::Pin, None));
+        let pin = tcx.adt_def(tcx.require_lang_item(LangItem::Pin, DUMMY_SP));
         Ty::new_adt(tcx, pin, tcx.mk_args(&[Ty::new_ref(tcx, r, ty, mutbl).into()]))
     }
 
@@ -857,19 +858,19 @@ impl<'tcx> Ty<'tcx> {
 
     #[inline]
     pub fn new_box(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
-        let def_id = tcx.require_lang_item(LangItem::OwnedBox, None);
+        let def_id = tcx.require_lang_item(LangItem::OwnedBox, DUMMY_SP);
         Ty::new_generic_adt(tcx, def_id, ty)
     }
 
     #[inline]
     pub fn new_maybe_uninit(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
-        let def_id = tcx.require_lang_item(LangItem::MaybeUninit, None);
+        let def_id = tcx.require_lang_item(LangItem::MaybeUninit, DUMMY_SP);
         Ty::new_generic_adt(tcx, def_id, ty)
     }
 
     /// Creates a `&mut Context<'_>` [`Ty`] with erased lifetimes.
     pub fn new_task_context(tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
-        let context_did = tcx.require_lang_item(LangItem::Context, None);
+        let context_did = tcx.require_lang_item(LangItem::Context, DUMMY_SP);
         let context_adt_ref = tcx.adt_def(context_did);
         let context_args = tcx.mk_args(&[tcx.lifetimes.re_erased.into()]);
         let context_ty = Ty::new_adt(tcx, context_adt_ref, context_args);
@@ -1260,8 +1261,7 @@ impl<'tcx> Ty<'tcx> {
                     return true;
                 };
                 alloc.expect_ty().ty_adt_def().is_some_and(|alloc_adt| {
-                    let global_alloc = tcx.require_lang_item(LangItem::GlobalAlloc, None);
-                    alloc_adt.did() == global_alloc
+                    tcx.is_lang_item(alloc_adt.did(), LangItem::GlobalAlloc)
                 })
             }
             _ => false,
@@ -1550,7 +1550,7 @@ impl<'tcx> Ty<'tcx> {
 
             ty::Param(_) | ty::Alias(..) | ty::Infer(ty::TyVar(_)) => {
                 let assoc_items = tcx.associated_item_def_ids(
-                    tcx.require_lang_item(hir::LangItem::DiscriminantKind, None),
+                    tcx.require_lang_item(hir::LangItem::DiscriminantKind, DUMMY_SP),
                 );
                 Ty::new_projection_from_args(tcx, assoc_items[0], tcx.mk_args(&[self.into()]))
             }
@@ -1630,7 +1630,7 @@ impl<'tcx> Ty<'tcx> {
             ty::Str | ty::Slice(_) => Ok(tcx.types.usize),
 
             ty::Dynamic(_, _, ty::Dyn) => {
-                let dyn_metadata = tcx.require_lang_item(LangItem::DynMetadata, None);
+                let dyn_metadata = tcx.require_lang_item(LangItem::DynMetadata, DUMMY_SP);
                 Ok(tcx.type_of(dyn_metadata).instantiate(tcx, &[tail.into()]))
             }
 
@@ -1678,13 +1678,13 @@ impl<'tcx> Ty<'tcx> {
         let Some(pointee_ty) = self.builtin_deref(true) else {
             bug!("Type {self:?} is not a pointer or reference type")
         };
-        if pointee_ty.is_trivially_sized(tcx) {
+        if pointee_ty.has_trivial_sizedness(tcx, SizedTraitKind::Sized) {
             tcx.types.unit
         } else {
             match pointee_ty.ptr_metadata_ty_or_tail(tcx, |x| x) {
                 Ok(metadata_ty) => metadata_ty,
                 Err(tail_ty) => {
-                    let metadata_def_id = tcx.require_lang_item(LangItem::Metadata, None);
+                    let metadata_def_id = tcx.require_lang_item(LangItem::Metadata, DUMMY_SP);
                     Ty::new_projection(tcx, metadata_def_id, [tail_ty])
                 }
             }
@@ -1779,17 +1779,17 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
-    /// Fast path helper for testing if a type is `Sized`.
+    /// Fast path helper for testing if a type is `Sized` or `MetaSized`.
     ///
-    /// Returning true means the type is known to implement `Sized`. Returning `false` means
-    /// nothing -- could be sized, might not be.
+    /// Returning true means the type is known to implement the sizedness trait. Returning `false`
+    /// means nothing -- could be sized, might not be.
     ///
     /// Note that we could never rely on the fact that a type such as `[_]` is trivially `!Sized`
     /// because we could be in a type environment with a bound such as `[_]: Copy`. A function with
     /// such a bound obviously never can be called, but that doesn't mean it shouldn't typecheck.
     /// This is why this method doesn't return `Option<bool>`.
     #[instrument(skip(tcx), level = "debug")]
-    pub fn is_trivially_sized(self, tcx: TyCtxt<'tcx>) -> bool {
+    pub fn has_trivial_sizedness(self, tcx: TyCtxt<'tcx>, sizedness: SizedTraitKind) -> bool {
         match self.kind() {
             ty::Infer(ty::IntVar(_) | ty::FloatVar(_))
             | ty::Uint(_)
@@ -1812,13 +1812,20 @@ impl<'tcx> Ty<'tcx> {
             | ty::Error(_)
             | ty::Dynamic(_, _, ty::DynStar) => true,
 
-            ty::Str | ty::Slice(_) | ty::Dynamic(_, _, ty::Dyn) | ty::Foreign(..) => false,
+            ty::Str | ty::Slice(_) | ty::Dynamic(_, _, ty::Dyn) => match sizedness {
+                SizedTraitKind::Sized => false,
+                SizedTraitKind::MetaSized => true,
+            },
 
-            ty::Tuple(tys) => tys.last().is_none_or(|ty| ty.is_trivially_sized(tcx)),
+            ty::Foreign(..) => match sizedness {
+                SizedTraitKind::Sized | SizedTraitKind::MetaSized => false,
+            },
+
+            ty::Tuple(tys) => tys.last().is_none_or(|ty| ty.has_trivial_sizedness(tcx, sizedness)),
 
             ty::Adt(def, args) => def
-                .sized_constraint(tcx)
-                .is_none_or(|ty| ty.instantiate(tcx, args).is_trivially_sized(tcx)),
+                .sizedness_constraint(tcx, sizedness)
+                .is_none_or(|ty| ty.instantiate(tcx, args).has_trivial_sizedness(tcx, sizedness)),
 
             ty::Alias(..) | ty::Param(_) | ty::Placeholder(..) | ty::Bound(..) => false,
 
@@ -1883,10 +1890,8 @@ impl<'tcx> Ty<'tcx> {
             // Needs normalization or revealing to determine, so no is the safe answer.
             ty::Alias(..) => false,
 
-            ty::Param(..) | ty::Infer(..) | ty::Error(..) => false,
-
-            ty::Bound(..) | ty::Placeholder(..) => {
-                bug!("`is_trivially_pure_clone_copy` applied to unexpected type: {:?}", self);
+            ty::Param(..) | ty::Placeholder(..) | ty::Bound(..) | ty::Infer(..) | ty::Error(..) => {
+                false
             }
         }
     }

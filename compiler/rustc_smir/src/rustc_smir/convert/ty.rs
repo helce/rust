@@ -100,7 +100,7 @@ impl<'tcx> Stable<'tcx> for ty::ExistentialProjection<'tcx> {
         stable_mir::ty::ExistentialProjection {
             def_id: tables.trait_def(*def_id),
             generic_args: args.stable(tables),
-            term: term.unpack().stable(tables),
+            term: term.kind().stable(tables),
         }
     }
 }
@@ -158,7 +158,7 @@ impl<'tcx> Stable<'tcx> for ty::FieldDef {
 impl<'tcx> Stable<'tcx> for ty::GenericArgs<'tcx> {
     type T = stable_mir::ty::GenericArgs;
     fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
-        GenericArgs(self.iter().map(|arg| arg.unpack().stable(tables)).collect())
+        GenericArgs(self.iter().map(|arg| arg.kind().stable(tables)).collect())
     }
 }
 
@@ -604,8 +604,8 @@ impl<'tcx> Stable<'tcx> for ty::PredicateKind<'tcx> {
             PredicateKind::NormalizesTo(_pred) => unimplemented!(),
             PredicateKind::AliasRelate(a, b, alias_relation_direction) => {
                 stable_mir::ty::PredicateKind::AliasRelate(
-                    a.unpack().stable(tables),
-                    b.unpack().stable(tables),
+                    a.kind().stable(tables),
+                    b.kind().stable(tables),
                     alias_relation_direction.stable(tables),
                 )
             }
@@ -640,7 +640,7 @@ impl<'tcx> Stable<'tcx> for ty::ClauseKind<'tcx> {
                 ty.stable(tables),
             ),
             ClauseKind::WellFormed(term) => {
-                stable_mir::ty::ClauseKind::WellFormed(term.unpack().stable(tables))
+                stable_mir::ty::ClauseKind::WellFormed(term.kind().stable(tables))
             }
             ClauseKind::ConstEvaluatable(const_) => {
                 stable_mir::ty::ClauseKind::ConstEvaluatable(const_.stable(tables))
@@ -726,7 +726,7 @@ impl<'tcx> Stable<'tcx> for ty::ProjectionPredicate<'tcx> {
         let ty::ProjectionPredicate { projection_term, term } = self;
         stable_mir::ty::ProjectionPredicate {
             projection_term: projection_term.stable(tables),
-            term: term.unpack().stable(tables),
+            term: term.kind().stable(tables),
         }
     }
 }
@@ -877,8 +877,10 @@ impl<'tcx> Stable<'tcx> for rustc_abi::ExternAbi {
             ExternAbi::RustCall => Abi::RustCall,
             ExternAbi::Unadjusted => Abi::Unadjusted,
             ExternAbi::RustCold => Abi::RustCold,
+            ExternAbi::RustInvalid => Abi::RustInvalid,
             ExternAbi::RiscvInterruptM => Abi::RiscvInterruptM,
             ExternAbi::RiscvInterruptS => Abi::RiscvInterruptS,
+            ExternAbi::Custom => Abi::Custom,
         }
     }
 }
@@ -957,5 +959,13 @@ impl<'tcx> Stable<'tcx> for ty::ImplTraitInTraitData {
                 ImplTraitInTraitData::Impl { fn_def_id: tables.fn_def(*fn_def_id) }
             }
         }
+    }
+}
+
+impl<'tcx> Stable<'tcx> for rustc_middle::ty::util::Discr<'tcx> {
+    type T = stable_mir::ty::Discr;
+
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        stable_mir::ty::Discr { val: self.val, ty: self.ty.stable(tables) }
     }
 }

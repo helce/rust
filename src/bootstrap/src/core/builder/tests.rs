@@ -8,6 +8,8 @@ use super::*;
 use crate::Flags;
 use crate::core::build_steps::doc::DocumentationFormat;
 use crate::core::config::Config;
+use crate::utils::cache::ExecutedStep;
+use crate::utils::helpers::get_host_target;
 use crate::utils::tests::git::{GitCtx, git_test};
 
 static TEST_TRIPLE_1: &str = "i686-unknown-haiku";
@@ -15,14 +17,15 @@ static TEST_TRIPLE_2: &str = "i686-unknown-hurd-gnu";
 static TEST_TRIPLE_3: &str = "i686-unknown-netbsd";
 
 fn configure(cmd: &str, host: &[&str], target: &[&str]) -> Config {
-    configure_with_args(&[cmd.to_owned()], host, target)
+    configure_with_args(&[cmd], host, target)
 }
 
-fn configure_with_args(cmd: &[String], host: &[&str], target: &[&str]) -> Config {
-    let mut config = Config::parse(Flags::parse(cmd));
+fn configure_with_args(cmd: &[&str], host: &[&str], target: &[&str]) -> Config {
+    let cmd = cmd.iter().copied().map(String::from).collect::<Vec<_>>();
+    let mut config = Config::parse(Flags::parse(&cmd));
     // don't save toolstates
     config.save_toolstates = None;
-    config.dry_run = DryRun::SelfCheck;
+    config.set_dry_run(DryRun::SelfCheck);
 
     // Ignore most submodules, since we don't need them for a dry run, and the
     // tests run much faster without them.
@@ -46,7 +49,7 @@ fn configure_with_args(cmd: &[String], host: &[&str], target: &[&str]) -> Config
         .join(&thread::current().name().unwrap_or("unknown").replace(":", "-"));
     t!(fs::create_dir_all(&dir));
     config.out = dir;
-    config.build = TargetSelection::from_user(TEST_TRIPLE_1);
+    config.host_target = TargetSelection::from_user(TEST_TRIPLE_1);
     config.hosts = host.iter().map(|s| TargetSelection::from_user(s)).collect();
     config.targets = target.iter().map(|s| TargetSelection::from_user(s)).collect();
     config
@@ -67,7 +70,7 @@ fn run_build(paths: &[PathBuf], config: Config) -> Cache {
 fn check_cli<const N: usize>(paths: [&str; N]) {
     run_build(
         &paths.map(PathBuf::from),
-        configure_with_args(&paths.map(String::from), &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]),
+        configure_with_args(&paths, &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]),
     );
 }
 
@@ -237,7 +240,7 @@ fn alias_and_path_for_library() {
     );
     assert_eq!(
         first(cache.all::<doc::Std>()),
-        &[doc_std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 0)]
+        &[doc_std!(TEST_TRIPLE_1 => TEST_TRIPLE_1, stage = 1)]
     );
 }
 
@@ -248,19 +251,6 @@ fn ci_rustc_if_unchanged_invalidate_on_compiler_changes() {
         ctx.create_upstream_merge(&["compiler/bar"]);
         // This change should invalidate download-ci-rustc
         ctx.create_nonupstream_merge(&["compiler/foo"]);
-
-        let config = parse_config_download_rustc_at(ctx.get_path(), "if-unchanged", true);
-        assert_eq!(config.download_rustc_commit, None);
-    });
-}
-
-#[test]
-fn ci_rustc_if_unchanged_invalidate_on_library_changes_in_ci() {
-    git_test(|ctx| {
-        prepare_rustc_checkout(ctx);
-        ctx.create_upstream_merge(&["compiler/bar"]);
-        // This change should invalidate download-ci-rustc
-        ctx.create_nonupstream_merge(&["library/foo"]);
 
         let config = parse_config_download_rustc_at(ctx.get_path(), "if-unchanged", true);
         assert_eq!(config.download_rustc_commit, None);
@@ -433,14 +423,14 @@ mod defaults {
         assert_eq!(first(cache.all::<doc::ErrorIndex>()), &[doc::ErrorIndex { target: a },]);
         assert_eq!(
             first(cache.all::<tool::ErrorIndex>()),
-            &[tool::ErrorIndex { compiler: Compiler::new(0, a) }]
+            &[tool::ErrorIndex { compiler: Compiler::new(1, a) }]
         );
-        // docs should be built with the beta compiler, not with the stage0 artifacts.
+        // docs should be built with the stage0 compiler, not with the stage0 artifacts.
         // recall that rustdoc is off-by-one: `stage` is the compiler rustdoc is _linked_ to,
         // not the one it was built by.
         assert_eq!(
             first(cache.all::<tool::Rustdoc>()),
-            &[tool::Rustdoc { compiler: Compiler::new(0, a) },]
+            &[tool::Rustdoc { compiler: Compiler::new(1, a) },]
         );
     }
 }
@@ -1013,8 +1003,7 @@ mod sysroot_target_dirs {
 /// cg_gcc tests instead.
 #[test]
 fn test_test_compiler() {
-    let cmd = &["test", "compiler"].map(str::to_owned);
-    let config = configure_with_args(cmd, &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
+    let config = configure_with_args(&["test", "compiler"], &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
     let cache = run_build(&config.paths.clone(), config);
 
     let compiler = cache.contains::<test::CrateLibrustc>();
@@ -1047,8 +1036,7 @@ fn test_test_coverage() {
         // Print each test case so that if one fails, the most recently printed
         // case is the one that failed.
         println!("Testing case: {cmd:?}");
-        let cmd = cmd.iter().copied().map(str::to_owned).collect::<Vec<_>>();
-        let config = configure_with_args(&cmd, &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
+        let config = configure_with_args(cmd, &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
         let mut cache = run_build(&config.paths.clone(), config);
 
         let modes =
@@ -1115,7 +1103,7 @@ fn test_prebuilt_llvm_config_path_resolution() {
     let actual = drop_win_disk_prefix_if_present(actual);
     assert_eq!(expected, actual);
 
-    let actual = prebuilt_llvm_config(&builder, builder.config.build, false)
+    let actual = prebuilt_llvm_config(&builder, builder.config.host_target, false)
         .llvm_result()
         .llvm_config
         .clone();
@@ -1133,15 +1121,15 @@ fn test_prebuilt_llvm_config_path_resolution() {
     let build = Build::new(config.clone());
     let builder = Builder::new(&build);
 
-    let actual = prebuilt_llvm_config(&builder, builder.config.build, false)
+    let actual = prebuilt_llvm_config(&builder, builder.config.host_target, false)
         .llvm_result()
         .llvm_config
         .clone();
     let expected = builder
         .out
-        .join(builder.config.build)
+        .join(builder.config.host_target)
         .join("llvm/bin")
-        .join(exe("llvm-config", builder.config.build));
+        .join(exe("llvm-config", builder.config.host_target));
     assert_eq!(expected, actual);
 
     let config = configure(
@@ -1156,15 +1144,15 @@ fn test_prebuilt_llvm_config_path_resolution() {
         let build = Build::new(config.clone());
         let builder = Builder::new(&build);
 
-        let actual = prebuilt_llvm_config(&builder, builder.config.build, false)
+        let actual = prebuilt_llvm_config(&builder, builder.config.host_target, false)
             .llvm_result()
             .llvm_config
             .clone();
         let expected = builder
             .out
-            .join(builder.config.build)
+            .join(builder.config.host_target)
             .join("ci-llvm/bin")
-            .join(exe("llvm-config", builder.config.build));
+            .join(exe("llvm-config", builder.config.host_target));
         assert_eq!(expected, actual);
     }
 }
@@ -1176,7 +1164,7 @@ fn test_is_builder_target() {
 
     for (target1, target2) in [(target1, target2), (target2, target1)] {
         let mut config = configure("build", &[], &[]);
-        config.build = target1;
+        config.host_target = target1;
         let build = Build::new(config);
         let builder = Builder::new(&build);
 
@@ -1220,8 +1208,7 @@ fn test_get_tool_rustc_compiler() {
 /// of `Any { .. }`.
 #[test]
 fn step_cycle_debug() {
-    let cmd = ["run", "cyclic-step"].map(str::to_owned);
-    let config = configure_with_args(&cmd, &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
+    let config = configure_with_args(&["run", "cyclic-step"], &[TEST_TRIPLE_1], &[TEST_TRIPLE_1]);
 
     let err = panic::catch_unwind(|| run_build(&config.paths.clone(), config)).unwrap_err();
     let err = err.downcast_ref::<String>().unwrap().as_str();
@@ -1245,4 +1232,80 @@ fn any_debug() {
     assert_eq!(format!("{x:?}"), format!("{:?}", MyStruct { x: 7 }));
     // Downcasting to the underlying type should succeed.
     assert_eq!(x.downcast_ref::<MyStruct>(), Some(&MyStruct { x: 7 }));
+}
+
+/// The staging tests use insta for snapshot testing.
+/// See bootstrap's README on how to bless the snapshots.
+mod staging {
+    use crate::Build;
+    use crate::core::builder::Builder;
+    use crate::core::builder::tests::{
+        TEST_TRIPLE_1, configure, configure_with_args, render_steps, run_build,
+    };
+    use crate::utils::tests::{ConfigBuilder, TestCtx};
+
+    #[test]
+    fn build_compiler_stage_1() {
+        let ctx = TestCtx::new();
+        insta::assert_snapshot!(
+            ctx.config("build")
+                .path("compiler")
+                .stage(1)
+                .get_steps(), @r"
+        [build] rustc 0 <host> -> std 0 <host>
+        [build] llvm <host>
+        [build] rustc 0 <host> -> rustc 1 <host>
+        [build] rustc 0 <host> -> rustc 1 <host>
+        ");
+    }
+
+    impl ConfigBuilder {
+        fn get_steps(self) -> String {
+            let config = self.create_config();
+
+            let kind = config.cmd.kind();
+            let build = Build::new(config);
+            let builder = Builder::new(&build);
+            builder.run_step_descriptions(&Builder::get_step_descriptions(kind), &builder.paths);
+            render_steps(&builder.cache.into_executed_steps())
+        }
+    }
+}
+
+/// Renders the executed bootstrap steps for usage in snapshot tests with insta.
+/// Only renders certain important steps.
+/// Each value in `steps` should be a tuple of (Step, step output).
+///
+/// The arrow in the rendered output (`X -> Y`) means `X builds Y`.
+/// This is similar to the output printed by bootstrap to stdout, but here it is
+/// generated purely for the purpose of tests.
+fn render_steps(steps: &[ExecutedStep]) -> String {
+    steps
+        .iter()
+        .filter_map(|step| {
+            use std::fmt::Write;
+
+            let Some(metadata) = &step.metadata else {
+                return None;
+            };
+
+            let mut record = format!("[{}] ", metadata.kind.as_str());
+            if let Some(compiler) = metadata.built_by {
+                write!(record, "{} -> ", render_compiler(compiler));
+            }
+            let stage =
+                if let Some(stage) = metadata.stage { format!("{stage} ") } else { "".to_string() };
+            write!(record, "{} {stage}<{}>", metadata.name, normalize_target(metadata.target));
+            Some(record)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_target(target: TargetSelection) -> String {
+    target.to_string().replace(&get_host_target().to_string(), "host")
+}
+
+fn render_compiler(compiler: Compiler) -> String {
+    format!("rustc {} <{}>", compiler.stage, normalize_target(compiler.host))
 }

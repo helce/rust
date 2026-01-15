@@ -10,6 +10,9 @@
 #![allow(internal_features)]
 #![allow(rustc::default_hash_types)]
 #![allow(rustc::potential_query_instability)]
+#![cfg_attr(bootstrap, feature(cfg_match))]
+#![cfg_attr(not(bootstrap), feature(cfg_select))]
+#![cfg_attr(not(bootstrap), feature(sized_hierarchy))]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
@@ -19,12 +22,10 @@
 #![feature(ascii_char_variants)]
 #![feature(assert_matches)]
 #![feature(auto_traits)]
-#![feature(cfg_match)]
 #![feature(core_intrinsics)]
 #![feature(dropck_eyepatch)]
 #![feature(extend_one)]
 #![feature(file_buffered)]
-#![feature(macro_metavar_expr)]
 #![feature(map_try_insert)]
 #![feature(min_specialization)]
 #![feature(negative_impls)]
@@ -43,6 +44,9 @@ use std::fmt;
 pub use atomic_ref::AtomicRef;
 pub use ena::{snapshot_vec, undo_log, unify};
 pub use rustc_index::static_assert_size;
+// re-exported for `rustc_smir`
+// FIXME(sized_hierarchy): remove with `cfg(bootstrap)`, see `rustc_serialize/src/lib.rs`
+pub use rustc_serialize::PointeeSized;
 
 pub mod aligned;
 pub mod base_n;

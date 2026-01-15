@@ -91,7 +91,7 @@ impl From<MirEvalError> for ConstEvalError {
 
 pub(crate) fn path_to_const<'g>(
     db: &dyn HirDatabase,
-    resolver: &Resolver,
+    resolver: &Resolver<'_>,
     path: &Path,
     mode: ParamLoweringMode,
     args: impl FnOnce() -> &'g Generics,
@@ -286,7 +286,7 @@ pub(crate) fn const_eval_discriminant_variant(
         let value = match prev_idx {
             Some(prev_idx) => {
                 1 + db.const_eval_discriminant(
-                    db.enum_variants(loc.parent).variants[prev_idx as usize].0,
+                    loc.parent.enum_variants(db).variants[prev_idx as usize].0,
                 )?
             }
             _ => 0,

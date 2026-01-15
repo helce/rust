@@ -763,6 +763,13 @@ Default: `"hexadecimal"`
 How to render the offset information in a memory layout hover.
 
 
+## rust-analyzer.hover.memoryLayout.padding {#hover.memoryLayout.padding}
+
+Default: `null`
+
+How to render the padding information in a memory layout hover.
+
+
 ## rust-analyzer.hover.memoryLayout.size {#hover.memoryLayout.size}
 
 Default: `"both"`
@@ -835,7 +842,7 @@ Whether to prefer import paths containing a `prelude` module.
 
 ## rust-analyzer.imports.prefix {#imports.prefix}
 
-Default: `"plain"`
+Default: `"crate"`
 
 The path structure for newly inserted paths to use.
 
@@ -1522,6 +1529,13 @@ and therefore, a workspace, whereas `DiscoverArgument::buildfile` is used to
 to update an existing workspace. As a reference for implementors,
 buck2's `rust-project` will likely be useful:
 https://github.com/facebook/buck2/tree/main/integrations/rust-project.
+
+
+## rust-analyzer.workspace.symbol.search.excludeImports {#workspace.symbol.search.excludeImports}
+
+Default: `false`
+
+Exclude imports from symbol search.
 
 
 ## rust-analyzer.workspace.symbol.search.kind {#workspace.symbol.search.kind}

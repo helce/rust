@@ -17,16 +17,16 @@ use tracing::trace;
 use super::memory::MemoryKind;
 use super::util::ensure_monomorphic_enough;
 use super::{
-    Allocation, CheckInAllocMsg, ConstAllocation, GlobalId, ImmTy, InterpCx, InterpResult,
-    MPlaceTy, Machine, OpTy, Pointer, PointerArithmetic, Provenance, Scalar, err_inval,
-    err_ub_custom, err_unsup_format, interp_ok, throw_inval, throw_ub_custom, throw_ub_format,
+    Allocation, CheckInAllocMsg, ConstAllocation, GlobalId, ImmTy, InterpCx, InterpResult, Machine,
+    OpTy, PlaceTy, Pointer, PointerArithmetic, Provenance, Scalar, err_inval, err_ub_custom,
+    err_unsup_format, interp_ok, throw_inval, throw_ub_custom, throw_ub_format,
 };
 use crate::fluent_generated as fluent;
 
 /// Directly returns an `Allocation` containing an absolute path representation of the given type.
 pub(crate) fn alloc_type_name<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> ConstAllocation<'tcx> {
     let path = crate::util::type_name(tcx, ty);
-    let alloc = Allocation::from_bytes_byte_aligned_immutable(path.into_bytes());
+    let alloc = Allocation::from_bytes_byte_aligned_immutable(path.into_bytes(), ());
     tcx.mk_const_alloc(alloc)
 }
 
@@ -49,13 +49,6 @@ pub(crate) fn eval_nullary_intrinsic<'tcx>(
         sym::needs_drop => {
             ensure_monomorphic_enough(tcx, tp_ty)?;
             ConstValue::from_bool(tp_ty.needs_drop(tcx, typing_env))
-        }
-        sym::pref_align_of => {
-            // Correctly handles non-monomorphic calls, so there is no need for ensure_monomorphic_enough.
-            let layout = tcx
-                .layout_of(typing_env.as_query_input(tp_ty))
-                .map_err(|e| err_inval!(Layout(*e)))?;
-            ConstValue::from_target_usize(layout.align.pref.bytes(), &tcx)
         }
         sym::type_id => {
             ensure_monomorphic_enough(tcx, tp_ty)?;
@@ -112,7 +105,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         &mut self,
         instance: ty::Instance<'tcx>,
         args: &[OpTy<'tcx, M::Provenance>],
-        dest: &MPlaceTy<'tcx, M::Provenance>,
+        dest: &PlaceTy<'tcx, M::Provenance>,
         ret: Option<mir::BasicBlock>,
     ) -> InterpResult<'tcx, bool> {
         let instance_args = instance.args;
@@ -127,7 +120,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 self.copy_op(&val, dest)?;
             }
 
-            sym::min_align_of_val | sym::size_of_val => {
+            sym::align_of_val | sym::size_of_val => {
                 // Avoid `deref_pointer` -- this is not a deref, the ptr does not have to be
                 // dereferenceable!
                 let place = self.ref_to_mplace(&self.read_immediate(&args[0])?)?;
@@ -136,7 +129,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                     .ok_or_else(|| err_unsup_format!("`extern type` does not have known layout"))?;
 
                 let result = match intrinsic_name {
-                    sym::min_align_of_val => align.bytes(),
+                    sym::align_of_val => align.bytes(),
                     sym::size_of_val => size.bytes(),
                     _ => bug!(),
                 };
@@ -144,19 +137,15 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 self.write_scalar(Scalar::from_target_usize(result, self), dest)?;
             }
 
-            sym::pref_align_of
-            | sym::needs_drop
-            | sym::type_id
-            | sym::type_name
-            | sym::variant_count => {
+            sym::needs_drop | sym::type_id | sym::type_name | sym::variant_count => {
                 let gid = GlobalId { instance, promoted: None };
-                let ty = match intrinsic_name {
-                    sym::pref_align_of | sym::variant_count => self.tcx.types.usize,
-                    sym::needs_drop => self.tcx.types.bool,
-                    sym::type_id => self.tcx.types.u128,
-                    sym::type_name => Ty::new_static_str(self.tcx.tcx),
-                    _ => bug!(),
-                };
+                let ty = self
+                    .tcx
+                    .fn_sig(instance.def_id())
+                    .instantiate(self.tcx.tcx, instance.args)
+                    .output()
+                    .no_bound_vars()
+                    .unwrap();
                 let val = self
                     .ctfe_query(|tcx| tcx.const_eval_global_id(self.typing_env, gid, tcx.span))?;
                 let val = self.const_val_to_op(val, ty, Some(dest.layout))?;
@@ -493,10 +482,20 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             sym::minnumf64 => self.float_min_intrinsic::<Double>(args, dest)?,
             sym::minnumf128 => self.float_min_intrinsic::<Quad>(args, dest)?,
 
+            sym::minimumf16 => self.float_minimum_intrinsic::<Half>(args, dest)?,
+            sym::minimumf32 => self.float_minimum_intrinsic::<Single>(args, dest)?,
+            sym::minimumf64 => self.float_minimum_intrinsic::<Double>(args, dest)?,
+            sym::minimumf128 => self.float_minimum_intrinsic::<Quad>(args, dest)?,
+
             sym::maxnumf16 => self.float_max_intrinsic::<Half>(args, dest)?,
             sym::maxnumf32 => self.float_max_intrinsic::<Single>(args, dest)?,
             sym::maxnumf64 => self.float_max_intrinsic::<Double>(args, dest)?,
             sym::maxnumf128 => self.float_max_intrinsic::<Quad>(args, dest)?,
+
+            sym::maximumf16 => self.float_maximum_intrinsic::<Half>(args, dest)?,
+            sym::maximumf32 => self.float_maximum_intrinsic::<Single>(args, dest)?,
+            sym::maximumf64 => self.float_maximum_intrinsic::<Double>(args, dest)?,
+            sym::maximumf128 => self.float_maximum_intrinsic::<Quad>(args, dest)?,
 
             sym::copysignf16 => self.float_copysign_intrinsic::<Half>(args, dest)?,
             sym::copysignf32 => self.float_copysign_intrinsic::<Single>(args, dest)?,
@@ -507,6 +506,103 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             sym::fabsf32 => self.float_abs_intrinsic::<Single>(args, dest)?,
             sym::fabsf64 => self.float_abs_intrinsic::<Double>(args, dest)?,
             sym::fabsf128 => self.float_abs_intrinsic::<Quad>(args, dest)?,
+
+            sym::floorf16 => self.float_round_intrinsic::<Half>(
+                args,
+                dest,
+                rustc_apfloat::Round::TowardNegative,
+            )?,
+            sym::floorf32 => self.float_round_intrinsic::<Single>(
+                args,
+                dest,
+                rustc_apfloat::Round::TowardNegative,
+            )?,
+            sym::floorf64 => self.float_round_intrinsic::<Double>(
+                args,
+                dest,
+                rustc_apfloat::Round::TowardNegative,
+            )?,
+            sym::floorf128 => self.float_round_intrinsic::<Quad>(
+                args,
+                dest,
+                rustc_apfloat::Round::TowardNegative,
+            )?,
+
+            sym::ceilf16 => self.float_round_intrinsic::<Half>(
+                args,
+                dest,
+                rustc_apfloat::Round::TowardPositive,
+            )?,
+            sym::ceilf32 => self.float_round_intrinsic::<Single>(
+                args,
+                dest,
+                rustc_apfloat::Round::TowardPositive,
+            )?,
+            sym::ceilf64 => self.float_round_intrinsic::<Double>(
+                args,
+                dest,
+                rustc_apfloat::Round::TowardPositive,
+            )?,
+            sym::ceilf128 => self.float_round_intrinsic::<Quad>(
+                args,
+                dest,
+                rustc_apfloat::Round::TowardPositive,
+            )?,
+
+            sym::truncf16 => {
+                self.float_round_intrinsic::<Half>(args, dest, rustc_apfloat::Round::TowardZero)?
+            }
+            sym::truncf32 => {
+                self.float_round_intrinsic::<Single>(args, dest, rustc_apfloat::Round::TowardZero)?
+            }
+            sym::truncf64 => {
+                self.float_round_intrinsic::<Double>(args, dest, rustc_apfloat::Round::TowardZero)?
+            }
+            sym::truncf128 => {
+                self.float_round_intrinsic::<Quad>(args, dest, rustc_apfloat::Round::TowardZero)?
+            }
+
+            sym::roundf16 => self.float_round_intrinsic::<Half>(
+                args,
+                dest,
+                rustc_apfloat::Round::NearestTiesToAway,
+            )?,
+            sym::roundf32 => self.float_round_intrinsic::<Single>(
+                args,
+                dest,
+                rustc_apfloat::Round::NearestTiesToAway,
+            )?,
+            sym::roundf64 => self.float_round_intrinsic::<Double>(
+                args,
+                dest,
+                rustc_apfloat::Round::NearestTiesToAway,
+            )?,
+            sym::roundf128 => self.float_round_intrinsic::<Quad>(
+                args,
+                dest,
+                rustc_apfloat::Round::NearestTiesToAway,
+            )?,
+
+            sym::round_ties_even_f16 => self.float_round_intrinsic::<Half>(
+                args,
+                dest,
+                rustc_apfloat::Round::NearestTiesToEven,
+            )?,
+            sym::round_ties_even_f32 => self.float_round_intrinsic::<Single>(
+                args,
+                dest,
+                rustc_apfloat::Round::NearestTiesToEven,
+            )?,
+            sym::round_ties_even_f64 => self.float_round_intrinsic::<Double>(
+                args,
+                dest,
+                rustc_apfloat::Round::NearestTiesToEven,
+            )?,
+            sym::round_ties_even_f128 => self.float_round_intrinsic::<Quad>(
+                args,
+                dest,
+                rustc_apfloat::Round::NearestTiesToEven,
+            )?,
 
             // Unsupported intrinsic: skip the return_to_block below.
             _ => return interp_ok(false),
@@ -577,7 +673,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         &mut self,
         a: &ImmTy<'tcx, M::Provenance>,
         b: &ImmTy<'tcx, M::Provenance>,
-        dest: &MPlaceTy<'tcx, M::Provenance>,
+        dest: &PlaceTy<'tcx, M::Provenance>,
     ) -> InterpResult<'tcx> {
         assert_eq!(a.layout.ty, b.layout.ty);
         assert_matches!(a.layout.ty.kind(), ty::Int(..) | ty::Uint(..));
@@ -791,7 +887,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     fn float_min_intrinsic<F>(
         &mut self,
         args: &[OpTy<'tcx, M::Provenance>],
-        dest: &MPlaceTy<'tcx, M::Provenance>,
+        dest: &PlaceTy<'tcx, M::Provenance>,
     ) -> InterpResult<'tcx, ()>
     where
         F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
@@ -812,7 +908,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     fn float_max_intrinsic<F>(
         &mut self,
         args: &[OpTy<'tcx, M::Provenance>],
-        dest: &MPlaceTy<'tcx, M::Provenance>,
+        dest: &PlaceTy<'tcx, M::Provenance>,
     ) -> InterpResult<'tcx, ()>
     where
         F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
@@ -830,10 +926,42 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         interp_ok(())
     }
 
+    fn float_minimum_intrinsic<F>(
+        &mut self,
+        args: &[OpTy<'tcx, M::Provenance>],
+        dest: &PlaceTy<'tcx, M::Provenance>,
+    ) -> InterpResult<'tcx, ()>
+    where
+        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
+    {
+        let a: F = self.read_scalar(&args[0])?.to_float()?;
+        let b: F = self.read_scalar(&args[1])?.to_float()?;
+        let res = a.minimum(b);
+        let res = self.adjust_nan(res, &[a, b]);
+        self.write_scalar(res, dest)?;
+        interp_ok(())
+    }
+
+    fn float_maximum_intrinsic<F>(
+        &mut self,
+        args: &[OpTy<'tcx, M::Provenance>],
+        dest: &PlaceTy<'tcx, M::Provenance>,
+    ) -> InterpResult<'tcx, ()>
+    where
+        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
+    {
+        let a: F = self.read_scalar(&args[0])?.to_float()?;
+        let b: F = self.read_scalar(&args[1])?.to_float()?;
+        let res = a.maximum(b);
+        let res = self.adjust_nan(res, &[a, b]);
+        self.write_scalar(res, dest)?;
+        interp_ok(())
+    }
+
     fn float_copysign_intrinsic<F>(
         &mut self,
         args: &[OpTy<'tcx, M::Provenance>],
-        dest: &MPlaceTy<'tcx, M::Provenance>,
+        dest: &PlaceTy<'tcx, M::Provenance>,
     ) -> InterpResult<'tcx, ()>
     where
         F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
@@ -848,7 +976,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     fn float_abs_intrinsic<F>(
         &mut self,
         args: &[OpTy<'tcx, M::Provenance>],
-        dest: &MPlaceTy<'tcx, M::Provenance>,
+        dest: &PlaceTy<'tcx, M::Provenance>,
     ) -> InterpResult<'tcx, ()>
     where
         F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
@@ -856,6 +984,22 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         let x: F = self.read_scalar(&args[0])?.to_float()?;
         // bitwise, no NaN adjustments
         self.write_scalar(x.abs(), dest)?;
+        interp_ok(())
+    }
+
+    fn float_round_intrinsic<F>(
+        &mut self,
+        args: &[OpTy<'tcx, M::Provenance>],
+        dest: &PlaceTy<'tcx, M::Provenance>,
+        mode: rustc_apfloat::Round,
+    ) -> InterpResult<'tcx, ()>
+    where
+        F: rustc_apfloat::Float + rustc_apfloat::FloatConvert<F> + Into<Scalar<M::Provenance>>,
+    {
+        let x: F = self.read_scalar(&args[0])?.to_float()?;
+        let res = x.round_to_integral(mode).value;
+        let res = self.adjust_nan(res, &[x]);
+        self.write_scalar(res, dest)?;
         interp_ok(())
     }
 }

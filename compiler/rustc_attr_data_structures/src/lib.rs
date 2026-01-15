@@ -1,6 +1,9 @@
+//! Data structures for representing parsed attributes in the Rust compiler.
+//! For detailed documentation about attribute processing,
+//! see [rustc_attr_parsing](https://doc.rust-lang.org/nightly/nightly-rustc/rustc_attr_parsing/index.html).
+
 // tidy-alphabetical-start
 #![allow(internal_features)]
-#![cfg_attr(bootstrap, feature(let_chains))]
 #![doc(rust_logo)]
 #![feature(rustdoc_internals)]
 // tidy-alphabetical-end
@@ -8,6 +11,8 @@
 mod attributes;
 mod stability;
 mod version;
+
+pub mod lints;
 
 use std::num::NonZero;
 

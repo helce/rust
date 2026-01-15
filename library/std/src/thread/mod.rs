@@ -595,7 +595,7 @@ impl Builder {
             // Similarly, the `sys` implementation must guarantee that no references to the closure
             // exist after the thread has terminated, which is signaled by `Thread::join`
             // returning.
-            native: unsafe { imp::Thread::new(stack_size, main)? },
+            native: unsafe { imp::Thread::new(stack_size, my_thread.name(), main)? },
             thread: my_thread,
             packet: my_packet,
         })
@@ -1676,7 +1676,7 @@ impl fmt::Debug for Thread {
 /// [`Result`]: crate::result::Result
 /// [`std::panic::resume_unwind`]: crate::panic::resume_unwind
 #[stable(feature = "rust1", since = "1.0.0")]
-#[cfg_attr(not(bootstrap), doc(search_unbox))]
+#[doc(search_unbox)]
 pub type Result<T> = crate::result::Result<T, Box<dyn Any + Send + 'static>>;
 
 // This packet is used to communicate the return value between the spawned

@@ -42,7 +42,6 @@ use hir_def::{
 use hir_expand::name::Name;
 use la_arena::{Arena, ArenaMap};
 use rustc_hash::FxHashSet;
-use rustc_pattern_analysis::Captures;
 use stdx::{impl_from, never};
 use triomphe::{Arc, ThinArc};
 
@@ -151,10 +150,10 @@ impl LifetimeElisionKind {
 }
 
 #[derive(Debug)]
-pub struct TyLoweringContext<'a> {
-    pub db: &'a dyn HirDatabase,
-    resolver: &'a Resolver,
-    store: &'a ExpressionStore,
+pub struct TyLoweringContext<'db> {
+    pub db: &'db dyn HirDatabase,
+    resolver: &'db Resolver<'db>,
+    store: &'db ExpressionStore,
     def: GenericDefId,
     generics: OnceCell<Generics>,
     in_binders: DebruijnIndex,
@@ -170,11 +169,11 @@ pub struct TyLoweringContext<'a> {
     lifetime_elision: LifetimeElisionKind,
 }
 
-impl<'a> TyLoweringContext<'a> {
+impl<'db> TyLoweringContext<'db> {
     pub fn new(
-        db: &'a dyn HirDatabase,
-        resolver: &'a Resolver,
-        store: &'a ExpressionStore,
+        db: &'db dyn HirDatabase,
+        resolver: &'db Resolver<'db>,
+        store: &'db ExpressionStore,
         def: GenericDefId,
         lifetime_elision: LifetimeElisionKind,
     ) -> Self {
@@ -582,11 +581,28 @@ impl<'a> TyLoweringContext<'a> {
         match bound {
             &TypeBound::Path(path, TraitBoundModifier::None) | &TypeBound::ForLifetime(_, path) => {
                 // FIXME Don't silently drop the hrtb lifetimes here
-                if let Some((trait_ref, ctx)) = self.lower_trait_ref_from_path(path, self_ty) {
-                    if !ignore_bindings {
-                        assoc_bounds = ctx.assoc_type_bindings_from_type_bound(trait_ref.clone());
+                if let Some((trait_ref, mut ctx)) =
+                    self.lower_trait_ref_from_path(path, self_ty.clone())
+                {
+                    // FIXME(sized-hierarchy): Remove this bound modifications once we have implemented
+                    // sized-hierarchy correctly.
+                    let meta_sized = LangItem::MetaSized
+                        .resolve_trait(ctx.ty_ctx().db, ctx.ty_ctx().resolver.krate());
+                    let pointee_sized = LangItem::PointeeSized
+                        .resolve_trait(ctx.ty_ctx().db, ctx.ty_ctx().resolver.krate());
+                    if meta_sized.is_some_and(|it| it == trait_ref.hir_trait_id()) {
+                        // Ignore this bound
+                    } else if pointee_sized.is_some_and(|it| it == trait_ref.hir_trait_id()) {
+                        // Regard this as `?Sized` bound
+                        ctx.ty_ctx().unsized_types.insert(self_ty);
+                    } else {
+                        if !ignore_bindings {
+                            assoc_bounds =
+                                ctx.assoc_type_bindings_from_type_bound(trait_ref.clone());
+                        }
+                        clause =
+                            Some(crate::wrap_empty_binders(WhereClause::Implemented(trait_ref)));
                     }
-                    clause = Some(crate::wrap_empty_binders(WhereClause::Implemented(trait_ref)));
                 }
             }
             &TypeBound::Path(path, TraitBoundModifier::Maybe) => {
@@ -937,8 +953,32 @@ pub(crate) fn generic_predicates_for_param_query(
         | WherePredicate::TypeBound { target, bound, .. } => {
             let invalid_target = { ctx.lower_ty_only_param(*target) != Some(param_id) };
             if invalid_target {
-                // If this is filtered out without lowering, `?Sized` is not gathered into `ctx.unsized_types`
-                if let TypeBound::Path(_, TraitBoundModifier::Maybe) = bound {
+                // FIXME(sized-hierarchy): Revisit and adjust this properly once we have implemented
+                // sized-hierarchy correctly.
+                // If this is filtered out without lowering, `?Sized` or `PointeeSized` is not gathered into
+                // `ctx.unsized_types`
+                let lower = || -> bool {
+                    match bound {
+                        TypeBound::Path(_, TraitBoundModifier::Maybe) => true,
+                        TypeBound::Path(path, _) | TypeBound::ForLifetime(_, path) => {
+                            let TypeRef::Path(path) = &ctx.store[path.type_ref()] else {
+                                return false;
+                            };
+                            let Some(pointee_sized) =
+                                LangItem::PointeeSized.resolve_trait(ctx.db, ctx.resolver.krate())
+                            else {
+                                return false;
+                            };
+                            // Lower the path directly with `Resolver` instead of PathLoweringContext`
+                            // to prevent diagnostics duplications.
+                            ctx.resolver.resolve_path_in_type_ns_fully(ctx.db, path).is_some_and(
+                                |it| matches!(it, TypeNs::TraitId(tr) if tr == pointee_sized),
+                            )
+                        }
+                        _ => false,
+                    }
+                }();
+                if lower {
                     ctx.lower_where_predicate(pred, true).for_each(drop);
                 }
                 return false;
@@ -1176,13 +1216,13 @@ where
 
 /// Generate implicit `: Sized` predicates for all generics that has no `?Sized` bound.
 /// Exception is Self of a trait def.
-fn implicitly_sized_clauses<'a, 'subst: 'a>(
-    db: &dyn HirDatabase,
+fn implicitly_sized_clauses<'db, 'a, 'subst: 'a>(
+    db: &'db dyn HirDatabase,
     def: GenericDefId,
     explicitly_unsized_tys: &'a FxHashSet<Ty>,
     substitution: &'subst Substitution,
-    resolver: &Resolver,
-) -> Option<impl Iterator<Item = WhereClause> + Captures<'a> + Captures<'subst>> {
+    resolver: &Resolver<'db>,
+) -> Option<impl Iterator<Item = WhereClause>> {
     let sized_trait = LangItem::Sized.resolve_trait(db, resolver.krate()).map(to_chalk_trait_id)?;
 
     let trait_self_idx = trait_self_param_idx(db, def);
@@ -1605,6 +1645,14 @@ pub(crate) fn impl_self_ty_with_diagnostics_query(
     )
 }
 
+pub(crate) fn impl_self_ty_with_diagnostics_cycle_result(
+    db: &dyn HirDatabase,
+    impl_id: ImplId,
+) -> (Binders<Ty>, Diagnostics) {
+    let generics = generics(db, impl_id.into());
+    (make_binders(db, &generics, TyKind::Error.intern(Interner)), None)
+}
+
 pub(crate) fn const_param_ty_query(db: &dyn HirDatabase, def: ConstParamId) -> Ty {
     db.const_param_ty_with_diagnostics(def).0
 }
@@ -1634,12 +1682,12 @@ pub(crate) fn const_param_ty_with_diagnostics_query(
     (ty, create_diagnostics(ctx.diagnostics))
 }
 
-pub(crate) fn impl_self_ty_with_diagnostics_cycle_result(
-    db: &dyn HirDatabase,
-    impl_id: ImplId,
-) -> (Binders<Ty>, Diagnostics) {
-    let generics = generics(db, impl_id.into());
-    (make_binders(db, &generics, TyKind::Error.intern(Interner)), None)
+pub(crate) fn const_param_ty_with_diagnostics_cycle_result(
+    _: &dyn HirDatabase,
+    _: crate::db::HirDatabaseData,
+    _: ConstParamId,
+) -> (Ty, Diagnostics) {
+    (TyKind::Error.intern(Interner), None)
 }
 
 pub(crate) fn impl_trait_query(db: &dyn HirDatabase, impl_id: ImplId) -> Option<Binders<TraitRef>> {

@@ -35,7 +35,7 @@ use std::sync::{Arc, Once};
 
 use miri::{
     BacktraceStyle, BorrowTrackerMethod, GenmcConfig, GenmcCtx, MiriConfig, MiriEntryFnType,
-    ProvenanceMode, RetagFields, ValidationMode,
+    ProvenanceMode, RetagFields, TreeBorrowsParams, ValidationMode,
 };
 use rustc_abi::ExternAbi;
 use rustc_data_structures::sync;
@@ -281,7 +281,9 @@ impl rustc_driver::Callbacks for MiriBeRustCompilerCalls {
                             }
                             let codegen_fn_attrs = tcx.codegen_fn_attrs(local_def_id);
                             if codegen_fn_attrs.contains_extern_indicator()
-                                || codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::USED)
+                                || codegen_fn_attrs
+                                    .flags
+                                    .contains(CodegenFnAttrFlags::USED_COMPILER)
                                 || codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER)
                             {
                                 Some((
@@ -459,7 +461,7 @@ fn jemalloc_magic() {
     // linking, so we need to explicitly depend on the function.
     #[cfg(target_os = "macos")]
     {
-        extern "C" {
+        unsafe extern "C" {
             fn _rjem_je_zone_register();
         }
 
@@ -552,8 +554,21 @@ fn main() {
         } else if arg == "-Zmiri-disable-stacked-borrows" {
             miri_config.borrow_tracker = None;
         } else if arg == "-Zmiri-tree-borrows" {
-            miri_config.borrow_tracker = Some(BorrowTrackerMethod::TreeBorrows);
+            miri_config.borrow_tracker =
+                Some(BorrowTrackerMethod::TreeBorrows(TreeBorrowsParams {
+                    precise_interior_mut: true,
+                }));
             miri_config.provenance_mode = ProvenanceMode::Strict;
+        } else if arg == "-Zmiri-tree-borrows-no-precise-interior-mut" {
+            match &mut miri_config.borrow_tracker {
+                Some(BorrowTrackerMethod::TreeBorrows(params)) => {
+                    params.precise_interior_mut = false;
+                }
+                _ =>
+                    show_error!(
+                        "`-Zmiri-tree-borrows` is required before `-Zmiri-tree-borrows-no-precise-interior-mut`"
+                    ),
+            };
         } else if arg == "-Zmiri-disable-data-race-detector" {
             miri_config.data_race_detector = false;
             miri_config.weak_memory_emulation = false;
@@ -584,6 +599,10 @@ fn main() {
         } else if arg == "-Zmiri-ignore-leaks" {
             miri_config.ignore_leaks = true;
             miri_config.collect_leak_backtraces = false;
+        } else if arg == "-Zmiri-force-intrinsic-fallback" {
+            miri_config.force_intrinsic_fallback = true;
+        } else if arg == "-Zmiri-deterministic-floats" {
+            miri_config.float_nondet = false;
         } else if arg == "-Zmiri-strict-provenance" {
             miri_config.provenance_mode = ProvenanceMode::Strict;
         } else if arg == "-Zmiri-permissive-provenance" {
@@ -688,11 +707,18 @@ fn main() {
             };
         } else if let Some(param) = arg.strip_prefix("-Zmiri-native-lib=") {
             let filename = param.to_string();
-            if std::path::Path::new(&filename).exists() {
-                if let Some(other_filename) = miri_config.native_lib {
-                    show_error!("-Zmiri-native-lib is already set to {}", other_filename.display());
+            let file_path = std::path::Path::new(&filename);
+            if file_path.exists() {
+                // For directories, nonrecursively add all normal files inside
+                if let Ok(dir) = file_path.read_dir() {
+                    for lib in dir.filter_map(|res| res.ok()) {
+                        if lib.file_type().unwrap().is_file() {
+                            miri_config.native_lib.push(lib.path().to_owned());
+                        }
+                    }
+                } else {
+                    miri_config.native_lib.push(filename.into());
                 }
-                miri_config.native_lib = Some(filename.into());
             } else {
                 show_error!("-Zmiri-native-lib `{}` does not exist", filename);
             }
@@ -721,18 +747,19 @@ fn main() {
         }
     }
     // Tree Borrows implies strict provenance, and is not compatible with native calls.
-    if matches!(miri_config.borrow_tracker, Some(BorrowTrackerMethod::TreeBorrows)) {
+    if matches!(miri_config.borrow_tracker, Some(BorrowTrackerMethod::TreeBorrows { .. })) {
         if miri_config.provenance_mode != ProvenanceMode::Strict {
             show_error!(
                 "Tree Borrows does not support integer-to-pointer casts, and hence requires strict provenance"
             );
         }
-        if miri_config.native_lib.is_some() {
+        if !miri_config.native_lib.is_empty() {
             show_error!("Tree Borrows is not compatible with calling native functions");
         }
     }
+
     // Native calls and strict provenance are not compatible.
-    if miri_config.native_lib.is_some() && miri_config.provenance_mode == ProvenanceMode::Strict {
+    if !miri_config.native_lib.is_empty() && miri_config.provenance_mode == ProvenanceMode::Strict {
         show_error!("strict provenance is not compatible with calling native functions");
     }
     // You can set either one seed or many.

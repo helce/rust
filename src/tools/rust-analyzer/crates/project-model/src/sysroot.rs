@@ -137,7 +137,12 @@ impl Sysroot {
                 }
 
                 let mut cmd = toolchain::command(tool.prefer_proxy(), current_dir, envs);
-                cmd.env("RUSTUP_TOOLCHAIN", AsRef::<std::path::Path>::as_ref(root));
+                if !envs.contains_key("RUSTUP_TOOLCHAIN")
+                    && std::env::var_os("RUSTUP_TOOLCHAIN").is_none()
+                {
+                    cmd.env("RUSTUP_TOOLCHAIN", AsRef::<std::path::Path>::as_ref(root));
+                }
+
                 cmd
             }
             _ => toolchain::command(tool.path(), current_dir, envs),
@@ -334,7 +339,7 @@ impl Sysroot {
                     Some(_) => {
                         tracing::warn!("unknown rustc-std-workspace-* crate: {}", package.name)
                     }
-                    None => match &*package.name {
+                    None => match &**package.name {
                         "core" => real_core = Some(package.id.clone()),
                         "alloc" => real_alloc = Some(package.id.clone()),
                         "std" => real_std = Some(package.id.clone()),

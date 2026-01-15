@@ -5,7 +5,7 @@
 
 use crate::msrvs::{self, Msrv};
 use hir::LangItem;
-use rustc_attr_parsing::{RustcVersion, StableSince};
+use rustc_attr_data_structures::{RustcVersion, StableSince};
 use rustc_const_eval::check_consts::ConstCx;
 use rustc_hir as hir;
 use rustc_hir::def_id::DefId;
@@ -18,7 +18,7 @@ use rustc_middle::mir::{
 };
 use rustc_middle::traits::{BuiltinImplSource, ImplSource, ObligationCause};
 use rustc_middle::ty::adjustment::PointerCoercion;
-use rustc_middle::ty::{self, GenericArgKind, TraitRef, Ty, TyCtxt};
+use rustc_middle::ty::{self, GenericArgKind, Instance, TraitRef, Ty, TyCtxt};
 use rustc_span::Span;
 use rustc_span::symbol::sym;
 use rustc_trait_selection::traits::{ObligationCtxt, SelectionContext};
@@ -55,7 +55,7 @@ pub fn is_min_const_fn<'tcx>(cx: &LateContext<'tcx>, body: &Body<'tcx>, msrv: Ms
 
 fn check_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>, span: Span, msrv: Msrv) -> McfResult {
     for arg in ty.walk() {
-        let ty = match arg.unpack() {
+        let ty = match arg.kind() {
             GenericArgKind::Type(ty) => ty,
 
             // No constraints on lifetimes or constants, except potentially
@@ -349,7 +349,15 @@ fn check_terminator<'tcx>(
         }
         | TerminatorKind::TailCall { func, args, fn_span: _ } => {
             let fn_ty = func.ty(body, cx.tcx);
-            if let ty::FnDef(fn_def_id, _) = *fn_ty.kind() {
+            if let ty::FnDef(fn_def_id, fn_substs) = fn_ty.kind() {
+                // FIXME: when analyzing a function with generic parameters, we may not have enough information to
+                // resolve to an instance. However, we could check if a host effect predicate can guarantee that
+                // this can be made a `const` call.
+                let fn_def_id = match Instance::try_resolve(cx.tcx, cx.typing_env(), *fn_def_id, fn_substs) {
+                    Ok(Some(fn_inst)) => fn_inst.def_id(),
+                    Ok(None) => return Err((span, format!("cannot resolve instance for {func:?}").into())),
+                    Err(_) => return Err((span, format!("error during instance resolution of {func:?}").into())),
+                };
                 if !is_stable_const_fn(cx, fn_def_id, msrv) {
                     return Err((
                         span,
@@ -393,7 +401,8 @@ fn check_terminator<'tcx>(
     }
 }
 
-fn is_stable_const_fn(cx: &LateContext<'_>, def_id: DefId, msrv: Msrv) -> bool {
+/// Checks if the given `def_id` is a stable const fn, in respect to the given MSRV.
+pub fn is_stable_const_fn(cx: &LateContext<'_>, def_id: DefId, msrv: Msrv) -> bool {
     cx.tcx.is_const_fn(def_id)
         && cx
             .tcx
@@ -404,7 +413,7 @@ fn is_stable_const_fn(cx: &LateContext<'_>, def_id: DefId, msrv: Msrv) -> bool {
                     .and_then(|trait_def_id| cx.tcx.lookup_const_stability(trait_def_id))
             })
             .is_none_or(|const_stab| {
-                if let rustc_attr_parsing::StabilityLevel::Stable { since, .. } = const_stab.level {
+                if let rustc_attr_data_structures::StabilityLevel::Stable { since, .. } = const_stab.level {
                     // Checking MSRV is manually necessary because `rustc` has no such concept. This entire
                     // function could be removed if `rustc` provided a MSRV-aware version of `is_stable_const_fn`.
                     // as a part of an unimplemented MSRV check https://github.com/rust-lang/rust/issues/65262.
@@ -438,7 +447,7 @@ fn is_ty_const_destruct<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>, body: &Body<'tcx>
             tcx,
             ObligationCause::dummy_with_span(body.span),
             param_env,
-            TraitRef::new(tcx, tcx.require_lang_item(LangItem::Destruct, Some(body.span)), [ty]),
+            TraitRef::new(tcx, tcx.require_lang_item(LangItem::Destruct, body.span), [ty]),
         );
 
         let mut selcx = SelectionContext::new(&infcx);

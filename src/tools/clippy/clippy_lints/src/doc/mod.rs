@@ -3,7 +3,6 @@
 use clippy_config::Conf;
 use clippy_utils::attrs::is_doc_hidden;
 use clippy_utils::diagnostics::{span_lint, span_lint_and_help, span_lint_and_then};
-use clippy_utils::source::snippet_opt;
 use clippy_utils::{is_entrypoint_fn, is_trait_impl_item};
 use pulldown_cmark::Event::{
     Code, DisplayMath, End, FootnoteReference, HardBreak, Html, InlineHtml, InlineMath, Rule, SoftBreak, Start,
@@ -26,6 +25,7 @@ use std::ops::Range;
 use url::Url;
 
 mod doc_comment_double_space_linebreaks;
+mod doc_suspicious_footnotes;
 mod include_in_doc_without_cfg;
 mod lazy_continuation;
 mod link_with_quotes;
@@ -93,7 +93,7 @@ declare_clippy_lint! {
     /// ```no_run
     /// //! <code>[first](x)second</code>
     /// ```
-    #[clippy::version = "1.86.0"]
+    #[clippy::version = "1.87.0"]
     pub DOC_LINK_CODE,
     nursery,
     "link with code back-to-back with other code"
@@ -608,6 +608,37 @@ declare_clippy_lint! {
     "double-space used for doc comment linebreak instead of `\\`"
 }
 
+declare_clippy_lint! {
+    /// ### What it does
+    /// Detects syntax that looks like a footnote reference.
+    ///
+    /// Rustdoc footnotes are compatible with GitHub-Flavored Markdown (GFM).
+    /// GFM does not parse a footnote reference unless its definition also
+    /// exists. This lint checks for footnote references with missing
+    /// definitions, unless it thinks you're writing a regex.
+    ///
+    /// ### Why is this bad?
+    /// This probably means that a footnote was meant to exist,
+    /// but was not written.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// /// This is not a footnote[^1], because no definition exists.
+    /// fn my_fn() {}
+    /// ```
+    /// Use instead:
+    /// ```no_run
+    /// /// This is a footnote[^1].
+    /// ///
+    /// /// [^1]: defined here
+    /// fn my_fn() {}
+    /// ```
+    #[clippy::version = "1.88.0"]
+    pub DOC_SUSPICIOUS_FOOTNOTES,
+    suspicious,
+    "looks like a link or footnote ref, but with no definition"
+}
+
 pub struct Documentation {
     valid_idents: FxHashSet<String>,
     check_private_items: bool,
@@ -639,7 +670,8 @@ impl_lint_pass!(Documentation => [
     DOC_OVERINDENTED_LIST_ITEMS,
     TOO_LONG_FIRST_DOC_PARAGRAPH,
     DOC_INCLUDE_WITHOUT_CFG,
-    DOC_COMMENT_DOUBLE_SPACE_LINEBREAKS
+    DOC_COMMENT_DOUBLE_SPACE_LINEBREAKS,
+    DOC_SUSPICIOUS_FOOTNOTES,
 ]);
 
 impl EarlyLintPass for Documentation {
@@ -730,7 +762,10 @@ struct Fragments<'a> {
 }
 
 impl Fragments<'_> {
-    fn span(self, cx: &LateContext<'_>, range: Range<usize>) -> Option<Span> {
+    /// get the span for the markdown range. Note that this function is not cheap, use it with
+    /// caution.
+    #[must_use]
+    fn span(&self, cx: &LateContext<'_>, range: Range<usize>) -> Option<Span> {
         source_span_for_markdown_range(cx.tcx, self.doc, &range, self.fragments)
     }
 }
@@ -823,6 +858,7 @@ fn check_attrs(cx: &LateContext<'_>, valid_idents: &FxHashSet<String>, attrs: &[
             doc: &doc,
             fragments: &fragments,
         },
+        attrs,
     ))
 }
 
@@ -903,6 +939,7 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
     events: Events,
     doc: &str,
     fragments: Fragments<'_>,
+    attrs: &[Attribute],
 ) -> DocHeaders {
     // true if a safety header was found
     let mut headers = DocHeaders::default();
@@ -1068,9 +1105,7 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
                     );
                 } else {
                     for (text, range, assoc_code_level) in text_to_check {
-                        if let Some(span) = fragments.span(cx, range) {
-                            markdown::check(cx, valid_idents, &text, span, assoc_code_level, blockquote_level);
-                        }
+                        markdown::check(cx, valid_idents, &text, &fragments, range, assoc_code_level, blockquote_level);
                     }
                 }
                 text_to_check = Vec::new();
@@ -1081,26 +1116,27 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
             | TaskListMarker(_) | Code(_) | Rule | InlineMath(..) | DisplayMath(..) => (),
             SoftBreak | HardBreak => {
                 if !containers.is_empty()
-                    && let Some((next_event, next_range)) = events.peek()
-                    && let Some(next_span) = fragments.span(cx, next_range.clone())
-                    && let Some(span) = fragments.span(cx, range.clone())
                     && !in_footnote_definition
+                    // Tabs aren't handled correctly vvvv
+                    && !doc[range.clone()].contains('\t')
+                    && let Some((next_event, next_range)) = events.peek()
                     && !matches!(next_event, End(_))
                 {
                     lazy_continuation::check(
                         cx,
                         doc,
                         range.end..next_range.start,
-                        Span::new(span.hi(), next_span.lo(), span.ctxt(), span.parent()),
+                        &fragments,
                         &containers[..],
                     );
                 }
 
-                if let Some(span) = fragments.span(cx, range.clone())
+
+                if event == HardBreak
+                    && !doc[range.clone()].trim().starts_with('\\')
+                    && let Some(span) = fragments.span(cx, range.clone())
                     && !span.from_expansion()
-                    && let Some(snippet) = snippet_opt(cx, span)
-                    && !snippet.trim().starts_with('\\')
-                    && event == HardBreak {
+                    {
                     collected_breaks.push(span);
                 }
             },
@@ -1147,7 +1183,8 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
                         // Don't check the text associated with external URLs
                         continue;
                     }
-                    text_to_check.push((text, range, code_level));
+                    text_to_check.push((text, range.clone(), code_level));
+                    doc_suspicious_footnotes::check(cx, doc, range, &fragments, attrs);
                 }
             }
             FootnoteReference(_) => {}

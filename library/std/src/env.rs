@@ -1047,6 +1047,7 @@ pub mod consts {
     /// * `"sparc64"`
     /// * `"e2k"`
     /// * `"hexagon"`
+    /// * `"loongarch32"`
     /// * `"loongarch64"`
     ///
     /// </details>

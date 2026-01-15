@@ -84,7 +84,7 @@ pub const unwinder_private_data_size: usize = 35;
 #[cfg(target_arch = "e2k")]
 pub const unwinder_private_data_size: usize = 6;
 
-#[cfg(target_arch = "loongarch64")]
+#[cfg(any(target_arch = "loongarch32", target_arch = "loongarch64"))]
 pub const unwinder_private_data_size: usize = 2;
 
 #[repr(C)]

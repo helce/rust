@@ -53,11 +53,11 @@ impl<'tcx> ExportableItemCollector<'tcx> {
         let is_pub = visibilities.is_directly_public(def_id);
 
         if has_attr && !is_pub {
-            let vis = visibilities.effective_vis(def_id).cloned().unwrap_or(
+            let vis = visibilities.effective_vis(def_id).cloned().unwrap_or_else(|| {
                 EffectiveVisibility::from_vis(Visibility::Restricted(
                     self.tcx.parent_module_from_def_id(def_id).to_local_def_id(),
-                )),
-            );
+                ))
+            });
             let vis = vis.at_level(Level::Direct);
             let span = self.tcx.def_span(def_id);
 
@@ -132,7 +132,7 @@ impl<'tcx> Visitor<'tcx> for ExportableItemCollector<'tcx> {
                 self.add_exportable(def_id);
             }
             hir::ItemKind::Use(path, _) => {
-                for res in &path.res {
+                for res in path.res.present_items() {
                     // Only local items are exportable.
                     if let Some(res_id) = res.opt_def_id()
                         && let Some(res_id) = res_id.as_local()

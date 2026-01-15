@@ -914,7 +914,7 @@ fn render_const_scalar(
                     write!(
                         f,
                         "{}",
-                        f.db.enum_variants(loc.parent).variants[loc.index as usize]
+                        loc.parent.enum_variants(f.db).variants[loc.index as usize]
                             .1
                             .display(f.db, f.edition())
                     )?;
@@ -1208,7 +1208,7 @@ impl HirDisplay for Ty {
                         write!(
                             f,
                             "{}",
-                            db.enum_variants(loc.parent).variants[loc.index as usize]
+                            loc.parent.enum_variants(db).variants[loc.index as usize]
                                 .1
                                 .display(db, f.edition())
                         )?
@@ -1463,6 +1463,8 @@ impl HirDisplay for Ty {
                     }
                     if f.closure_style == ClosureStyle::RANotation || !sig.ret().is_unit() {
                         write!(f, " -> ")?;
+                        // FIXME: We display `AsyncFn` as `-> impl Future`, but this is hard to fix because
+                        // we don't have a trait environment here, required to normalize `<Ret as Future>::Output`.
                         sig.ret().hir_fmt(f)?;
                     }
                 } else {
@@ -2080,6 +2082,7 @@ pub fn write_visibility(
 ) -> Result<(), HirDisplayError> {
     match vis {
         Visibility::Public => write!(f, "pub "),
+        Visibility::PubCrate(_) => write!(f, "pub(crate) "),
         Visibility::Module(vis_id, _) => {
             let def_map = module_id.def_map(f.db);
             let root_module_id = def_map.module_id(DefMap::ROOT);

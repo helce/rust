@@ -1583,7 +1583,10 @@ impl<'test> TestCx<'test> {
             Crashes => {
                 set_mir_dump_dir(&mut rustc);
             }
-            Pretty | DebugInfo | Rustdoc | RustdocJson | RunMake | CodegenUnits | RustdocJs => {
+            CodegenUnits => {
+                rustc.arg("-Zprint-mono-items");
+            }
+            Pretty | DebugInfo | Rustdoc | RustdocJson | RunMake | RustdocJs => {
                 // do not use JSON output
             }
         }
@@ -2365,8 +2368,15 @@ impl<'test> TestCx<'test> {
         // Real paths into the libstd/libcore
         let rust_src_dir = &self.config.sysroot_base.join("lib/rustlib/src/rust");
         rust_src_dir.try_exists().expect(&*format!("{} should exists", rust_src_dir));
-        let rust_src_dir = rust_src_dir.read_link_utf8().unwrap_or(rust_src_dir.to_path_buf());
+        let rust_src_dir =
+            rust_src_dir.read_link_utf8().unwrap_or_else(|_| rust_src_dir.to_path_buf());
         normalize_path(&rust_src_dir.join("library"), "$SRC_DIR_REAL");
+
+        // Real paths into the compiler
+        let rustc_src_dir = &self.config.sysroot_base.join("lib/rustlib/rustc-src/rust");
+        rustc_src_dir.try_exists().expect(&*format!("{} should exists", rustc_src_dir));
+        let rustc_src_dir = rustc_src_dir.read_link_utf8().unwrap_or(rustc_src_dir.to_path_buf());
+        normalize_path(&rustc_src_dir.join("compiler"), "$COMPILER_DIR_REAL");
 
         // eg.
         // /home/user/rust/build/x86_64-unknown-linux-gnu/test/ui/<test_dir>/$name.$revision.$mode/
@@ -2606,18 +2616,19 @@ impl<'test> TestCx<'test> {
             (expected, actual)
         };
 
-        // Write the actual output to a file in build/
-        let test_name = self.config.compare_mode.as_ref().map_or("", |m| m.to_str());
+        // Write the actual output to a file in build directory.
         let actual_path = self
             .output_base_name()
             .with_extra_extension(self.revision.unwrap_or(""))
-            .with_extra_extension(test_name)
+            .with_extra_extension(
+                self.config.compare_mode.as_ref().map(|cm| cm.to_str()).unwrap_or(""),
+            )
             .with_extra_extension(stream);
 
         if let Err(err) = fs::write(&actual_path, &actual) {
-            self.fatal(&format!("failed to write {stream} to `{actual_path:?}`: {err}",));
+            self.fatal(&format!("failed to write {stream} to `{actual_path}`: {err}",));
         }
-        println!("Saved the actual {stream} to {actual_path:?}");
+        println!("Saved the actual {stream} to `{actual_path}`");
 
         if !self.config.bless {
             if expected.is_empty() {
@@ -2643,13 +2654,16 @@ impl<'test> TestCx<'test> {
 
             if !actual.is_empty() {
                 if let Err(err) = fs::write(&expected_path, &actual) {
-                    self.fatal(&format!("failed to write {stream} to `{expected_path:?}`: {err}"));
+                    self.fatal(&format!("failed to write {stream} to `{expected_path}`: {err}"));
                 }
-                println!("Blessing the {stream} of {test_name} in {expected_path:?}");
+                println!(
+                    "Blessing the {stream} of `{test_name}` as `{expected_path}`",
+                    test_name = self.testpaths.file
+                );
             }
         }
 
-        println!("\nThe actual {0} differed from the expected {0}.", stream);
+        println!("\nThe actual {stream} differed from the expected {stream}");
 
         if self.config.bless { CompareOutcome::Blessed } else { CompareOutcome::Differed }
     }

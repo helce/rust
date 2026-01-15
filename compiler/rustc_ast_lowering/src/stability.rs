@@ -96,6 +96,9 @@ pub fn extern_abi_stability(abi: ExternAbi) -> Result<(), UnstableAbi> {
         ExternAbi::RustCold => {
             Err(UnstableAbi { abi, feature: sym::rust_cold_cc, explain: GateReason::Experimental })
         }
+        ExternAbi::RustInvalid => {
+            Err(UnstableAbi { abi, feature: sym::rustc_attrs, explain: GateReason::ImplDetail })
+        }
         ExternAbi::GpuKernel => Err(UnstableAbi {
             abi,
             feature: sym::abi_gpu_kernel,
@@ -134,5 +137,8 @@ pub fn extern_abi_stability(abi: ExternAbi) -> Result<(), UnstableAbi> {
             feature: sym::cmse_nonsecure_entry,
             explain: GateReason::Experimental,
         }),
+        ExternAbi::Custom => {
+            Err(UnstableAbi { abi, feature: sym::abi_custom, explain: GateReason::Experimental })
+        }
     }
 }

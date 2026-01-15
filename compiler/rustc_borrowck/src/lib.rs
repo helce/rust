@@ -2,7 +2,6 @@
 
 // tidy-alphabetical-start
 #![allow(internal_features)]
-#![cfg_attr(bootstrap, feature(let_chains))]
 #![doc(rust_logo)]
 #![feature(assert_matches)]
 #![feature(box_patterns)]
@@ -30,7 +29,7 @@ use rustc_errors::LintDiagnostic;
 use rustc_hir as hir;
 use rustc_hir::CRATE_HIR_ID;
 use rustc_hir::def_id::LocalDefId;
-use rustc_index::bit_set::{DenseBitSet, MixedBitSet};
+use rustc_index::bit_set::MixedBitSet;
 use rustc_index::{IndexSlice, IndexVec};
 use rustc_infer::infer::{
     InferCtxt, NllRegionVariableOrigin, RegionVariableOrigin, TyCtxtInferExt,
@@ -41,9 +40,7 @@ use rustc_middle::ty::{
     self, ParamEnv, RegionVid, Ty, TyCtxt, TypeFoldable, TypeVisitable, TypingMode, fold_regions,
 };
 use rustc_middle::{bug, span_bug};
-use rustc_mir_dataflow::impls::{
-    EverInitializedPlaces, MaybeInitializedPlaces, MaybeUninitializedPlaces,
-};
+use rustc_mir_dataflow::impls::{EverInitializedPlaces, MaybeUninitializedPlaces};
 use rustc_mir_dataflow::move_paths::{
     InitIndex, InitLocation, LookupResult, MoveData, MovePathIndex,
 };
@@ -75,6 +72,7 @@ mod constraints;
 mod dataflow;
 mod def_use;
 mod diagnostics;
+mod handle_placeholders;
 mod member_constraints;
 mod nll;
 mod path_utils;
@@ -325,10 +323,6 @@ fn do_mir_borrowck<'tcx>(
 
     let move_data = MoveData::gather_moves(body, tcx, |_| true);
 
-    let flow_inits = MaybeInitializedPlaces::new(tcx, body, &move_data)
-        .iterate_to_fixpoint(tcx, body, Some("borrowck"))
-        .into_results_cursor(body);
-
     let locals_are_invalidated_at_exit = tcx.hir_body_owner_kind(def).is_fn_or_closure();
     let borrow_set = BorrowSet::build(tcx, body, locals_are_invalidated_at_exit, &move_data);
 
@@ -347,7 +341,6 @@ fn do_mir_borrowck<'tcx>(
         body,
         &promoted,
         &location_table,
-        flow_inits,
         &move_data,
         &borrow_set,
         consumer_options,
@@ -1158,11 +1151,11 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, '_, 'tcx> {
         &self,
         location: Location,
         state: &'s BorrowckDomain,
-    ) -> Cow<'s, DenseBitSet<BorrowIndex>> {
+    ) -> Cow<'s, MixedBitSet<BorrowIndex>> {
         if let Some(polonius) = &self.polonius_output {
             // Use polonius output if it has been enabled.
             let location = self.location_table.start_index(location);
-            let mut polonius_output = DenseBitSet::new_empty(self.borrow_set.len());
+            let mut polonius_output = MixedBitSet::new_empty(self.borrow_set.len());
             for &idx in polonius.errors_at(location) {
                 polonius_output.insert(idx);
             }

@@ -10,7 +10,7 @@ use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_data_structures::memmap::{Mmap, MmapMut};
 use rustc_data_structures::sync::{join, par_for_each_in};
 use rustc_data_structures::temp_dir::MaybeTempDir;
-use rustc_data_structures::thousands::format_with_underscores;
+use rustc_data_structures::thousands::usize_with_underscores;
 use rustc_feature::Features;
 use rustc_hir as hir;
 use rustc_hir::def_id::{CRATE_DEF_ID, CRATE_DEF_INDEX, LOCAL_CRATE, LocalDefId, LocalDefIdSet};
@@ -789,7 +789,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     "{} {:<23}{:>10} ({:4.1}%)",
                     prefix,
                     label,
-                    format_with_underscores(size),
+                    usize_with_underscores(size),
                     perc(size)
                 );
             }
@@ -798,7 +798,7 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                 "{} {:<23}{:>10} (of which {:.1}% are zero bytes)",
                 prefix,
                 "Total",
-                format_with_underscores(total_bytes),
+                usize_with_underscores(total_bytes),
                 perc(zero_bytes)
             );
             eprintln!("{prefix}");
@@ -1568,6 +1568,9 @@ impl<'a, 'tcx> EncodeContext<'a, 'tcx> {
                     record_defaulted_array!(self.tables.explicit_implied_const_bounds[def_id]
                         <- tcx.explicit_implied_const_bounds(def_id).skip_binder());
                 }
+            }
+            if let DefKind::AnonConst = def_kind {
+                record!(self.tables.anon_const_kind[def_id] <- self.tcx.anon_const_kind(def_id));
             }
             if tcx.impl_method_has_trait_impl_trait_tys(def_id)
                 && let Ok(table) = self.tcx.collect_return_position_impl_trait_in_trait_tys(def_id)

@@ -37,7 +37,7 @@
 
 use std::ops::Deref;
 
-use rustc_attr_parsing::InlineAttr;
+use rustc_attr_data_structures::InlineAttr;
 use rustc_errors::codes::*;
 use rustc_errors::{Applicability, Diag, struct_span_code_err};
 use rustc_hir as hir;
@@ -47,7 +47,7 @@ use rustc_infer::infer::relate::RelateResult;
 use rustc_infer::infer::{Coercion, DefineOpaqueTypes, InferOk, InferResult};
 use rustc_infer::traits::{
     IfExpressionCause, MatchExpressionArmCause, Obligation, PredicateObligation,
-    PredicateObligations,
+    PredicateObligations, SelectionError,
 };
 use rustc_middle::span_bug;
 use rustc_middle::ty::adjustment::{
@@ -677,7 +677,21 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
                     return Err(TypeError::Mismatch);
                 }
 
-                // Dyn-compatibility violations or miscellaneous.
+                Err(SelectionError::TraitDynIncompatible(_)) => {
+                    // Dyn compatibility errors in coercion will *always* be due to the
+                    // fact that the RHS of the coercion is a non-dyn compatible `dyn Trait`
+                    // writen in source somewhere (otherwise we will never have lowered
+                    // the dyn trait from HIR to middle).
+                    //
+                    // There's no reason to emit yet another dyn compatibility error,
+                    // especially since the span will differ slightly and thus not be
+                    // deduplicated at all!
+                    self.fcx.set_tainted_by_errors(
+                        self.fcx
+                            .dcx()
+                            .span_delayed_bug(self.cause.span, "dyn compatibility during coercion"),
+                    );
+                }
                 Err(err) => {
                     let guar = self.err_ctxt().report_selection_error(
                         obligation.clone(),
@@ -746,8 +760,7 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
                     self.param_env,
                     ty::TraitRef::new(
                         self.tcx,
-                        self.tcx
-                            .require_lang_item(hir::LangItem::PointerLike, Some(self.cause.span)),
+                        self.tcx.require_lang_item(hir::LangItem::PointerLike, self.cause.span),
                         [a],
                     ),
                 ),
@@ -1190,9 +1203,23 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     (ty::FnDef(..), ty::FnDef(..)) => {
                         // Don't reify if the function types have a LUB, i.e., they
                         // are the same function and their parameters have a LUB.
-                        match self
-                            .commit_if_ok(|_| self.at(cause, self.param_env).lub(prev_ty, new_ty))
-                        {
+                        match self.commit_if_ok(|_| {
+                            // We need to eagerly handle nested obligations due to lazy norm.
+                            if self.next_trait_solver() {
+                                let ocx = ObligationCtxt::new(self);
+                                let value = ocx.lub(cause, self.param_env, prev_ty, new_ty)?;
+                                if ocx.select_where_possible().is_empty() {
+                                    Ok(InferOk {
+                                        value,
+                                        obligations: ocx.into_pending_obligations(),
+                                    })
+                                } else {
+                                    Err(TypeError::Mismatch)
+                                }
+                            } else {
+                                self.at(cause, self.param_env).lub(prev_ty, new_ty)
+                            }
+                        }) {
                             // We have a LUB of prev_ty and new_ty, just return it.
                             Ok(ok) => return Ok(self.register_infer_ok_obligations(ok)),
                             Err(_) => {
@@ -1635,9 +1662,7 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                             blk_id,
                             expression,
                         );
-                        if !fcx.tcx.features().unsized_locals() {
-                            unsized_return = self.is_return_ty_definitely_unsized(fcx);
-                        }
+                        unsized_return = self.is_return_ty_definitely_unsized(fcx);
                     }
                     ObligationCauseCode::ReturnValue(return_expr_id) => {
                         err = self.report_return_mismatched_types(
@@ -1649,9 +1674,7 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                             return_expr_id,
                             expression,
                         );
-                        if !fcx.tcx.features().unsized_locals() {
-                            unsized_return = self.is_return_ty_definitely_unsized(fcx);
-                        }
+                        unsized_return = self.is_return_ty_definitely_unsized(fcx);
                     }
                     ObligationCauseCode::MatchExpressionArm(box MatchExpressionArmCause {
                         arm_span,
@@ -1840,17 +1863,16 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
             fcx.err_ctxt().report_mismatched_types(cause, fcx.param_env, expected, found, ty_err);
 
         let due_to_block = matches!(fcx.tcx.hir_node(block_or_return_id), hir::Node::Block(..));
-
-        let parent_id = fcx.tcx.parent_hir_id(block_or_return_id);
-        let parent = fcx.tcx.hir_node(parent_id);
+        let parent = fcx.tcx.parent_hir_node(block_or_return_id);
         if let Some(expr) = expression
             && let hir::Node::Expr(&hir::Expr {
                 kind: hir::ExprKind::Closure(&hir::Closure { body, .. }),
                 ..
             }) = parent
-            && !matches!(fcx.tcx.hir_body(body).value.kind, hir::ExprKind::Block(..))
         {
-            fcx.suggest_missing_semicolon(&mut err, expr, expected, true);
+            let needs_block =
+                !matches!(fcx.tcx.hir_body(body).value.kind, hir::ExprKind::Block(..));
+            fcx.suggest_missing_semicolon(&mut err, expr, expected, needs_block, true);
         }
         // Verify that this is a tail expression of a function, otherwise the
         // label pointing out the cause for the type coercion will be wrong
@@ -1858,7 +1880,7 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
         if let Some(expr) = expression
             && due_to_block
         {
-            fcx.suggest_missing_semicolon(&mut err, expr, expected, false);
+            fcx.suggest_missing_semicolon(&mut err, expr, expected, false, false);
             let pointing_at_return_type = fcx.suggest_mismatched_types_on_tail(
                 &mut err,
                 expr,
@@ -1942,7 +1964,7 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                 fcx.param_env,
                 ty::TraitRef::new(
                     fcx.tcx,
-                    fcx.tcx.require_lang_item(hir::LangItem::Sized, None),
+                    fcx.tcx.require_lang_item(hir::LangItem::Sized, DUMMY_SP),
                     [sig.output()],
                 ),
             ))

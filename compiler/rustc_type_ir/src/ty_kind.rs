@@ -771,23 +771,6 @@ pub enum InferTy {
     FreshFloatTy(u32),
 }
 
-/// Raw `TyVid` are used as the unification key for `sub_relations`;
-/// they carry no values.
-impl UnifyKey for TyVid {
-    type Value = ();
-    #[inline]
-    fn index(&self) -> u32 {
-        self.as_u32()
-    }
-    #[inline]
-    fn from_index(i: u32) -> TyVid {
-        TyVid::from_u32(i)
-    }
-    fn tag() -> &'static str {
-        "TyVid"
-    }
-}
-
 impl UnifyValue for IntVarValue {
     type Error = NoError;
 
@@ -1162,4 +1145,14 @@ pub struct FnHeader<I: Interner> {
     pub c_variadic: bool,
     pub safety: I::Safety,
     pub abi: I::Abi,
+}
+
+#[derive_where(Clone, Copy, Debug, PartialEq, Eq, Hash; I: Interner)]
+#[cfg_attr(
+    feature = "nightly",
+    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
+)]
+#[derive(TypeVisitable_Generic, TypeFoldable_Generic, Lift_Generic)]
+pub struct CoroutineWitnessTypes<I: Interner> {
+    pub types: I::Tys,
 }

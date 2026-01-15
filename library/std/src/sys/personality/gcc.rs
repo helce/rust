@@ -89,7 +89,7 @@ const UNWIND_DATA_REG: (i32, i32) = (10, 11); // x10, x11
 #[cfg(target_arch = "e2k")]
 const UNWIND_DATA_REG: (i32, i32) = (64, 65); // b[0], b[1]
 
-#[cfg(target_arch = "loongarch64")]
+#[cfg(any(target_arch = "loongarch32", target_arch = "loongarch64"))]
 const UNWIND_DATA_REG: (i32, i32) = (4, 5); // a0, a1
 
 // The following code is based on GCC's C and C++ personality routines.  For reference, see:

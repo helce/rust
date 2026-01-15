@@ -32,7 +32,7 @@ use rustc_data_structures::tagged_ptr::Tag;
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 pub use rustc_span::AttrId;
 use rustc_span::source_map::{Spanned, respan};
-use rustc_span::{ErrorGuaranteed, Ident, Span, Symbol, kw, sym};
+use rustc_span::{DUMMY_SP, ErrorGuaranteed, Ident, Span, Symbol, kw, sym};
 use thin_vec::{ThinVec, thin_vec};
 
 pub use crate::format::*;
@@ -97,10 +97,26 @@ pub struct Path {
     pub tokens: Option<LazyAttrTokenStream>,
 }
 
+// Succeeds if the path has a single segment that is arg-free and matches the given symbol.
 impl PartialEq<Symbol> for Path {
     #[inline]
-    fn eq(&self, symbol: &Symbol) -> bool {
-        matches!(&self.segments[..], [segment] if segment.ident.name == *symbol)
+    fn eq(&self, name: &Symbol) -> bool {
+        if let [segment] = self.segments.as_ref()
+            && segment == name
+        {
+            true
+        } else {
+            false
+        }
+    }
+}
+
+// Succeeds if the path has segments that are arg-free and match the given symbols.
+impl PartialEq<&[Symbol]> for Path {
+    #[inline]
+    fn eq(&self, names: &&[Symbol]) -> bool {
+        self.segments.len() == names.len()
+            && self.segments.iter().zip(names.iter()).all(|(s1, s2)| s1 == s2)
     }
 }
 
@@ -118,17 +134,6 @@ impl Path {
     /// one-segment path.
     pub fn from_ident(ident: Ident) -> Path {
         Path { segments: thin_vec![PathSegment::from_ident(ident)], span: ident.span, tokens: None }
-    }
-
-    pub fn is_ident(&self, name: Symbol) -> bool {
-        if let [segment] = self.segments.as_ref()
-            && segment.args.is_none()
-            && segment.ident.name == name
-        {
-            true
-        } else {
-            false
-        }
     }
 
     pub fn is_global(&self) -> bool {
@@ -168,6 +173,14 @@ pub struct PathSegment {
     /// but it can be empty (`Path<>`).
     /// `P` is used as a size optimization for the common case with no parameters.
     pub args: Option<P<GenericArgs>>,
+}
+
+// Succeeds if the path segment is arg-free and matches the given symbol.
+impl PartialEq<Symbol> for PathSegment {
+    #[inline]
+    fn eq(&self, name: &Symbol) -> bool {
+        self.args.is_none() && self.ident.name == *name
+    }
 }
 
 impl PathSegment {
@@ -308,7 +321,6 @@ impl ParenthesizedArgs {
     }
 }
 
-use crate::AstDeref;
 pub use crate::node_id::{CRATE_NODE_ID, DUMMY_NODE_ID, NodeId};
 
 /// Modifiers on a trait bound like `~const`, `?` and `!`.
@@ -611,7 +623,7 @@ impl Pat {
     /// Walk top-down and call `it` in each place where a pattern occurs
     /// starting with the root pattern `walk` is called on. If `it` returns
     /// false then we will descend no further but siblings will be processed.
-    pub fn walk(&self, it: &mut impl FnMut(&Pat) -> bool) {
+    pub fn walk<'ast>(&'ast self, it: &mut impl FnMut(&'ast Pat) -> bool) {
         if !it(self) {
             return;
         }
@@ -695,6 +707,12 @@ impl Pat {
             PatKind::Ref(pat, mutbl) => pat.descr().map(|d| format!("&{}{d}", mutbl.prefix_str())),
             _ => None,
         }
+    }
+}
+
+impl From<P<Pat>> for Pat {
+    fn from(value: P<Pat>) -> Self {
+        *value
     }
 }
 
@@ -1124,10 +1142,9 @@ impl Stmt {
     pub fn add_trailing_semicolon(mut self) -> Self {
         self.kind = match self.kind {
             StmtKind::Expr(expr) => StmtKind::Semi(expr),
-            StmtKind::MacCall(mac) => {
-                StmtKind::MacCall(mac.map(|MacCallStmt { mac, style: _, attrs, tokens }| {
-                    MacCallStmt { mac, style: MacStmtStyle::Semicolon, attrs, tokens }
-                }))
+            StmtKind::MacCall(mut mac) => {
+                mac.style = MacStmtStyle::Semicolon;
+                StmtKind::MacCall(mac)
             }
             kind => kind,
         };
@@ -1439,19 +1456,32 @@ impl Expr {
     }
 
     pub fn precedence(&self) -> ExprPrecedence {
+        fn prefix_attrs_precedence(attrs: &AttrVec) -> ExprPrecedence {
+            for attr in attrs {
+                if let AttrStyle::Outer = attr.style {
+                    return ExprPrecedence::Prefix;
+                }
+            }
+            ExprPrecedence::Unambiguous
+        }
+
         match &self.kind {
             ExprKind::Closure(closure) => {
                 match closure.fn_decl.output {
                     FnRetTy::Default(_) => ExprPrecedence::Jump,
-                    FnRetTy::Ty(_) => ExprPrecedence::Unambiguous,
+                    FnRetTy::Ty(_) => prefix_attrs_precedence(&self.attrs),
                 }
             }
 
-            ExprKind::Break(..)
-            | ExprKind::Ret(..)
-            | ExprKind::Yield(..)
-            | ExprKind::Yeet(..)
-            | ExprKind::Become(..) => ExprPrecedence::Jump,
+            ExprKind::Break(_ /*label*/, value)
+            | ExprKind::Ret(value)
+            | ExprKind::Yield(YieldKind::Prefix(value))
+            | ExprKind::Yeet(value) => match value {
+                Some(_) => ExprPrecedence::Jump,
+                None => prefix_attrs_precedence(&self.attrs),
+            },
+
+            ExprKind::Become(_) => ExprPrecedence::Jump,
 
             // `Range` claims to have higher precedence than `Assign`, but `x .. x = x` fails to
             // parse, instead of parsing as `(x .. x) = x`. Giving `Range` a lower precedence
@@ -1475,7 +1505,7 @@ impl Expr {
             | ExprKind::Let(..)
             | ExprKind::Unary(..) => ExprPrecedence::Prefix,
 
-            // Never need parens
+            // Need parens if and only if there are prefix attributes.
             ExprKind::Array(_)
             | ExprKind::Await(..)
             | ExprKind::Use(..)
@@ -1508,8 +1538,9 @@ impl Expr {
             | ExprKind::Underscore
             | ExprKind::UnsafeBinderCast(..)
             | ExprKind::While(..)
+            | ExprKind::Yield(YieldKind::Postfix(..))
             | ExprKind::Err(_)
-            | ExprKind::Dummy => ExprPrecedence::Unambiguous,
+            | ExprKind::Dummy => prefix_attrs_precedence(&self.attrs),
         }
     }
 
@@ -1526,6 +1557,25 @@ impl Expr {
                 | ExprKind::Path(_, _)
                 | ExprKind::Struct(_)
         )
+    }
+
+    /// Creates a dummy `Expr`.
+    ///
+    /// Should only be used when it will be replaced afterwards or as a return value when an error was encountered.
+    pub fn dummy() -> Expr {
+        Expr {
+            id: DUMMY_NODE_ID,
+            kind: ExprKind::Dummy,
+            span: DUMMY_SP,
+            attrs: ThinVec::new(),
+            tokens: None,
+        }
+    }
+}
+
+impl From<P<Expr>> for Expr {
+    fn from(value: P<Expr>) -> Self {
+        *value
     }
 }
 
@@ -1716,7 +1766,7 @@ pub enum ExprKind {
     ///
     /// Usually not written directly in user code but
     /// indirectly via the macro `core::mem::offset_of!(...)`.
-    OffsetOf(P<Ty>, P<[Ident]>),
+    OffsetOf(P<Ty>, Vec<Ident>),
 
     /// A macro invocation; pre-expansion.
     MacCall(P<MacCall>),
@@ -2336,6 +2386,12 @@ impl Clone for Ty {
     }
 }
 
+impl From<P<Ty>> for Ty {
+    fn from(value: P<Ty>) -> Self {
+        *value
+    }
+}
+
 impl Ty {
     pub fn peel_refs(&self) -> &Self {
         let mut final_ty = self;
@@ -2349,7 +2405,7 @@ impl Ty {
     pub fn is_maybe_parenthesised_infer(&self) -> bool {
         match &self.kind {
             TyKind::Infer => true,
-            TyKind::Paren(inner) => inner.ast_deref().is_maybe_parenthesised_infer(),
+            TyKind::Paren(inner) => inner.is_maybe_parenthesised_infer(),
             _ => false,
         }
     }
@@ -2452,6 +2508,39 @@ impl TyKind {
         } else {
             None
         }
+    }
+
+    /// Returns `true` if this type is considered a scalar primitive (e.g.,
+    /// `i32`, `u8`, `bool`, etc).
+    ///
+    /// This check is based on **symbol equality** and does **not** remove any
+    /// path prefixes or references. If a type alias or shadowing is present
+    /// (e.g., `type i32 = CustomType;`), this method will still return `true`
+    /// for `i32`, even though it may not refer to the primitive type.
+    pub fn maybe_scalar(&self) -> bool {
+        let Some(ty_sym) = self.is_simple_path() else {
+            // unit type
+            return self.is_unit();
+        };
+        matches!(
+            ty_sym,
+            sym::i8
+                | sym::i16
+                | sym::i32
+                | sym::i64
+                | sym::i128
+                | sym::u8
+                | sym::u16
+                | sym::u32
+                | sym::u64
+                | sym::u128
+                | sym::f16
+                | sym::f32
+                | sym::f64
+                | sym::f128
+                | sym::char
+                | sym::bool
+        )
     }
 }
 
@@ -3418,9 +3507,9 @@ impl Item {
             ItemKind::Fn(i) => Some(&i.generics),
             ItemKind::TyAlias(i) => Some(&i.generics),
             ItemKind::TraitAlias(_, generics, _)
-            | ItemKind::Enum(_, _, generics)
-            | ItemKind::Struct(_, _, generics)
-            | ItemKind::Union(_, _, generics) => Some(&generics),
+            | ItemKind::Enum(_, generics, _)
+            | ItemKind::Struct(_, generics, _)
+            | ItemKind::Union(_, generics, _) => Some(&generics),
             ItemKind::Trait(i) => Some(&i.generics),
             ItemKind::Impl(i) => Some(&i.generics),
         }
@@ -3479,6 +3568,38 @@ impl FnHeader {
             || coroutine_kind.is_some()
             || matches!(constness, Const::Yes(_))
             || !matches!(ext, Extern::None)
+    }
+
+    /// Return a span encompassing the header, or none if all options are default.
+    pub fn span(&self) -> Option<Span> {
+        fn append(a: &mut Option<Span>, b: Span) {
+            *a = match a {
+                None => Some(b),
+                Some(x) => Some(x.to(b)),
+            }
+        }
+
+        let mut full_span = None;
+
+        match self.safety {
+            Safety::Unsafe(span) | Safety::Safe(span) => append(&mut full_span, span),
+            Safety::Default => {}
+        };
+
+        if let Some(coroutine_kind) = self.coroutine_kind {
+            append(&mut full_span, coroutine_kind.span());
+        }
+
+        if let Const::Yes(span) = self.constness {
+            append(&mut full_span, span);
+        }
+
+        match self.ext {
+            Extern::Implicit(span) | Extern::Explicit(_, span) => append(&mut full_span, span),
+            Extern::None => {}
+        }
+
+        full_span
     }
 }
 
@@ -3664,15 +3785,15 @@ pub enum ItemKind {
     /// An enum definition (`enum`).
     ///
     /// E.g., `enum Foo<A, B> { C<A>, D<B> }`.
-    Enum(Ident, EnumDef, Generics),
+    Enum(Ident, Generics, EnumDef),
     /// A struct definition (`struct`).
     ///
     /// E.g., `struct Foo<A> { x: A }`.
-    Struct(Ident, VariantData, Generics),
+    Struct(Ident, Generics, VariantData),
     /// A union definition (`union`).
     ///
     /// E.g., `union Foo<A, B> { x: A, y: B }`.
-    Union(Ident, VariantData, Generics),
+    Union(Ident, Generics, VariantData),
     /// A trait declaration (`trait`).
     ///
     /// E.g., `trait Foo { .. }`, `trait Foo<T> { .. }` or `auto trait Foo {}`.
@@ -3689,10 +3810,8 @@ pub enum ItemKind {
     ///
     /// E.g., `foo!(..)`.
     MacCall(P<MacCall>),
-
     /// A macro definition.
     MacroDef(Ident, MacroDef),
-
     /// A single delegation item (`reuse`).
     ///
     /// E.g. `reuse <Type as Trait>::name { target_expr_template }`.
@@ -3768,9 +3887,9 @@ impl ItemKind {
             Self::Fn(box Fn { generics, .. })
             | Self::TyAlias(box TyAlias { generics, .. })
             | Self::Const(box ConstItem { generics, .. })
-            | Self::Enum(_, _, generics)
-            | Self::Struct(_, _, generics)
-            | Self::Union(_, _, generics)
+            | Self::Enum(_, generics, _)
+            | Self::Struct(_, generics, _)
+            | Self::Union(_, generics, _)
             | Self::Trait(box Trait { generics, .. })
             | Self::TraitAlias(_, generics, _)
             | Self::Impl(box Impl { generics, .. }) => Some(generics),

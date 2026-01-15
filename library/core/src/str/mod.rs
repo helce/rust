@@ -17,6 +17,7 @@ use self::pattern::{DoubleEndedSearcher, Pattern, ReverseSearcher, Searcher};
 use crate::char::{self, EscapeDebugExtArgs};
 use crate::ops::Range;
 use crate::slice::{self, SliceIndex};
+use crate::ub_checks::assert_unsafe_precondition;
 use crate::{ascii, mem};
 
 pub mod pattern;
@@ -134,7 +135,7 @@ impl str {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_str_len", since = "1.39.0")]
     #[rustc_diagnostic_item = "str_len"]
-    #[cfg_attr(not(bootstrap), rustc_no_implicit_autorefs)]
+    #[rustc_no_implicit_autorefs]
     #[must_use]
     #[inline]
     pub const fn len(&self) -> usize {
@@ -154,7 +155,7 @@ impl str {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_stable(feature = "const_str_is_empty", since = "1.39.0")]
-    #[cfg_attr(not(bootstrap), rustc_no_implicit_autorefs)]
+    #[rustc_no_implicit_autorefs]
     #[must_use]
     #[inline]
     pub const fn is_empty(&self) -> bool {
@@ -1172,6 +1173,7 @@ impl str {
     /// The iterator returned will return string slices that are sub-slices of
     /// the original string slice, separated by any amount of ASCII whitespace.
     ///
+    /// This uses the same definition as [`char::is_ascii_whitespace`].
     /// To split by Unicode `Whitespace` instead, use [`split_whitespace`].
     ///
     /// [`split_whitespace`]: str::split_whitespace
@@ -1190,7 +1192,8 @@ impl str {
     /// assert_eq!(None, iter.next());
     /// ```
     ///
-    /// All kinds of ASCII whitespace are considered:
+    /// Various kinds of ASCII whitespace are considered
+    /// (see [`char::is_ascii_whitespace`]):
     ///
     /// ```
     /// let mut iter = " Mary   had\ta little  \n\t lamb".split_ascii_whitespace();
@@ -2423,6 +2426,83 @@ impl str {
         suffix.strip_suffix_of(self)
     }
 
+    /// Returns a string slice with the optional prefix removed.
+    ///
+    /// If the string starts with the pattern `prefix`, returns the substring after the prefix.
+    /// Unlike [`strip_prefix`], this method always returns `&str` for easy method chaining,
+    /// instead of returning [`Option<&str>`].
+    ///
+    /// If the string does not start with `prefix`, returns the original string unchanged.
+    ///
+    /// The [pattern] can be a `&str`, [`char`], a slice of [`char`]s, or a
+    /// function or closure that determines if a character matches.
+    ///
+    /// [`char`]: prim@char
+    /// [pattern]: self::pattern
+    /// [`strip_prefix`]: Self::strip_prefix
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(trim_prefix_suffix)]
+    ///
+    /// // Prefix present - removes it
+    /// assert_eq!("foo:bar".trim_prefix("foo:"), "bar");
+    /// assert_eq!("foofoo".trim_prefix("foo"), "foo");
+    ///
+    /// // Prefix absent - returns original string
+    /// assert_eq!("foo:bar".trim_prefix("bar"), "foo:bar");
+    ///
+    /// // Method chaining example
+    /// assert_eq!("<https://example.com/>".trim_prefix('<').trim_suffix('>'), "https://example.com/");
+    /// ```
+    #[must_use = "this returns the remaining substring as a new slice, \
+                  without modifying the original"]
+    #[unstable(feature = "trim_prefix_suffix", issue = "142312")]
+    pub fn trim_prefix<P: Pattern>(&self, prefix: P) -> &str {
+        prefix.strip_prefix_of(self).unwrap_or(self)
+    }
+
+    /// Returns a string slice with the optional suffix removed.
+    ///
+    /// If the string ends with the pattern `suffix`, returns the substring before the suffix.
+    /// Unlike [`strip_suffix`], this method always returns `&str` for easy method chaining,
+    /// instead of returning [`Option<&str>`].
+    ///
+    /// If the string does not end with `suffix`, returns the original string unchanged.
+    ///
+    /// The [pattern] can be a `&str`, [`char`], a slice of [`char`]s, or a
+    /// function or closure that determines if a character matches.
+    ///
+    /// [`char`]: prim@char
+    /// [pattern]: self::pattern
+    /// [`strip_suffix`]: Self::strip_suffix
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(trim_prefix_suffix)]
+    ///
+    /// // Suffix present - removes it
+    /// assert_eq!("bar:foo".trim_suffix(":foo"), "bar");
+    /// assert_eq!("foofoo".trim_suffix("foo"), "foo");
+    ///
+    /// // Suffix absent - returns original string
+    /// assert_eq!("bar:foo".trim_suffix("bar"), "bar:foo");
+    ///
+    /// // Method chaining example
+    /// assert_eq!("<https://example.com/>".trim_prefix('<').trim_suffix('>'), "https://example.com/");
+    /// ```
+    #[must_use = "this returns the remaining substring as a new slice, \
+                  without modifying the original"]
+    #[unstable(feature = "trim_prefix_suffix", issue = "142312")]
+    pub fn trim_suffix<P: Pattern>(&self, suffix: P) -> &str
+    where
+        for<'a> P::Searcher<'a>: ReverseSearcher<'a>,
+    {
+        suffix.strip_suffix_of(self).unwrap_or(self)
+    }
+
     /// Returns a string slice with all suffixes that match a pattern
     /// repeatedly removed.
     ///
@@ -2634,6 +2714,27 @@ impl str {
         self.as_bytes().as_ascii()
     }
 
+    /// Converts this string slice into a slice of [ASCII characters](ascii::Char),
+    /// without checking whether they are valid.
+    ///
+    /// # Safety
+    ///
+    /// Every character in this string must be ASCII, or else this is UB.
+    #[unstable(feature = "ascii_char", issue = "110998")]
+    #[must_use]
+    #[inline]
+    pub const unsafe fn as_ascii_unchecked(&self) -> &[ascii::Char] {
+        assert_unsafe_precondition!(
+            check_library_ub,
+            "as_ascii_unchecked requires that the string is valid ASCII",
+            (it: &str = self) => it.is_ascii()
+        );
+
+        // SAFETY: the caller promised that every byte of this string slice
+        // is ASCII.
+        unsafe { self.as_bytes().as_ascii_unchecked() }
+    }
+
     /// Checks that two strings are an ASCII case-insensitive match.
     ///
     /// Same as `to_ascii_lowercase(a) == to_ascii_lowercase(b)`,
@@ -2647,7 +2748,7 @@ impl str {
     /// assert!(!"Ferrös".eq_ignore_ascii_case("FERRÖS"));
     /// ```
     #[stable(feature = "ascii_methods_on_intrinsics", since = "1.23.0")]
-    #[rustc_const_unstable(feature = "const_eq_ignore_ascii_case", issue = "131719")]
+    #[rustc_const_stable(feature = "const_eq_ignore_ascii_case", since = "1.89.0")]
     #[must_use]
     #[inline]
     pub const fn eq_ignore_ascii_case(&self, other: &str) -> bool {

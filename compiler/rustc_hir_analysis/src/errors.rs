@@ -162,15 +162,6 @@ pub(crate) enum AssocItemNotFoundSugg<'a> {
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_analysis_unrecognized_atomic_operation, code = E0092)]
-pub(crate) struct UnrecognizedAtomicOperation<'a> {
-    #[primary_span]
-    #[label]
-    pub span: Span,
-    pub op: &'a str,
-}
-
-#[derive(Diagnostic)]
 #[diag(hir_analysis_wrong_number_of_generic_arguments_to_intrinsic, code = E0094)]
 pub(crate) struct WrongNumberOfGenericArgumentsToIntrinsic<'a> {
     #[primary_span]
@@ -642,7 +633,7 @@ pub(crate) struct VariadicFunctionCompatibleConvention<'a> {
     #[primary_span]
     #[label]
     pub span: Span,
-    pub conventions: &'a str,
+    pub convention: &'a str,
 }
 
 #[derive(Diagnostic)]
@@ -1327,7 +1318,7 @@ pub(crate) struct ImplForTyRequires {
 }
 
 #[derive(Diagnostic)]
-#[diag(hir_analysis_traits_with_defualt_impl, code = E0321)]
+#[diag(hir_analysis_traits_with_default_impl, code = E0321)]
 #[note]
 pub(crate) struct TraitsWithDefaultImpl<'a> {
     #[primary_span]
@@ -1705,5 +1696,27 @@ pub(crate) enum SupertraitItemShadowee {
 pub(crate) struct SelfInTypeAlias {
     #[primary_span]
     #[label]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_abi_custom_clothed_function)]
+pub(crate) struct AbiCustomClothedFunction {
+    #[primary_span]
+    pub span: Span,
+    #[suggestion(
+        hir_analysis_suggestion,
+        applicability = "maybe-incorrect",
+        code = "#[unsafe(naked)]\n",
+        style = "short"
+    )]
+    pub naked_span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(hir_analysis_async_drop_without_sync_drop)]
+#[help]
+pub(crate) struct AsyncDropWithoutSyncDrop {
+    #[primary_span]
     pub span: Span,
 }

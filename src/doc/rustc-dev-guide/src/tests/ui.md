@@ -13,6 +13,11 @@ used for many other purposes. For example, tests can also be configured to [run
 the resulting program](#controlling-passfail-expectations) to verify its
 behavior.
 
+For a survey of each subdirectory's purpose under `tests/ui`, consult the
+[SUMMARY.md](https://github.com/rust-lang/rust/tree/master/tests/ui/SUMMARY.md).
+This is useful if you write a new test, and are looking for a category to
+place it in.
+
 If you need to work with `#![no_std]` cross-compiling tests, consult the
 [`minicore` test auxiliary](./minicore.md) chapter.
 
@@ -113,6 +118,8 @@ Compiletest makes the following replacements on the compiler output:
 - The base directory where the test's output goes is replaced with
   `$TEST_BUILD_DIR`. This only comes up in a few rare circumstances. Example:
   `/path/to/rust/build/x86_64-unknown-linux-gnu/test/ui`
+- The real directory to the standard library source is replaced with `$SRC_DIR_REAL`.
+- The real directory to the compiler source is replaced with `$COMPILER_DIR_REAL`.
 - Tabs are replaced with `\t`.
 - Backslashes (`\`) are converted to forward slashes (`/`) within paths (using a
   heuristic). This helps normalize differences with Windows-style paths.
@@ -192,7 +199,7 @@ They have several forms, but generally are a comment with the diagnostic level
 to write out the entire message, just make sure to include the important part of
 the message to make it self-documenting.
 
-The error annotation needs to match with the line of the diagnostic. There are
+Most error annotations need to match with the line of the diagnostic. There are
 several ways to match the message with the line (see the examples below):
 
 * `~`: Associates the error level and message with the *current* line
@@ -205,9 +212,6 @@ several ways to match the message with the line (see the examples below):
 * `~v`: Associates the error level and message with the *next* error
   annotation line. Each symbol (`v`) that you add adds a line to this, so `~vvv`
   is three lines below the error annotation line.
-* `~?`: Used to match error levels and messages with errors not having line
-  information. These can be placed on any line in the test file, but are
-  conventionally placed at the end.
 
 Example:
 
@@ -221,6 +225,14 @@ fn meow(_: [u8]) {}
 The space character between `//~` (or other variants) and the subsequent text is
 negligible (i.e. there is no semantic difference between `//~ ERROR` and
 `//~ERROR` although the former is more common in the codebase).
+
+`~? <diagnostic kind>` (example being `~? ERROR`)
+is used to match diagnostics _without_ line info at all,
+or where the line info is outside the main test file[^main test file].
+These annotations can be placed on any line in the test file.
+
+[^main test file]: This is a file that has the `~?` annotations,
+as distinct from aux files, or sources that we have no control over.
 
 ### Error annotation examples
 

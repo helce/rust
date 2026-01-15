@@ -17,13 +17,12 @@
 
 // tidy-alphabetical-start
 #![allow(internal_features)]
-#![cfg_attr(bootstrap, feature(let_chains))]
+#![cfg_attr(bootstrap, feature(cfg_match))]
+#![cfg_attr(not(bootstrap), feature(cfg_select))]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
 #![feature(array_windows)]
-#![feature(cfg_match)]
 #![feature(core_io_borrowed_buf)]
-#![feature(hash_set_entry)]
 #![feature(if_let_guard)]
 #![feature(map_try_insert)]
 #![feature(negative_impls)]
@@ -2601,7 +2600,7 @@ pub trait HashStableContext {
     fn span_data_to_lines_and_cols(
         &mut self,
         span: &SpanData,
-    ) -> Option<(Arc<SourceFile>, usize, BytePos, usize, BytePos)>;
+    ) -> Option<(StableSourceFileId, usize, BytePos, usize, BytePos)>;
     fn hashing_controls(&self) -> HashingControls;
 }
 
@@ -2658,7 +2657,7 @@ where
         };
 
         Hash::hash(&TAG_VALID_SPAN, hasher);
-        Hash::hash(&file.stable_id, hasher);
+        Hash::hash(&file, hasher);
 
         // Hash both the length and the end location (line/column) of a span. If we
         // hash only the length, for example, then two otherwise equal spans with

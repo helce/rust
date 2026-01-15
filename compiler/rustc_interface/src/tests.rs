@@ -27,7 +27,7 @@ use rustc_span::source_map::{RealFileLoader, SourceMapInputs};
 use rustc_span::{FileName, SourceFileHashAlgorithm, sym};
 use rustc_target::spec::{
     CodeModel, FramePointer, LinkerFlavorCli, MergeFunctions, OnBrokenPipe, PanicStrategy,
-    RelocModel, RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, TlsModel, WasmCAbi,
+    RelocModel, RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, TlsModel,
 };
 
 use crate::interface::{initialize_checked_jobserver, parse_cfg};
@@ -709,18 +709,20 @@ fn test_unstable_options_tracking_hash() {
     untracked!(llvm_time_trace, true);
     untracked!(ls, vec!["all".to_owned()]);
     untracked!(macro_backtrace, true);
+    untracked!(macro_stats, true);
     untracked!(meta_stats, true);
     untracked!(mir_include_spans, MirIncludeSpans::On);
     untracked!(nll_facts, true);
     untracked!(no_analysis, true);
     untracked!(no_leak_check, true);
     untracked!(no_parallel_backend, true);
+    untracked!(no_steal_thir, true);
     untracked!(parse_crate_root_only, true);
     // `pre_link_arg` is omitted because it just forwards to `pre_link_args`.
     untracked!(pre_link_args, vec![String::from("abc"), String::from("def")]);
     untracked!(print_codegen_stats, true);
     untracked!(print_llvm_passes, true);
-    untracked!(print_mono_items, Some(String::from("abc")));
+    untracked!(print_mono_items, true);
     untracked!(print_type_sizes, true);
     untracked!(proc_macro_backtrace, true);
     untracked!(proc_macro_execution_strategy, ProcMacroExecutionStrategy::CrossThread);
@@ -800,6 +802,7 @@ fn test_unstable_options_tracking_hash() {
     tracked!(force_unstable_if_unmarked, true);
     tracked!(function_return, FunctionReturn::ThunkExtern);
     tracked!(function_sections, Some(false));
+    tracked!(hint_mostly_unused, true);
     tracked!(human_readable_cgu_names, true);
     tracked!(incremental_ignore_spans, true);
     tracked!(inline_mir, Some(true));
@@ -880,7 +883,6 @@ fn test_unstable_options_tracking_hash() {
     tracked!(verify_llvm_ir, true);
     tracked!(virtual_function_elimination, true);
     tracked!(wasi_exec_model, Some(WasiExecModel::Reactor));
-    tracked!(wasm_c_abi, WasmCAbi::Spec);
     // tidy-alphabetical-end
 
     macro_rules! tracked_no_crate_hash {

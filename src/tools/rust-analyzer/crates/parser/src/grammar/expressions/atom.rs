@@ -381,10 +381,14 @@ fn parse_asm_expr(p: &mut Parser<'_>, m: Marker) -> Option<CompletedMarker> {
             op.complete(p, ASM_REG_OPERAND);
             op_n.complete(p, ASM_OPERAND_NAMED);
         } else if p.eat_contextual_kw(T![label]) {
+            // test asm_label
+            // fn foo() {
+            //     builtin#asm("", label {});
+            // }
             dir_spec.abandon(p);
             block_expr(p);
-            op.complete(p, ASM_OPERAND_NAMED);
-            op_n.complete(p, ASM_LABEL);
+            op.complete(p, ASM_LABEL);
+            op_n.complete(p, ASM_OPERAND_NAMED);
         } else if p.eat(T![const]) {
             dir_spec.abandon(p);
             expr(p);
@@ -558,8 +562,12 @@ fn closure_expr(p: &mut Parser<'_>) -> CompletedMarker {
 
     let m = p.start();
 
+    // test closure_binder
+    // fn main() { for<'a> || (); }
     if p.at(T![for]) {
+        let b = p.start();
         types::for_binder(p);
+        b.complete(p, CLOSURE_BINDER);
     }
     // test const_closure
     // fn main() { let cl = const || _ = 0; }

@@ -44,6 +44,14 @@ fn associated_type_bounds<'tcx>(
             | PredicateFilter::SelfOnly
             | PredicateFilter::SelfTraitThatDefines(_)
             | PredicateFilter::SelfAndAssociatedTypeBounds => {
+                icx.lowerer().add_sizedness_bounds(
+                    &mut bounds,
+                    item_ty,
+                    hir_bounds,
+                    None,
+                    None,
+                    span,
+                );
                 icx.lowerer().add_default_traits(&mut bounds, item_ty, hir_bounds, None, span);
             }
             // `ConstIfConst` is only interested in `~const` bounds.
@@ -151,7 +159,7 @@ fn remap_gat_vars_and_recurse_into_nested_projections<'tcx>(
     let mut mapping = FxIndexMap::default();
     let generics = tcx.generics_of(assoc_item_def_id);
     for (param, var) in std::iter::zip(&generics.own_params, gat_vars) {
-        let existing = match var.unpack() {
+        let existing = match var.kind() {
             ty::GenericArgKind::Lifetime(re) => {
                 if let ty::RegionKind::ReBound(ty::INNERMOST, bv) = re.kind() {
                     mapping.insert(bv.var, tcx.mk_param_from_def(param))
@@ -333,6 +341,14 @@ fn opaque_type_bounds<'tcx>(
             | PredicateFilter::SelfOnly
             | PredicateFilter::SelfTraitThatDefines(_)
             | PredicateFilter::SelfAndAssociatedTypeBounds => {
+                icx.lowerer().add_sizedness_bounds(
+                    &mut bounds,
+                    item_ty,
+                    hir_bounds,
+                    None,
+                    None,
+                    span,
+                );
                 icx.lowerer().add_default_traits(&mut bounds, item_ty, hir_bounds, None, span);
             }
             //`ConstIfConst` is only interested in `~const` bounds.

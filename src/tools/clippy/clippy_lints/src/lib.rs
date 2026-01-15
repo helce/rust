@@ -1,5 +1,4 @@
 #![feature(array_windows)]
-#![feature(binary_heap_into_iter_sorted)]
 #![feature(box_patterns)]
 #![feature(macro_metavar_expr_concat)]
 #![feature(f128)]
@@ -7,7 +6,6 @@
 #![feature(if_let_guard)]
 #![feature(iter_intersperse)]
 #![feature(iter_partition_in_place)]
-#![feature(let_chains)]
 #![feature(never_type)]
 #![feature(round_char_boundary)]
 #![feature(rustc_private)]
@@ -37,7 +35,7 @@ extern crate rustc_abi;
 extern crate rustc_arena;
 extern crate rustc_ast;
 extern crate rustc_ast_pretty;
-extern crate rustc_attr_parsing;
+extern crate rustc_attr_data_structures;
 extern crate rustc_data_structures;
 extern crate rustc_driver;
 extern crate rustc_errors;
@@ -57,6 +55,7 @@ extern crate rustc_session;
 extern crate rustc_span;
 extern crate rustc_target;
 extern crate rustc_trait_selection;
+extern crate smallvec;
 extern crate thin_vec;
 
 #[macro_use]
@@ -67,11 +66,10 @@ extern crate clippy_utils;
 
 mod utils;
 
-pub mod ctfe; // Very important lint, do not remove (rust#125116)
 pub mod declared_lints;
 pub mod deprecated_lints;
 
-// begin lints modules, do not remove this comment, it’s used in `update_lints`
+// begin lints modules, do not remove this comment, it's used in `update_lints`
 mod absolute_paths;
 mod almost_complete_range;
 mod approx_const;
@@ -96,6 +94,8 @@ mod cargo;
 mod casts;
 mod cfg_not_test;
 mod checked_conversions;
+mod cloned_ref_to_slice_refs;
+mod coerce_container_to_any;
 mod cognitive_complexity;
 mod collapsible_if;
 mod collection_is_never_read;
@@ -170,6 +170,7 @@ mod inconsistent_struct_constructor;
 mod index_refutable_slice;
 mod indexing_slicing;
 mod ineffective_open_options;
+mod infallible_try_from;
 mod infinite_iter;
 mod inherent_impl;
 mod inherent_to_string;
@@ -394,6 +395,7 @@ mod unwrap;
 mod unwrap_in_result;
 mod upper_case_acronyms;
 mod use_self;
+mod useless_concat;
 mod useless_conversion;
 mod vec;
 mod vec_init_then_push;
@@ -404,7 +406,7 @@ mod zero_div_zero;
 mod zero_repeat_side_effects;
 mod zero_sized_map_values;
 mod zombie_processes;
-// end lints modules, do not remove this comment, it’s used in `update_lints`
+// end lints modules, do not remove this comment, it's used in `update_lints`
 
 use clippy_config::{Conf, get_configuration_metadata, sanitize_explanation};
 use clippy_utils::macros::FormatArgsStorage;
@@ -583,8 +585,6 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
     let attrs = attr_storage.clone();
     store.register_early_pass(move || Box::new(AttrCollector::new(attrs.clone())));
 
-    store.register_late_pass(|_| Box::new(ctfe::ClippyCtfe));
-
     store.register_late_pass(move |_| Box::new(operators::arithmetic_side_effects::ArithmeticSideEffects::new(conf)));
     store.register_late_pass(|_| Box::new(utils::dump_hir::DumpHir));
     store.register_late_pass(|_| Box::new(utils::author::Author));
@@ -731,7 +731,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
     store.register_early_pass(|| Box::new(unused_unit::UnusedUnit));
     store.register_late_pass(|_| Box::new(unused_unit::UnusedUnit));
     store.register_late_pass(|_| Box::new(returns::Return));
-    store.register_late_pass(move |tcx| Box::new(collapsible_if::CollapsibleIf::new(tcx, conf)));
+    store.register_late_pass(move |_| Box::new(collapsible_if::CollapsibleIf::new(conf)));
     store.register_late_pass(|_| Box::new(items_after_statements::ItemsAfterStatements));
     store.register_early_pass(|| Box::new(precedence::Precedence));
     store.register_late_pass(|_| Box::new(needless_parens_on_range_literals::NeedlessParensOnRangeLiterals));
@@ -748,7 +748,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
     store.register_late_pass(move |_| Box::new(unused_self::UnusedSelf::new(conf)));
     store.register_late_pass(|_| Box::new(mutable_debug_assertion::DebugAssertWithMutCall));
     store.register_late_pass(|_| Box::new(exit::Exit));
-    store.register_late_pass(|_| Box::new(to_digit_is_some::ToDigitIsSome));
+    store.register_late_pass(move |_| Box::new(to_digit_is_some::ToDigitIsSome::new(conf)));
     store.register_late_pass(move |_| Box::new(large_stack_arrays::LargeStackArrays::new(conf)));
     store.register_late_pass(move |_| Box::new(large_const_arrays::LargeConstArrays::new(conf)));
     store.register_late_pass(|_| Box::new(floating_point_arithmetic::FloatingPointArithmetic));
@@ -867,7 +867,7 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
     store.register_late_pass(move |_| Box::new(unnecessary_box_returns::UnnecessaryBoxReturns::new(conf)));
     store.register_late_pass(move |_| Box::new(lines_filter_map_ok::LinesFilterMapOk::new(conf)));
     store.register_late_pass(|_| Box::new(tests_outside_test_module::TestsOutsideTestModule));
-    store.register_late_pass(|_| Box::new(manual_slice_size_calculation::ManualSliceSizeCalculation));
+    store.register_late_pass(|_| Box::new(manual_slice_size_calculation::ManualSliceSizeCalculation::new(conf)));
     store.register_early_pass(move || Box::new(excessive_nesting::ExcessiveNesting::new(conf)));
     store.register_late_pass(|_| Box::new(items_after_test_module::ItemsAfterTestModule));
     store.register_early_pass(|| Box::new(ref_patterns::RefPatterns));
@@ -938,11 +938,15 @@ pub fn register_lints(store: &mut rustc_lint::LintStore, conf: &'static Conf) {
     store.register_late_pass(|_| Box::new(unnecessary_literal_bound::UnnecessaryLiteralBound));
     store.register_early_pass(|| Box::new(empty_line_after::EmptyLineAfter::new()));
     store.register_late_pass(move |_| Box::new(arbitrary_source_item_ordering::ArbitrarySourceItemOrdering::new(conf)));
+    store.register_late_pass(|_| Box::new(useless_concat::UselessConcat));
     store.register_late_pass(|_| Box::new(unneeded_struct_pattern::UnneededStructPattern));
     store.register_late_pass(|_| Box::<unnecessary_semicolon::UnnecessarySemicolon>::default());
     store.register_late_pass(move |_| Box::new(non_std_lazy_statics::NonStdLazyStatic::new(conf)));
     store.register_late_pass(|_| Box::new(manual_option_as_slice::ManualOptionAsSlice::new(conf)));
     store.register_late_pass(|_| Box::new(single_option_map::SingleOptionMap));
     store.register_late_pass(move |_| Box::new(redundant_test_prefix::RedundantTestPrefix));
+    store.register_late_pass(|_| Box::new(cloned_ref_to_slice_refs::ClonedRefToSliceRefs::new(conf)));
+    store.register_late_pass(|_| Box::new(infallible_try_from::InfallibleTryFrom));
+    store.register_late_pass(|_| Box::new(coerce_container_to_any::CoerceContainerToAny));
     // add lints here, do not remove this comment, it's used in `new_lint`
 }

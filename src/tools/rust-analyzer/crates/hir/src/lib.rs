@@ -52,12 +52,14 @@ use hir_def::{
         BindingAnnotation, BindingId, Expr, ExprId, ExprOrPatId, LabelId, Pat,
         generics::{LifetimeParamData, TypeOrConstParamData, TypeParamProvenance},
     },
-    item_tree::{AttrOwner, FieldParent, ImportAlias, ItemTreeFieldId, ItemTreeNode},
+    item_tree::ImportAlias,
     layout::{self, ReprOptions, TargetDataLayout},
     nameres::{self, diagnostics::DefDiagnostic},
     per_ns::PerNs,
     resolver::{HasResolver, Resolver},
     signatures::{ImplFlags, StaticFlags, TraitFlags, VariantFields},
+    src::HasSource as _,
+    visibility::visibility_from_ast,
 };
 use hir_expand::{
     AstId, MacroCallKind, RenderedExpandError, ValueResult, attrs::collect_attrs,
@@ -81,11 +83,11 @@ use itertools::Itertools;
 use nameres::diagnostics::DefDiagnosticKind;
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
-use span::{Edition, FileId};
+use span::{AstIdNode, Edition, FileId};
 use stdx::{format_to, impl_from, never};
 use syntax::{
     AstNode, AstPtr, SmolStr, SyntaxNode, SyntaxNodePtr, T, TextRange, ToSmolStr,
-    ast::{self, HasAttrs as _, HasName},
+    ast::{self, HasAttrs as _, HasName, HasVisibility as _},
     format_smolstr,
 };
 use triomphe::{Arc, ThinArc};
@@ -97,7 +99,8 @@ pub use crate::{
     diagnostics::*,
     has_source::HasSource,
     semantics::{
-        PathResolution, Semantics, SemanticsImpl, SemanticsScope, TypeInfo, VisibleTraits,
+        PathResolution, PathResolutionPerNs, Semantics, SemanticsImpl, SemanticsScope, TypeInfo,
+        VisibleTraits,
     },
 };
 
@@ -119,7 +122,7 @@ pub use {
         find_path::PrefixKind,
         import_map,
         lang_item::LangItem,
-        nameres::{DefMap, ModuleSource},
+        nameres::{DefMap, ModuleSource, crate_def_map},
         per_ns::Namespace,
         type_ref::{Mutability, TypeRef},
         visibility::Visibility,
@@ -227,7 +230,7 @@ impl Crate {
     }
 
     pub fn modules(self, db: &dyn HirDatabase) -> Vec<Module> {
-        let def_map = db.crate_def_map(self.id);
+        let def_map = crate_def_map(db, self.id);
         def_map.modules().map(|(id, _)| def_map.module_id(id).into()).collect()
     }
 
@@ -528,7 +531,7 @@ impl Module {
     /// might be missing `krate`. This can happen if a module's file is not included
     /// in the module tree of any target in `Cargo.toml`.
     pub fn crate_root(self, db: &dyn HirDatabase) -> Module {
-        let def_map = db.crate_def_map(self.id.krate());
+        let def_map = crate_def_map(db, self.id.krate());
         Module { id: def_map.crate_root().into() }
     }
 
@@ -685,8 +688,8 @@ impl Module {
                         Adt::Enum(e) => {
                             let source_map = db.enum_signature_with_source_map(e.id).1;
                             expr_store_diagnostics(db, acc, &source_map);
-                            let (variants, diagnostics) = db.enum_variants_with_diagnostics(e.id);
-                            let file = e.id.lookup(db).id.file_id();
+                            let (variants, diagnostics) = e.id.enum_variants_with_diagnostics(db);
+                            let file = e.id.lookup(db).id.file_id;
                             let ast_id_map = db.ast_id_map(file);
                             if let Some(diagnostics) = &diagnostics {
                                 for diag in diagnostics.iter() {
@@ -703,7 +706,7 @@ impl Module {
                                     );
                                 }
                             }
-                            for &(v, _) in &variants.variants {
+                            for &(v, _, _) in &variants.variants {
                                 let source_map = db.variant_fields_with_source_map(v.into()).1;
                                 push_ty_diagnostics(
                                     db,
@@ -741,12 +744,10 @@ impl Module {
             GenericDef::Impl(impl_def).diagnostics(db, acc);
 
             let loc = impl_def.id.lookup(db);
-            let tree = loc.id.item_tree(db);
             let source_map = db.impl_signature_with_source_map(impl_def.id).1;
             expr_store_diagnostics(db, acc, &source_map);
 
-            let node = &tree[loc.id.value];
-            let file_id = loc.id.file_id();
+            let file_id = loc.id.file_id;
             if file_id.macro_file().is_some_and(|it| it.kind(db) == MacroKind::DeriveBuiltIn) {
                 // these expansion come from us, diagnosing them is a waste of resources
                 // FIXME: Once we diagnose the inputs to builtin derives, we should at least extract those diagnostics somehow
@@ -759,16 +760,16 @@ impl Module {
 
             let ast_id_map = db.ast_id_map(file_id);
 
-            for diag in db.impl_items_with_diagnostics(impl_def.id).1.iter() {
+            for diag in impl_def.id.impl_items_with_diagnostics(db).1.iter() {
                 emit_def_diagnostic(db, acc, diag, edition);
             }
 
             if inherent_impls.invalid_impls().contains(&impl_def.id) {
-                acc.push(IncoherentImpl { impl_: ast_id_map.get(node.ast_id()), file_id }.into())
+                acc.push(IncoherentImpl { impl_: ast_id_map.get(loc.id.value), file_id }.into())
             }
 
             if !impl_def.check_orphan_rules(db) {
-                acc.push(TraitImplOrphan { impl_: ast_id_map.get(node.ast_id()), file_id }.into())
+                acc.push(TraitImplOrphan { impl_: ast_id_map.get(loc.id.value), file_id }.into())
             }
 
             let trait_ = impl_def.trait_(db);
@@ -807,11 +808,11 @@ impl Module {
                 // unsafe negative impl
                 (true, _, true, _) |
                 // unsafe impl for safe trait
-                (true, false, _, false) => acc.push(TraitImplIncorrectSafety { impl_: ast_id_map.get(node.ast_id()), file_id, should_be_safe: true }.into()),
+                (true, false, _, false) => acc.push(TraitImplIncorrectSafety { impl_: ast_id_map.get(loc.id.value), file_id, should_be_safe: true }.into()),
                 // safe impl for unsafe trait
                 (false, true, false, _) |
                 // safe impl of dangling drop
-                (false, false, _, true) => acc.push(TraitImplIncorrectSafety { impl_: ast_id_map.get(node.ast_id()), file_id, should_be_safe: false }.into()),
+                (false, false, _, true) => acc.push(TraitImplIncorrectSafety { impl_: ast_id_map.get(loc.id.value), file_id, should_be_safe: false }.into()),
                 _ => (),
             };
 
@@ -823,7 +824,7 @@ impl Module {
                     AssocItemId::ConstId(id) => !db.const_signature(id).has_body(),
                     AssocItemId::TypeAliasId(it) => db.type_alias_signature(it).ty.is_none(),
                 });
-                impl_assoc_items_scratch.extend(db.impl_items(impl_def.id).items.iter().cloned());
+                impl_assoc_items_scratch.extend(impl_def.id.impl_items(db).items.iter().cloned());
 
                 let redundant = impl_assoc_items_scratch
                     .iter()
@@ -838,14 +839,14 @@ impl Module {
                         TraitImplRedundantAssocItems {
                             trait_,
                             file_id,
-                            impl_: ast_id_map.get(node.ast_id()),
+                            impl_: ast_id_map.get(loc.id.value),
                             assoc_item: (name, assoc_item),
                         }
                         .into(),
                     )
                 }
 
-                let missing: Vec<_> = required_items
+                let mut missing: Vec<_> = required_items
                     .filter(|(name, id)| {
                         !impl_assoc_items_scratch.iter().any(|(impl_name, impl_item)| {
                             discriminant(impl_item) == discriminant(id) && impl_name == name
@@ -853,10 +854,42 @@ impl Module {
                     })
                     .map(|(name, item)| (name.clone(), AssocItem::from(*item)))
                     .collect();
+
+                if !missing.is_empty() {
+                    let self_ty = db.impl_self_ty(impl_def.id).substitute(
+                        Interner,
+                        &hir_ty::generics::generics(db, impl_def.id.into()).placeholder_subst(db),
+                    );
+                    let self_ty = if let TyKind::Alias(AliasTy::Projection(projection)) =
+                        self_ty.kind(Interner)
+                    {
+                        db.normalize_projection(
+                            projection.clone(),
+                            db.trait_environment(impl_def.id.into()),
+                        )
+                    } else {
+                        self_ty
+                    };
+                    let self_ty_is_guaranteed_unsized = matches!(
+                        self_ty.kind(Interner),
+                        TyKind::Dyn(..) | TyKind::Slice(..) | TyKind::Str
+                    );
+                    if self_ty_is_guaranteed_unsized {
+                        missing.retain(|(_, assoc_item)| {
+                            let assoc_item = match *assoc_item {
+                                AssocItem::Function(it) => it.id.into(),
+                                AssocItem::Const(it) => it.id.into(),
+                                AssocItem::TypeAlias(it) => it.id.into(),
+                            };
+                            !hir_ty::dyn_compatibility::generics_require_sized_self(db, assoc_item)
+                        });
+                    }
+                }
+
                 if !missing.is_empty() {
                     acc.push(
                         TraitImplMissingAssocItems {
-                            impl_: ast_id_map.get(node.ast_id()),
+                            impl_: ast_id_map.get(loc.id.value),
                             file_id,
                             missing,
                         }
@@ -879,7 +912,7 @@ impl Module {
                 &source_map,
             );
 
-            for &(_, item) in db.impl_items(impl_def.id).items.iter() {
+            for &(_, item) in impl_def.id.impl_items(db).items.iter() {
                 AssocItem::from(item).diagnostics(db, acc, style_lints);
             }
         }
@@ -1043,73 +1076,25 @@ fn emit_def_diagnostic_(
             )
         }
         DefDiagnosticKind::UnresolvedImport { id, index } => {
-            let file_id = id.file_id();
-            let item_tree = id.item_tree(db);
-            let import = &item_tree[id.value];
+            let file_id = id.file_id;
 
-            let use_tree = import.use_tree_to_ast(db, file_id, *index);
+            let use_tree = hir_def::src::use_tree_to_ast(db, *id, *index);
             acc.push(
                 UnresolvedImport { decl: InFile::new(file_id, AstPtr::new(&use_tree)) }.into(),
             );
         }
 
-        DefDiagnosticKind::UnconfiguredCode { tree, item, cfg, opts } => {
-            let item_tree = tree.item_tree(db);
-            let ast_id_map = db.ast_id_map(tree.file_id());
-            // FIXME: This parses... We could probably store relative ranges for the children things
-            // here in the item tree?
-            (|| {
-                let process_field_list =
-                    |field_list: Option<_>, idx: ItemTreeFieldId| match field_list? {
-                        ast::FieldList::RecordFieldList(it) => Some(SyntaxNodePtr::new(
-                            it.fields().nth(idx.into_raw().into_u32() as usize)?.syntax(),
-                        )),
-                        ast::FieldList::TupleFieldList(it) => Some(SyntaxNodePtr::new(
-                            it.fields().nth(idx.into_raw().into_u32() as usize)?.syntax(),
-                        )),
-                    };
-                let ptr = match *item {
-                    AttrOwner::ModItem(it) => {
-                        ast_id_map.get(it.ast_id(&item_tree)).syntax_node_ptr()
-                    }
-                    AttrOwner::TopLevel => ast_id_map.root(),
-                    AttrOwner::Variant(it) => {
-                        ast_id_map.get(item_tree[it].ast_id).syntax_node_ptr()
-                    }
-                    AttrOwner::Field(FieldParent::EnumVariant(parent), idx) => process_field_list(
-                        ast_id_map
-                            .get(item_tree[parent].ast_id)
-                            .to_node(&db.parse_or_expand(tree.file_id()))
-                            .field_list(),
-                        idx,
-                    )?,
-                    AttrOwner::Field(FieldParent::Struct(parent), idx) => process_field_list(
-                        ast_id_map
-                            .get(item_tree[parent.index()].ast_id)
-                            .to_node(&db.parse_or_expand(tree.file_id()))
-                            .field_list(),
-                        idx,
-                    )?,
-                    AttrOwner::Field(FieldParent::Union(parent), idx) => SyntaxNodePtr::new(
-                        ast_id_map
-                            .get(item_tree[parent.index()].ast_id)
-                            .to_node(&db.parse_or_expand(tree.file_id()))
-                            .record_field_list()?
-                            .fields()
-                            .nth(idx.into_raw().into_u32() as usize)?
-                            .syntax(),
-                    ),
-                };
-                acc.push(
-                    InactiveCode {
-                        node: InFile::new(tree.file_id(), ptr),
-                        cfg: cfg.clone(),
-                        opts: opts.clone(),
-                    }
-                    .into(),
-                );
-                Some(())
-            })();
+        DefDiagnosticKind::UnconfiguredCode { ast_id, cfg, opts } => {
+            let ast_id_map = db.ast_id_map(ast_id.file_id);
+            let ptr = ast_id_map.get_erased(ast_id.value);
+            acc.push(
+                InactiveCode {
+                    node: InFile::new(ast_id.file_id, ptr),
+                    cfg: cfg.clone(),
+                    opts: opts.clone(),
+                }
+                .into(),
+            );
         }
         DefDiagnosticKind::UnresolvedMacroCall { ast, path } => {
             let (node, precise_location) = precise_macro_call_location(ast, db);
@@ -1445,12 +1430,8 @@ impl Struct {
 impl HasVisibility for Struct {
     fn visibility(&self, db: &dyn HirDatabase) -> Visibility {
         let loc = self.id.lookup(db);
-        let item_tree = loc.id.item_tree(db);
-        Visibility::resolve(
-            db,
-            &self.id.resolver(db),
-            &item_tree[item_tree[loc.id.value].visibility],
-        )
+        let source = loc.source(db);
+        visibility_from_ast(db, self.id, source.map(|src| src.visibility()))
     }
 }
 
@@ -1503,12 +1484,8 @@ impl Union {
 impl HasVisibility for Union {
     fn visibility(&self, db: &dyn HirDatabase) -> Visibility {
         let loc = self.id.lookup(db);
-        let item_tree = loc.id.item_tree(db);
-        Visibility::resolve(
-            db,
-            &self.id.resolver(db),
-            &item_tree[item_tree[loc.id.value].visibility],
-        )
+        let source = loc.source(db);
+        visibility_from_ast(db, self.id, source.map(|src| src.visibility()))
     }
 }
 
@@ -1527,11 +1504,11 @@ impl Enum {
     }
 
     pub fn variants(self, db: &dyn HirDatabase) -> Vec<Variant> {
-        db.enum_variants(self.id).variants.iter().map(|&(id, _)| Variant { id }).collect()
+        self.id.enum_variants(db).variants.iter().map(|&(id, _, _)| Variant { id }).collect()
     }
 
     pub fn num_variants(self, db: &dyn HirDatabase) -> usize {
-        db.enum_variants(self.id).variants.len()
+        self.id.enum_variants(db).variants.len()
     }
 
     pub fn repr(self, db: &dyn HirDatabase) -> Option<ReprOptions> {
@@ -1596,12 +1573,8 @@ impl Enum {
 impl HasVisibility for Enum {
     fn visibility(&self, db: &dyn HirDatabase) -> Visibility {
         let loc = self.id.lookup(db);
-        let item_tree = loc.id.item_tree(db);
-        Visibility::resolve(
-            db,
-            &self.id.resolver(db),
-            &item_tree[item_tree[loc.id.value].visibility],
-        )
+        let source = loc.source(db);
+        visibility_from_ast(db, self.id, source.map(|src| src.visibility()))
     }
 }
 
@@ -1633,7 +1606,7 @@ impl Variant {
     pub fn name(self, db: &dyn HirDatabase) -> Name {
         let lookup = self.id.lookup(db);
         let enum_ = lookup.parent;
-        db.enum_variants(enum_).variants[lookup.index as usize].1.clone()
+        enum_.enum_variants(db).variants[lookup.index as usize].1.clone()
     }
 
     pub fn fields(self, db: &dyn HirDatabase) -> Vec<Field> {
@@ -2468,7 +2441,7 @@ impl Function {
         {
             return None;
         }
-        let def_map = db.crate_def_map(HasModule::krate(&self.id, db));
+        let def_map = crate_def_map(db, HasModule::krate(&self.id, db));
         def_map.fn_as_proc_macro(self.id).map(|id| Macro { id: id.into() })
     }
 
@@ -2659,7 +2632,7 @@ impl SelfParam {
 
 impl HasVisibility for Function {
     fn visibility(&self, db: &dyn HirDatabase) -> Visibility {
-        db.function_visibility(self.id)
+        db.assoc_visibility(self.id.into())
     }
 }
 
@@ -2675,10 +2648,9 @@ impl ExternCrateDecl {
 
     pub fn resolved_crate(self, db: &dyn HirDatabase) -> Option<Crate> {
         let loc = self.id.lookup(db);
-        let item_tree = loc.id.item_tree(db);
         let krate = loc.container.krate();
-        let name = &item_tree[loc.id.value].name;
-        if *name == sym::self_ {
+        let name = self.name(db);
+        if name == sym::self_ {
             Some(krate.into())
         } else {
             krate.data(db).dependencies.iter().find_map(|dep| {
@@ -2689,25 +2661,29 @@ impl ExternCrateDecl {
 
     pub fn name(self, db: &dyn HirDatabase) -> Name {
         let loc = self.id.lookup(db);
-        let item_tree = loc.id.item_tree(db);
-        item_tree[loc.id.value].name.clone()
+        let source = loc.source(db);
+        as_name_opt(source.value.name_ref())
     }
 
     pub fn alias(self, db: &dyn HirDatabase) -> Option<ImportAlias> {
         let loc = self.id.lookup(db);
-        let item_tree = loc.id.item_tree(db);
-        item_tree[loc.id.value].alias.clone()
+        let source = loc.source(db);
+        let rename = source.value.rename()?;
+        if let Some(name) = rename.name() {
+            Some(ImportAlias::Alias(name.as_name()))
+        } else if rename.underscore_token().is_some() {
+            Some(ImportAlias::Underscore)
+        } else {
+            None
+        }
     }
 
     /// Returns the name under which this crate is made accessible, taking `_` into account.
     pub fn alias_or_name(self, db: &dyn HirDatabase) -> Option<Name> {
-        let loc = self.id.lookup(db);
-        let item_tree = loc.id.item_tree(db);
-
-        match &item_tree[loc.id.value].alias {
+        match self.alias(db) {
             Some(ImportAlias::Underscore) => None,
-            Some(ImportAlias::Alias(alias)) => Some(alias.clone()),
-            None => Some(item_tree[loc.id.value].name.clone()),
+            Some(ImportAlias::Alias(alias)) => Some(alias),
+            None => Some(self.name(db)),
         }
     }
 }
@@ -2715,12 +2691,8 @@ impl ExternCrateDecl {
 impl HasVisibility for ExternCrateDecl {
     fn visibility(&self, db: &dyn HirDatabase) -> Visibility {
         let loc = self.id.lookup(db);
-        let item_tree = loc.id.item_tree(db);
-        Visibility::resolve(
-            db,
-            &self.id.resolver(db),
-            &item_tree[item_tree[loc.id.value].visibility],
-        )
+        let source = loc.source(db);
+        visibility_from_ast(db, self.id, source.map(|src| src.visibility()))
     }
 }
 
@@ -2755,7 +2727,7 @@ impl Const {
 
 impl HasVisibility for Const {
     fn visibility(&self, db: &dyn HirDatabase) -> Visibility {
-        db.const_visibility(self.id)
+        db.assoc_visibility(self.id.into())
     }
 }
 
@@ -2840,12 +2812,8 @@ impl Static {
 impl HasVisibility for Static {
     fn visibility(&self, db: &dyn HirDatabase) -> Visibility {
         let loc = self.id.lookup(db);
-        let item_tree = loc.id.item_tree(db);
-        Visibility::resolve(
-            db,
-            &self.id.resolver(db),
-            &item_tree[item_tree[loc.id.value].visibility],
-        )
+        let source = loc.source(db);
+        visibility_from_ast(db, self.id, source.map(|src| src.visibility()))
     }
 }
 
@@ -2934,11 +2902,7 @@ impl Trait {
     }
 
     fn all_macro_calls(&self, db: &dyn HirDatabase) -> Box<[(AstId<ast::Item>, MacroCallId)]> {
-        db.trait_items(self.id)
-            .macro_calls
-            .as_ref()
-            .map(|it| it.as_ref().clone().into_boxed_slice())
-            .unwrap_or_default()
+        db.trait_items(self.id).macro_calls.to_vec().into_boxed_slice()
     }
 
     /// `#[rust_analyzer::completions(...)]` mode.
@@ -2950,12 +2914,8 @@ impl Trait {
 impl HasVisibility for Trait {
     fn visibility(&self, db: &dyn HirDatabase) -> Visibility {
         let loc = self.id.lookup(db);
-        let item_tree = loc.id.item_tree(db);
-        Visibility::resolve(
-            db,
-            &self.id.resolver(db),
-            &item_tree[item_tree[loc.id.value].visibility],
-        )
+        let source = loc.source(db);
+        visibility_from_ast(db, self.id, source.map(|src| src.visibility()))
     }
 }
 
@@ -2977,12 +2937,8 @@ impl TraitAlias {
 impl HasVisibility for TraitAlias {
     fn visibility(&self, db: &dyn HirDatabase) -> Visibility {
         let loc = self.id.lookup(db);
-        let item_tree = loc.id.item_tree(db);
-        Visibility::resolve(
-            db,
-            &self.id.resolver(db),
-            &item_tree[item_tree[loc.id.value].visibility],
-        )
+        let source = loc.source(db);
+        visibility_from_ast(db, self.id, source.map(|src| src.visibility()))
     }
 }
 
@@ -3020,7 +2976,7 @@ impl TypeAlias {
 
 impl HasVisibility for TypeAlias {
     fn visibility(&self, db: &dyn HirDatabase) -> Visibility {
-        db.type_alias_visibility(self.id)
+        db.assoc_visibility(self.id.into())
     }
 }
 
@@ -3130,25 +3086,23 @@ impl Macro {
         match self.id {
             MacroId::Macro2Id(id) => {
                 let loc = id.lookup(db);
-                let item_tree = loc.id.item_tree(db);
-                item_tree[loc.id.value].name.clone()
+                let source = loc.source(db);
+                as_name_opt(source.value.name())
             }
             MacroId::MacroRulesId(id) => {
                 let loc = id.lookup(db);
-                let item_tree = loc.id.item_tree(db);
-                item_tree[loc.id.value].name.clone()
+                let source = loc.source(db);
+                as_name_opt(source.value.name())
             }
             MacroId::ProcMacroId(id) => {
                 let loc = id.lookup(db);
-                let item_tree = loc.id.item_tree(db);
+                let source = loc.source(db);
                 match loc.kind {
                     ProcMacroKind::CustomDerive => db
                         .attrs(id.into())
                         .parse_proc_macro_derive()
-                        .map_or_else(|| item_tree[loc.id.value].name.clone(), |(it, _)| it),
-                    ProcMacroKind::Bang | ProcMacroKind::Attr => {
-                        item_tree[loc.id.value].name.clone()
-                    }
+                        .map_or_else(|| as_name_opt(source.value.name()), |(it, _)| it),
+                    ProcMacroKind::Bang | ProcMacroKind::Attr => as_name_opt(source.value.name()),
                 }
             }
         }
@@ -3245,12 +3199,8 @@ impl HasVisibility for Macro {
         match self.id {
             MacroId::Macro2Id(id) => {
                 let loc = id.lookup(db);
-                let item_tree = loc.id.item_tree(db);
-                Visibility::resolve(
-                    db,
-                    &id.resolver(db),
-                    &item_tree[item_tree[loc.id.value].visibility],
-                )
+                let source = loc.source(db);
+                visibility_from_ast(db, id, source.map(|src| src.visibility()))
             }
             MacroId::MacroRulesId(_) => Visibility::Public,
             MacroId::ProcMacroId(_) => Visibility::Public,
@@ -3404,7 +3354,7 @@ fn as_assoc_item<'db, ID, DEF, LOC>(
 where
     ID: Lookup<Database = dyn DefDatabase, Data = AssocItemLoc<LOC>>,
     DEF: From<ID>,
-    LOC: ItemTreeNode,
+    LOC: AstIdNode,
 {
     match id.lookup(db).container {
         ItemContainerId::TraitId(_) | ItemContainerId::ImplId(_) => Some(ctor(DEF::from(id))),
@@ -3420,7 +3370,7 @@ fn as_extern_assoc_item<'db, ID, DEF, LOC>(
 where
     ID: Lookup<Database = dyn DefDatabase, Data = AssocItemLoc<LOC>>,
     DEF: From<ID>,
-    LOC: ItemTreeNode,
+    LOC: AstIdNode,
 {
     match id.lookup(db).container {
         ItemContainerId::ExternBlockId(_) => Some(ctor(DEF::from(id))),
@@ -4015,8 +3965,7 @@ impl BuiltinAttr {
         if let builtin @ Some(_) = Self::builtin(name) {
             return builtin;
         }
-        let idx = db
-            .crate_def_map(krate.id)
+        let idx = crate_def_map(db, krate.id)
             .registered_attrs()
             .iter()
             .position(|it| it.as_str() == name)? as u32;
@@ -4031,7 +3980,7 @@ impl BuiltinAttr {
     pub fn name(&self, db: &dyn HirDatabase) -> Name {
         match self.krate {
             Some(krate) => Name::new_symbol_root(
-                db.crate_def_map(krate).registered_attrs()[self.idx as usize].clone(),
+                crate_def_map(db, krate).registered_attrs()[self.idx as usize].clone(),
             ),
             None => Name::new_symbol_root(Symbol::intern(
                 hir_expand::inert_attr_macro::INERT_ATTRIBUTES[self.idx as usize].name,
@@ -4059,14 +4008,14 @@ impl ToolModule {
     pub(crate) fn by_name(db: &dyn HirDatabase, krate: Crate, name: &str) -> Option<Self> {
         let krate = krate.id;
         let idx =
-            db.crate_def_map(krate).registered_tools().iter().position(|it| it.as_str() == name)?
+            crate_def_map(db, krate).registered_tools().iter().position(|it| it.as_str() == name)?
                 as u32;
         Some(ToolModule { krate, idx })
     }
 
     pub fn name(&self, db: &dyn HirDatabase) -> Name {
         Name::new_symbol_root(
-            db.crate_def_map(self.krate).registered_tools()[self.idx as usize].clone(),
+            crate_def_map(db, self.krate).registered_tools()[self.idx as usize].clone(),
         )
     }
 
@@ -4464,7 +4413,7 @@ impl Impl {
     }
 
     pub fn items(self, db: &dyn HirDatabase) -> Vec<AssocItem> {
-        db.impl_items(self.id).items.iter().map(|&(_, it)| it.into()).collect()
+        self.id.impl_items(db).items.iter().map(|&(_, it)| it.into()).collect()
     }
 
     pub fn is_negative(self, db: &dyn HirDatabase) -> bool {
@@ -4488,7 +4437,7 @@ impl Impl {
             MacroCallKind::Derive { ast_id, derive_attr_index, derive_index, .. } => {
                 let module_id = self.id.lookup(db).container;
                 (
-                    db.crate_def_map(module_id.krate())[module_id.local_id]
+                    crate_def_map(db, module_id.krate())[module_id.local_id]
                         .scope
                         .derive_macro_invoc(ast_id, derive_attr_index)?,
                     derive_index,
@@ -4513,11 +4462,7 @@ impl Impl {
     }
 
     fn all_macro_calls(&self, db: &dyn HirDatabase) -> Box<[(AstId<ast::Item>, MacroCallId)]> {
-        db.impl_items(self.id)
-            .macro_calls
-            .as_ref()
-            .map(|it| it.as_ref().clone().into_boxed_slice())
-            .unwrap_or_default()
+        self.id.impl_items(db).macro_calls.to_vec().into_boxed_slice()
     }
 }
 
@@ -4530,7 +4475,7 @@ pub struct TraitRef {
 impl TraitRef {
     pub(crate) fn new_with_resolver(
         db: &dyn HirDatabase,
-        resolver: &Resolver,
+        resolver: &Resolver<'_>,
         trait_ref: hir_ty::TraitRef,
     ) -> TraitRef {
         let env = resolver
@@ -4752,13 +4697,13 @@ pub struct Type {
 }
 
 impl Type {
-    pub(crate) fn new_with_resolver(db: &dyn HirDatabase, resolver: &Resolver, ty: Ty) -> Type {
+    pub(crate) fn new_with_resolver(db: &dyn HirDatabase, resolver: &Resolver<'_>, ty: Ty) -> Type {
         Type::new_with_resolver_inner(db, resolver, ty)
     }
 
     pub(crate) fn new_with_resolver_inner(
         db: &dyn HirDatabase,
-        resolver: &Resolver,
+        resolver: &Resolver<'_>,
         ty: Ty,
     ) -> Type {
         let environment = resolver
@@ -5326,7 +5271,7 @@ impl Type {
             let impls = db.inherent_impls_in_crate(krate);
 
             for impl_def in impls.for_self_ty(&self.ty) {
-                for &(_, item) in db.impl_items(*impl_def).items.iter() {
+                for &(_, item) in impl_def.impl_items(db).items.iter() {
                     if callback(item) {
                         return;
                     }
@@ -5972,6 +5917,59 @@ impl Layout {
         }
     }
 
+    pub fn tail_padding(&self, field_size: &mut impl FnMut(usize) -> Option<u64>) -> Option<u64> {
+        match self.0.fields {
+            layout::FieldsShape::Primitive => None,
+            layout::FieldsShape::Union(_) => None,
+            layout::FieldsShape::Array { stride, count } => count.checked_sub(1).and_then(|tail| {
+                let tail_field_size = field_size(tail as usize)?;
+                let offset = stride.bytes() * tail;
+                self.0.size.bytes().checked_sub(offset)?.checked_sub(tail_field_size)
+            }),
+            layout::FieldsShape::Arbitrary { ref offsets, ref memory_index } => {
+                let tail = memory_index.last_index()?;
+                let tail_field_size = field_size(tail.0.into_raw().into_u32() as usize)?;
+                let offset = offsets.get(tail)?.bytes();
+                self.0.size.bytes().checked_sub(offset)?.checked_sub(tail_field_size)
+            }
+        }
+    }
+
+    pub fn largest_padding(
+        &self,
+        field_size: &mut impl FnMut(usize) -> Option<u64>,
+    ) -> Option<u64> {
+        match self.0.fields {
+            layout::FieldsShape::Primitive => None,
+            layout::FieldsShape::Union(_) => None,
+            layout::FieldsShape::Array { stride: _, count: 0 } => None,
+            layout::FieldsShape::Array { stride, .. } => {
+                let size = field_size(0)?;
+                stride.bytes().checked_sub(size)
+            }
+            layout::FieldsShape::Arbitrary { ref offsets, ref memory_index } => {
+                let mut reverse_index = vec![None; memory_index.len()];
+                for (src, (mem, offset)) in memory_index.iter().zip(offsets.iter()).enumerate() {
+                    reverse_index[*mem as usize] = Some((src, offset.bytes()));
+                }
+                if reverse_index.iter().any(|it| it.is_none()) {
+                    stdx::never!();
+                    return None;
+                }
+                reverse_index
+                    .into_iter()
+                    .flatten()
+                    .chain(std::iter::once((0, self.0.size.bytes())))
+                    .tuple_windows()
+                    .filter_map(|((i, start), (_, end))| {
+                        let size = field_size(i)?;
+                        end.checked_sub(start)?.checked_sub(size)
+                    })
+                    .max()
+            }
+        }
+    }
+
     pub fn enum_tag_size(&self) -> Option<usize> {
         let tag_size =
             if let layout::Variants::Multiple { tag, tag_encoding, .. } = &self.0.variants {
@@ -6400,7 +6398,7 @@ pub fn resolve_absolute_path<'a, I: Iterator<Item = Symbol> + Clone + 'a>(
                 })
                 .filter_map(|&krate| {
                     let segments = segments.clone();
-                    let mut def_map = db.crate_def_map(krate);
+                    let mut def_map = crate_def_map(db, krate);
                     let mut module = &def_map[DefMap::ROOT];
                     let mut segments = segments.with_position().peekable();
                     while let Some((_, segment)) = segments.next_if(|&(position, _)| {
@@ -6424,4 +6422,8 @@ pub fn resolve_absolute_path<'a, I: Iterator<Item = Symbol> + Clone + 'a>(
                 .collect::<Vec<_>>()
         })
         .flatten()
+}
+
+fn as_name_opt(name: Option<impl AsName>) -> Name {
+    name.map_or_else(Name::missing, |name| name.as_name())
 }

@@ -208,7 +208,7 @@
 use std::cell::OnceCell;
 use std::path::PathBuf;
 
-use rustc_attr_parsing::InlineAttr;
+use rustc_attr_data_structures::InlineAttr;
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::sync::{MTLock, par_for_each_in};
 use rustc_data_structures::unord::{UnordMap, UnordSet};
@@ -781,7 +781,7 @@ impl<'a, 'tcx> MirVisitor<'tcx> for MirUsedCollector<'a, 'tcx> {
 
         let tcx = self.tcx;
         let push_mono_lang_item = |this: &mut Self, lang_item: LangItem| {
-            let instance = Instance::mono(tcx, tcx.require_lang_item(lang_item, Some(source)));
+            let instance = Instance::mono(tcx, tcx.require_lang_item(lang_item, source));
             if tcx.should_codegen_locally(instance) {
                 this.used_items.push(create_fn_mono_item(tcx, instance, source));
             }
@@ -921,7 +921,7 @@ fn visit_instance_use<'tcx>(
             // be lowered in codegen to nothing or a call to panic_nounwind. So if we encounter any
             // of those intrinsics, we need to include a mono item for panic_nounwind, else we may try to
             // codegen a call to that function without generating code for the function itself.
-            let def_id = tcx.require_lang_item(LangItem::PanicNounwind, None);
+            let def_id = tcx.require_lang_item(LangItem::PanicNounwind, source);
             let panic_instance = Instance::mono(tcx, def_id);
             if tcx.should_codegen_locally(panic_instance) {
                 output.push(create_fn_mono_item(tcx, panic_instance, source));
@@ -949,6 +949,9 @@ fn visit_instance_use<'tcx>(
         }
         ty::InstanceKind::DropGlue(_, None) => {
             // Don't need to emit noop drop glue if we are calling directly.
+            //
+            // Note that we also optimize away the call to visit_instance_use in vtable construction
+            // (see create_mono_items_for_vtable_methods).
             if !is_direct_call {
                 output.push(create_fn_mono_item(tcx, instance, source));
             }
@@ -1177,8 +1180,13 @@ fn create_mono_items_for_vtable_methods<'tcx>(
         output.extend(methods);
     }
 
-    // Also add the destructor.
-    visit_drop_use(tcx, impl_ty, false, source, output);
+    // Also add the destructor, if it's necessary.
+    //
+    // This matches the check in vtable_allocation_provider in middle/ty/vtable.rs,
+    // if we don't need drop we're not adding an actual pointer to the vtable.
+    if impl_ty.needs_drop(tcx, ty::TypingEnv::fully_monomorphized()) {
+        visit_drop_use(tcx, impl_ty, false, source, output);
+    }
 }
 
 /// Scans the CTFE alloc in order to find function pointers and statics that must be monomorphized.
@@ -1483,7 +1491,7 @@ impl<'v> RootCollector<'_, 'v> {
 
                 // But even just declaring them must collect the items they refer to
                 // unless their generics require monomorphization.
-                if !self.tcx.generics_of(id.owner_id).requires_monomorphization(self.tcx)
+                if !self.tcx.generics_of(id.owner_id).own_requires_monomorphization()
                     && let Ok(val) = self.tcx.const_eval_poly(id.owner_id.to_def_id())
                 {
                     collect_const_value(self.tcx, val, self.output);

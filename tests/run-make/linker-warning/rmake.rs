@@ -1,3 +1,5 @@
+//@ ignore-cross-compile (need to run fake linker)
+
 use run_make_support::{Rustc, diff, regex, rustc};
 
 fn run_rustc() -> Rustc {

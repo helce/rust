@@ -1069,24 +1069,35 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
 
         let mut traits = FxIndexMap::default();
         let mut fn_traits = FxIndexMap::default();
+        let mut lifetimes = SmallVec::<[ty::Region<'tcx>; 1]>::new();
+
         let mut has_sized_bound = false;
         let mut has_negative_sized_bound = false;
-        let mut lifetimes = SmallVec::<[ty::Region<'tcx>; 1]>::new();
+        let mut has_meta_sized_bound = false;
 
         for (predicate, _) in bounds.iter_instantiated_copied(tcx, args) {
             let bound_predicate = predicate.kind();
 
             match bound_predicate.skip_binder() {
                 ty::ClauseKind::Trait(pred) => {
-                    // Don't print `+ Sized`, but rather `+ ?Sized` if absent.
-                    if tcx.is_lang_item(pred.def_id(), LangItem::Sized) {
-                        match pred.polarity {
+                    // With `feature(sized_hierarchy)`, don't print `?Sized` as an alias for
+                    // `MetaSized`, and skip sizedness bounds to be added at the end.
+                    match tcx.as_lang_item(pred.def_id()) {
+                        Some(LangItem::Sized) => match pred.polarity {
                             ty::PredicatePolarity::Positive => {
                                 has_sized_bound = true;
                                 continue;
                             }
                             ty::PredicatePolarity::Negative => has_negative_sized_bound = true,
+                        },
+                        Some(LangItem::MetaSized) => {
+                            has_meta_sized_bound = true;
+                            continue;
                         }
+                        Some(LangItem::PointeeSized) => {
+                            bug!("`PointeeSized` is removed during lowering");
+                        }
+                        _ => (),
                     }
 
                     self.insert_trait_and_projection(
@@ -1239,7 +1250,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
 
                         p!(write("{} = ", tcx.associated_item(assoc_item_def_id).name()));
 
-                        match term.unpack() {
+                        match term.kind() {
                             TermKind::Ty(ty) => p!(print(ty)),
                             TermKind::Const(c) => p!(print(c)),
                         };
@@ -1255,8 +1266,13 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
             })?;
         }
 
+        let using_sized_hierarchy = self.tcx().features().sized_hierarchy();
         let add_sized = has_sized_bound && (first || has_negative_sized_bound);
-        let add_maybe_sized = !has_sized_bound && !has_negative_sized_bound;
+        let add_maybe_sized =
+            has_meta_sized_bound && !has_negative_sized_bound && !using_sized_hierarchy;
+        // Set `has_pointee_sized_bound` if there were no `Sized` or `MetaSized` bounds.
+        let has_pointee_sized_bound =
+            !has_sized_bound && !has_meta_sized_bound && !has_negative_sized_bound;
         if add_sized || add_maybe_sized {
             if !first {
                 write!(self, " + ")?;
@@ -1265,6 +1281,16 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                 write!(self, "?")?;
             }
             write!(self, "Sized")?;
+        } else if has_meta_sized_bound && using_sized_hierarchy {
+            if !first {
+                write!(self, " + ")?;
+            }
+            write!(self, "MetaSized")?;
+        } else if has_pointee_sized_bound && using_sized_hierarchy {
+            if !first {
+                write!(self, " + ")?;
+            }
+            write!(self, "PointeeSized")?;
         }
 
         if !with_forced_trimmed_paths() {
@@ -1453,9 +1479,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                                 // contain named regions. So we erase and anonymize everything
                                 // here to compare the types modulo regions below.
                                 let proj = cx.tcx().erase_regions(proj);
-                                let proj = cx.tcx().anonymize_bound_vars(proj);
                                 let super_proj = cx.tcx().erase_regions(super_proj);
-                                let super_proj = cx.tcx().anonymize_bound_vars(super_proj);
 
                                 proj == super_proj
                             });
@@ -1888,7 +1912,7 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
     ) -> Result<(), PrintError> {
         define_scoped_cx!(self);
 
-        if self.should_print_verbose() {
+        if with_reduced_queries() || self.should_print_verbose() {
             p!(write("ValTree({:?}: ", cv.valtree), print(cv.ty), ")");
             return Ok(());
         }
@@ -3388,7 +3412,7 @@ define_print_and_forward_display! {
     }
 
     ty::Term<'tcx> {
-      match self.unpack() {
+      match self.kind() {
         ty::TermKind::Ty(ty) => p!(print(ty)),
         ty::TermKind::Const(c) => p!(print(c)),
       }
@@ -3403,7 +3427,7 @@ define_print_and_forward_display! {
     }
 
     GenericArg<'tcx> {
-        match self.unpack() {
+        match self.kind() {
             GenericArgKind::Lifetime(lt) => p!(print(lt)),
             GenericArgKind::Type(ty) => p!(print(ty)),
             GenericArgKind::Const(ct) => p!(print(ct)),

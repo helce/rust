@@ -237,6 +237,8 @@ declare_features! (
     (internal, profiler_runtime, "1.18.0", None),
     /// Allows using `rustc_*` attributes (RFC 572).
     (internal, rustc_attrs, "1.0.0", None),
+    /// Introduces a hierarchy of `Sized` traits (RFC 3729).
+    (unstable, sized_hierarchy, "1.89.0", None),
     /// Allows using the `#[stable]` and `#[unstable]` attributes.
     (internal, staged_api, "1.0.0", None),
     /// Added for testing unstable lints; perma-unstable.
@@ -318,7 +320,6 @@ declare_features! (
     (unstable, aarch64_ver_target_feature, "1.27.0", Some(44839)),
     (unstable, apx_target_feature, "1.88.0", Some(139284)),
     (unstable, arm_target_feature, "1.27.0", Some(44839)),
-    (unstable, avx512_target_feature, "1.27.0", Some(44839)),
     (unstable, bpf_target_feature, "1.54.0", Some(44839)),
     (unstable, csky_target_feature, "1.73.0", Some(44839)),
     (unstable, e2k_target_feature, "1.88.0", Some(44839)),
@@ -355,6 +356,8 @@ declare_features! (
     (unstable, abi_avr_interrupt, "1.45.0", Some(69664)),
     /// Allows `extern "C-cmse-nonsecure-call" fn()`.
     (unstable, abi_c_cmse_nonsecure_call, "1.51.0", Some(81391)),
+    /// Allows `extern "custom" fn()`.
+    (unstable, abi_custom, "1.89.0", Some(140829)),
     /// Allows `extern "gpu-kernel" fn()`.
     (unstable, abi_gpu_kernel, "1.86.0", Some(135467)),
     /// Allows `extern "msp430-interrupt" fn()`.
@@ -373,6 +376,8 @@ declare_features! (
     (unstable, arbitrary_self_types, "1.23.0", Some(44874)),
     /// Allows inherent and trait methods with arbitrary self types that are raw pointers.
     (unstable, arbitrary_self_types_pointers, "1.83.0", Some(44874)),
+    /// Allows #[cfg(...)] on inline assembly templates and operands.
+    (unstable, asm_cfg, "1.89.0", Some(140364)),
     /// Enables experimental inline assembly support for additional architectures.
     (unstable, asm_experimental_arch, "1.58.0", Some(93335)),
     /// Enables experimental register support in inline assembly.
@@ -506,7 +511,7 @@ declare_features! (
     (unstable, ffi_pure, "1.45.0", Some(58329)),
     /// Controlling the behavior of fmt::Debug
     (unstable, fmt_debug, "1.82.0", Some(129709)),
-    /// Allows using `#[repr(align(...))]` on function items
+    /// Allows using `#[align(...)]` on function items
     (unstable, fn_align, "1.53.0", Some(82232)),
     /// Support delegating implementation of functions to other already implemented functions.
     (incomplete, fn_delegation, "1.76.0", Some(118212)),
@@ -516,8 +521,6 @@ declare_features! (
     (unstable, frontmatter, "1.88.0", Some(136889)),
     /// Allows defining gen blocks and `gen fn`.
     (unstable, gen_blocks, "1.75.0", Some(117078)),
-    /// Infer generic args for both consts and types.
-    (unstable, generic_arg_infer, "1.55.0", Some(85077)),
     /// Allows non-trivial generic constants which have to have wfness manually propagated to callers
     (incomplete, generic_const_exprs, "1.56.0", Some(76560)),
     /// Allows generic parameters and where-clauses on free & associated const items.
@@ -546,8 +549,6 @@ declare_features! (
     (incomplete, inherent_associated_types, "1.52.0", Some(8995)),
     /// Allows using `pointer` and `reference` in intra-doc links
     (unstable, intra_doc_pointers, "1.51.0", Some(80896)),
-    // Allows using the `kl` and `widekl` target features and the associated intrinsics
-    (unstable, keylocker_x86, "1.86.0", Some(134813)),
     // Allows setting the threshold for the `large_assignments` lint.
     (unstable, large_assignments, "1.52.0", Some(83518)),
     /// Allow to have type alias types for inter-crate use.
@@ -621,16 +622,12 @@ declare_features! (
     (incomplete, ref_pat_eat_one_layer_2024_structural, "1.81.0", Some(123076)),
     /// Allows using the `#[register_tool]` attribute.
     (unstable, register_tool, "1.41.0", Some(66079)),
-    /// Allows the `#[repr(i128)]` attribute for enums.
-    (incomplete, repr128, "1.16.0", Some(56071)),
     /// Allows `repr(simd)` and importing the various simd intrinsics.
     (unstable, repr_simd, "1.4.0", Some(27731)),
     /// Allows bounding the return type of AFIT/RPITIT.
     (unstable, return_type_notation, "1.70.0", Some(109417)),
     /// Allows `extern "rust-cold"`.
     (unstable, rust_cold_cc, "1.63.0", Some(97544)),
-    /// Allows use of x86 SHA512, SM3 and SM4 target-features and intrinsics
-    (unstable, sha512_sm_x86, "1.82.0", Some(126624)),
     /// Allows the use of SIMD types in functions declared in `extern` blocks.
     (unstable, simd_ffi, "1.0.0", Some(27731)),
     /// Allows specialization of implementations (RFC 1210).
@@ -671,8 +668,6 @@ declare_features! (
     (incomplete, unsized_const_params, "1.82.0", Some(95174)),
     /// Allows unsized fn parameters.
     (internal, unsized_fn_params, "1.49.0", Some(48055)),
-    /// Allows unsized rvalues at arguments and parameters.
-    (incomplete, unsized_locals, "1.30.0", Some(48055)),
     /// Allows using the `#[used(linker)]` (or `#[used(compiler)]`) attribute.
     (unstable, used_with_arg, "1.60.0", Some(93798)),
     /// Allows use of attributes in `where` clauses.

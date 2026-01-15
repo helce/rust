@@ -9,8 +9,8 @@ use rustc_hir::{Item, ItemKind, PathSegment, UseKind};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty;
 use rustc_session::impl_lint_pass;
+use rustc_span::BytePos;
 use rustc_span::symbol::kw;
-use rustc_span::{BytePos, sym};
 
 declare_clippy_lint! {
     /// ### What it does
@@ -169,8 +169,8 @@ impl LateLintPass<'_> for WildcardImports {
                 format!("{import_source_snippet}::{imports_string}")
             };
 
-            // Glob imports always have a single resolution.
-            let (lint, message) = if let Res::Def(DefKind::Enum, _) = use_path.res[0] {
+            // Glob imports always have a single resolution. Enums are in the value namespace.
+            let (lint, message) = if let Some(Res::Def(DefKind::Enum, _)) = use_path.res.value_ns {
                 (ENUM_GLOB_USE, "usage of wildcard import for enum variants")
             } else {
                 (WILDCARD_IMPORTS, "usage of wildcard import")
@@ -193,9 +193,7 @@ impl WildcardImports {
 // Allow "...prelude::..::*" imports.
 // Many crates have a prelude, and it is imported as a glob by design.
 fn is_prelude_import(segments: &[PathSegment<'_>]) -> bool {
-    segments
-        .iter()
-        .any(|ps| ps.ident.as_str().contains(sym::prelude.as_str()))
+    segments.iter().any(|ps| ps.ident.as_str().contains("prelude"))
 }
 
 // Allow "super::*" imports in tests.

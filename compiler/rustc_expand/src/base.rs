@@ -11,8 +11,8 @@ use rustc_ast::token::MetaVarKind;
 use rustc_ast::tokenstream::TokenStream;
 use rustc_ast::visit::{AssocCtxt, Visitor};
 use rustc_ast::{self as ast, AttrVec, Attribute, HasAttrs, Item, NodeId, PatKind};
-use rustc_attr_parsing::{AttributeKind, Deprecation, Stability, find_attr};
-use rustc_data_structures::fx::FxIndexMap;
+use rustc_attr_data_structures::{AttributeKind, Deprecation, Stability, find_attr};
+use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_data_structures::sync;
 use rustc_errors::{DiagCtxtHandle, ErrorGuaranteed, PResult};
 use rustc_feature::Features;
@@ -35,6 +35,7 @@ use crate::base::ast::MetaItemInner;
 use crate::errors;
 use crate::expand::{self, AstFragment, Invocation};
 use crate::module::DirOwnership;
+use crate::stats::MacroStat;
 
 // When adding new variants, make sure to
 // adjust the `visit_*` / `flat_map_*` calls in `InvocationCollector`
@@ -167,7 +168,7 @@ impl Annotatable {
 
     pub fn expect_stmt(self) -> ast::Stmt {
         match self {
-            Annotatable::Stmt(stmt) => stmt.into_inner(),
+            Annotatable::Stmt(stmt) => *stmt,
             _ => panic!("expected statement"),
         }
     }
@@ -727,6 +728,7 @@ pub enum SyntaxExtensionKind {
     /// A trivial attribute "macro" that does nothing,
     /// only keeps the attribute and marks it as inert,
     /// thus making it ineligible for further expansion.
+    /// E.g. `#[default]`, `#[rustfmt::skip]`.
     NonMacroAttr,
 
     /// A token-based derive macro.
@@ -1189,6 +1191,8 @@ pub struct ExtCtxt<'a> {
     /// in the AST, but insert it here so that we know
     /// not to expand it again.
     pub(super) expanded_inert_attrs: MarkedAttrs,
+    /// `-Zmacro-stats` data.
+    pub macro_stats: FxHashMap<(Symbol, MacroKind), MacroStat>,
 }
 
 impl<'a> ExtCtxt<'a> {
@@ -1218,6 +1222,7 @@ impl<'a> ExtCtxt<'a> {
             expansions: FxIndexMap::default(),
             expanded_inert_attrs: MarkedAttrs::new(),
             buffered_early_lint: vec![],
+            macro_stats: Default::default(),
         }
     }
 
@@ -1424,7 +1429,7 @@ pub fn parse_macro_name_and_helper_attrs(
 /// See #73345 and #83125 for more details.
 /// FIXME(#73933): Remove this eventually.
 fn pretty_printing_compatibility_hack(item: &Item, psess: &ParseSess) {
-    if let ast::ItemKind::Enum(ident, enum_def, _) = &item.kind
+    if let ast::ItemKind::Enum(ident, _, enum_def) = &item.kind
         && ident.name == sym::ProceduralMasqueradeDummyType
         && let [variant] = &*enum_def.variants
         && variant.ident.name == sym::Input

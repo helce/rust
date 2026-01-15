@@ -2,12 +2,13 @@
 
 #![allow(rustc::usage_of_qualified_ty)]
 
+use rustc_abi::{ArmCall, CanonAbi, InterruptKind, X86Call};
 use rustc_middle::ty;
-use rustc_target::callconv::{self, Conv};
+use rustc_target::callconv;
 use stable_mir::abi::{
-    AddressSpace, ArgAbi, CallConvention, FieldsShape, FloatLength, FnAbi, IntegerLength, Layout,
-    LayoutShape, PassMode, Primitive, Scalar, TagEncoding, TyAndLayout, ValueAbi, VariantsShape,
-    WrappingRange,
+    AddressSpace, ArgAbi, CallConvention, FieldsShape, FloatLength, FnAbi, IntegerLength,
+    IntegerType, Layout, LayoutShape, PassMode, Primitive, ReprFlags, ReprOptions, Scalar,
+    TagEncoding, TyAndLayout, ValueAbi, VariantsShape, WrappingRange,
 };
 use stable_mir::opaque;
 use stable_mir::target::MachineSize as Size;
@@ -69,7 +70,7 @@ impl<'tcx> Stable<'tcx> for callconv::FnAbi<'tcx, ty::Ty<'tcx>> {
 
     fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
         assert!(self.args.len() >= self.fixed_count as usize);
-        assert!(!self.c_variadic || matches!(self.conv, Conv::C));
+        assert!(!self.c_variadic || matches!(self.conv, CanonAbi::C));
         FnAbi {
             args: self.args.as_ref().stable(tables),
             ret: self.ret.stable(tables),
@@ -92,31 +93,38 @@ impl<'tcx> Stable<'tcx> for callconv::ArgAbi<'tcx, ty::Ty<'tcx>> {
     }
 }
 
-impl<'tcx> Stable<'tcx> for callconv::Conv {
+impl<'tcx> Stable<'tcx> for CanonAbi {
     type T = CallConvention;
 
     fn stable(&self, _tables: &mut Tables<'_>) -> Self::T {
         match self {
-            Conv::C => CallConvention::C,
-            Conv::Rust => CallConvention::Rust,
-            Conv::Cold => CallConvention::Cold,
-            Conv::PreserveMost => CallConvention::PreserveMost,
-            Conv::PreserveAll => CallConvention::PreserveAll,
-            Conv::ArmAapcs => CallConvention::ArmAapcs,
-            Conv::CCmseNonSecureCall => CallConvention::CCmseNonSecureCall,
-            Conv::CCmseNonSecureEntry => CallConvention::CCmseNonSecureEntry,
-            Conv::Msp430Intr => CallConvention::Msp430Intr,
-            Conv::X86Fastcall => CallConvention::X86Fastcall,
-            Conv::X86Intr => CallConvention::X86Intr,
-            Conv::X86Stdcall => CallConvention::X86Stdcall,
-            Conv::X86ThisCall => CallConvention::X86ThisCall,
-            Conv::X86VectorCall => CallConvention::X86VectorCall,
-            Conv::X86_64SysV => CallConvention::X86_64SysV,
-            Conv::X86_64Win64 => CallConvention::X86_64Win64,
-            Conv::GpuKernel => CallConvention::GpuKernel,
-            Conv::AvrInterrupt => CallConvention::AvrInterrupt,
-            Conv::AvrNonBlockingInterrupt => CallConvention::AvrNonBlockingInterrupt,
-            Conv::RiscvInterrupt { .. } => CallConvention::RiscvInterrupt,
+            CanonAbi::C => CallConvention::C,
+            CanonAbi::Rust => CallConvention::Rust,
+            CanonAbi::RustCold => CallConvention::Cold,
+            CanonAbi::Custom => CallConvention::Custom,
+            CanonAbi::Arm(arm_call) => match arm_call {
+                ArmCall::Aapcs => CallConvention::ArmAapcs,
+                ArmCall::CCmseNonSecureCall => CallConvention::CCmseNonSecureCall,
+                ArmCall::CCmseNonSecureEntry => CallConvention::CCmseNonSecureEntry,
+            },
+            CanonAbi::GpuKernel => CallConvention::GpuKernel,
+            CanonAbi::Interrupt(interrupt_kind) => match interrupt_kind {
+                InterruptKind::Avr => CallConvention::AvrInterrupt,
+                InterruptKind::AvrNonBlocking => CallConvention::AvrNonBlockingInterrupt,
+                InterruptKind::Msp430 => CallConvention::Msp430Intr,
+                InterruptKind::RiscvMachine | InterruptKind::RiscvSupervisor => {
+                    CallConvention::RiscvInterrupt
+                }
+                InterruptKind::X86 => CallConvention::X86Intr,
+            },
+            CanonAbi::X86(x86_call) => match x86_call {
+                X86Call::Fastcall => CallConvention::X86Fastcall,
+                X86Call::Stdcall => CallConvention::X86Stdcall,
+                X86Call::SysV64 => CallConvention::X86_64SysV,
+                X86Call::Thiscall => CallConvention::X86ThisCall,
+                X86Call::Vectorcall => CallConvention::X86VectorCall,
+                X86Call::Win64 => CallConvention::X86_64Win64,
+            },
         }
     }
 }
@@ -173,7 +181,7 @@ impl<'tcx> Stable<'tcx> for rustc_abi::Variants<rustc_abi::FieldIdx, rustc_abi::
                 VariantsShape::Multiple {
                     tag: tag.stable(tables),
                     tag_encoding: tag_encoding.stable(tables),
-                    tag_field: *tag_field,
+                    tag_field: tag_field.stable(tables),
                     variants: variants.iter().as_slice().stable(tables),
                 }
             }
@@ -301,5 +309,44 @@ impl<'tcx> Stable<'tcx> for rustc_abi::WrappingRange {
 
     fn stable(&self, _tables: &mut Tables<'_>) -> Self::T {
         WrappingRange { start: self.start, end: self.end }
+    }
+}
+
+impl<'tcx> Stable<'tcx> for rustc_abi::ReprFlags {
+    type T = ReprFlags;
+
+    fn stable(&self, _tables: &mut Tables<'_>) -> Self::T {
+        ReprFlags {
+            is_simd: self.intersects(Self::IS_SIMD),
+            is_c: self.intersects(Self::IS_C),
+            is_transparent: self.intersects(Self::IS_TRANSPARENT),
+            is_linear: self.intersects(Self::IS_LINEAR),
+        }
+    }
+}
+
+impl<'tcx> Stable<'tcx> for rustc_abi::IntegerType {
+    type T = IntegerType;
+
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        match self {
+            rustc_abi::IntegerType::Pointer(signed) => IntegerType::Pointer { is_signed: *signed },
+            rustc_abi::IntegerType::Fixed(integer, signed) => {
+                IntegerType::Fixed { length: integer.stable(tables), is_signed: *signed }
+            }
+        }
+    }
+}
+
+impl<'tcx> Stable<'tcx> for rustc_abi::ReprOptions {
+    type T = ReprOptions;
+
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        ReprOptions {
+            int: self.int.map(|int| int.stable(tables)),
+            align: self.align.map(|align| align.stable(tables)),
+            pack: self.pack.map(|pack| pack.stable(tables)),
+            flags: self.flags.stable(tables),
+        }
     }
 }

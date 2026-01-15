@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 use std::ffi::{CStr, CString};
+use std::num::NonZero;
 use std::ptr;
 use std::str::FromStr;
 use std::string::FromUtf8Error;
@@ -327,6 +328,28 @@ pub(crate) fn get_value_name(value: &Value) -> &[u8] {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct Intrinsic {
+    id: NonZero<c_uint>,
+}
+
+impl Intrinsic {
+    pub(crate) fn lookup(name: &[u8]) -> Option<Self> {
+        let id = unsafe { LLVMLookupIntrinsicID(name.as_c_char_ptr(), name.len()) };
+        NonZero::new(id).map(|id| Self { id })
+    }
+
+    pub(crate) fn get_declaration<'ll>(
+        self,
+        llmod: &'ll Module,
+        type_params: &[&'ll Type],
+    ) -> &'ll Value {
+        unsafe {
+            LLVMGetIntrinsicDeclaration(llmod, self.id, type_params.as_ptr(), type_params.len())
+        }
+    }
+}
+
 /// Safe wrapper for `LLVMSetValueName2` from a byte slice
 pub(crate) fn set_value_name(value: &Value, name: &[u8]) {
     unsafe {
@@ -363,12 +386,13 @@ pub(crate) fn last_error() -> Option<String> {
     }
 }
 
-/// Owns an [`OperandBundle`], and will dispose of it when dropped.
-pub(crate) struct OperandBundleOwned<'a> {
+/// Owning pointer to an [`OperandBundle`] that will dispose of the bundle
+/// when dropped.
+pub(crate) struct OperandBundleBox<'a> {
     raw: ptr::NonNull<OperandBundle<'a>>,
 }
 
-impl<'a> OperandBundleOwned<'a> {
+impl<'a> OperandBundleBox<'a> {
     pub(crate) fn new(name: &str, vals: &[&'a Value]) -> Self {
         let raw = unsafe {
             LLVMCreateOperandBundle(
@@ -378,21 +402,21 @@ impl<'a> OperandBundleOwned<'a> {
                 vals.len() as c_uint,
             )
         };
-        OperandBundleOwned { raw: ptr::NonNull::new(raw).unwrap() }
+        Self { raw: ptr::NonNull::new(raw).unwrap() }
     }
 
-    /// Returns inner `OperandBundle` type.
+    /// Dereferences to the underlying `&OperandBundle`.
     ///
-    /// This could be a `Deref` implementation, but `OperandBundle` contains an extern type and
-    /// `Deref::Target: ?Sized`.
-    pub(crate) fn raw(&self) -> &OperandBundle<'a> {
+    /// This can't be a `Deref` implementation because `OperandBundle` transitively
+    /// contains an extern type, which is incompatible with `Deref::Target: ?Sized`.
+    pub(crate) fn as_ref(&self) -> &OperandBundle<'a> {
         // SAFETY: The returned reference is opaque and can only used for FFI.
         // It is valid for as long as `&self` is.
         unsafe { self.raw.as_ref() }
     }
 }
 
-impl Drop for OperandBundleOwned<'_> {
+impl Drop for OperandBundleBox<'_> {
     fn drop(&mut self) {
         unsafe {
             LLVMDisposeOperandBundle(self.raw);
@@ -438,5 +462,13 @@ pub(crate) fn set_dllimport_storage_class<'ll>(v: &'ll Value) {
 pub(crate) fn set_dso_local<'ll>(v: &'ll Value) {
     unsafe {
         LLVMRustSetDSOLocal(v, true);
+    }
+}
+
+/// Safe wrapper for `LLVMAppendModuleInlineAsm`, which delegates to
+/// `Module::appendModuleInlineAsm`.
+pub(crate) fn append_module_inline_asm<'ll>(llmod: &'ll Module, asm: &[u8]) {
+    unsafe {
+        LLVMAppendModuleInlineAsm(llmod, asm.as_ptr(), asm.len());
     }
 }

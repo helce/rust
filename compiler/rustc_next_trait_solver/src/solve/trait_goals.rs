@@ -4,12 +4,12 @@ use rustc_type_ir::data_structures::IndexSet;
 use rustc_type_ir::fast_reject::DeepRejectCtxt;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
-use rustc_type_ir::solve::CanonicalResponse;
+use rustc_type_ir::solve::{CanonicalResponse, SizedTraitKind};
 use rustc_type_ir::{
-    self as ty, Interner, Movability, TraitPredicate, TypeVisitableExt as _, TypingMode,
+    self as ty, Interner, Movability, TraitPredicate, TraitRef, TypeVisitableExt as _, TypingMode,
     Upcast as _, elaborate,
 };
-use tracing::{instrument, trace};
+use tracing::{debug, instrument, trace};
 
 use crate::delegate::SolverDelegate;
 use crate::solve::assembly::structural_traits::{self, AsyncCallableRelevantTypes};
@@ -17,7 +17,7 @@ use crate::solve::assembly::{self, AllowInferenceConstraints, AssembleCandidates
 use crate::solve::inspect::ProbeKind;
 use crate::solve::{
     BuiltinImplSource, CandidateSource, Certainty, EvalCtxt, Goal, GoalSource, MaybeCause,
-    NoSolution, ParamEnvSource,
+    NoSolution, ParamEnvSource, QueryResult, has_only_region_constraints,
 };
 
 impl<D, I> assembly::GoalKind<D> for TraitPredicate<I>
@@ -131,15 +131,28 @@ where
         assumption: I::Clause,
     ) -> Result<(), NoSolution> {
         if let Some(trait_clause) = assumption.as_trait_clause() {
-            if trait_clause.def_id() == goal.predicate.def_id()
-                && trait_clause.polarity() == goal.predicate.polarity
-            {
+            if trait_clause.polarity() != goal.predicate.polarity {
+                return Err(NoSolution);
+            }
+
+            if trait_clause.def_id() == goal.predicate.def_id() {
                 if DeepRejectCtxt::relate_rigid_rigid(ecx.cx()).args_may_unify(
                     goal.predicate.trait_ref.args,
                     trait_clause.skip_binder().trait_ref.args,
                 ) {
                     return Ok(());
                 }
+            }
+
+            // PERF(sized-hierarchy): Sizedness supertraits aren't elaborated to improve perf, so
+            // check for a `Sized` subtrait when looking for `MetaSized`. `PointeeSized` bounds
+            // are syntactic sugar for a lack of bounds so don't need this.
+            if ecx.cx().is_lang_item(goal.predicate.def_id(), TraitSolverLangItem::MetaSized)
+                && ecx.cx().is_lang_item(trait_clause.def_id(), TraitSolverLangItem::Sized)
+            {
+                let meta_sized_clause =
+                    trait_predicate_with_def_id(ecx.cx(), trait_clause, goal.predicate.def_id());
+                return Self::fast_reject_assumption(ecx, goal, meta_sized_clause);
             }
         }
 
@@ -150,13 +163,25 @@ where
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
         assumption: I::Clause,
-    ) -> Result<(), NoSolution> {
+        then: impl FnOnce(&mut EvalCtxt<'_, D>) -> QueryResult<I>,
+    ) -> QueryResult<I> {
         let trait_clause = assumption.as_trait_clause().unwrap();
+
+        // PERF(sized-hierarchy): Sizedness supertraits aren't elaborated to improve perf, so
+        // check for a `Sized` subtrait when looking for `MetaSized`. `PointeeSized` bounds
+        // are syntactic sugar for a lack of bounds so don't need this.
+        if ecx.cx().is_lang_item(goal.predicate.def_id(), TraitSolverLangItem::MetaSized)
+            && ecx.cx().is_lang_item(trait_clause.def_id(), TraitSolverLangItem::Sized)
+        {
+            let meta_sized_clause =
+                trait_predicate_with_def_id(ecx.cx(), trait_clause, goal.predicate.def_id());
+            return Self::match_assumption(ecx, goal, meta_sized_clause, then);
+        }
 
         let assumption_trait_pred = ecx.instantiate_binder_with_infer(trait_clause);
         ecx.eq(goal.param_env, goal.predicate.trait_ref, assumption_trait_pred.trait_ref)?;
 
-        Ok(())
+        then(ecx)
     }
 
     fn consider_auto_trait_candidate(
@@ -234,15 +259,20 @@ where
                 .predicates_of(goal.predicate.def_id())
                 .iter_instantiated(cx, goal.predicate.trait_ref.args)
                 .map(|p| goal.with(cx, p));
-            // FIXME(-Znext-solver=coinductive): Should this be `GoalSource::ImplWhereBound`?
+            // While you could think of trait aliases to have a single builtin impl
+            // which uses its implied trait bounds as where-clauses, using
+            // `GoalSource::ImplWhereClause` here would be incorrect, as we also
+            // impl them, which means we're "stepping out of the impl constructor"
+            // again. To handle this, we treat these cycles as ambiguous for now.
             ecx.add_goals(GoalSource::Misc, nested_obligations);
             ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
         })
     }
 
-    fn consider_builtin_sized_candidate(
+    fn consider_builtin_sizedness_candidates(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,
+        sizedness: SizedTraitKind,
     ) -> Result<Candidate<I>, NoSolution> {
         if goal.predicate.polarity != ty::PredicatePolarity::Positive {
             return Err(NoSolution);
@@ -251,7 +281,11 @@ where
         ecx.probe_and_evaluate_goal_for_constituent_tys(
             CandidateSource::BuiltinImpl(BuiltinImplSource::Trivial),
             goal,
-            structural_traits::instantiate_constituent_tys_for_sized_trait,
+            |ecx, ty| {
+                structural_traits::instantiate_constituent_tys_for_sizedness_trait(
+                    ecx, sizedness, ty,
+                )
+            },
         )
     }
 
@@ -807,6 +841,25 @@ where
     }
 }
 
+/// Small helper function to change the `def_id` of a trait predicate - this is not normally
+/// something that you want to do, as different traits will require different args and so making
+/// it easy to change the trait is something of a footgun, but it is useful in the narrow
+/// circumstance of changing from `MetaSized` to `Sized`, which happens as part of the lazy
+/// elaboration of sizedness candidates.
+#[inline(always)]
+fn trait_predicate_with_def_id<I: Interner>(
+    cx: I,
+    clause: ty::Binder<I, ty::TraitPredicate<I>>,
+    did: I::DefId,
+) -> I::Clause {
+    clause
+        .map_bound(|c| TraitPredicate {
+            trait_ref: TraitRef::new_from_args(cx, did, c.trait_ref.args),
+            polarity: c.polarity,
+        })
+        .upcast(cx)
+}
+
 impl<D, I> EvalCtxt<'_, D>
 where
     D: SolverDelegate<Interner = I>,
@@ -1252,6 +1305,45 @@ where
     D: SolverDelegate<Interner = I>,
     I: Interner,
 {
+    /// FIXME(#57893): For backwards compatability with the old trait solver implementation,
+    /// we need to handle overlap between builtin and user-written impls for trait objects.
+    ///
+    /// This overlap is unsound in general and something which we intend to fix separately.
+    /// To avoid blocking the stabilization of the trait solver, we add this hack to avoid
+    /// breakage in cases which are *mostly fine*™. Importantly, this preference is strictly
+    /// weaker than the old behavior.
+    ///
+    /// We only prefer builtin over user-written impls if there are no inference constraints.
+    /// Importantly, we also only prefer the builtin impls for trait goals, and not during
+    /// normalization. This means the only case where this special-case results in exploitable
+    /// unsoundness should be lifetime dependent user-written impls.
+    pub(super) fn unsound_prefer_builtin_dyn_impl(&mut self, candidates: &mut Vec<Candidate<I>>) {
+        match self.typing_mode() {
+            TypingMode::Coherence => return,
+            TypingMode::Analysis { .. }
+            | TypingMode::Borrowck { .. }
+            | TypingMode::PostBorrowckAnalysis { .. }
+            | TypingMode::PostAnalysis => {}
+        }
+
+        if candidates
+            .iter()
+            .find(|c| {
+                matches!(c.source, CandidateSource::BuiltinImpl(BuiltinImplSource::Object(_)))
+            })
+            .is_some_and(|c| has_only_region_constraints(c.result))
+        {
+            candidates.retain(|c| {
+                if matches!(c.source, CandidateSource::Impl(_)) {
+                    debug!(?c, "unsoundly dropping impl in favor of builtin dyn-candidate");
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
+
     #[instrument(level = "debug", skip(self), ret)]
     pub(super) fn merge_trait_candidates(
         &mut self,
@@ -1312,6 +1404,7 @@ where
         }
 
         self.filter_specialized_impls(AllowInferenceConstraints::No, &mut candidates);
+        self.unsound_prefer_builtin_dyn_impl(&mut candidates);
 
         // If there are *only* global where bounds, then make sure to return that this
         // is still reported as being proven-via the param-env so that rigid projections

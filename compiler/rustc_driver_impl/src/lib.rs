@@ -7,13 +7,11 @@
 // tidy-alphabetical-start
 #![allow(internal_features)]
 #![allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
-#![cfg_attr(bootstrap, feature(let_chains))]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
 #![feature(decl_macro)]
 #![feature(panic_backtrace_config)]
 #![feature(panic_update_hook)]
-#![feature(result_flattening)]
 #![feature(rustdoc_internals)]
 #![feature(try_blocks)]
 // tidy-alphabetical-end
@@ -40,6 +38,7 @@ use rustc_data_structures::profiling::{
 };
 use rustc_errors::emitter::stderr_destination;
 use rustc_errors::registry::Registry;
+use rustc_errors::translation::Translator;
 use rustc_errors::{ColorConfig, DiagCtxt, ErrCode, FatalError, PResult, markdown};
 use rustc_feature::find_gated_cfg;
 // This avoids a false positive with `-Wunused_crate_dependencies`.
@@ -110,6 +109,10 @@ use crate::session_diagnostics::{
 };
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
+
+pub fn default_translator() -> Translator {
+    Translator::with_fallback_bundle(DEFAULT_LOCALE_RESOURCES.to_vec(), false)
+}
 
 pub static DEFAULT_LOCALE_RESOURCES: &[&str] = &[
     // tidy-alphabetical-start
@@ -559,27 +562,34 @@ fn process_rlink(sess: &Session, compiler: &interface::Compiler) {
         let rlink_data = fs::read(file).unwrap_or_else(|err| {
             dcx.emit_fatal(RlinkUnableToRead { err });
         });
-        let (codegen_results, outputs) = match CodegenResults::deserialize_rlink(sess, rlink_data) {
-            Ok((codegen, outputs)) => (codegen, outputs),
-            Err(err) => {
-                match err {
-                    CodegenErrors::WrongFileType => dcx.emit_fatal(RLinkWrongFileType),
-                    CodegenErrors::EmptyVersionNumber => dcx.emit_fatal(RLinkEmptyVersionNumber),
-                    CodegenErrors::EncodingVersionMismatch { version_array, rlink_version } => dcx
-                        .emit_fatal(RLinkEncodingVersionMismatch { version_array, rlink_version }),
-                    CodegenErrors::RustcVersionMismatch { rustc_version } => {
-                        dcx.emit_fatal(RLinkRustcVersionMismatch {
-                            rustc_version,
-                            current_version: sess.cfg_version,
-                        })
-                    }
-                    CodegenErrors::CorruptFile => {
-                        dcx.emit_fatal(RlinkCorruptFile { file });
-                    }
-                };
-            }
-        };
-        compiler.codegen_backend.link(sess, codegen_results, &outputs);
+        let (codegen_results, metadata, outputs) =
+            match CodegenResults::deserialize_rlink(sess, rlink_data) {
+                Ok((codegen, metadata, outputs)) => (codegen, metadata, outputs),
+                Err(err) => {
+                    match err {
+                        CodegenErrors::WrongFileType => dcx.emit_fatal(RLinkWrongFileType),
+                        CodegenErrors::EmptyVersionNumber => {
+                            dcx.emit_fatal(RLinkEmptyVersionNumber)
+                        }
+                        CodegenErrors::EncodingVersionMismatch { version_array, rlink_version } => {
+                            dcx.emit_fatal(RLinkEncodingVersionMismatch {
+                                version_array,
+                                rlink_version,
+                            })
+                        }
+                        CodegenErrors::RustcVersionMismatch { rustc_version } => {
+                            dcx.emit_fatal(RLinkRustcVersionMismatch {
+                                rustc_version,
+                                current_version: sess.cfg_version,
+                            })
+                        }
+                        CodegenErrors::CorruptFile => {
+                            dcx.emit_fatal(RlinkCorruptFile { file });
+                        }
+                    };
+                }
+            };
+        compiler.codegen_backend.link(sess, codegen_results, metadata, &outputs);
     } else {
         dcx.emit_fatal(RlinkNotAFile {});
     }
@@ -1408,11 +1418,10 @@ fn report_ice(
     extra_info: fn(&DiagCtxt),
     using_internal_features: &AtomicBool,
 ) {
-    let fallback_bundle =
-        rustc_errors::fallback_fluent_bundle(crate::DEFAULT_LOCALE_RESOURCES.to_vec(), false);
+    let translator = default_translator();
     let emitter = Box::new(rustc_errors::emitter::HumanEmitter::new(
         stderr_destination(rustc_errors::ColorConfig::Auto),
-        fallback_bundle,
+        translator,
     ));
     let dcx = rustc_errors::DiagCtxt::new(emitter);
     let dcx = dcx.handle();
@@ -1502,9 +1511,27 @@ pub fn init_rustc_env_logger(early_dcx: &EarlyDiagCtxt) {
 
 /// This allows tools to enable rust logging without having to magically match rustc's
 /// tracing crate version. In contrast to `init_rustc_env_logger` it allows you to choose
-/// the values directly rather than having to set an environment variable.
+/// the logger config directly rather than having to set an environment variable.
 pub fn init_logger(early_dcx: &EarlyDiagCtxt, cfg: rustc_log::LoggerConfig) {
     if let Err(error) = rustc_log::init_logger(cfg) {
+        early_dcx.early_fatal(error.to_string());
+    }
+}
+
+/// This allows tools to enable rust logging without having to magically match rustc's
+/// tracing crate version. In contrast to `init_rustc_env_logger`, it allows you to
+/// choose the logger config directly rather than having to set an environment variable.
+/// Moreover, in contrast to `init_logger`, it allows you to add a custom tracing layer
+/// via `build_subscriber`, for example `|| Registry::default().with(custom_layer)`.
+pub fn init_logger_with_additional_layer<F, T>(
+    early_dcx: &EarlyDiagCtxt,
+    cfg: rustc_log::LoggerConfig,
+    build_subscriber: F,
+) where
+    F: FnOnce() -> T,
+    T: rustc_log::BuildSubscriberRet,
+{
+    if let Err(error) = rustc_log::init_logger_with_additional_layer(cfg, build_subscriber) {
         early_dcx.early_fatal(error.to_string());
     }
 }

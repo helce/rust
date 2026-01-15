@@ -21,6 +21,8 @@ mod ok {
     #[test]
     fn asm_expr() { run_and_expect_no_errors("test_data/parser/inline/ok/asm_expr.rs"); }
     #[test]
+    fn asm_label() { run_and_expect_no_errors("test_data/parser/inline/ok/asm_label.rs"); }
+    #[test]
     fn assoc_const_eq() {
         run_and_expect_no_errors("test_data/parser/inline/ok/assoc_const_eq.rs");
     }
@@ -80,6 +82,10 @@ mod ok {
     fn call_expr() { run_and_expect_no_errors("test_data/parser/inline/ok/call_expr.rs"); }
     #[test]
     fn cast_expr() { run_and_expect_no_errors("test_data/parser/inline/ok/cast_expr.rs"); }
+    #[test]
+    fn closure_binder() {
+        run_and_expect_no_errors("test_data/parser/inline/ok/closure_binder.rs");
+    }
     #[test]
     fn closure_body_underscore_assignment() {
         run_and_expect_no_errors(
@@ -868,6 +874,10 @@ mod err {
     #[test]
     fn tuple_pat_leading_comma() {
         run_and_expect_errors("test_data/parser/inline/err/tuple_pat_leading_comma.rs");
+    }
+    #[test]
+    fn type_bounds_macro_call_recovery() {
+        run_and_expect_errors("test_data/parser/inline/err/type_bounds_macro_call_recovery.rs");
     }
     #[test]
     fn type_in_array_recover() {

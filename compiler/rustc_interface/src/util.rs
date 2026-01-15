@@ -2,7 +2,7 @@ use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::{env, iter, thread};
+use std::{env, thread};
 
 use rustc_ast as ast;
 use rustc_codegen_ssa::traits::CodegenBackend;
@@ -12,7 +12,6 @@ use rustc_metadata::{DylibError, load_symbol_from_dylib};
 use rustc_middle::ty::CurrentGcx;
 use rustc_parse::validate_attr;
 use rustc_session::config::{Cfg, OutFileName, OutputFilenames, OutputTypes, host_tuple};
-use rustc_session::filesearch::sysroot_candidates;
 use rustc_session::lint::{self, BuiltinLintDiag, LintBuffer};
 use rustc_session::output::{CRATE_TYPES, categorize_crate_type};
 use rustc_session::{EarlyDiagCtxt, Session, filesearch};
@@ -209,7 +208,7 @@ pub(crate) fn run_in_thread_pool_with_globals<
 
     let proxy_ = Arc::clone(&proxy);
     let proxy__ = Arc::clone(&proxy);
-    let builder = rayon_core::ThreadPoolBuilder::new()
+    let builder = rustc_thread_pool::ThreadPoolBuilder::new()
         .thread_name(|_| "rustc".to_string())
         .acquire_thread_handler(move || proxy_.acquire_thread())
         .release_thread_handler(move || proxy__.release_thread())
@@ -219,7 +218,7 @@ pub(crate) fn run_in_thread_pool_with_globals<
             // locals to it. The new thread runs the deadlock handler.
 
             let current_gcx2 = current_gcx2.clone();
-            let registry = rayon_core::Registry::current();
+            let registry = rustc_thread_pool::Registry::current();
             let session_globals = rustc_span::with_session_globals(|session_globals| {
                 session_globals as *const SessionGlobals as usize
             });
@@ -266,7 +265,7 @@ pub(crate) fn run_in_thread_pool_with_globals<
             builder
                 .build_scoped(
                     // Initialize each new worker thread when created.
-                    move |thread: rayon_core::ThreadBuilder| {
+                    move |thread: rustc_thread_pool::ThreadBuilder| {
                         // Register the thread for use with the `WorkerLocal` type.
                         registry.register();
 
@@ -275,7 +274,7 @@ pub(crate) fn run_in_thread_pool_with_globals<
                         })
                     },
                     // Run `f` on the first thread in the thread pool.
-                    move |pool: &rayon_core::ThreadPool| {
+                    move |pool: &rustc_thread_pool::ThreadPool| {
                         pool.install(|| f(current_gcx.into_inner(), proxy))
                     },
                 )
@@ -346,14 +345,10 @@ pub fn rustc_path<'a>() -> Option<&'a Path> {
 }
 
 fn get_rustc_path_inner(bin_path: &str) -> Option<PathBuf> {
-    sysroot_candidates().iter().find_map(|sysroot| {
-        let candidate = sysroot.join(bin_path).join(if cfg!(target_os = "windows") {
-            "rustc.exe"
-        } else {
-            "rustc"
-        });
-        candidate.exists().then_some(candidate)
-    })
+    let candidate = filesearch::get_or_default_sysroot()
+        .join(bin_path)
+        .join(if cfg!(target_os = "windows") { "rustc.exe" } else { "rustc" });
+    candidate.exists().then_some(candidate)
 }
 
 #[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
@@ -374,10 +369,10 @@ fn get_codegen_sysroot(
     );
 
     let target = host_tuple();
-    let sysroot_candidates = sysroot_candidates();
+    let sysroot_candidates = filesearch::sysroot_with_fallback(&sysroot);
 
-    let sysroot = iter::once(sysroot)
-        .chain(sysroot_candidates.iter().map(<_>::as_ref))
+    let sysroot = sysroot_candidates
+        .iter()
         .map(|sysroot| {
             filesearch::make_target_lib_path(sysroot, target).with_file_name("codegen-backends")
         })

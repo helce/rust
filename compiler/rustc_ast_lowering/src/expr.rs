@@ -1,4 +1,3 @@
-use std::assert_matches::assert_matches;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -74,16 +73,15 @@ impl<'hir> LoweringContext<'_, 'hir> {
                     // Merge attributes into the inner expression.
                     if !e.attrs.is_empty() {
                         let old_attrs = self.attrs.get(&ex.hir_id.local_id).copied().unwrap_or(&[]);
-                        let attrs = &*self.arena.alloc_from_iter(
-                            self.lower_attrs_vec(&e.attrs, e.span)
-                                .into_iter()
-                                .chain(old_attrs.iter().cloned()),
-                        );
-                        if attrs.is_empty() {
+                        let new_attrs = self
+                            .lower_attrs_vec(&e.attrs, e.span, ex.hir_id)
+                            .into_iter()
+                            .chain(old_attrs.iter().cloned());
+                        let new_attrs = &*self.arena.alloc_from_iter(new_attrs);
+                        if new_attrs.is_empty() {
                             return ex;
                         }
-
-                        self.attrs.insert(ex.hir_id.local_id, attrs);
+                        self.attrs.insert(ex.hir_id.local_id, new_attrs);
                     }
                     return ex;
                 }
@@ -1199,11 +1197,13 @@ impl<'hir> LoweringContext<'_, 'hir> {
         let closure_def_id = self.local_def_id(closure_id);
         let (binder_clause, generic_params) = self.lower_closure_binder(binder);
 
-        assert_matches!(
-            coroutine_kind,
-            CoroutineKind::Async { .. },
-            "only async closures are supported currently"
-        );
+        let coroutine_desugaring = match coroutine_kind {
+            CoroutineKind::Async { .. } => hir::CoroutineDesugaring::Async,
+            CoroutineKind::Gen { .. } => hir::CoroutineDesugaring::Gen,
+            CoroutineKind::AsyncGen { span, .. } => {
+                span_bug!(span, "only async closures and `iter!` closures are supported currently")
+            }
+        };
 
         let body = self.with_new_scopes(fn_decl_span, |this| {
             let inner_decl =
@@ -1247,7 +1247,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             // Lower this as a `CoroutineClosure`. That will ensure that HIR typeck
             // knows that a `FnDecl` output type like `-> &str` actually means
             // "coroutine that returns &str", rather than directly returning a `&str`.
-            kind: hir::ClosureKind::CoroutineClosure(hir::CoroutineDesugaring::Async),
+            kind: hir::ClosureKind::CoroutineClosure(coroutine_desugaring),
             constness: hir::Constness::NotConst,
         });
         hir::ExprKind::Closure(c)
@@ -2034,7 +2034,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 let ret_expr = self.checked_return(Some(from_residual_expr));
                 self.arena.alloc(self.expr(try_span, ret_expr))
             };
-            self.lower_attrs(ret_expr.hir_id, &attrs, ret_expr.span);
+            self.lower_attrs(ret_expr.hir_id, &attrs, span);
 
             let break_pat = self.pat_cf_break(try_span, residual_local);
             self.arm(break_pat, ret_expr)
@@ -2289,12 +2289,12 @@ impl<'hir> LoweringContext<'_, 'hir> {
         span: Span,
         elements: &'hir [hir::Expr<'hir>],
     ) -> hir::Expr<'hir> {
-        let addrof = hir::ExprKind::AddrOf(
-            hir::BorrowKind::Ref,
-            hir::Mutability::Not,
-            self.arena.alloc(self.expr(span, hir::ExprKind::Array(elements))),
-        );
-        self.expr(span, addrof)
+        let array = self.arena.alloc(self.expr(span, hir::ExprKind::Array(elements)));
+        self.expr_ref(span, array)
+    }
+
+    pub(super) fn expr_ref(&mut self, span: Span, expr: &'hir hir::Expr<'hir>) -> hir::Expr<'hir> {
+        self.expr(span, hir::ExprKind::AddrOf(hir::BorrowKind::Ref, hir::Mutability::Not, expr))
     }
 
     pub(super) fn expr(&mut self, span: Span, kind: hir::ExprKind<'hir>) -> hir::Expr<'hir> {

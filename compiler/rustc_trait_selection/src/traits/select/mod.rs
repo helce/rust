@@ -27,8 +27,8 @@ use rustc_middle::ty::abstract_const::NotConstEvaluatable;
 use rustc_middle::ty::error::TypeErrorToStringExt;
 use rustc_middle::ty::print::{PrintTraitRefExt as _, with_no_trimmed_paths};
 use rustc_middle::ty::{
-    self, GenericArgsRef, PolyProjectionPredicate, Ty, TyCtxt, TypeFoldable, TypeVisitableExt,
-    TypingMode, Upcast, elaborate,
+    self, DeepRejectCtxt, GenericArgsRef, PolyProjectionPredicate, SizedTraitKind, Ty, TyCtxt,
+    TypeFoldable, TypeVisitableExt, TypingMode, Upcast, elaborate,
 };
 use rustc_span::{Symbol, sym};
 use tracing::{debug, instrument, trace};
@@ -265,9 +265,7 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         &mut self,
         obligation: &PolyTraitObligation<'tcx>,
     ) -> SelectionResult<'tcx, Selection<'tcx>> {
-        if self.infcx.next_trait_solver() {
-            return self.infcx.select_in_new_trait_solver(obligation);
-        }
+        assert!(!self.infcx.next_trait_solver());
 
         let candidate = match self.select_from_obligation(obligation) {
             Err(SelectionError::Overflow(OverflowError::Canonical)) => {
@@ -299,6 +297,10 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
         &mut self,
         obligation: &TraitObligation<'tcx>,
     ) -> SelectionResult<'tcx, Selection<'tcx>> {
+        if self.infcx.next_trait_solver() {
+            return self.infcx.select_in_new_trait_solver(obligation);
+        }
+
         self.poly_select(&Obligation {
             cause: obligation.cause.clone(),
             param_env: obligation.param_env,
@@ -1241,7 +1243,12 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             ty::PredicateKind::Clause(ty::ClauseKind::Trait(data)) => {
                 self.infcx.tcx.trait_is_coinductive(data.def_id())
             }
-            ty::PredicateKind::Clause(ty::ClauseKind::WellFormed(_)) => true,
+            ty::PredicateKind::Clause(ty::ClauseKind::WellFormed(_)) => {
+                // FIXME(generic_const_exprs): GCE needs well-formedness predicates to be
+                // coinductive, but GCE is on the way out anyways, so this should eventually
+                // be replaced with `false`.
+                self.infcx.tcx.features().generic_const_exprs()
+            }
             _ => false,
         })
     }
@@ -1669,6 +1676,12 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
             return Err(());
         }
 
+        let drcx = DeepRejectCtxt::relate_rigid_rigid(self.infcx.tcx);
+        let obligation_args = obligation.predicate.skip_binder().trait_ref.args;
+        if !drcx.args_may_unify(obligation_args, trait_bound.skip_binder().args) {
+            return Err(());
+        }
+
         let trait_bound = self.infcx.instantiate_binder_with_fresh_vars(
             obligation.cause.span,
             HigherRankedType,
@@ -1760,17 +1773,18 @@ impl<'cx, 'tcx> SelectionContext<'cx, 'tcx> {
 
         if is_match {
             let generics = self.tcx().generics_of(obligation.predicate.def_id);
-            // FIXME(generic-associated-types): Addresses aggressive inference in #92917.
+            // FIXME(generic_associated_types): Addresses aggressive inference in #92917.
             // If this type is a GAT, and of the GAT args resolve to something new,
             // that means that we must have newly inferred something about the GAT.
             // We should give up in that case.
-            // FIXME(generic-associated-types): This only detects one layer of inference,
-            // which is probably not what we actually want, but fixing it causes some ambiguity:
+            //
+            // This only detects one layer of inference, which is probably not what we actually
+            // want, but fixing it causes some ambiguity:
             // <https://github.com/rust-lang/rust/issues/125196>.
             if !generics.is_own_empty()
                 && obligation.predicate.args[generics.parent_count..].iter().any(|&p| {
                     p.has_non_region_infer()
-                        && match p.unpack() {
+                        && match p.kind() {
                             ty::GenericArgKind::Const(ct) => {
                                 self.infcx.shallow_resolve_const(ct) != ct
                             }
@@ -1905,12 +1919,23 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
         // impl `impl<T: ?Sized> Any for T { .. }`. This really shouldn't exist but is
         // necessary due to #57893. We again arbitrarily prefer the applicable candidate
         // with the lowest index.
+        //
+        // We do not want to use these impls to guide inference in case a user-written impl
+        // may also apply.
         let object_bound = candidates
             .iter()
             .filter_map(|c| if let ObjectCandidate(i) = c.candidate { Some(i) } else { None })
             .try_reduce(|c1, c2| if has_non_region_infer { None } else { Some(c1.min(c2)) });
         match object_bound {
-            Some(Some(index)) => return Some(ObjectCandidate(index)),
+            Some(Some(index)) => {
+                return if has_non_region_infer
+                    && candidates.iter().any(|c| matches!(c.candidate, ImplCandidate(_)))
+                {
+                    None
+                } else {
+                    Some(ObjectCandidate(index))
+                };
+            }
             Some(None) => {}
             None => return None,
         }
@@ -2069,9 +2094,10 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
 }
 
 impl<'tcx> SelectionContext<'_, 'tcx> {
-    fn sized_conditions(
+    fn sizedness_conditions(
         &mut self,
         obligation: &PolyTraitObligation<'tcx>,
+        sizedness: SizedTraitKind,
     ) -> BuiltinImplConditions<'tcx> {
         use self::BuiltinImplConditions::{Ambiguous, None, Where};
 
@@ -2101,7 +2127,12 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
                 Where(ty::Binder::dummy(Vec::new()))
             }
 
-            ty::Str | ty::Slice(_) | ty::Dynamic(..) | ty::Foreign(..) => None,
+            ty::Str | ty::Slice(_) | ty::Dynamic(..) => match sizedness {
+                SizedTraitKind::Sized => None,
+                SizedTraitKind::MetaSized => Where(ty::Binder::dummy(Vec::new())),
+            },
+
+            ty::Foreign(..) => None,
 
             ty::Tuple(tys) => Where(
                 obligation.predicate.rebind(tys.last().map_or_else(Vec::new, |&last| vec![last])),
@@ -2110,11 +2141,9 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
             ty::Pat(ty, _) => Where(obligation.predicate.rebind(vec![*ty])),
 
             ty::Adt(def, args) => {
-                if let Some(sized_crit) = def.sized_constraint(self.tcx()) {
+                if let Some(crit) = def.sizedness_constraint(self.tcx(), sizedness) {
                     // (*) binder moved here
-                    Where(
-                        obligation.predicate.rebind(vec![sized_crit.instantiate(self.tcx(), args)]),
-                    )
+                    Where(obligation.predicate.rebind(vec![crit.instantiate(self.tcx(), args)]))
                 } else {
                     Where(ty::Binder::dummy(Vec::new()))
                 }
@@ -2854,7 +2883,7 @@ fn rebind_coroutine_witness_types<'tcx>(
     let shifted_coroutine_types =
         tcx.shift_bound_var_indices(bound_vars.len(), bound_coroutine_types.skip_binder());
     ty::Binder::bind_with_vars(
-        ty::EarlyBinder::bind(shifted_coroutine_types.to_vec()).instantiate(tcx, args),
+        ty::EarlyBinder::bind(shifted_coroutine_types.types.to_vec()).instantiate(tcx, args),
         tcx.mk_bound_variable_kinds_from_iter(
             bound_vars.iter().chain(bound_coroutine_types.bound_vars()),
         ),

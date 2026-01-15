@@ -5,7 +5,7 @@
 use rustc_ast::visit::BoundKind;
 use rustc_ast::{self as ast, NodeId, visit as ast_visit};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_data_structures::thousands::format_with_underscores;
+use rustc_data_structures::thousands::usize_with_underscores;
 use rustc_hir::{self as hir, AmbigArg, HirId, intravisit as hir_visit};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::Span;
@@ -140,10 +140,10 @@ impl<'k> StatCollector<'k> {
                 "{} {:<18}{:>10} ({:4.1}%){:>14}{:>14}",
                 prefix,
                 label,
-                format_with_underscores(size),
+                usize_with_underscores(size),
                 percent(size, total_size),
-                format_with_underscores(node.stats.count),
-                format_with_underscores(node.stats.size)
+                usize_with_underscores(node.stats.count),
+                usize_with_underscores(node.stats.size)
             );
             if !node.subnodes.is_empty() {
                 // We will soon sort, so the initial order does not matter.
@@ -159,9 +159,9 @@ impl<'k> StatCollector<'k> {
                         "{} - {:<18}{:>10} ({:4.1}%){:>14}",
                         prefix,
                         label,
-                        format_with_underscores(size),
+                        usize_with_underscores(size),
                         percent(size, total_size),
-                        format_with_underscores(subnode.count),
+                        usize_with_underscores(subnode.count),
                     );
                 }
             }
@@ -171,8 +171,8 @@ impl<'k> StatCollector<'k> {
             "{} {:<18}{:>10}        {:>14}",
             prefix,
             "Total",
-            format_with_underscores(total_size),
-            format_with_underscores(total_count),
+            usize_with_underscores(total_size),
+            usize_with_underscores(total_count),
         );
         eprintln!("{prefix}");
     }
@@ -426,10 +426,16 @@ impl<'v> hir_visit::Visitor<'v> for StatCollector<'v> {
         hir_visit::walk_fn(self, fk, fd, b, id)
     }
 
-    fn visit_use(&mut self, p: &'v hir::UsePath<'v>, hir_id: HirId) {
+    fn visit_use(&mut self, p: &'v hir::UsePath<'v>, _hir_id: HirId) {
         // This is `visit_use`, but the type is `Path` so record it that way.
         self.record("Path", None, p);
-        hir_visit::walk_use(self, p, hir_id)
+        // Don't call `hir_visit::walk_use(self, p, hir_id)`: it calls
+        // `visit_path` up to three times, once for each namespace result in
+        // `p.res`, by building temporary `Path`s that are not part of the real
+        // HIR, which causes `p` to be double- or triple-counted. Instead just
+        // walk the path internals (i.e. the segments) directly.
+        let hir::Path { span: _, res: _, segments } = *p;
+        ast_visit::walk_list!(self, visit_path_segment, segments);
     }
 
     fn visit_trait_item(&mut self, ti: &'v hir::TraitItem<'v>) {
