@@ -1,6 +1,6 @@
 //@ compile-flags: -Copt-level=3
 //@ needs-deterministic-layouts (opposite scalar pair orders breaks it)
-//@ ignore-e2k llvm-18 problem?
+//@ ignore-e2k optimizations problems?
 #![crate_type = "lib"]
 
 type Demo = [u8; 3];
