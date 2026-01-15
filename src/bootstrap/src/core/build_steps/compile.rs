@@ -799,15 +799,19 @@ impl Step for StdLink {
             }
         } else if compiler.stage == 0 {
             let sysroot = builder.out.join(compiler.host.triple).join("stage0-sysroot");
+            let relative_libdir = &builder.initial_relative_libdir;
 
             if builder.local_rebuild {
                 // On local rebuilds this path might be a symlink to the project root,
                 // which can be read-only (e.g., on CI). So remove it before copying
                 // the stage0 lib.
-                let _ = fs::remove_dir_all(sysroot.join("lib/rustlib/src/rust"));
+                let _ = fs::remove_dir_all(sysroot.join(&relative_libdir).join("rustlib/src/rust"));
             }
 
-            builder.cp_link_r(&builder.initial_sysroot.join("lib"), &sysroot.join("lib"));
+            builder.cp_link_r(
+                &builder.initial_sysroot.join(&relative_libdir),
+                &sysroot.join(relative_libdir),
+            );
         } else {
             if builder.download_rustc() {
                 // Ensure there are no CI-rustc std artifacts.
