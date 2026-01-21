@@ -13,6 +13,14 @@ passes_abi_ne =
 passes_abi_of =
     fn_abi_of({$fn_name}) = {$fn_abi}
 
+passes_align_attr_application =
+    `#[rustc_align(...)]` should be applied to a function item
+    .label = not a function item
+
+passes_align_on_fields =
+    attribute should be applied to a function or method
+    .warn = {-passes_previously_accepted}
+
 passes_align_should_be_repr_align =
     `#[rustc_align(...)]` is not supported on {$item} items
     .suggestion = use `#[repr(align(...))]` instead
@@ -82,10 +90,13 @@ passes_collapse_debuginfo =
 passes_confusables = attribute should be applied to an inherent method
     .label = not an inherent method
 
+passes_const_continue_attr =
+    `#[const_continue]` should be applied to a break expression
+    .label = not a break expression
+
 passes_const_stable_not_stable =
     attribute `#[rustc_const_stable]` can only be applied to functions that are declared `#[stable]`
     .label = attribute specified here
-
 
 passes_coroutine_on_non_closure =
     attribute should be applied to closures
@@ -291,7 +302,7 @@ passes_duplicate_lang_item_crate_depends =
     .second_definition_path = second definition in `{$crate_name}` loaded from {$path}
 
 passes_enum_variant_same_name =
-    it is impossible to refer to the {$descr} `{$dead_name}` because it is shadowed by this enum variant with the same name
+    it is impossible to refer to the {$dead_descr} `{$dead_name}` because it is shadowed by this enum variant with the same name
 
 passes_export_name =
     attribute should be applied to a free function, impl method or static
@@ -446,6 +457,10 @@ passes_linkage =
     attribute should be applied to a function or static
     .label = not a function definition or static
 
+passes_loop_match_attr =
+    `#[loop_match]` should be applied to a loop
+    .label = not a loop
+
 passes_macro_export =
     `#[macro_export]` only has an effect on macro definitions
 
@@ -479,6 +494,11 @@ passes_missing_panic_handler =
 passes_missing_stability_attr =
     {$descr} has missing stability attribute
 
+passes_mixed_export_name_and_no_mangle = `{$no_mangle_attr}` attribute may not be used in combination with `{$export_name_attr}`
+    .label = `{$no_mangle_attr}` is ignored
+    .note = `{$export_name_attr}` takes precedence
+    .suggestion = remove the `{$no_mangle_attr}` attribute
+
 passes_multiple_rustc_main =
     multiple functions with a `#[rustc_main]` attribute
     .first = first `#[rustc_main]` function
@@ -490,11 +510,6 @@ passes_must_not_suspend =
 
 passes_must_use_no_effect =
     `#[must_use]` has no effect when applied to {$article} {$target}
-
-passes_naked_functions_incompatible_attribute =
-    attribute incompatible with `#[unsafe(naked)]`
-    .label = the `{$attr}` attribute is incompatible with `#[unsafe(naked)]`
-    .naked_attribute = function marked with `#[unsafe(naked)]` here
 
 passes_no_link =
     attribute should be applied to an `extern crate` item
@@ -530,7 +545,7 @@ passes_no_sanitize =
     `#[no_sanitize({$attr_str})]` should be applied to {$accepted_kind}
     .label = not {$accepted_kind}
 
-passes_non_exaustive_with_default_field_values =
+passes_non_exhaustive_with_default_field_values =
     `#[non_exhaustive]` can't be used to annotate items with default field values
     .label = this struct has default field values
 
@@ -545,7 +560,8 @@ passes_only_has_effect_on =
     `#[{$attr_name}]` only has an effect on {$target_name ->
         [function] functions
         [module] modules
-        [implementation_block] implementation blocks
+        [trait_implementation_block] trait implementation blocks
+        [inherent_implementation_block] inherent implementation blocks
         *[unspecified] (unspecified--this is a compiler bug)
     }
 
@@ -611,9 +627,6 @@ passes_rustc_force_inline_coro =
     attribute cannot be applied to a `async`, `gen` or `async gen` function
     .label = `async`, `gen` or `async gen` function
 
-passes_rustc_layout_scalar_valid_range_arg =
-    expected exactly one integer literal argument
-
 passes_rustc_layout_scalar_valid_range_not_struct =
     attribute should be applied to a struct
     .label = not a struct
@@ -655,6 +668,10 @@ passes_rustc_std_internal_symbol =
     attribute should be applied to functions or statics
     .label = not a function or static
 
+passes_rustc_unstable_feature_bound =
+    attribute should be applied to `impl` or free function outside of any `impl` or trait
+    .label = not an `impl` or free function
+
 passes_should_be_applied_to_fn =
     attribute should be applied to a function definition
     .label = {$on_crate ->
@@ -692,7 +709,7 @@ passes_trait_impl_const_stability_mismatch_trait_unstable = ...but the trait is 
 
 passes_trait_impl_const_stable =
     trait implementations cannot be const stable yet
-    .note = see issue #67792 <https://github.com/rust-lang/rust/issues/67792> for more information
+    .note = see issue #143874 <https://github.com/rust-lang/rust/issues/143874> for more information
 
 passes_transparent_incompatible =
     transparent {$target} cannot have other repr hints
@@ -768,7 +785,7 @@ passes_unused_capture_maybe_capture_ref = value captured by `{$name}` is never r
     .help = did you mean to capture by reference instead?
 
 passes_unused_default_method_body_const_note =
-    `default_method_body_is_const` has been replaced with `#[const_trait]` on traits
+    `default_method_body_is_const` has been replaced with `const` on traits
 
 passes_unused_duplicate =
     unused attribute
@@ -808,9 +825,6 @@ passes_unused_variable_try_prefix = unused variable: `{$name}`
     .label = unused variable
     .suggestion = if this is intentional, prefix it with an underscore
 
-
-passes_used_compiler_linker =
-    `used(compiler)` and `used(linker)` can't be used together
 
 passes_used_static =
     attribute must be applied to a `static` variable

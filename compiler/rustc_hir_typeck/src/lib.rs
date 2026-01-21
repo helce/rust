@@ -1,7 +1,6 @@
 // tidy-alphabetical-start
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::untranslatable_diagnostic)]
-#![feature(assert_matches)]
 #![feature(box_patterns)]
 #![feature(if_let_guard)]
 #![feature(iter_intersperse)]
@@ -46,17 +45,18 @@ use rustc_data_structures::unord::UnordSet;
 use rustc_errors::codes::*;
 use rustc_errors::{Applicability, ErrorGuaranteed, pluralize, struct_span_code_err};
 use rustc_hir as hir;
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{DefKind, Res};
-use rustc_hir::{HirId, HirIdMap, Node};
+use rustc_hir::{HirId, HirIdMap, Node, find_attr};
 use rustc_hir_analysis::check::{check_abi, check_custom_abi};
 use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer;
 use rustc_infer::traits::{ObligationCauseCode, ObligationInspector, WellFormedLoc};
 use rustc_middle::query::Providers;
-use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
 use rustc_middle::{bug, span_bug};
 use rustc_session::config;
+use rustc_span::Span;
 use rustc_span::def_id::LocalDefId;
-use rustc_span::{Span, sym};
 use tracing::{debug, instrument};
 use typeck_root_ctxt::TypeckRootCtxt;
 
@@ -173,7 +173,7 @@ fn typeck_with_inspect<'tcx>(
                 .map(|(idx, ty)| fcx.normalize(arg_span(idx), ty)),
         );
 
-        if tcx.has_attr(def_id, sym::naked) {
+        if find_attr!(tcx.get_all_attrs(def_id), AttributeKind::Naked(..)) {
             naked_functions::typeck_naked_fn(tcx, def_id, body);
         }
 
@@ -257,6 +257,21 @@ fn typeck_with_inspect<'tcx>(
     fcx.check_asms();
 
     let typeck_results = fcx.resolve_type_vars_in_body(body);
+
+    // Handle potentially region dependent goals, see `InferCtxt::in_hir_typeck`.
+    if let None = fcx.infcx.tainted_by_errors() {
+        for obligation in fcx.take_hir_typeck_potentially_region_dependent_goals() {
+            let obligation = fcx.resolve_vars_if_possible(obligation);
+            if obligation.has_non_region_infer() {
+                bug!("unexpected inference variable after writeback: {obligation:?}");
+            }
+            fcx.register_predicate(obligation);
+        }
+        fcx.select_obligations_where_possible(|_| {});
+        if let None = fcx.infcx.tainted_by_errors() {
+            fcx.report_ambiguity_errors();
+        }
+    }
 
     fcx.detect_opaque_types_added_during_writeback();
 
@@ -427,11 +442,9 @@ fn report_unexpected_variant_res(
                 }
                 hir::Node::Expr(hir::Expr { kind: hir::ExprKind::Binary(..), hir_id, .. }) => {
                     suggestion.push((expr.span.shrink_to_lo(), "(".to_string()));
-                    if let hir::Node::Expr(drop_temps) = tcx.parent_hir_node(*hir_id)
-                        && let hir::ExprKind::DropTemps(_) = drop_temps.kind
-                        && let hir::Node::Expr(parent) = tcx.parent_hir_node(drop_temps.hir_id)
+                    if let hir::Node::Expr(parent) = tcx.parent_hir_node(*hir_id)
                         && let hir::ExprKind::If(condition, block, None) = parent.kind
-                        && condition.hir_id == drop_temps.hir_id
+                        && condition.hir_id == *hir_id
                         && let hir::ExprKind::Block(block, _) = block.kind
                         && block.stmts.is_empty()
                         && let Some(expr) = block.expr
@@ -535,7 +548,12 @@ fn fatally_break_rust(tcx: TyCtxt<'_>, span: Span) -> ! {
     diag.emit()
 }
 
+/// Adds query implementations to the [Providers] vtable, see [`rustc_middle::query`]
 pub fn provide(providers: &mut Providers) {
-    method::provide(providers);
-    *providers = Providers { typeck, used_trait_imports, ..*providers };
+    *providers = Providers {
+        method_autoderef_steps: method::probe::method_autoderef_steps,
+        typeck,
+        used_trait_imports,
+        ..*providers
+    };
 }

@@ -1,31 +1,31 @@
 //! A bunch of methods and structures more or less related to resolving macros and
 //! interface provided by `Resolver` to macro expander.
 
+use std::any::Any;
 use std::cell::Cell;
 use std::mem;
 use std::sync::Arc;
 
-use rustc_ast::expand::StrippedCfgItem;
 use rustc_ast::{self as ast, Crate, NodeId, attr};
 use rustc_ast_pretty::pprust;
-use rustc_attr_data_structures::StabilityLevel;
-use rustc_data_structures::intern::Interned;
 use rustc_errors::{Applicability, DiagCtxtHandle, StashKey};
 use rustc_expand::base::{
     Annotatable, DeriveResolution, Indeterminate, ResolverExpand, SyntaxExtension,
     SyntaxExtensionKind,
 };
-use rustc_expand::compile_declarative_macro;
 use rustc_expand::expand::{
     AstFragment, AstFragmentKind, Invocation, InvocationKind, SupportsMacroExpansion,
 };
+use rustc_expand::{MacroRulesMacroExpander, compile_declarative_macro};
+use rustc_hir::StabilityLevel;
+use rustc_hir::attrs::{CfgEntry, StrippedCfgItem};
 use rustc_hir::def::{self, DefKind, Namespace, NonMacroAttrKind};
 use rustc_hir::def_id::{CrateNum, DefId, LocalDefId};
 use rustc_middle::middle::stability;
-use rustc_middle::ty::{RegisteredTools, TyCtxt, Visibility};
+use rustc_middle::ty::{RegisteredTools, TyCtxt};
 use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::lint::builtin::{
-    LEGACY_DERIVE_HELPERS, OUT_OF_SCOPE_MACRO_CALLS, UNKNOWN_OR_MALFORMED_DIAGNOSTIC_ATTRIBUTES,
+    LEGACY_DERIVE_HELPERS, OUT_OF_SCOPE_MACRO_CALLS, UNKNOWN_DIAGNOSTIC_ATTRIBUTES,
     UNUSED_MACRO_RULES, UNUSED_MACROS,
 };
 use rustc_session::parse::feature_err;
@@ -43,7 +43,7 @@ use crate::imports::Import;
 use crate::{
     BindingKey, DeriveData, Determinacy, Finalize, InvocationParent, MacroData, ModuleKind,
     ModuleOrUniformRoot, NameBinding, NameBindingKind, ParentScope, PathResult, ResolutionError,
-    Resolver, ScopeSet, Segment, ToNameBinding, Used,
+    Resolver, ScopeSet, Segment, Used,
 };
 
 type Res = def::Res<NodeId>;
@@ -80,7 +80,7 @@ pub(crate) enum MacroRulesScope<'ra> {
 /// This helps to avoid uncontrollable growth of `macro_rules!` scope chains,
 /// which usually grow linearly with the number of macro invocations
 /// in a module (including derives) and hurt performance.
-pub(crate) type MacroRulesScopeRef<'ra> = Interned<'ra, Cell<MacroRulesScope<'ra>>>;
+pub(crate) type MacroRulesScopeRef<'ra> = &'ra Cell<MacroRulesScope<'ra>>;
 
 /// Macro namespace is separated into two sub-namespaces, one for bang macros and
 /// one for attribute-like macros (attributes, derives).
@@ -172,7 +172,7 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
         self.invocation_parents[&id].parent_def
     }
 
-    fn resolve_dollar_crates(&mut self) {
+    fn resolve_dollar_crates(&self) {
         hygiene::update_dollar_crate_names(|ctxt| {
             let ident = Ident::new(kw::DollarCrate, DUMMY_SP.with_ctxt(ctxt));
             match self.resolve_crate_root(ident).kind {
@@ -334,7 +334,7 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
 
     fn record_macro_rule_usage(&mut self, id: NodeId, rule_i: usize) {
         if let Some(rules) = self.unused_macro_rules.get_mut(&id) {
-            rules.remove(&rule_i);
+            rules.remove(rule_i);
         }
     }
 
@@ -351,13 +351,27 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
         }
 
         for (&node_id, unused_arms) in self.unused_macro_rules.iter() {
-            for (&arm_i, &(ident, rule_span)) in unused_arms.to_sorted_stable_ord() {
-                self.lint_buffer.buffer_lint(
-                    UNUSED_MACRO_RULES,
-                    node_id,
-                    rule_span,
-                    BuiltinLintDiag::MacroRuleNeverUsed(arm_i, ident.name),
-                );
+            if unused_arms.is_empty() {
+                continue;
+            }
+            let def_id = self.local_def_id(node_id);
+            let m = &self.local_macro_map[&def_id];
+            let SyntaxExtensionKind::LegacyBang(ref ext) = m.ext.kind else {
+                continue;
+            };
+            let ext: &dyn Any = ext.as_ref();
+            let Some(m) = ext.downcast_ref::<MacroRulesMacroExpander>() else {
+                continue;
+            };
+            for arm_i in unused_arms.iter() {
+                if let Some((ident, rule_span)) = m.get_unused_rule(arm_i) {
+                    self.lint_buffer.buffer_lint(
+                        UNUSED_MACRO_RULES,
+                        node_id,
+                        rule_span,
+                        BuiltinLintDiag::MacroRuleNeverUsed(arm_i, ident.name),
+                    );
+                }
             }
         }
     }
@@ -428,8 +442,7 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
             .iter()
             .map(|(_, ident)| {
                 let res = Res::NonMacroAttr(NonMacroAttrKind::DeriveHelper);
-                let binding = (res, Visibility::<DefId>::Public, ident.span, expn_id)
-                    .to_name_binding(self.arenas);
+                let binding = self.arenas.new_pub_res_binding(res, ident.span, expn_id);
                 (*ident, binding)
             })
             .collect();
@@ -476,8 +489,18 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
         self.proc_macros.push(self.local_def_id(id))
     }
 
-    fn append_stripped_cfg_item(&mut self, parent_node: NodeId, ident: Ident, cfg: ast::MetaItem) {
-        self.stripped_cfg_items.push(StrippedCfgItem { parent_module: parent_node, ident, cfg });
+    fn append_stripped_cfg_item(
+        &mut self,
+        parent_node: NodeId,
+        ident: Ident,
+        cfg: CfgEntry,
+        cfg_span: Span,
+    ) {
+        self.stripped_cfg_items.push(StrippedCfgItem {
+            parent_module: parent_node,
+            ident,
+            cfg: (cfg, cfg_span),
+        });
     }
 
     fn registered_tools(&self) -> &RegisteredTools {
@@ -489,7 +512,7 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
     }
 
     fn glob_delegation_suffixes(
-        &mut self,
+        &self,
         trait_def_id: DefId,
         impl_def_id: LocalDefId,
     ) -> Result<Vec<(Ident, Option<Ident>)>, Indeterminate> {
@@ -513,7 +536,7 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
         target_trait.for_each_child(self, |this, ident, ns, _binding| {
             // FIXME: Adjust hygiene for idents from globs, like for glob imports.
             if let Some(overriding_keys) = this.impl_binding_keys.get(&impl_def_id)
-                && overriding_keys.contains(&BindingKey::new(ident.normalize_to_macros_2_0(), ns))
+                && overriding_keys.contains(&BindingKey::new(ident, ns))
             {
                 // The name is overridden, do not produce it from the glob delegation.
             } else {
@@ -521,6 +544,10 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
             }
         });
         Ok(idents)
+    }
+
+    fn insert_impl_trait_name(&mut self, id: NodeId, name: Symbol) {
+        self.impl_trait_names.insert(id, name);
     }
 }
 
@@ -676,7 +703,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             );
 
             self.tcx.sess.psess.buffer_lint(
-                UNKNOWN_OR_MALFORMED_DIAGNOSTIC_ATTRIBUTES,
+                UNKNOWN_DIAGNOSTIC_ATTRIBUTES,
                 attribute.span(),
                 node_id,
                 BuiltinLintDiag::UnknownDiagnosticAttribute { span: attribute.span(), typo_name },
@@ -814,7 +841,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
     }
 
     pub(crate) fn finalize_macro_resolutions(&mut self, krate: &Crate) {
-        let check_consistency = |this: &mut Self,
+        let check_consistency = |this: &Self,
                                  path: &[Segment],
                                  span,
                                  kind: MacroKind,
@@ -997,40 +1024,39 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         node_id: NodeId,
     ) {
         let span = path.span;
-        if let Some(stability) = &ext.stability {
-            if let StabilityLevel::Unstable { reason, issue, is_soft, implied_by, .. } =
+        if let Some(stability) = &ext.stability
+            && let StabilityLevel::Unstable { reason, issue, is_soft, implied_by, .. } =
                 stability.level
-            {
-                let feature = stability.feature;
+        {
+            let feature = stability.feature;
 
-                let is_allowed =
-                    |feature| self.tcx.features().enabled(feature) || span.allows_unstable(feature);
-                let allowed_by_implication = implied_by.is_some_and(|feature| is_allowed(feature));
-                if !is_allowed(feature) && !allowed_by_implication {
-                    let lint_buffer = &mut self.lint_buffer;
-                    let soft_handler = |lint, span, msg: String| {
-                        lint_buffer.buffer_lint(
-                            lint,
-                            node_id,
-                            span,
-                            BuiltinLintDiag::UnstableFeature(
-                                // FIXME make this translatable
-                                msg.into(),
-                            ),
-                        )
-                    };
-                    stability::report_unstable(
-                        self.tcx.sess,
-                        feature,
-                        reason.to_opt_reason(),
-                        issue,
-                        None,
-                        is_soft,
+            let is_allowed =
+                |feature| self.tcx.features().enabled(feature) || span.allows_unstable(feature);
+            let allowed_by_implication = implied_by.is_some_and(|feature| is_allowed(feature));
+            if !is_allowed(feature) && !allowed_by_implication {
+                let lint_buffer = &mut self.lint_buffer;
+                let soft_handler = |lint, span, msg: String| {
+                    lint_buffer.buffer_lint(
+                        lint,
+                        node_id,
                         span,
-                        soft_handler,
-                        stability::UnstableKind::Regular,
-                    );
-                }
+                        BuiltinLintDiag::UnstableFeature(
+                            // FIXME make this translatable
+                            msg.into(),
+                        ),
+                    )
+                };
+                stability::report_unstable(
+                    self.tcx.sess,
+                    feature,
+                    reason.to_opt_reason(),
+                    issue,
+                    None,
+                    is_soft,
+                    span,
+                    soft_handler,
+                    stability::UnstableKind::Regular,
+                );
             }
         }
         if let Some(depr) = &ext.deprecation {
@@ -1118,7 +1144,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         }
     }
 
-    pub(crate) fn check_reserved_macro_name(&mut self, ident: Ident, res: Res) {
+    pub(crate) fn check_reserved_macro_name(&self, ident: Ident, res: Res) {
         // Reserve some names that are not quite covered by the general check
         // performed on `Resolver::builtin_attrs`.
         if ident.name == sym::cfg || ident.name == sym::cfg_attr {
@@ -1134,7 +1160,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
     ///
     /// Possibly replace its expander to a pre-defined one for built-in macros.
     pub(crate) fn compile_macro(
-        &mut self,
+        &self,
         macro_def: &ast::MacroDef,
         ident: Ident,
         attrs: &[rustc_hir::Attribute],
@@ -1142,7 +1168,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         node_id: NodeId,
         edition: Edition,
     ) -> MacroData {
-        let (mut ext, mut rule_spans) = compile_declarative_macro(
+        let (mut ext, mut nrules) = compile_declarative_macro(
             self.tcx.sess,
             self.tcx.features(),
             macro_def,
@@ -1159,13 +1185,13 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 // The macro is a built-in, replace its expander function
                 // while still taking everything else from the source code.
                 ext.kind = builtin_ext_kind.clone();
-                rule_spans = Vec::new();
+                nrules = 0;
             } else {
                 self.dcx().emit_err(errors::CannotFindBuiltinMacroWithName { span, ident });
             }
         }
 
-        MacroData { ext: Arc::new(ext), rule_spans, macro_rules: macro_def.macro_rules }
+        MacroData { ext: Arc::new(ext), nrules, macro_rules: macro_def.macro_rules }
     }
 
     fn path_accessible(

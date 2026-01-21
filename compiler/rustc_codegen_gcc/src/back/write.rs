@@ -4,7 +4,6 @@ use gccjit::{Context, OutputKind};
 use rustc_codegen_ssa::back::link::ensure_removed;
 use rustc_codegen_ssa::back::write::{BitcodeSection, CodegenContext, EmitObj, ModuleConfig};
 use rustc_codegen_ssa::{CompiledModule, ModuleCodegen};
-use rustc_errors::DiagCtxtHandle;
 use rustc_fs_util::link_or_copy;
 use rustc_session::config::OutputType;
 use rustc_span::fatal_error::FatalError;
@@ -16,10 +15,12 @@ use crate::{GccCodegenBackend, GccContext};
 
 pub(crate) fn codegen(
     cgcx: &CodegenContext<GccCodegenBackend>,
-    dcx: DiagCtxtHandle<'_>,
     module: ModuleCodegen<GccContext>,
     config: &ModuleConfig,
 ) -> Result<CompiledModule, FatalError> {
+    let dcx = cgcx.create_dcx();
+    let dcx = dcx.handle();
+
     let _timer = cgcx.prof.generic_activity_with_arg("GCC_module_codegen", &*module.name);
     {
         let context = &module.module_llvm.context;
@@ -254,14 +255,6 @@ pub(crate) fn codegen(
         &cgcx.output_filenames,
         cgcx.invocation_temp.as_deref(),
     ))
-}
-
-pub(crate) fn link(
-    _cgcx: &CodegenContext<GccCodegenBackend>,
-    _dcx: DiagCtxtHandle<'_>,
-    mut _modules: Vec<ModuleCodegen<GccContext>>,
-) -> Result<ModuleCodegen<GccContext>, FatalError> {
-    unimplemented!();
 }
 
 pub(crate) fn save_temp_bitcode(

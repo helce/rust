@@ -629,7 +629,7 @@ fn issue_4053_diesel_where_clauses() {
             488..522 '{     ...     }': ()
             498..502 'self': SelectStatement<F, S, D, W, O, LOf, {unknown}, {unknown}>
             498..508 'self.order': O
-            498..515 'self.o...into()': dyn QueryFragment<DB> + 'static
+            498..515 'self.o...into()': dyn QueryFragment<DB> + '?
         "#]],
     );
 }
@@ -773,7 +773,7 @@ fn issue_4800() {
         "#,
         expect![[r#"
             379..383 'self': &'? mut PeerSet<D>
-            401..424 '{     ...     }': dyn Future<Output = ()> + 'static
+            401..424 '{     ...     }': dyn Future<Output = ()> + '?
             411..418 'loop {}': !
             416..418 '{}': ()
             575..579 'self': &'? mut Self
@@ -2347,5 +2347,39 @@ fn test() {
             149..150 '_': Foo<_>
             153..154 'N': Foo<_>
         "#]],
+    );
+}
+
+#[test]
+fn rust_destruct_option_clone() {
+    check_types(
+        r#"
+//- minicore: option, drop
+fn test(o: &Option<i32>) {
+    o.my_clone();
+  //^^^^^^^^^^^^ Option<i32>
+}
+pub trait MyClone: Sized {
+    fn my_clone(&self) -> Self;
+}
+impl<T> const MyClone for Option<T>
+where
+    T: ~const MyClone + ~const Destruct,
+{
+    fn my_clone(&self) -> Self {
+        match self {
+            Some(x) => Some(x.my_clone()),
+            None => None,
+        }
+    }
+}
+impl const MyClone for i32 {
+    fn my_clone(&self) -> Self {
+        *self
+    }
+}
+#[lang = "destruct"]
+pub trait Destruct {}
+"#,
     );
 }

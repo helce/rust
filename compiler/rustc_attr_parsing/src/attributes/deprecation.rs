@@ -1,5 +1,5 @@
-use rustc_attr_data_structures::{AttributeKind, DeprecatedSince, Deprecation};
 use rustc_feature::{AttributeTemplate, template};
+use rustc_hir::attrs::{AttributeKind, DeprecatedSince, Deprecation};
 use rustc_span::{Span, Symbol, sym};
 
 use super::util::parse_version;
@@ -36,7 +36,7 @@ fn get<S: Stage>(
 
 impl<S: Stage> SingleAttributeParser<S> for DeprecationParser {
     const PATH: &[Symbol] = &[sym::deprecated];
-    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepFirst;
+    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepInnermost;
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
     const TEMPLATE: AttributeTemplate = template!(
         Word,

@@ -1,12 +1,12 @@
 [package]
 name = "tidy"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 autobins = false
 
 [dependencies]
 build_helper = { path = "../../build_helper" }
-cargo_metadata = "0.19"
+cargo_metadata = "0.21"
 regex = "1"
 miropt-test-tools = { path = "../miropt-test-tools" }
 walkdir = "2"

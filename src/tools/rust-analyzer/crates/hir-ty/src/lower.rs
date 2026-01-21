@@ -590,9 +590,14 @@ impl<'a> TyLoweringContext<'a> {
                         .resolve_trait(ctx.ty_ctx().db, ctx.ty_ctx().resolver.krate());
                     let pointee_sized = LangItem::PointeeSized
                         .resolve_trait(ctx.ty_ctx().db, ctx.ty_ctx().resolver.krate());
-                    if meta_sized.is_some_and(|it| it == trait_ref.hir_trait_id()) {
+                    let destruct = LangItem::Destruct
+                        .resolve_trait(ctx.ty_ctx().db, ctx.ty_ctx().resolver.krate());
+                    let hir_trait_id = trait_ref.hir_trait_id();
+                    if meta_sized.is_some_and(|it| it == hir_trait_id)
+                        || destruct.is_some_and(|it| it == hir_trait_id)
+                    {
                         // Ignore this bound
-                    } else if pointee_sized.is_some_and(|it| it == trait_ref.hir_trait_id()) {
+                    } else if pointee_sized.is_some_and(|it| it == hir_trait_id) {
                         // Regard this as `?Sized` bound
                         ctx.ty_ctx().unsized_types.insert(self_ty);
                     } else {
@@ -728,7 +733,7 @@ impl<'a> TyLoweringContext<'a> {
                             .unwrap_or(it),
                         None => it,
                     },
-                    None => static_lifetime(),
+                    None => error_lifetime(),
                 },
             })
             .intern(Interner)
@@ -822,7 +827,7 @@ fn named_associated_type_shorthand_candidates<R>(
 ) -> Option<R> {
     let mut search = |t| {
         all_super_trait_refs(db, t, |t| {
-            let data = db.trait_items(t.hir_trait_id());
+            let data = t.hir_trait_id().trait_items(db);
 
             for (name, assoc_id) in &data.items {
                 if let AssocItemId::TypeAliasId(alias) = assoc_id {
@@ -900,7 +905,12 @@ pub(crate) fn field_types_with_diagnostics_query(
     db: &dyn HirDatabase,
     variant_id: VariantId,
 ) -> (Arc<ArenaMap<LocalFieldId, Binders<Ty>>>, Diagnostics) {
-    let var_data = db.variant_fields(variant_id);
+    let var_data = variant_id.fields(db);
+    let fields = var_data.fields();
+    if fields.is_empty() {
+        return (Arc::new(ArenaMap::default()), None);
+    }
+
     let (resolver, def): (_, GenericDefId) = match variant_id {
         VariantId::StructId(it) => (it.resolver(db), it.into()),
         VariantId::UnionId(it) => (it.resolver(db), it.into()),
@@ -916,7 +926,7 @@ pub(crate) fn field_types_with_diagnostics_query(
         LifetimeElisionKind::AnonymousReportError,
     )
     .with_type_param_mode(ParamLoweringMode::Variable);
-    for (field_id, field_data) in var_data.fields().iter() {
+    for (field_id, field_data) in fields.iter() {
         res.insert(field_id, make_binders(db, &generics, ctx.lower_ty(field_data.type_ref)));
     }
     (Arc::new(res), create_diagnostics(ctx.diagnostics))
@@ -937,6 +947,10 @@ pub(crate) fn generic_predicates_for_param_query(
     assoc_name: Option<Name>,
 ) -> GenericPredicates {
     let generics = generics(db, def);
+    if generics.has_no_predicates() && generics.is_empty() {
+        return GenericPredicates(None);
+    }
+
     let resolver = def.resolver(db);
     let mut ctx = TyLoweringContext::new(
         db,
@@ -998,7 +1012,7 @@ pub(crate) fn generic_predicates_for_param_query(
                     };
 
                     all_super_traits(db, tr).iter().any(|tr| {
-                        db.trait_items(*tr).items.iter().any(|(name, item)| {
+                        tr.trait_items(db).items.iter().any(|(name, item)| {
                             matches!(item, AssocItemId::TypeAliasId(_)) && name == assoc_name
                         })
                     })
@@ -1066,6 +1080,10 @@ pub(crate) fn trait_environment_query(
     def: GenericDefId,
 ) -> Arc<TraitEnvironment> {
     let generics = generics(db, def);
+    if generics.has_no_predicates() && generics.is_empty() {
+        return TraitEnvironment::empty(def.krate(db));
+    }
+
     let resolver = def.resolver(db);
     let mut ctx = TyLoweringContext::new(
         db,
@@ -1169,6 +1187,10 @@ where
     F: Fn(&WherePredicate, GenericDefId) -> bool,
 {
     let generics = generics(db, def);
+    if generics.has_no_predicates() && generics.is_empty() {
+        return (GenericPredicates(None), None);
+    }
+
     let resolver = def.resolver(db);
     let mut ctx = TyLoweringContext::new(
         db,
@@ -1195,7 +1217,7 @@ where
         }
     }
 
-    if generics.len() > 0 {
+    if !generics.is_empty() {
         let subst = generics.bound_vars_subst(db, DebruijnIndex::INNERMOST);
         let explicitly_unsized_tys = ctx.unsized_types;
         if let Some(implicitly_sized_predicates) =
@@ -1270,7 +1292,7 @@ pub(crate) fn generic_defaults_with_diagnostics_query(
     def: GenericDefId,
 ) -> (GenericDefaults, Diagnostics) {
     let generic_params = generics(db, def);
-    if generic_params.len() == 0 {
+    if generic_params.is_empty() {
         return (GenericDefaults(None), None);
     }
     let resolver = def.resolver(db);
@@ -1459,7 +1481,7 @@ fn fn_sig_for_struct_constructor(db: &dyn HirDatabase, def: StructId) -> PolyFnS
 
 /// Build the type of a tuple struct constructor.
 fn type_for_struct_constructor(db: &dyn HirDatabase, def: StructId) -> Option<Binders<Ty>> {
-    let struct_data = db.variant_fields(def.into());
+    let struct_data = def.fields(db);
     match struct_data.shape {
         FieldsShape::Record => None,
         FieldsShape::Unit => Some(type_for_adt(db, def.into())),
@@ -1492,7 +1514,7 @@ fn type_for_enum_variant_constructor(
     def: EnumVariantId,
 ) -> Option<Binders<Ty>> {
     let e = def.lookup(db).parent;
-    match db.variant_fields(def.into()).shape {
+    match def.fields(db).shape {
         FieldsShape::Record => None,
         FieldsShape::Unit => Some(type_for_adt(db, e.into())),
         FieldsShape::Tuple => {

@@ -156,7 +156,7 @@ use crate::vec::{self, Vec};
 /// ```
 ///
 /// Next, what should `s[i]` return? Because indexing returns a reference
-/// to underlying data it could be `&u8`, `&[u8]`, or something else similar.
+/// to underlying data it could be `&u8`, `&[u8]`, or something similar.
 /// Since we're only providing one index, `&u8` makes the most sense but that
 /// might not be what the user expects and can be explicitly achieved with
 /// [`as_bytes()`]:
@@ -787,12 +787,12 @@ impl String {
     #[cfg(not(no_global_oom_handling))]
     #[unstable(feature = "str_from_utf16_endian", issue = "116258")]
     pub fn from_utf16le(v: &[u8]) -> Result<String, FromUtf16Error> {
-        if v.len() % 2 != 0 {
+        let (chunks, []) = v.as_chunks::<2>() else {
             return Err(FromUtf16Error(()));
-        }
+        };
         match (cfg!(target_endian = "little"), unsafe { v.align_to::<u16>() }) {
             (true, ([], v, [])) => Self::from_utf16(v),
-            _ => char::decode_utf16(v.array_chunks::<2>().copied().map(u16::from_le_bytes))
+            _ => char::decode_utf16(chunks.iter().copied().map(u16::from_le_bytes))
                 .collect::<Result<_, _>>()
                 .map_err(|_| FromUtf16Error(())),
         }
@@ -830,11 +830,11 @@ impl String {
             (true, ([], v, [])) => Self::from_utf16_lossy(v),
             (true, ([], v, [_remainder])) => Self::from_utf16_lossy(v) + "\u{FFFD}",
             _ => {
-                let mut iter = v.array_chunks::<2>();
-                let string = char::decode_utf16(iter.by_ref().copied().map(u16::from_le_bytes))
+                let (chunks, remainder) = v.as_chunks::<2>();
+                let string = char::decode_utf16(chunks.iter().copied().map(u16::from_le_bytes))
                     .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
                     .collect();
-                if iter.remainder().is_empty() { string } else { string + "\u{FFFD}" }
+                if remainder.is_empty() { string } else { string + "\u{FFFD}" }
             }
         }
     }
@@ -862,12 +862,12 @@ impl String {
     #[cfg(not(no_global_oom_handling))]
     #[unstable(feature = "str_from_utf16_endian", issue = "116258")]
     pub fn from_utf16be(v: &[u8]) -> Result<String, FromUtf16Error> {
-        if v.len() % 2 != 0 {
+        let (chunks, []) = v.as_chunks::<2>() else {
             return Err(FromUtf16Error(()));
-        }
+        };
         match (cfg!(target_endian = "big"), unsafe { v.align_to::<u16>() }) {
             (true, ([], v, [])) => Self::from_utf16(v),
-            _ => char::decode_utf16(v.array_chunks::<2>().copied().map(u16::from_be_bytes))
+            _ => char::decode_utf16(chunks.iter().copied().map(u16::from_be_bytes))
                 .collect::<Result<_, _>>()
                 .map_err(|_| FromUtf16Error(())),
         }
@@ -905,11 +905,11 @@ impl String {
             (true, ([], v, [])) => Self::from_utf16_lossy(v),
             (true, ([], v, [_remainder])) => Self::from_utf16_lossy(v) + "\u{FFFD}",
             _ => {
-                let mut iter = v.array_chunks::<2>();
-                let string = char::decode_utf16(iter.by_ref().copied().map(u16::from_be_bytes))
+                let (chunks, remainder) = v.as_chunks::<2>();
+                let string = char::decode_utf16(chunks.iter().copied().map(u16::from_be_bytes))
                     .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
                     .collect();
-                if iter.remainder().is_empty() { string } else { string + "\u{FFFD}" }
+                if remainder.is_empty() { string } else { string + "\u{FFFD}" }
             }
         }
     }
@@ -2611,7 +2611,8 @@ impl_eq! { Cow<'a, str>, &'b str }
 impl_eq! { Cow<'a, str>, String }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl Default for String {
+#[rustc_const_unstable(feature = "const_default", issue = "143894")]
+impl const Default for String {
     /// Creates an empty `String`.
     #[inline]
     fn default() -> String {
@@ -2875,7 +2876,8 @@ macro_rules! impl_to_string {
                     out = String::with_capacity(SIZE);
                 }
 
-                out.push_str(self.unsigned_abs()._fmt(&mut buf));
+                // SAFETY: `buf` is always big enough to contain all the digits.
+                unsafe { out.push_str(self.unsigned_abs()._fmt(&mut buf)); }
                 out
             }
         }
@@ -2887,7 +2889,8 @@ macro_rules! impl_to_string {
                 const SIZE: usize = $unsigned::MAX.ilog10() as usize + 1;
                 let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); SIZE];
 
-                self._fmt(&mut buf).to_string()
+                // SAFETY: `buf` is always big enough to contain all the digits.
+                unsafe { self._fmt(&mut buf).to_string() }
             }
         }
         )*

@@ -39,9 +39,9 @@
 //!   return. You should mark your implementation using `#[panic_handler]`.
 //!
 //! * `rust_eh_personality` - is used by the failure mechanisms of the
-//!    compiler. This is often mapped to GCC's personality function, but crates
-//!    which do not trigger a panic can be assured that this function is never
-//!    called. The `lang` attribute is called `eh_personality`.
+//!   compiler. This is often mapped to GCC's personality function, but crates
+//!   which do not trigger a panic can be assured that this function is never
+//!   called. The `lang` attribute is called `eh_personality`.
 
 #![stable(feature = "core", since = "1.6.0")]
 #![doc(
@@ -89,7 +89,7 @@
 #![allow(internal_features)]
 #![deny(ffi_unwind_calls)]
 #![warn(unreachable_pub)]
-// Do not check link redundancy on bootstraping phase
+// Do not check link redundancy on bootstrapping phase
 #![allow(rustdoc::redundant_explicit_links)]
 #![warn(rustdoc::unescaped_backticks)]
 //
@@ -103,6 +103,7 @@
 #![feature(cfg_select)]
 #![feature(cfg_target_has_reliable_f16_f128)]
 #![feature(const_carrying_mul_add)]
+#![feature(const_cmp)]
 #![feature(const_destruct)]
 #![feature(const_eval_select)]
 #![feature(core_intrinsics)]
@@ -146,12 +147,13 @@
 #![feature(const_trait_impl)]
 #![feature(decl_macro)]
 #![feature(deprecated_suggestion)]
+#![feature(derive_const)]
 #![feature(doc_cfg)]
 #![feature(doc_cfg_hide)]
 #![feature(doc_notable_trait)]
 #![feature(extern_types)]
-#![feature(f128)]
 #![feature(f16)]
+#![feature(f128)]
 #![feature(freeze_impls)]
 #![feature(fundamental)]
 #![feature(if_let_guard)]
@@ -160,6 +162,7 @@
 #![feature(lang_items)]
 #![feature(link_llvm_intrinsics)]
 #![feature(macro_metavar_expr)]
+#![feature(macro_metavar_expr_concat)]
 #![feature(marker_trait_attr)]
 #![feature(min_specialization)]
 #![feature(multiple_supertrait_upcastable)]

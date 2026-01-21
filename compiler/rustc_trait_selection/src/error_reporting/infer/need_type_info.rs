@@ -909,11 +909,11 @@ impl<'a, 'tcx> FindInferSourceVisitor<'a, 'tcx> {
                 }
             }
             (GenericArgKind::Const(inner_ct), TermKind::Const(target_ct)) => {
-                use ty::InferConst::*;
                 match (inner_ct.kind(), target_ct.kind()) {
-                    (ty::ConstKind::Infer(Var(a_vid)), ty::ConstKind::Infer(Var(b_vid))) => {
-                        self.tecx.root_const_var(a_vid) == self.tecx.root_const_var(b_vid)
-                    }
+                    (
+                        ty::ConstKind::Infer(ty::InferConst::Var(a_vid)),
+                        ty::ConstKind::Infer(ty::InferConst::Var(b_vid)),
+                    ) => self.tecx.root_const_var(a_vid) == self.tecx.root_const_var(b_vid),
                     _ => false,
                 }
             }
@@ -1303,7 +1303,7 @@ impl<'a, 'tcx> Visitor<'tcx> for FindInferSourceVisitor<'a, 'tcx> {
             && let Some(args) = self.node_args_opt(expr.hir_id)
             && args.iter().any(|arg| self.generic_arg_contains_target(arg))
             && let Some(def_id) = self.typeck_results.type_dependent_def_id(expr.hir_id)
-            && self.tecx.tcx.trait_of_item(def_id).is_some()
+            && self.tecx.tcx.trait_of_assoc(def_id).is_some()
             && !has_impl_trait(def_id)
             // FIXME(fn_delegation): In delegation item argument spans are equal to last path
             // segment. This leads to ICE's when emitting `multipart_suggestion`.

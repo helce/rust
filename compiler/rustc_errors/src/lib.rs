@@ -3,11 +3,10 @@
 //! This module contains the code for creating and emitting diagnostics.
 
 // tidy-alphabetical-start
-#![allow(incomplete_features)]
 #![allow(internal_features)]
 #![allow(rustc::diagnostic_outside_of_impl)]
+#![allow(rustc::direct_use_of_rustc_type_ir)]
 #![allow(rustc::untranslatable_diagnostic)]
-#![cfg_attr(not(bootstrap), allow(rustc::direct_use_of_rustc_type_ir))]
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![doc(rust_logo)]
 #![feature(array_windows)]
@@ -51,7 +50,7 @@ pub use diagnostic_impls::{
     IndicateAnonymousLifetime, SingleLabelManySpans,
 };
 pub use emitter::ColorConfig;
-use emitter::{DynEmitter, Emitter, is_case_difference, is_different};
+use emitter::{ConfusionType, DynEmitter, Emitter, detect_confusion_type, is_different};
 use rustc_data_structures::AtomicRef;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_data_structures::stable_hasher::StableHasher;
@@ -309,7 +308,7 @@ impl CodeSuggestion {
     pub(crate) fn splice_lines(
         &self,
         sm: &SourceMap,
-    ) -> Vec<(String, Vec<SubstitutionPart>, Vec<Vec<SubstitutionHighlight>>, bool)> {
+    ) -> Vec<(String, Vec<SubstitutionPart>, Vec<Vec<SubstitutionHighlight>>, ConfusionType)> {
         // For the `Vec<Vec<SubstitutionHighlight>>` value, the first level of the vector
         // corresponds to the output snippet's lines, while the second level corresponds to the
         // substrings within that line that should be highlighted.
@@ -415,14 +414,15 @@ impl CodeSuggestion {
                 // We need to keep track of the difference between the existing code and the added
                 // or deleted code in order to point at the correct column *after* substitution.
                 let mut acc = 0;
-                let mut only_capitalization = false;
+                let mut confusion_type = ConfusionType::None;
                 for part in &mut substitution.parts {
                     // If this is a replacement of, e.g. `"a"` into `"ab"`, adjust the
                     // suggestion and snippet to look as if we just suggested to add
                     // `"b"`, which is typically much easier for the user to understand.
                     part.trim_trivial_replacements(sm);
 
-                    only_capitalization |= is_case_difference(sm, &part.snippet, part.span);
+                    let part_confusion = detect_confusion_type(sm, &part.snippet, part.span);
+                    confusion_type = confusion_type.combine(part_confusion);
                     let cur_lo = sm.lookup_char_pos(part.span.lo());
                     if prev_hi.line == cur_lo.line {
                         let mut count =
@@ -512,7 +512,7 @@ impl CodeSuggestion {
                 if highlights.iter().all(|parts| parts.is_empty()) {
                     None
                 } else {
-                    Some((buf, substitution.parts, highlights, only_capitalization))
+                    Some((buf, substitution.parts, highlights, confusion_type))
                 }
             })
             .collect()

@@ -8,6 +8,7 @@ use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::svh::Svh;
 use rustc_data_structures::sync::{DynSend, DynSync, par_for_each_in, try_par_for_each_in};
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LOCAL_CRATE, LocalDefId, LocalModDefId};
 use rustc_hir::definitions::{DefKey, DefPath, DefPathHash};
@@ -15,7 +16,7 @@ use rustc_hir::intravisit::Visitor;
 use rustc_hir::*;
 use rustc_hir_pretty as pprust_hir;
 use rustc_span::def_id::StableCrateId;
-use rustc_span::{ErrorGuaranteed, Ident, Span, Symbol, kw, sym, with_metavar_spans};
+use rustc_span::{ErrorGuaranteed, Ident, Span, Symbol, kw, with_metavar_spans};
 
 use crate::hir::{ModuleItems, nested_filter};
 use crate::middle::debugger_visualizer::DebuggerVisualizerFile;
@@ -369,7 +370,7 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     pub fn hir_rustc_coherence_is_core(self) -> bool {
-        self.hir_krate_attrs().iter().any(|attr| attr.has_name(sym::rustc_coherence_is_core))
+        find_attr!(self.hir_krate_attrs(), AttributeKind::CoherenceIsCore)
     }
 
     pub fn hir_get_module(self, module: LocalModDefId) -> (&'tcx Mod<'tcx>, Span, HirId) {
@@ -939,7 +940,7 @@ impl<'tcx> TyCtxt<'tcx> {
             }) => until_within(*outer_span, ty.span),
             // With generics and bounds.
             Node::Item(Item {
-                kind: ItemKind::Trait(_, _, _, generics, bounds, _),
+                kind: ItemKind::Trait(_, _, _, _, generics, bounds, _),
                 span: outer_span,
                 ..
             })
@@ -1254,9 +1255,17 @@ pub(crate) fn hir_crate_items(tcx: TyCtxt<'_>, _: ()) -> ModuleItems {
         body_owners,
         opaques,
         nested_bodies,
-        delayed_lint_items,
+        mut delayed_lint_items,
         ..
     } = collector;
+
+    // The crate could have delayed lints too, but would not be picked up by the visitor.
+    // The `delayed_lint_items` list is smart - it only contains items which we know from
+    // earlier passes is guaranteed to contain lints. It's a little harder to determine that
+    // for sure here, so we simply always add the crate to the list. If it has no lints,
+    // we'll discover that later. The cost of this should be low, there's only one crate
+    // after all compared to the many items we have we wouldn't want to iterate over later.
+    delayed_lint_items.push(CRATE_OWNER_ID);
 
     ModuleItems {
         add_root: true,

@@ -274,7 +274,7 @@ impl From<DiagnosticInfo<'_>> for OwnedDiagnosticInfo {
 }
 
 impl OwnedDiagnosticInfo {
-    pub(crate) fn into_info(&self) -> DiagnosticInfo<'_> {
+    pub(crate) fn as_info(&self) -> DiagnosticInfo<'_> {
         DiagnosticInfo {
             item: &self.item,
             ori_link: &self.ori_link,
@@ -1177,7 +1177,7 @@ impl LinkCollector<'_, '_> {
                     // Primitive types are always valid.
                     Res::Primitive(_) => true,
                 });
-                let diag_info = info.diag_info.into_info();
+                let diag_info = info.diag_info.as_info();
                 match info.resolved.len() {
                     1 => {
                         let (res, fragment) = info.resolved.pop().unwrap();
@@ -1243,17 +1243,16 @@ impl LinkCollector<'_, '_> {
             disambiguator,
             None | Some(Disambiguator::Namespace(Namespace::TypeNS) | Disambiguator::Primitive)
         ) && !matches!(res, Res::Primitive(_))
+            && let Some(prim) = resolve_primitive(path_str, TypeNS)
         {
-            if let Some(prim) = resolve_primitive(path_str, TypeNS) {
-                // `prim@char`
-                if matches!(disambiguator, Some(Disambiguator::Primitive)) {
-                    res = prim;
-                } else {
-                    // `[char]` when a `char` module is in scope
-                    let candidates = &[(res, res.def_id(self.cx.tcx)), (prim, None)];
-                    ambiguity_error(self.cx, &diag_info, path_str, candidates, true);
-                    return None;
-                }
+            // `prim@char`
+            if matches!(disambiguator, Some(Disambiguator::Primitive)) {
+                res = prim;
+            } else {
+                // `[char]` when a `char` module is in scope
+                let candidates = &[(res, res.def_id(self.cx.tcx)), (prim, None)];
+                ambiguity_error(self.cx, &diag_info, path_str, candidates, true);
+                return None;
             }
         }
 
@@ -1387,13 +1386,15 @@ impl LinkCollector<'_, '_> {
         ori_link: &MarkdownLinkRange,
         item: &Item,
     ) {
-        let span = source_span_for_markdown_range(
+        let span = match source_span_for_markdown_range(
             self.cx.tcx,
             dox,
             ori_link.inner_range(),
             &item.attrs.doc_strings,
-        )
-        .unwrap_or_else(|| item.attr_span(self.cx.tcx));
+        ) {
+            Some((sp, _)) => sp,
+            None => item.attr_span(self.cx.tcx),
+        };
         rustc_session::parse::feature_err(
             self.cx.tcx.sess,
             sym::intra_doc_pointers,
@@ -1836,7 +1837,7 @@ fn report_diagnostic(
                 let mut md_range = md_range.clone();
                 let sp =
                     source_span_for_markdown_range(tcx, dox, &md_range, &item.attrs.doc_strings)
-                        .map(|mut sp| {
+                        .map(|(mut sp, _)| {
                             while dox.as_bytes().get(md_range.start) == Some(&b' ')
                                 || dox.as_bytes().get(md_range.start) == Some(&b'`')
                             {
@@ -1854,7 +1855,8 @@ fn report_diagnostic(
                 (sp, MarkdownLinkRange::Destination(md_range))
             }
             MarkdownLinkRange::WholeLink(md_range) => (
-                source_span_for_markdown_range(tcx, dox, md_range, &item.attrs.doc_strings),
+                source_span_for_markdown_range(tcx, dox, md_range, &item.attrs.doc_strings)
+                    .map(|(sp, _)| sp),
                 link_range.clone(),
             ),
         };
@@ -2230,7 +2232,7 @@ fn ambiguity_error(
     // proc macro can exist in multiple namespaces at once, so we need to compare `DefIds`
     //  to remove the candidate in the fn namespace.
     let mut possible_proc_macro_id = None;
-    let is_proc_macro_crate = cx.tcx.crate_types() == &[CrateType::ProcMacro];
+    let is_proc_macro_crate = cx.tcx.crate_types() == [CrateType::ProcMacro];
     let mut kinds = candidates
         .iter()
         .map(|(res, def_id)| {

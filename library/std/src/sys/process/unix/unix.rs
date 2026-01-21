@@ -340,6 +340,10 @@ impl Command {
             cvt(libc::setpgid(0, pgroup))?;
         }
 
+        if self.get_setsid() {
+            cvt(libc::setsid())?;
+        }
+
         // emscripten has no signal support.
         #[cfg(not(target_os = "emscripten"))]
         {
@@ -741,6 +745,16 @@ impl Command {
                 flags |= libc::POSIX_SPAWN_SETSIGDEF;
             }
 
+            if self.get_setsid() {
+                cfg_if::cfg_if! {
+                    if #[cfg(all(target_os = "linux", target_env = "gnu"))] {
+                        flags |= libc::POSIX_SPAWN_SETSID;
+                    } else {
+                        return Ok(None);
+                    }
+                }
+            }
+
             cvt_nz(libc::posix_spawnattr_setflags(attrs.0.as_mut_ptr(), flags as _))?;
 
             // Make sure we synchronize access to the global `environ` resource
@@ -968,8 +982,8 @@ impl Process {
     }
 
     pub(crate) fn send_signal(&self, signal: i32) -> io::Result<()> {
-        // If we've already waited on this process then the pid can be recycled
-        // and used for another process, and we probably shouldn't be signaling
+        // If we've already waited on this process then the pid can be recycled and
+        // used for another process, and we probably shouldn't be sending signals to
         // random processes, so return Ok because the process has exited already.
         if self.status.is_some() {
             return Ok(());

@@ -37,6 +37,7 @@
 //!
 //! [JSON]: https://json.org
 
+use core::result::Result;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -198,17 +199,28 @@ impl LldFlavor {
             LldFlavor::Link => "link",
         }
     }
+}
 
-    fn from_str(s: &str) -> Option<Self> {
-        Some(match s {
+impl FromStr for LldFlavor {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "darwin" => LldFlavor::Ld64,
             "gnu" => LldFlavor::Ld,
             "link" => LldFlavor::Link,
             "wasm" => LldFlavor::Wasm,
-            _ => return None,
+            _ => {
+                return Err(
+                    "invalid value for lld flavor: '{s}', expected one of 'darwin', 'gnu', 'link', 'wasm'"
+                        .into(),
+                );
+            }
         })
     }
 }
+
+crate::json::serde_deserialize_from_str!(LldFlavor);
 
 impl ToJson for LldFlavor {
     fn to_json(&self) -> Json {
@@ -494,17 +506,21 @@ macro_rules! linker_flavor_cli_impls {
                 concat!("one of: ", $($string, " ",)*)
             }
 
-            pub fn from_str(s: &str) -> Option<LinkerFlavorCli> {
-                Some(match s {
-                    $($string => $($flavor)*,)*
-                    _ => return None,
-                })
-            }
-
             pub fn desc(self) -> &'static str {
                 match self {
                     $($($flavor)* => $string,)*
                 }
+            }
+        }
+
+        impl FromStr for LinkerFlavorCli {
+            type Err = String;
+
+            fn from_str(s: &str) -> Result<LinkerFlavorCli, Self::Err> {
+                Ok(match s {
+                    $($string => $($flavor)*,)*
+                    _ => return Err(format!("invalid linker flavor, allowed values: {}", Self::one_of())),
+                })
             }
         }
     )
@@ -540,6 +556,8 @@ linker_flavor_cli_impls! {
     (LinkerFlavorCli::Em) "em"
 }
 
+crate::json::serde_deserialize_from_str!(LinkerFlavorCli);
+
 impl ToJson for LinkerFlavorCli {
     fn to_json(&self) -> Json {
         self.desc().to_json()
@@ -573,18 +591,25 @@ pub enum LinkSelfContainedDefault {
 
 /// Parses a backwards-compatible `-Clink-self-contained` option string, without components.
 impl FromStr for LinkSelfContainedDefault {
-    type Err = ();
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<LinkSelfContainedDefault, ()> {
+    fn from_str(s: &str) -> Result<LinkSelfContainedDefault, Self::Err> {
         Ok(match s {
             "false" => LinkSelfContainedDefault::False,
             "true" | "wasm" => LinkSelfContainedDefault::True,
             "musl" => LinkSelfContainedDefault::InferredForMusl,
             "mingw" => LinkSelfContainedDefault::InferredForMingw,
-            _ => return Err(()),
+            _ => {
+                return Err(format!(
+                    "'{s}' is not a valid `-Clink-self-contained` default. \
+                        Use 'false', 'true', 'wasm', 'musl' or 'mingw'",
+                ));
+            }
         })
     }
 }
+
+crate::json::serde_deserialize_from_str!(LinkSelfContainedDefault);
 
 impl ToJson for LinkSelfContainedDefault {
     fn to_json(&self) -> Json {
@@ -652,19 +677,6 @@ bitflags::bitflags! {
 rustc_data_structures::external_bitflags_debug! { LinkSelfContainedComponents }
 
 impl LinkSelfContainedComponents {
-    /// Parses a single `-Clink-self-contained` well-known component, not a set of flags.
-    pub fn from_str(s: &str) -> Option<LinkSelfContainedComponents> {
-        Some(match s {
-            "crto" => LinkSelfContainedComponents::CRT_OBJECTS,
-            "libc" => LinkSelfContainedComponents::LIBC,
-            "unwind" => LinkSelfContainedComponents::UNWIND,
-            "linker" => LinkSelfContainedComponents::LINKER,
-            "sanitizers" => LinkSelfContainedComponents::SANITIZERS,
-            "mingw" => LinkSelfContainedComponents::MINGW,
-            _ => return None,
-        })
-    }
-
     /// Return the component's name.
     ///
     /// Returns `None` if the bitflags aren't a singular component (but a mix of multiple flags).
@@ -708,6 +720,29 @@ impl LinkSelfContainedComponents {
     }
 }
 
+impl FromStr for LinkSelfContainedComponents {
+    type Err = String;
+
+    /// Parses a single `-Clink-self-contained` well-known component, not a set of flags.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "crto" => LinkSelfContainedComponents::CRT_OBJECTS,
+            "libc" => LinkSelfContainedComponents::LIBC,
+            "unwind" => LinkSelfContainedComponents::UNWIND,
+            "linker" => LinkSelfContainedComponents::LINKER,
+            "sanitizers" => LinkSelfContainedComponents::SANITIZERS,
+            "mingw" => LinkSelfContainedComponents::MINGW,
+            _ => {
+                return Err(format!(
+                    "'{s}' is not a valid link-self-contained component, expected 'crto', 'libc', 'unwind', 'linker', 'sanitizers', 'mingw'"
+                ));
+            }
+        })
+    }
+}
+
+crate::json::serde_deserialize_from_str!(LinkSelfContainedComponents);
+
 impl ToJson for LinkSelfContainedComponents {
     fn to_json(&self) -> Json {
         let components: Vec<_> = Self::all_components()
@@ -725,7 +760,7 @@ impl ToJson for LinkSelfContainedComponents {
 }
 
 bitflags::bitflags! {
-    /// The `-Z linker-features` components that can individually be enabled or disabled.
+    /// The `-C linker-features` components that can individually be enabled or disabled.
     ///
     /// They are feature flags intended to be a more flexible mechanism than linker flavors, and
     /// also to prevent a combinatorial explosion of flavors whenever a new linker feature is
@@ -756,11 +791,22 @@ bitflags::bitflags! {
 rustc_data_structures::external_bitflags_debug! { LinkerFeatures }
 
 impl LinkerFeatures {
-    /// Parses a single `-Z linker-features` well-known feature, not a set of flags.
+    /// Parses a single `-C linker-features` well-known feature, not a set of flags.
     pub fn from_str(s: &str) -> Option<LinkerFeatures> {
         Some(match s {
             "cc" => LinkerFeatures::CC,
             "lld" => LinkerFeatures::LLD,
+            _ => return None,
+        })
+    }
+
+    /// Return the linker feature name, as would be passed on the CLI.
+    ///
+    /// Returns `None` if the bitflags aren't a singular component (but a mix of multiple flags).
+    pub fn as_str(self) -> Option<&'static str> {
+        Some(match self {
+            LinkerFeatures::CC => "cc",
+            LinkerFeatures::LLD => "lld",
             _ => return None,
         })
     }
@@ -810,6 +856,25 @@ impl PanicStrategy {
     }
 }
 
+impl FromStr for PanicStrategy {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "unwind" => PanicStrategy::Unwind,
+            "abort" => PanicStrategy::Abort,
+            _ => {
+                return Err(format!(
+                    "'{}' is not a valid value for \
+                    panic-strategy. Use 'unwind' or 'abort'.",
+                    s
+                ));
+            }
+        })
+    }
+}
+
+crate::json::serde_deserialize_from_str!(PanicStrategy);
+
 impl ToJson for PanicStrategy {
     fn to_json(&self) -> Json {
         match *self {
@@ -856,17 +921,23 @@ impl SymbolVisibility {
 }
 
 impl FromStr for SymbolVisibility {
-    type Err = ();
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<SymbolVisibility, ()> {
+    fn from_str(s: &str) -> Result<SymbolVisibility, Self::Err> {
         match s {
             "hidden" => Ok(SymbolVisibility::Hidden),
             "protected" => Ok(SymbolVisibility::Protected),
             "interposable" => Ok(SymbolVisibility::Interposable),
-            _ => Err(()),
+            _ => Err(format!(
+                "'{}' is not a valid value for \
+                    symbol-visibility. Use 'hidden', 'protected, or 'interposable'.",
+                s
+            )),
         }
     }
 }
+
+crate::json::serde_deserialize_from_str!(SymbolVisibility);
 
 impl ToJson for SymbolVisibility {
     fn to_json(&self) -> Json {
@@ -879,18 +950,24 @@ impl ToJson for SymbolVisibility {
 }
 
 impl FromStr for RelroLevel {
-    type Err = ();
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<RelroLevel, ()> {
+    fn from_str(s: &str) -> Result<RelroLevel, Self::Err> {
         match s {
             "full" => Ok(RelroLevel::Full),
             "partial" => Ok(RelroLevel::Partial),
             "off" => Ok(RelroLevel::Off),
             "none" => Ok(RelroLevel::None),
-            _ => Err(()),
+            _ => Err(format!(
+                "'{}' is not a valid value for \
+                        relro-level. Use 'full', 'partial, 'off', or 'none'.",
+                s
+            )),
         }
     }
 }
+
+crate::json::serde_deserialize_from_str!(RelroLevel);
 
 impl ToJson for RelroLevel {
     fn to_json(&self) -> Json {
@@ -912,7 +989,7 @@ pub enum SmallDataThresholdSupport {
 }
 
 impl FromStr for SmallDataThresholdSupport {
-    type Err = ();
+    type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "none" {
@@ -924,10 +1001,12 @@ impl FromStr for SmallDataThresholdSupport {
         } else if let Some(arg) = s.strip_prefix("llvm-arg=") {
             Ok(Self::LlvmArg(arg.to_string().into()))
         } else {
-            Err(())
+            Err(format!("'{s}' is not a valid value for small-data-threshold-support."))
         }
     }
 }
+
+crate::json::serde_deserialize_from_str!(SmallDataThresholdSupport);
 
 impl ToJson for SmallDataThresholdSupport {
     fn to_json(&self) -> Value {
@@ -958,17 +1037,24 @@ impl MergeFunctions {
 }
 
 impl FromStr for MergeFunctions {
-    type Err = ();
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<MergeFunctions, ()> {
+    fn from_str(s: &str) -> Result<MergeFunctions, Self::Err> {
         match s {
             "disabled" => Ok(MergeFunctions::Disabled),
             "trampolines" => Ok(MergeFunctions::Trampolines),
             "aliases" => Ok(MergeFunctions::Aliases),
-            _ => Err(()),
+            _ => Err(format!(
+                "'{}' is not a valid value for \
+                    merge-functions. Use 'disabled', \
+                    'trampolines', or 'aliases'.",
+                s
+            )),
         }
     }
 }
+
+crate::json::serde_deserialize_from_str!(MergeFunctions);
 
 impl ToJson for MergeFunctions {
     fn to_json(&self) -> Json {
@@ -1029,9 +1115,9 @@ impl RelocModel {
 }
 
 impl FromStr for RelocModel {
-    type Err = ();
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<RelocModel, ()> {
+    fn from_str(s: &str) -> Result<RelocModel, Self::Err> {
         Ok(match s {
             "static" => RelocModel::Static,
             "pic" => RelocModel::Pic,
@@ -1040,10 +1126,18 @@ impl FromStr for RelocModel {
             "ropi" => RelocModel::Ropi,
             "rwpi" => RelocModel::Rwpi,
             "ropi-rwpi" => RelocModel::RopiRwpi,
-            _ => return Err(()),
+            _ => {
+                return Err(format!(
+                    "invalid relocation model '{s}'.
+                        Run `rustc --print relocation-models` to \
+                        see the list of supported values.'"
+                ));
+            }
         })
     }
 }
+
+crate::json::serde_deserialize_from_str!(RelocModel);
 
 impl ToJson for RelocModel {
     fn to_json(&self) -> Json {
@@ -1061,19 +1155,27 @@ pub enum CodeModel {
 }
 
 impl FromStr for CodeModel {
-    type Err = ();
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<CodeModel, ()> {
+    fn from_str(s: &str) -> Result<CodeModel, Self::Err> {
         Ok(match s {
             "tiny" => CodeModel::Tiny,
             "small" => CodeModel::Small,
             "kernel" => CodeModel::Kernel,
             "medium" => CodeModel::Medium,
             "large" => CodeModel::Large,
-            _ => return Err(()),
+            _ => {
+                return Err(format!(
+                    "'{s}' is not a valid code model. \
+                        Run `rustc --print code-models` to \
+                        see the list of supported values."
+                ));
+            }
         })
     }
 }
+
+crate::json::serde_deserialize_from_str!(CodeModel);
 
 impl ToJson for CodeModel {
     fn to_json(&self) -> Json {
@@ -1096,16 +1198,24 @@ pub enum FloatAbi {
 }
 
 impl FromStr for FloatAbi {
-    type Err = ();
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<FloatAbi, ()> {
+    fn from_str(s: &str) -> Result<FloatAbi, Self::Err> {
         Ok(match s {
             "soft" => FloatAbi::Soft,
             "hard" => FloatAbi::Hard,
-            _ => return Err(()),
+            _ => {
+                return Err(format!(
+                    "'{}' is not a valid value for \
+                        llvm-floatabi. Use 'soft' or 'hard'.",
+                    s
+                ));
+            }
         })
     }
 }
+
+crate::json::serde_deserialize_from_str!(FloatAbi);
 
 impl ToJson for FloatAbi {
     fn to_json(&self) -> Json {
@@ -1127,16 +1237,23 @@ pub enum RustcAbi {
 }
 
 impl FromStr for RustcAbi {
-    type Err = ();
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<RustcAbi, ()> {
+    fn from_str(s: &str) -> Result<RustcAbi, Self::Err> {
         Ok(match s {
             "x86-sse2" => RustcAbi::X86Sse2,
             "x86-softfloat" => RustcAbi::X86Softfloat,
-            _ => return Err(()),
+            _ => {
+                return Err(format!(
+                    "'{s}' is not a valid value for rustc-abi. \
+                        Use 'x86-softfloat' or leave the field unset."
+                ));
+            }
         })
     }
 }
+
+crate::json::serde_deserialize_from_str!(RustcAbi);
 
 impl ToJson for RustcAbi {
     fn to_json(&self) -> Json {
@@ -1158,9 +1275,9 @@ pub enum TlsModel {
 }
 
 impl FromStr for TlsModel {
-    type Err = ();
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<TlsModel, ()> {
+    fn from_str(s: &str) -> Result<TlsModel, Self::Err> {
         Ok(match s {
             // Note the difference "general" vs "global" difference. The model name is "general",
             // but the user-facing option name is "global" for consistency with other compilers.
@@ -1169,10 +1286,18 @@ impl FromStr for TlsModel {
             "initial-exec" => TlsModel::InitialExec,
             "local-exec" => TlsModel::LocalExec,
             "emulated" => TlsModel::Emulated,
-            _ => return Err(()),
+            _ => {
+                return Err(format!(
+                    "'{s}' is not a valid TLS model. \
+                        Run `rustc --print tls-models` to \
+                        see the list of supported values."
+                ));
+            }
         })
     }
 }
+
+crate::json::serde_deserialize_from_str!(TlsModel);
 
 impl ToJson for TlsModel {
     fn to_json(&self) -> Json {
@@ -1219,19 +1344,6 @@ impl LinkOutputKind {
         }
     }
 
-    pub(super) fn from_str(s: &str) -> Option<LinkOutputKind> {
-        Some(match s {
-            "dynamic-nopic-exe" => LinkOutputKind::DynamicNoPicExe,
-            "dynamic-pic-exe" => LinkOutputKind::DynamicPicExe,
-            "static-nopic-exe" => LinkOutputKind::StaticNoPicExe,
-            "static-pic-exe" => LinkOutputKind::StaticPicExe,
-            "dynamic-dylib" => LinkOutputKind::DynamicDylib,
-            "static-dylib" => LinkOutputKind::StaticDylib,
-            "wasi-reactor-exe" => LinkOutputKind::WasiReactorExe,
-            _ => return None,
-        })
-    }
-
     pub fn can_link_dylib(self) -> bool {
         match self {
             LinkOutputKind::StaticNoPicExe | LinkOutputKind::StaticPicExe => false,
@@ -1243,6 +1355,31 @@ impl LinkOutputKind {
         }
     }
 }
+
+impl FromStr for LinkOutputKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<LinkOutputKind, Self::Err> {
+        Ok(match s {
+            "dynamic-nopic-exe" => LinkOutputKind::DynamicNoPicExe,
+            "dynamic-pic-exe" => LinkOutputKind::DynamicPicExe,
+            "static-nopic-exe" => LinkOutputKind::StaticNoPicExe,
+            "static-pic-exe" => LinkOutputKind::StaticPicExe,
+            "dynamic-dylib" => LinkOutputKind::DynamicDylib,
+            "static-dylib" => LinkOutputKind::StaticDylib,
+            "wasi-reactor-exe" => LinkOutputKind::WasiReactorExe,
+            _ => {
+                return Err(format!(
+                    "invalid value for CRT object kind. \
+                        Use '(dynamic,static)-(nopic,pic)-exe' or \
+                        '(dynamic,static)-dylib' or 'wasi-reactor-exe'"
+                ));
+            }
+        })
+    }
+}
+
+crate::json::serde_deserialize_from_str!(LinkOutputKind);
 
 impl fmt::Display for LinkOutputKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1279,17 +1416,24 @@ impl DebuginfoKind {
 }
 
 impl FromStr for DebuginfoKind {
-    type Err = ();
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<Self, ()> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
             "dwarf" => DebuginfoKind::Dwarf,
             "dwarf-dsym" => DebuginfoKind::DwarfDsym,
             "pdb" => DebuginfoKind::Pdb,
-            _ => return Err(()),
+            _ => {
+                return Err(format!(
+                    "'{s}' is not a valid value for debuginfo-kind. Use 'dwarf', \
+                        'dwarf-dsym' or 'pdb'."
+                ));
+            }
         })
     }
 }
+
+crate::json::serde_deserialize_from_str!(DebuginfoKind);
 
 impl ToJson for DebuginfoKind {
     fn to_json(&self) -> Json {
@@ -1343,17 +1487,24 @@ impl SplitDebuginfo {
 }
 
 impl FromStr for SplitDebuginfo {
-    type Err = ();
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<Self, ()> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
             "off" => SplitDebuginfo::Off,
             "unpacked" => SplitDebuginfo::Unpacked,
             "packed" => SplitDebuginfo::Packed,
-            _ => return Err(()),
+            _ => {
+                return Err(format!(
+                    "'{s}' is not a valid value for \
+                        split-debuginfo. Use 'off', 'unpacked', or 'packed'.",
+                ));
+            }
         })
     }
 }
+
+crate::json::serde_deserialize_from_str!(SplitDebuginfo);
 
 impl ToJson for SplitDebuginfo {
     fn to_json(&self) -> Json {
@@ -1367,7 +1518,9 @@ impl fmt::Display for SplitDebuginfo {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde_derive::Deserialize)]
+#[serde(tag = "kind")]
+#[serde(rename_all = "kebab-case")]
 pub enum StackProbeType {
     /// Don't emit any stack probes.
     None,
@@ -1379,44 +1532,10 @@ pub enum StackProbeType {
     Call,
     /// Use inline option for LLVM versions later than specified in `min_llvm_version_for_inline`
     /// and call `__rust_probestack` otherwise.
-    InlineOrCall { min_llvm_version_for_inline: (u32, u32, u32) },
-}
-
-impl StackProbeType {
-    fn from_json(json: &Json) -> Result<Self, String> {
-        let object = json.as_object().ok_or_else(|| "expected a JSON object")?;
-        let kind = object
-            .get("kind")
-            .and_then(|o| o.as_str())
-            .ok_or_else(|| "expected `kind` to be a string")?;
-        match kind {
-            "none" => Ok(StackProbeType::None),
-            "inline" => Ok(StackProbeType::Inline),
-            "call" => Ok(StackProbeType::Call),
-            "inline-or-call" => {
-                let min_version = object
-                    .get("min-llvm-version-for-inline")
-                    .and_then(|o| o.as_array())
-                    .ok_or_else(|| "expected `min-llvm-version-for-inline` to be an array")?;
-                let mut iter = min_version.into_iter().map(|v| {
-                    let int = v.as_u64().ok_or_else(
-                        || "expected `min-llvm-version-for-inline` values to be integers",
-                    )?;
-                    u32::try_from(int)
-                        .map_err(|_| "`min-llvm-version-for-inline` values don't convert to u32")
-                });
-                let min_llvm_version_for_inline = (
-                    iter.next().unwrap_or(Ok(11))?,
-                    iter.next().unwrap_or(Ok(0))?,
-                    iter.next().unwrap_or(Ok(0))?,
-                );
-                Ok(StackProbeType::InlineOrCall { min_llvm_version_for_inline })
-            }
-            _ => Err(String::from(
-                "`kind` expected to be one of `none`, `inline`, `call` or `inline-or-call`",
-            )),
-        }
-    }
+    InlineOrCall {
+        #[serde(rename = "min-llvm-version-for-inline")]
+        min_llvm_version_for_inline: (u32, u32, u32),
+    },
 }
 
 impl ToJson for StackProbeType {
@@ -1538,6 +1657,29 @@ impl fmt::Display for SanitizerSet {
     }
 }
 
+impl FromStr for SanitizerSet {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "address" => SanitizerSet::ADDRESS,
+            "cfi" => SanitizerSet::CFI,
+            "dataflow" => SanitizerSet::DATAFLOW,
+            "kcfi" => SanitizerSet::KCFI,
+            "kernel-address" => SanitizerSet::KERNELADDRESS,
+            "leak" => SanitizerSet::LEAK,
+            "memory" => SanitizerSet::MEMORY,
+            "memtag" => SanitizerSet::MEMTAG,
+            "safestack" => SanitizerSet::SAFESTACK,
+            "shadow-call-stack" => SanitizerSet::SHADOWCALLSTACK,
+            "thread" => SanitizerSet::THREAD,
+            "hwaddress" => SanitizerSet::HWADDRESS,
+            s => return Err(format!("unknown sanitizer {s}")),
+        })
+    }
+}
+
+crate::json::serde_deserialize_from_str!(SanitizerSet);
+
 impl ToJson for SanitizerSet {
     fn to_json(&self) -> Json {
         self.into_iter()
@@ -1576,16 +1718,18 @@ impl FramePointer {
 }
 
 impl FromStr for FramePointer {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, ()> {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(match s {
             "always" => Self::Always,
             "non-leaf" => Self::NonLeaf,
             "may-omit" => Self::MayOmit,
-            _ => return Err(()),
+            _ => return Err(format!("'{s}' is not a valid value for frame-pointer")),
         })
     }
 }
+
+crate::json::serde_deserialize_from_str!(FramePointer);
 
 impl ToJson for FramePointer {
     fn to_json(&self) -> Json {
@@ -1674,7 +1818,7 @@ impl BinaryFormat {
 }
 
 impl FromStr for BinaryFormat {
-    type Err = ();
+    type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "coff" => Ok(Self::Coff),
@@ -1682,10 +1826,15 @@ impl FromStr for BinaryFormat {
             "mach-o" => Ok(Self::MachO),
             "wasm" => Ok(Self::Wasm),
             "xcoff" => Ok(Self::Xcoff),
-            _ => Err(()),
+            _ => Err(format!(
+                "'{s}' is not a valid value for binary_format. \
+                    Use 'coff', 'elf', 'mach-o', 'wasm' or 'xcoff' "
+            )),
         }
     }
 }
+
+crate::json::serde_deserialize_from_str!(BinaryFormat);
 
 impl ToJson for BinaryFormat {
     fn to_json(&self) -> Json {
@@ -2135,12 +2284,11 @@ pub(crate) use cvs;
 #[derive(Debug, PartialEq)]
 pub struct TargetWarnings {
     unused_fields: Vec<String>,
-    incorrect_type: Vec<String>,
 }
 
 impl TargetWarnings {
     pub fn empty() -> Self {
-        Self { unused_fields: Vec::new(), incorrect_type: Vec::new() }
+        Self { unused_fields: Vec::new() }
     }
 
     pub fn warning_messages(&self) -> Vec<String> {
@@ -2149,12 +2297,6 @@ impl TargetWarnings {
             warnings.push(format!(
                 "target json file contains unused fields: {}",
                 self.unused_fields.join(", ")
-            ));
-        }
-        if !self.incorrect_type.is_empty() {
-            warnings.push(format!(
-                "target json file contains fields whose value doesn't have the correct json type: {}",
-                self.incorrect_type.join(", ")
             ));
         }
         warnings
@@ -2214,7 +2356,10 @@ pub struct TargetMetadata {
 
 impl Target {
     pub fn parse_data_layout(&self) -> Result<TargetDataLayout, TargetDataLayoutErrors<'_>> {
-        let mut dl = TargetDataLayout::parse_from_llvm_datalayout_string(&self.data_layout)?;
+        let mut dl = TargetDataLayout::parse_from_llvm_datalayout_string(
+            &self.data_layout,
+            self.options.default_address_space,
+        )?;
 
         // Perform consistency checks against the Target information.
         if dl.endian != self.endian {
@@ -2225,9 +2370,10 @@ impl Target {
         }
 
         let target_pointer_width: u64 = self.pointer_width.into();
-        if dl.pointer_size.bits() != target_pointer_width {
+        let dl_pointer_size: u64 = dl.pointer_size().bits();
+        if dl_pointer_size != target_pointer_width {
             return Err(TargetDataLayoutErrors::InconsistentTargetPointerWidth {
-                pointer_size: dl.pointer_size.bits(),
+                pointer_size: dl_pointer_size,
                 target: self.pointer_width,
             });
         }
@@ -2666,6 +2812,11 @@ pub struct TargetOptions {
     /// Whether the target supports XRay instrumentation.
     pub supports_xray: bool,
 
+    /// The default address space for this target. When using LLVM as a backend, most targets simply
+    /// use LLVM's default address space (0). Some other targets, such as CHERI targets, use a
+    /// custom default address space (in this specific case, `200`).
+    pub default_address_space: rustc_abi::AddressSpace,
+
     /// Whether the targets supports -Z small-data-threshold
     small_data_threshold_support: SmallDataThresholdSupport,
 }
@@ -2894,6 +3045,7 @@ impl Default for TargetOptions {
             entry_name: "main".into(),
             entry_abi: CanonAbi::C,
             supports_xray: false,
+            default_address_space: rustc_abi::AddressSpace::ZERO,
             small_data_threshold_support: SmallDataThresholdSupport::DefaultForArch,
         }
     }
@@ -3320,7 +3472,8 @@ impl Target {
     /// Test target self-consistency and JSON encoding/decoding roundtrip.
     #[cfg(test)]
     fn test_target(mut self) {
-        let recycled_target = Target::from_json(self.to_json()).map(|(j, _)| j);
+        let recycled_target =
+            Target::from_json(&serde_json::to_string(&self.to_json()).unwrap()).map(|(j, _)| j);
         self.update_to_cli();
         self.check_consistency(TargetKind::Builtin).unwrap();
         assert_eq!(recycled_target, Ok(self));
@@ -3368,8 +3521,7 @@ impl Target {
 
         fn load_file(path: &Path) -> Result<(Target, TargetWarnings), String> {
             let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
-            let obj = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
-            Target::from_json(obj)
+            Target::from_json(&contents)
         }
 
         match *target_tuple {
@@ -3417,10 +3569,7 @@ impl Target {
                     Err(format!("could not find specification for target {target_tuple:?}"))
                 }
             }
-            TargetTuple::TargetJson { ref contents, .. } => {
-                let obj = serde_json::from_str(contents).map_err(|e| e.to_string())?;
-                Target::from_json(obj)
-            }
+            TargetTuple::TargetJson { ref contents, .. } => Target::from_json(contents),
         }
     }
 
@@ -3465,6 +3614,7 @@ impl Target {
             ),
             "x86" => (Architecture::I386, None),
             "s390x" => (Architecture::S390x, None),
+            "m68k" => (Architecture::M68k, None),
             "mips" | "mips32r6" => (Architecture::Mips, None),
             "mips64" | "mips64r6" => (
                 // While there are currently no builtin targets

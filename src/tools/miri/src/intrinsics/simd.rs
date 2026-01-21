@@ -3,13 +3,11 @@ use rand::Rng;
 use rustc_abi::{Endian, HasDataLayout};
 use rustc_apfloat::{Float, Round};
 use rustc_middle::ty::FloatTy;
-use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::{mir, ty};
 use rustc_span::{Symbol, sym};
 
-use crate::helpers::{
-    ToHost, ToSoft, bool_to_simd_element, check_intrinsic_arg_count, simd_element_to_bool,
-};
+use super::check_intrinsic_arg_count;
+use crate::helpers::{ToHost, ToSoft, bool_to_simd_element, simd_element_to_bool};
 use crate::*;
 
 #[derive(Copy, Clone)]
@@ -37,6 +35,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             | "ceil"
             | "floor"
             | "round"
+            | "round_ties_even"
             | "trunc"
             | "fsqrt"
             | "fsin"
@@ -72,6 +71,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
                     "ceil" => Op::Round(rustc_apfloat::Round::TowardPositive),
                     "floor" => Op::Round(rustc_apfloat::Round::TowardNegative),
                     "round" => Op::Round(rustc_apfloat::Round::NearestTiesToAway),
+                    "round_ties_even" => Op::Round(rustc_apfloat::Round::NearestTiesToEven),
                     "trunc" => Op::Round(rustc_apfloat::Round::TowardZero),
                     "ctlz" => Op::Numeric(sym::ctlz),
                     "ctpop" => Op::Numeric(sym::ctpop),

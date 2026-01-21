@@ -7,9 +7,14 @@ use tempfile::TempDir;
 
 use crate::core::builder::Builder;
 use crate::core::config::DryRun;
+use crate::utils::helpers::get_host_target;
 use crate::{Build, Config, Flags, t};
 
 pub mod git;
+
+// Note: tests for `shared_helpers` is separate here, as otherwise shim binaries that include the
+// `shared_helpers` via `#[path]` would fail to find it, breaking `./x check bootstrap`.
+mod shared_helpers_tests;
 
 /// Holds temporary state of a bootstrap test.
 /// Right now it is only used to redirect the build directory of the bootstrap
@@ -47,7 +52,39 @@ impl ConfigBuilder {
     }
 
     pub fn path(mut self, path: &str) -> Self {
-        self.args.push(path.to_string());
+        self.arg(path)
+    }
+
+    pub fn paths(mut self, paths: &[&str]) -> Self {
+        self.args(paths)
+    }
+
+    pub fn arg(mut self, arg: &str) -> Self {
+        self.args.push(arg.to_string());
+        self
+    }
+
+    pub fn args(mut self, args: &[&str]) -> Self {
+        for arg in args {
+            self = self.arg(arg);
+        }
+        self
+    }
+
+    /// Set the specified target to be treated as a no_std target.
+    pub fn override_target_no_std(mut self, target: &str) -> Self {
+        self.args(&["--set", &format!("target.{target}.no-std=true")])
+    }
+
+    pub fn hosts(mut self, targets: &[&str]) -> Self {
+        self.args.push("--host".to_string());
+        self.args.push(targets.join(","));
+        self
+    }
+
+    pub fn targets(mut self, targets: &[&str]) -> Self {
+        self.args.push("--target".to_string());
+        self.args.push(targets.join(","));
         self
     }
 
@@ -64,6 +101,11 @@ impl ConfigBuilder {
         // Ignore submodules
         self.args.push("--set".to_string());
         self.args.push("build.submodules=false".to_string());
+
+        // Override any external LLVM set and inhibit CI LLVM; pretend that we're always building
+        // in-tree LLVM from sources.
+        self.args.push("--set".to_string());
+        self.args.push("llvm.download-ci-llvm=false".to_string());
 
         // Do not mess with the local rustc checkout build directory
         self.args.push("--build-dir".to_string());

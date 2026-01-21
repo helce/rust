@@ -214,6 +214,7 @@ pub(crate) fn create_config(
         scrape_examples_options,
         expanded_args,
         remap_path_prefix,
+        target_modifiers,
         ..
     }: RustdocOptions,
     render_options: &RenderOptions,
@@ -277,6 +278,7 @@ pub(crate) fn create_config(
         } else {
             OutputTypes::new(&[])
         },
+        target_modifiers,
         ..Options::default()
     };
 
@@ -353,7 +355,7 @@ pub(crate) fn run_global_ctxt(
     rustc_passes::stability::check_unused_or_stable_features(tcx);
 
     let auto_traits =
-        tcx.all_traits().filter(|&trait_def_id| tcx.trait_is_auto(trait_def_id)).collect();
+        tcx.visible_traits().filter(|&trait_def_id| tcx.trait_is_auto(trait_def_id)).collect();
 
     let mut ctxt = DocContext {
         tcx,

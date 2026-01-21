@@ -121,7 +121,7 @@ pub fn print_variant_body_hir(db: &dyn DefDatabase, owner: VariantId, edition: E
         VariantId::UnionId(it) => format!("union {}", item_name(db, it, "<missing>")),
     };
 
-    let fields = db.variant_fields(owner);
+    let fields = owner.fields(db);
 
     let mut p = Printer {
         db,
@@ -902,7 +902,7 @@ impl Printer<'_> {
                         let mut same_name = false;
                         if let Pat::Bind { id, subpat: None } = &self.store[arg.pat] {
                             if let Binding { name, mode: BindingAnnotation::Unannotated, .. } =
-                                &self.store.bindings[*id]
+                                &self.store.assert_expr_only().bindings[*id]
                             {
                                 if name.as_str() == field_name {
                                     same_name = true;
@@ -1063,7 +1063,7 @@ impl Printer<'_> {
     }
 
     fn print_binding(&mut self, id: BindingId) {
-        let Binding { name, mode, .. } = &self.store.bindings[id];
+        let Binding { name, mode, .. } = &self.store.assert_expr_only().bindings[id];
         let mode = match mode {
             BindingAnnotation::Unannotated => "",
             BindingAnnotation::Mutable => "mut ",

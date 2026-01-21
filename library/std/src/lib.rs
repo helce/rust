@@ -281,7 +281,6 @@
 #![feature(cfg_target_thread_local)]
 #![feature(cfi_encoding)]
 #![feature(char_max_len)]
-#![feature(concat_idents)]
 #![feature(core_float_math)]
 #![feature(decl_macro)]
 #![feature(deprecated_suggestion)]
@@ -291,8 +290,8 @@
 #![feature(doc_notable_trait)]
 #![feature(dropck_eyepatch)]
 #![feature(extended_varargs_abi_support)]
-#![feature(f128)]
 #![feature(f16)]
+#![feature(f128)]
 #![feature(ffi_const)]
 #![feature(formatting_options)]
 #![feature(if_let_guard)]
@@ -325,14 +324,13 @@
 //
 // Library features (core):
 // tidy-alphabetical-start
-#![feature(array_chunks)]
 #![feature(bstr)]
 #![feature(bstr_internals)]
 #![feature(char_internals)]
 #![feature(clone_to_uninit)]
-#![feature(const_float_round_methods)]
 #![feature(core_intrinsics)]
 #![feature(core_io_borrowed_buf)]
+#![feature(drop_guard)]
 #![feature(duration_constants)]
 #![feature(error_generic_member_access)]
 #![feature(error_iter)]
@@ -717,10 +715,9 @@ pub use core::primitive;
 pub use core::todo;
 // Re-export built-in macros defined through core.
 #[stable(feature = "builtin_macro_prelude", since = "1.38.0")]
-#[allow(deprecated)]
 pub use core::{
-    assert, assert_matches, cfg, column, compile_error, concat, concat_idents, const_format_args,
-    env, file, format_args, format_args_nl, include, include_bytes, include_str, line, log_syntax,
+    assert, assert_matches, cfg, column, compile_error, concat, const_format_args, env, file,
+    format_args, format_args_nl, include, include_bytes, include_str, line, log_syntax,
     module_path, option_env, stringify, trace_macros,
 };
 // Re-export macros defined in core.

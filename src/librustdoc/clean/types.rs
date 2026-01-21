@@ -6,14 +6,12 @@ use std::{fmt, iter};
 use arrayvec::ArrayVec;
 use itertools::Either;
 use rustc_abi::{ExternAbi, VariantIdx};
-use rustc_attr_data_structures::{
-    AttributeKind, ConstStability, Deprecation, Stability, StableSince,
-};
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
+use rustc_hir::attrs::{AttributeKind, DeprecatedSince, Deprecation};
 use rustc_hir::def::{CtorKind, DefKind, Res};
 use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE, LocalDefId};
 use rustc_hir::lang_items::LangItem;
-use rustc_hir::{BodyId, Mutability};
+use rustc_hir::{BodyId, ConstStability, Mutability, Stability, StableSince, find_attr};
 use rustc_index::IndexVec;
 use rustc_metadata::rendered_const;
 use rustc_middle::span_bug;
@@ -24,7 +22,7 @@ use rustc_resolve::rustdoc::{
 };
 use rustc_session::Session;
 use rustc_span::hygiene::MacroKind;
-use rustc_span::symbol::{Ident, Symbol, kw, sym};
+use rustc_span::symbol::{Symbol, kw, sym};
 use rustc_span::{DUMMY_SP, FileName, Loc};
 use thin_vec::ThinVec;
 use tracing::{debug, trace};
@@ -387,13 +385,13 @@ impl Item {
             // versions; the paths that are exposed through it are "deprecated" because they
             // were never supposed to work at all.
             let stab = self.stability(tcx)?;
-            if let rustc_attr_data_structures::StabilityLevel::Stable {
+            if let rustc_hir::StabilityLevel::Stable {
                 allowed_through_unstable_modules: Some(note),
                 ..
             } = stab.level
             {
                 Some(Deprecation {
-                    since: rustc_attr_data_structures::DeprecatedSince::Unspecified,
+                    since: DeprecatedSince::Unspecified,
                     note: Some(note),
                     suggestion: None,
                 })
@@ -404,10 +402,7 @@ impl Item {
     }
 
     pub(crate) fn inner_docs(&self, tcx: TyCtxt<'_>) -> bool {
-        self.item_id
-            .as_def_id()
-            .map(|did| inner_docs(tcx.get_attrs_unchecked(did)))
-            .unwrap_or(false)
+        self.item_id.as_def_id().map(|did| inner_docs(tcx.get_all_attrs(did))).unwrap_or(false)
     }
 
     pub(crate) fn span(&self, tcx: TyCtxt<'_>) -> Option<Span> {
@@ -452,7 +447,7 @@ impl Item {
         kind: ItemKind,
         cx: &mut DocContext<'_>,
     ) -> Item {
-        let hir_attrs = cx.tcx.get_attrs_unchecked(def_id);
+        let hir_attrs = cx.tcx.get_all_attrs(def_id);
 
         Self::from_def_id_and_attrs_and_parts(
             def_id,
@@ -621,7 +616,7 @@ impl Item {
     }
 
     pub(crate) fn is_non_exhaustive(&self) -> bool {
-        self.attrs.other_attrs.iter().any(|a| a.has_name(sym::non_exhaustive))
+        find_attr!(&self.attrs.other_attrs, AttributeKind::NonExhaustive(..))
     }
 
     /// Returns a documentation-level item type from the item.
@@ -648,7 +643,7 @@ impl Item {
             let sig = tcx.fn_sig(def_id).skip_binder();
             let constness = if tcx.is_const_fn(def_id) {
                 // rustc's `is_const_fn` returns `true` for associated functions that have an `impl const` parent
-                // or that have a `#[const_trait]` parent. Do not display those as `const` in rustdoc because we
+                // or that have a `const trait` parent. Do not display those as `const` in rustdoc because we
                 // won't be printing correct syntax plus the syntax is unstable.
                 match tcx.opt_associated_item(def_id) {
                     Some(ty::AssocItem {
@@ -759,56 +754,48 @@ impl Item {
         Some(tcx.visibility(def_id))
     }
 
-    fn attributes_without_repr(&self, tcx: TyCtxt<'_>, is_json: bool) -> Vec<String> {
-        const ALLOWED_ATTRIBUTES: &[Symbol] =
-            &[sym::export_name, sym::link_section, sym::no_mangle, sym::non_exhaustive];
+    /// Get a list of attributes excluding `#[repr]` to display.
+    ///
+    /// Only used by the HTML output-format.
+    fn attributes_without_repr(&self) -> Vec<String> {
         self.attrs
             .other_attrs
             .iter()
-            .filter_map(|attr| {
-                // NoMangle is special-cased because cargo-semver-checks uses it
-                if matches!(attr, hir::Attribute::Parsed(AttributeKind::NoMangle(..))) {
-                    Some("#[no_mangle]".to_string())
-                } else if is_json {
-                    match attr {
-                        // rustdoc-json stores this in `Item::deprecation`, so we
-                        // don't want it it `Item::attrs`.
-                        hir::Attribute::Parsed(AttributeKind::Deprecation { .. }) => None,
-                        // We have separate pretty-printing logic for `#[repr(..)]` attributes.
-                        hir::Attribute::Parsed(AttributeKind::Repr(..)) => None,
-                        _ => Some({
-                            let mut s = rustc_hir_pretty::attribute_to_string(&tcx, attr);
-                            assert_eq!(s.pop(), Some('\n'));
-                            s
-                        }),
-                    }
-                } else {
-                    if !attr.has_any_name(ALLOWED_ATTRIBUTES) {
-                        return None;
-                    }
-                    Some(
-                        rustc_hir_pretty::attribute_to_string(&tcx, attr)
-                            .replace("\\\n", "")
-                            .replace('\n', "")
-                            .replace("  ", " "),
-                    )
+            .filter_map(|attr| match attr {
+                hir::Attribute::Parsed(AttributeKind::LinkSection { name, .. }) => {
+                    Some(format!("#[link_section = \"{name}\"]"))
                 }
+                hir::Attribute::Parsed(AttributeKind::NoMangle(..)) => {
+                    Some("#[no_mangle]".to_string())
+                }
+                hir::Attribute::Parsed(AttributeKind::ExportName { name, .. }) => {
+                    Some(format!("#[export_name = \"{name}\"]"))
+                }
+                hir::Attribute::Parsed(AttributeKind::NonExhaustive(..)) => {
+                    Some("#[non_exhaustive]".to_string())
+                }
+                _ => None,
             })
             .collect()
     }
 
-    pub(crate) fn attributes(&self, tcx: TyCtxt<'_>, cache: &Cache, is_json: bool) -> Vec<String> {
-        let mut attrs = self.attributes_without_repr(tcx, is_json);
+    /// Get a list of attributes to display on this item.
+    ///
+    /// Only used by the HTML output-format.
+    pub(crate) fn attributes(&self, tcx: TyCtxt<'_>, cache: &Cache) -> Vec<String> {
+        let mut attrs = self.attributes_without_repr();
 
-        if let Some(repr_attr) = self.repr(tcx, cache, is_json) {
+        if let Some(repr_attr) = self.repr(tcx, cache) {
             attrs.push(repr_attr);
         }
         attrs
     }
 
     /// Returns a stringified `#[repr(...)]` attribute.
-    pub(crate) fn repr(&self, tcx: TyCtxt<'_>, cache: &Cache, is_json: bool) -> Option<String> {
-        repr_attributes(tcx, cache, self.def_id()?, self.type_(), is_json)
+    ///
+    /// Only used by the HTML output-format.
+    pub(crate) fn repr(&self, tcx: TyCtxt<'_>, cache: &Cache) -> Option<String> {
+        repr_attributes(tcx, cache, self.def_id()?, self.type_())
     }
 
     pub fn is_doc_hidden(&self) -> bool {
@@ -820,12 +807,14 @@ impl Item {
     }
 }
 
+/// Return a string representing the `#[repr]` attribute if present.
+///
+/// Only used by the HTML output-format.
 pub(crate) fn repr_attributes(
     tcx: TyCtxt<'_>,
     cache: &Cache,
     def_id: DefId,
     item_type: ItemType,
-    is_json: bool,
 ) -> Option<String> {
     use rustc_abi::IntegerType;
 
@@ -842,7 +831,6 @@ pub(crate) fn repr_attributes(
         // Render `repr(transparent)` iff the non-1-ZST field is public or at least one
         // field is public in case all fields are 1-ZST fields.
         let render_transparent = cache.document_private
-            || is_json
             || adt
                 .all_fields()
                 .find(|field| {
@@ -1081,16 +1069,10 @@ pub(crate) fn extract_cfg_from_attrs<'a, I: Iterator<Item = &'a hir::Attribute> 
 
     // treat #[target_feature(enable = "feat")] attributes as if they were
     // #[doc(cfg(target_feature = "feat"))] attributes as well
-    for attr in hir_attr_lists(attrs, sym::target_feature) {
-        if attr.has_name(sym::enable) && attr.value_str().is_some() {
-            // Clone `enable = "feat"`, change to `target_feature = "feat"`.
-            // Unwrap is safe because `value_str` succeeded above.
-            let mut meta = attr.meta_item().unwrap().clone();
-            meta.path = ast::Path::from_ident(Ident::with_dummy_span(sym::target_feature));
-
-            if let Ok(feat_cfg) = Cfg::parse(&ast::MetaItemInner::MetaItem(meta)) {
-                cfg &= feat_cfg;
-            }
+    if let Some(features) = find_attr!(attrs, AttributeKind::TargetFeature(features, _) => features)
+    {
+        for (feature, _) in features {
+            cfg &= Cfg::Cfg(sym::target_feature, Some(*feature));
         }
     }
 
@@ -1690,7 +1672,7 @@ impl Type {
         }
     }
 
-    pub(crate) fn generics<'a>(&'a self) -> Option<impl Iterator<Item = &'a Type>> {
+    pub(crate) fn generics(&self) -> Option<impl Iterator<Item = &Type>> {
         match self {
             Type::Path { path, .. } => path.generics(),
             _ => None,
@@ -1976,43 +1958,6 @@ impl PrimitiveType {
     }
 }
 
-impl From<ast::IntTy> for PrimitiveType {
-    fn from(int_ty: ast::IntTy) -> PrimitiveType {
-        match int_ty {
-            ast::IntTy::Isize => PrimitiveType::Isize,
-            ast::IntTy::I8 => PrimitiveType::I8,
-            ast::IntTy::I16 => PrimitiveType::I16,
-            ast::IntTy::I32 => PrimitiveType::I32,
-            ast::IntTy::I64 => PrimitiveType::I64,
-            ast::IntTy::I128 => PrimitiveType::I128,
-        }
-    }
-}
-
-impl From<ast::UintTy> for PrimitiveType {
-    fn from(uint_ty: ast::UintTy) -> PrimitiveType {
-        match uint_ty {
-            ast::UintTy::Usize => PrimitiveType::Usize,
-            ast::UintTy::U8 => PrimitiveType::U8,
-            ast::UintTy::U16 => PrimitiveType::U16,
-            ast::UintTy::U32 => PrimitiveType::U32,
-            ast::UintTy::U64 => PrimitiveType::U64,
-            ast::UintTy::U128 => PrimitiveType::U128,
-        }
-    }
-}
-
-impl From<ast::FloatTy> for PrimitiveType {
-    fn from(float_ty: ast::FloatTy) -> PrimitiveType {
-        match float_ty {
-            ast::FloatTy::F16 => PrimitiveType::F16,
-            ast::FloatTy::F32 => PrimitiveType::F32,
-            ast::FloatTy::F64 => PrimitiveType::F64,
-            ast::FloatTy::F128 => PrimitiveType::F128,
-        }
-    }
-}
-
 impl From<ty::IntTy> for PrimitiveType {
     fn from(int_ty: ty::IntTy) -> PrimitiveType {
         match int_ty {
@@ -2240,7 +2185,7 @@ impl Path {
         self.segments.last().map(|seg| &seg.args)
     }
 
-    pub(crate) fn generics<'a>(&'a self) -> Option<impl Iterator<Item = &'a Type>> {
+    pub(crate) fn generics(&self) -> Option<impl Iterator<Item = &Type>> {
         self.segments.last().and_then(|seg| {
             if let GenericArgs::AngleBracketed { ref args, .. } = seg.args {
                 Some(args.iter().filter_map(|arg| match arg {

@@ -1,7 +1,7 @@
 use rustc_abi::Align;
 use rustc_ast::{IntTy, LitIntType, LitKind, UintTy};
-use rustc_attr_data_structures::{AttributeKind, IntType, ReprAttr};
 use rustc_feature::{AttributeTemplate, template};
+use rustc_hir::attrs::{AttributeKind, IntType, ReprAttr};
 use rustc_span::{DUMMY_SP, Span, Symbol, sym};
 
 use super::{AcceptMapping, AttributeParser, CombineAttributeParser, ConvertFn, FinalizeContext};
@@ -23,7 +23,8 @@ pub(crate) struct ReprParser;
 impl<S: Stage> CombineAttributeParser<S> for ReprParser {
     type Item = (ReprAttr, Span);
     const PATH: &[Symbol] = &[sym::repr];
-    const CONVERT: ConvertFn<Self::Item> = AttributeKind::Repr;
+    const CONVERT: ConvertFn<Self::Item> =
+        |items, first_span| AttributeKind::Repr { reprs: items, first_span };
     // FIXME(jdonszelmann): never used
     const TEMPLATE: AttributeTemplate =
         template!(List: "C | Rust | align(...) | packed(...) | <integer type> | transparent");
@@ -40,8 +41,8 @@ impl<S: Stage> CombineAttributeParser<S> for ReprParser {
         };
 
         if list.is_empty() {
-            // this is so validation can emit a lint
-            reprs.push((ReprAttr::ReprEmpty, cx.attr_span));
+            cx.warn_empty_attribute(cx.attr_span);
+            return reprs;
         }
 
         for param in list.mixed() {

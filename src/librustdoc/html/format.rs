@@ -14,18 +14,19 @@ use std::slice;
 
 use itertools::{Either, Itertools};
 use rustc_abi::ExternAbi;
-use rustc_attr_data_structures::{ConstStability, StabilityLevel, StableSince};
+use rustc_ast::join_path_syms;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{DefId, LOCAL_CRATE};
+use rustc_hir::{ConstStability, StabilityLevel, StableSince};
 use rustc_metadata::creader::{CStore, LoadedMacro};
 use rustc_middle::ty::{self, TyCtxt, TypingMode};
 use rustc_span::symbol::kw;
 use rustc_span::{Symbol, sym};
 use tracing::{debug, trace};
 
-use super::url_parts_builder::{UrlPartsBuilder, estimate_item_path_byte_length};
+use super::url_parts_builder::UrlPartsBuilder;
 use crate::clean::types::ExternalLocation;
 use crate::clean::utils::find_nearest_parent_module;
 use crate::clean::{self, ExternalCrate, PrimitiveType};
@@ -113,9 +114,9 @@ impl clean::Generics {
             let real_params =
                 fmt::from_fn(|f| real_params.clone().map(|g| g.print(cx)).joined(", ", f));
             if f.alternate() {
-                write!(f, "<{:#}>", real_params)
+                write!(f, "<{real_params:#}>")
             } else {
-                write!(f, "&lt;{}&gt;", real_params)
+                write!(f, "&lt;{real_params}&gt;")
             }
         })
     }
@@ -268,7 +269,7 @@ impl clean::GenericBound {
         fmt::from_fn(move |f| match self {
             clean::GenericBound::Outlives(lt) => write!(f, "{}", lt.print()),
             clean::GenericBound::TraitBound(ty, modifiers) => {
-                // `const` and `~const` trait bounds are experimental; don't render them.
+                // `const` and `[const]` trait bounds are experimental; don't render them.
                 let hir::TraitBoundModifiers { polarity, constness: _ } = modifiers;
                 f.write_str(match polarity {
                     hir::BoundPolarity::Positive => "",
@@ -367,18 +368,8 @@ pub(crate) enum HrefError {
     Private,
     // Not in external cache, href link should be in same page
     NotInExternalCache,
-}
-
-// Panics if `syms` is empty.
-pub(crate) fn join_with_double_colon(syms: &[Symbol]) -> String {
-    let mut s = String::with_capacity(estimate_item_path_byte_length(syms.len()));
-    // NOTE: using `Joined::joined` here causes a noticeable perf regression
-    s.push_str(syms[0].as_str());
-    for sym in &syms[1..] {
-        s.push_str("::");
-        s.push_str(sym.as_str());
-    }
-    s
+    /// Refers to an unnamable item, such as one defined within a function or const block.
+    UnnamableItem,
 }
 
 /// This function is to get the external macro path because they are not in the cache used in
@@ -490,6 +481,26 @@ fn generate_item_def_id_path(
     Ok((url_parts, shortty, fqp))
 }
 
+/// Checks if the given defid refers to an item that is unnamable, such as one defined in a const block.
+fn is_unnamable(tcx: TyCtxt<'_>, did: DefId) -> bool {
+    let mut cur_did = did;
+    while let Some(parent) = tcx.opt_parent(cur_did) {
+        match tcx.def_kind(parent) {
+            // items defined in these can be linked to, as long as they are visible
+            DefKind::Mod | DefKind::ForeignMod => cur_did = parent,
+            // items in impls can be linked to,
+            // as long as we can link to the item the impl is on.
+            // since associated traits are not a thing,
+            // it should not be possible to refer to an impl item if
+            // the base type is not namable.
+            DefKind::Impl { .. } => return false,
+            // everything else does not have docs generated for it
+            _ => return true,
+        }
+    }
+    return false;
+}
+
 fn to_module_fqp(shortty: ItemType, fqp: &[Symbol]) -> &[Symbol] {
     if shortty == ItemType::Module { fqp } else { &fqp[..fqp.len() - 1] }
 }
@@ -563,6 +574,9 @@ pub(crate) fn href_with_root_path(
         }
         _ => original_did,
     };
+    if is_unnamable(cx.tcx(), did) {
+        return Err(HrefError::UnnamableItem);
+    }
     let cache = cx.cache();
     let relative_to = &cx.current;
 
@@ -605,7 +619,7 @@ pub(crate) fn href_with_root_path(
             }
         }
     };
-    let url_parts = make_href(root_path, shortty, url_parts, &fqp, is_remote);
+    let url_parts = make_href(root_path, shortty, url_parts, fqp, is_remote);
     Ok((url_parts, shortty, fqp.clone()))
 }
 
@@ -672,7 +686,7 @@ pub(crate) fn link_tooltip(
             write!(f, "{}", cx.tcx().item_name(id))?;
         } else if !fqp.is_empty() {
             write!(f, "{shortty} ")?;
-            fqp.iter().joined("::", f)?;
+            write!(f, "{}", join_path_syms(fqp))?;
         }
         Ok(())
     })
@@ -703,7 +717,7 @@ fn resolved_path(
                     write!(
                         f,
                         "{path}::{anchor}",
-                        path = join_with_double_colon(&fqp[..fqp.len() - 1]),
+                        path = join_path_syms(&fqp[..fqp.len() - 1]),
                         anchor = print_anchor(did, *fqp.last().unwrap(), cx)
                     )
                 } else {
@@ -835,7 +849,7 @@ pub(crate) fn print_anchor(did: DefId, text: Symbol, cx: &Context<'_>) -> impl D
             write!(
                 f,
                 r#"<a class="{short_ty}" href="{url}" title="{short_ty} {path}">{text}</a>"#,
-                path = join_with_double_colon(&fqp),
+                path = join_path_syms(fqp),
                 text = EscapeBodyText(text.as_str()),
             )
         } else {
@@ -1095,7 +1109,7 @@ impl clean::QPathData {
                                     title=\"type {path}::{name}\">{name}</a>",
                         shortty = ItemType::AssocType,
                         name = assoc.name,
-                        path = join_with_double_colon(&path),
+                        path = join_path_syms(path),
                     )
                 } else {
                     write!(f, "{}", assoc.name)
@@ -1126,7 +1140,7 @@ impl clean::Impl {
                 {
                     let last = ty.last();
                     if f.alternate() {
-                        write!(f, "{}<", last)?;
+                        write!(f, "{last}<")?;
                         self.print_type(inner_type, f, use_absolute, cx)?;
                         write!(f, ">")?;
                     } else {
@@ -1230,7 +1244,7 @@ pub(crate) fn print_params(params: &[clean::Parameter], cx: &Context<'_>) -> imp
             .map(|param| {
                 fmt::from_fn(|f| {
                     if let Some(name) = param.name {
-                        write!(f, "{}: ", name)?;
+                        write!(f, "{name}: ")?;
                     }
                     param.type_.print(cx).fmt(f)
                 })
@@ -1352,7 +1366,7 @@ impl clean::FnDecl {
                     write!(f, "const ")?;
                 }
                 if let Some(name) = param.name {
-                    write!(f, "{}: ", name)?;
+                    write!(f, "{name}: ")?;
                 }
                 param.type_.print(cx).fmt(f)?;
             }

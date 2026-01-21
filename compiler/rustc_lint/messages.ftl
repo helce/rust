@@ -440,6 +440,7 @@ lint_invalid_asm_label_named = avoid using named labels in inline assembly
     .help = only local labels of the form `<number>:` should be used in inline asm
     .note = see the asm section of Rust By Example <https://doc.rust-lang.org/nightly/rust-by-example/unsafe/asm.html#labels> for more information
 lint_invalid_asm_label_no_span = the label may be declared in the expansion of a macro
+
 lint_invalid_crate_type_value = invalid `crate_type` value
     .suggestion = did you mean
 
@@ -592,7 +593,7 @@ lint_non_camel_case_type = {$sort} `{$name}` should have an upper camel case nam
 
 lint_non_fmt_panic = panic message is not a string literal
     .note = this usage of `{$name}!()` is deprecated; it will be a hard error in Rust 2021
-    .more_info_note = for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2021/panic-macro-consistency.html>
+    .more_info_note = for more information, see <https://doc.rust-lang.org/edition-guide/rust-2021/panic-macro-consistency.html>
     .supports_fmt_note = the `{$name}!()` macro supports formatting, so there's no need for the `format!()` macro here
     .supports_fmt_suggestion = remove the `format!(..)` macro call
     .display_suggestion = add a "{"{"}{"}"}" format string to `Display` the message
@@ -767,6 +768,9 @@ lint_redundant_semicolons_suggestion = remove {$multiple_semicolons ->
         *[false] this semicolon
     }
 
+lint_reexport_private_dependency =
+    {$kind} `{$name}` from private dependency '{$krate}' is re-exported
+
 lint_remove_mut_from_pattern = remove `mut` from the parameter
 
 lint_removed_lint = lint `{$name}` has been removed: {$reason}
@@ -813,6 +817,9 @@ lint_supertrait_as_deref_target = this `Deref` implementation is covered by an i
     .label2 = target type is a supertrait of `{$self_ty}`
     .help = consider removing this implementation or replacing it with a method instead
 
+lint_surrogate_char_cast = surrogate values are not valid for `char`
+    .note = `0xD800..=0xDFFF` are reserved for Unicode surrogates and are not valid `char` values
+
 lint_suspicious_double_ref_clone =
     using `.clone()` on a double reference, which returns `{$ty}` instead of cloning the inner type
 
@@ -821,6 +828,9 @@ lint_suspicious_double_ref_deref =
 
 lint_symbol_intern_string_literal = using `Symbol::intern` on a string literal
     .help = consider adding the symbol to `compiler/rustc_span/src/symbol.rs`
+
+lint_too_large_char_cast = value exceeds maximum `char` value
+    .note = maximum valid `char` value is `0x10FFFF`
 
 lint_trailing_semi_macro = trailing semicolon in macro used in expression position
     .note1 = macro invocations at the end of a block are treated as expressions

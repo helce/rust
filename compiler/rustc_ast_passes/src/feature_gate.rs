@@ -286,9 +286,9 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
 
     fn visit_ty(&mut self, ty: &'a ast::Ty) {
         match &ty.kind {
-            ast::TyKind::BareFn(bare_fn_ty) => {
+            ast::TyKind::FnPtr(fn_ptr_ty) => {
                 // Function pointers cannot be `const`
-                self.check_late_bound_lifetime_defs(&bare_fn_ty.generic_params);
+                self.check_late_bound_lifetime_defs(&fn_ptr_ty.generic_params);
             }
             ast::TyKind::Never => {
                 gate!(&self, never_type, ty.span, "the `!` type is experimental");
@@ -469,7 +469,6 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
         "`if let` guards are experimental",
         "you can write `if matches!(<expr>, <pattern>)` instead of `if let <pattern> = <expr>`"
     );
-    gate_all!(let_chains, "`let` expressions in this position are unstable");
     gate_all!(
         async_trait_bounds,
         "`async` trait bounds are unstable",
@@ -505,7 +504,6 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session, features: &Features) {
     );
     gate_all!(associated_const_equality, "associated const equality is incomplete");
     gate_all!(yeet_expr, "`do yeet` expression is experimental");
-    gate_all!(dyn_star, "`dyn*` trait objects are experimental");
     gate_all!(const_closures, "const closures are experimental");
     gate_all!(builtin_syntax, "`builtin #` syntax is unstable");
     gate_all!(ergonomic_clones, "ergonomic clones are experimental");
@@ -632,16 +630,11 @@ fn check_incompatible_features(sess: &Session, features: &Features) {
         .iter()
         .filter(|(f1, f2)| features.enabled(*f1) && features.enabled(*f2))
     {
-        if let Some((f1_name, f1_span)) = enabled_features.clone().find(|(name, _)| name == f1) {
-            if let Some((f2_name, f2_span)) = enabled_features.clone().find(|(name, _)| name == f2)
-            {
-                let spans = vec![f1_span, f2_span];
-                sess.dcx().emit_err(errors::IncompatibleFeatures {
-                    spans,
-                    f1: f1_name,
-                    f2: f2_name,
-                });
-            }
+        if let Some((f1_name, f1_span)) = enabled_features.clone().find(|(name, _)| name == f1)
+            && let Some((f2_name, f2_span)) = enabled_features.clone().find(|(name, _)| name == f2)
+        {
+            let spans = vec![f1_span, f2_span];
+            sess.dcx().emit_err(errors::IncompatibleFeatures { spans, f1: f1_name, f2: f2_name });
         }
     }
 }

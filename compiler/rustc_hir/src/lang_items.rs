@@ -274,6 +274,8 @@ language_item_table! {
     PartialOrd,              sym::partial_ord,         partial_ord_trait,          Target::Trait,          GenericRequirement::Exact(1);
     CVoid,                   sym::c_void,              c_void,                     Target::Enum,           GenericRequirement::None;
 
+    TypeId,                  sym::type_id,             type_id,                    Target::Struct,         GenericRequirement::None;
+
     // A number of panic-related lang items. The `panic` item corresponds to divide-by-zero and
     // various panic cases with `match`. The `panic_bounds_check` item is for indexing arrays.
     //
@@ -312,6 +314,7 @@ language_item_table! {
     PanicAsyncGenFnResumedPanic, sym::panic_const_async_gen_fn_resumed_panic, panic_const_async_gen_fn_resumed_panic, Target::Fn, GenericRequirement::None;
     PanicGenFnNonePanic, sym::panic_const_gen_fn_none_panic, panic_const_gen_fn_none_panic, Target::Fn, GenericRequirement::None;
     PanicNullPointerDereference, sym::panic_null_pointer_dereference, panic_null_pointer_dereference, Target::Fn, GenericRequirement::None;
+    PanicInvalidEnumConstruction, sym::panic_invalid_enum_construction, panic_invalid_enum_construction, Target::Fn, GenericRequirement::None;
     PanicCoroutineResumedDrop, sym::panic_const_coroutine_resumed_drop, panic_const_coroutine_resumed_drop, Target::Fn, GenericRequirement::None;
     PanicAsyncFnResumedDrop, sym::panic_const_async_fn_resumed_drop, panic_const_async_fn_resumed_drop, Target::Fn, GenericRequirement::None;
     PanicAsyncGenFnResumedDrop, sym::panic_const_async_gen_fn_resumed_drop, panic_const_async_gen_fn_resumed_drop, Target::Fn, GenericRequirement::None;
@@ -342,9 +345,6 @@ language_item_table! {
     OwnedBox,                sym::owned_box,           owned_box,                  Target::Struct,         GenericRequirement::Minimum(1);
     GlobalAlloc,             sym::global_alloc_ty,     global_alloc_ty,            Target::Struct,         GenericRequirement::None;
 
-    // Experimental lang item for Miri
-    PtrUnique,               sym::ptr_unique,          ptr_unique,                 Target::Struct,         GenericRequirement::Exact(1);
-
     PhantomData,             sym::phantom_data,        phantom_data,               Target::Struct,         GenericRequirement::Exact(1);
 
     ManuallyDrop,            sym::manually_drop,       manually_drop,              Target::Struct,         GenericRequirement::None;
@@ -365,8 +365,6 @@ language_item_table! {
     TryTraitFromOutput,      sym::from_output,         from_output_fn,             Target::Method(MethodKind::Trait { body: false }), GenericRequirement::None;
     TryTraitBranch,          sym::branch,              branch_fn,                  Target::Method(MethodKind::Trait { body: false }), GenericRequirement::None;
     TryTraitFromYeet,        sym::from_yeet,           from_yeet_fn,               Target::Fn,             GenericRequirement::None;
-
-    PointerLike,             sym::pointer_like,        pointer_like,               Target::Trait,          GenericRequirement::Exact(0);
 
     CoercePointeeValidated, sym::coerce_pointee_validated, coerce_pointee_validated_trait, Target::Trait,     GenericRequirement::Exact(0);
 

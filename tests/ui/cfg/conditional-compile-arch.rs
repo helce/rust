@@ -41,3 +41,6 @@ pub fn main() { }
 
 #[cfg(target_arch = "e2k")]
 pub fn main() { }
+
+#[cfg(target_arch = "arm64ec")]
+pub fn main() { }

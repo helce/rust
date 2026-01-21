@@ -370,10 +370,18 @@ fn update_target_reliable_float_cfg(sess: &Session, cfg: &mut TargetConfig) {
     let target_env = sess.target.options.env.as_ref();
     let target_abi = sess.target.options.abi.as_ref();
     let target_pointer_width = sess.target.pointer_width;
+    let version = get_version();
 
     cfg.has_reliable_f16 = match (target_arch, target_os) {
         // Selection failure <https://github.com/llvm/llvm-project/issues/50374>
         ("s390x", _) => false,
+        // LLVM crash without neon <https://github.com/llvm/llvm-project/issues/129394> (now fixed)
+        ("aarch64", _)
+            if !cfg.target_features.iter().any(|f| f.as_str() == "neon")
+                && version < (20, 1, 1) =>
+        {
+            false
+        }
         // Unsupported <https://github.com/llvm/llvm-project/issues/94434>
         ("arm64ec", _) => false,
         // MinGW ABI bugs <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=115054>
@@ -398,6 +406,8 @@ fn update_target_reliable_float_cfg(sess: &Session, cfg: &mut TargetConfig) {
         ("mips64" | "mips64r6", _) => false,
         // Selection bug <https://github.com/llvm/llvm-project/issues/95471>
         ("nvptx64", _) => false,
+        // Unsupported https://github.com/llvm/llvm-project/issues/121122
+        ("amdgpu", _) => false,
         // ABI bugs <https://github.com/rust-lang/rust/issues/125109> et al. (full
         // list at <https://github.com/rust-lang/rust/issues/116909>)
         ("powerpc" | "powerpc64", _) => false,
@@ -427,6 +437,9 @@ fn update_target_reliable_float_cfg(sess: &Session, cfg: &mut TargetConfig) {
         // This rules out anything that doesn't have `long double` = `binary128`; <= 32 bits
         // (ld is `f64`), anything other than Linux (Windows and MacOS use `f64`), and `x86`
         // (ld is 80-bit extended precision).
+        //
+        // musl does not implement the symbols required for f128 math at all.
+        _ if target_env == "musl" => false,
         ("x86_64", _) => false,
         (_, "linux") if target_pointer_width == 64 => true,
         _ => false,

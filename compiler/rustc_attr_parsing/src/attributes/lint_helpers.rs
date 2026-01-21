@@ -1,34 +1,33 @@
-use rustc_attr_data_structures::AttributeKind;
-use rustc_feature::{AttributeTemplate, template};
-use rustc_span::{Symbol, sym};
+use rustc_hir::attrs::AttributeKind;
+use rustc_span::{Span, Symbol, sym};
 
-use crate::attributes::{AttributeOrder, OnDuplicate, SingleAttributeParser};
-use crate::context::{AcceptContext, Stage};
-use crate::parser::ArgParser;
+use crate::attributes::{NoArgsAttributeParser, OnDuplicate};
+use crate::context::Stage;
 
 pub(crate) struct AsPtrParser;
-
-impl<S: Stage> SingleAttributeParser<S> for AsPtrParser {
+impl<S: Stage> NoArgsAttributeParser<S> for AsPtrParser {
     const PATH: &[Symbol] = &[sym::rustc_as_ptr];
-    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepFirst;
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
-    const TEMPLATE: AttributeTemplate = template!(Word);
-
-    fn convert(cx: &mut AcceptContext<'_, '_, S>, _args: &ArgParser<'_>) -> Option<AttributeKind> {
-        // FIXME: check that there's no args (this is currently checked elsewhere)
-        Some(AttributeKind::AsPtr(cx.attr_span))
-    }
+    const CREATE: fn(Span) -> AttributeKind = AttributeKind::AsPtr;
 }
 
 pub(crate) struct PubTransparentParser;
-impl<S: Stage> SingleAttributeParser<S> for PubTransparentParser {
+impl<S: Stage> NoArgsAttributeParser<S> for PubTransparentParser {
     const PATH: &[Symbol] = &[sym::rustc_pub_transparent];
-    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepFirst;
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
-    const TEMPLATE: AttributeTemplate = template!(Word);
+    const CREATE: fn(Span) -> AttributeKind = AttributeKind::PubTransparent;
+}
 
-    fn convert(cx: &mut AcceptContext<'_, '_, S>, _args: &ArgParser<'_>) -> Option<AttributeKind> {
-        // FIXME: check that there's no args (this is currently checked elsewhere)
-        Some(AttributeKind::PubTransparent(cx.attr_span))
-    }
+pub(crate) struct PassByValueParser;
+impl<S: Stage> NoArgsAttributeParser<S> for PassByValueParser {
+    const PATH: &[Symbol] = &[sym::rustc_pass_by_value];
+    const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
+    const CREATE: fn(Span) -> AttributeKind = AttributeKind::PassByValue;
+}
+
+pub(crate) struct AutomaticallyDerivedParser;
+impl<S: Stage> NoArgsAttributeParser<S> for AutomaticallyDerivedParser {
+    const PATH: &[Symbol] = &[sym::automatically_derived];
+    const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Warn;
+    const CREATE: fn(Span) -> AttributeKind = AttributeKind::AutomaticallyDerived;
 }

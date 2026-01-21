@@ -59,8 +59,7 @@ declare_lint! {
 }
 
 declare_lint! {
-    /// The `overflowing_literals` lint detects literal out of range for its
-    /// type.
+    /// The `overflowing_literals` lint detects literals out of range for their type.
     ///
     /// ### Example
     ///
@@ -72,9 +71,9 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// It is usually a mistake to use a literal that overflows the type where
-    /// it is used. Either use a literal that is within range, or change the
-    /// type to be within the range of the literal.
+    /// It is usually a mistake to use a literal that overflows its type
+    /// Change either the literal or its type such that the literal is
+    /// within the range of its type.
     OVERFLOWING_LITERALS,
     Deny,
     "literal out of range for its type"
@@ -547,18 +546,12 @@ fn lint_fn_pointer<'tcx>(
 }
 
 impl<'tcx> LateLintPass<'tcx> for TypeLimits {
-    fn check_lit(
-        &mut self,
-        cx: &LateContext<'tcx>,
-        hir_id: HirId,
-        lit: &'tcx hir::Lit,
-        negated: bool,
-    ) {
+    fn check_lit(&mut self, cx: &LateContext<'tcx>, hir_id: HirId, lit: hir::Lit, negated: bool) {
         if negated {
             self.negated_expr_id = Some(hir_id);
             self.negated_expr_span = Some(lit.span);
         }
-        lint_literal(cx, self, hir_id, lit.span, lit, negated);
+        lint_literal(cx, self, hir_id, lit.span, &lit, negated);
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx hir::Expr<'tcx>) {
@@ -1583,7 +1576,7 @@ impl<'a, 'tcx> ImproperCTypesVisitor<'a, 'tcx> {
         impl<'tcx> hir::intravisit::Visitor<'_> for FnPtrFinder<'tcx> {
             fn visit_ty(&mut self, ty: &'_ hir::Ty<'_, AmbigArg>) {
                 debug!(?ty);
-                if let hir::TyKind::BareFn(hir::BareFnTy { abi, .. }) = ty.kind
+                if let hir::TyKind::FnPtr(hir::FnPtrTy { abi, .. }) = ty.kind
                     && !abi.is_rustic_abi()
                 {
                     self.spans.push(ty.span);
@@ -1911,7 +1904,7 @@ impl InvalidAtomicOrdering {
         if let ExprKind::MethodCall(method_path, _, args, _) = &expr.kind
             && recognized_names.contains(&method_path.ident.name)
             && let Some(m_def_id) = cx.typeck_results().type_dependent_def_id(expr.hir_id)
-            && let Some(impl_did) = cx.tcx.impl_of_method(m_def_id)
+            && let Some(impl_did) = cx.tcx.impl_of_assoc(m_def_id)
             && let Some(adt) = cx.tcx.type_of(impl_did).instantiate_identity().ty_adt_def()
             // skip extension traits, only lint functions from the standard library
             && cx.tcx.trait_id_of_impl(impl_did).is_none()

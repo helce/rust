@@ -103,15 +103,12 @@ where
             // We currently elaborate all supertrait outlives obligations from impls.
             // This can be removed when we actually do coinduction correctly, and prove
             // all supertrait obligations unconditionally.
-            let goal_clause: I::Clause = goal.predicate.upcast(cx);
-            for clause in elaborate::elaborate(cx, [goal_clause]) {
-                if matches!(
-                    clause.kind().skip_binder(),
-                    ty::ClauseKind::TypeOutlives(..) | ty::ClauseKind::RegionOutlives(..)
-                ) {
-                    ecx.add_goal(GoalSource::Misc, goal.with(cx, clause));
-                }
-            }
+            ecx.add_goals(
+                GoalSource::Misc,
+                cx.impl_super_outlives(impl_def_id)
+                    .iter_instantiated(cx, impl_args)
+                    .map(|pred| goal.with(cx, pred)),
+            );
 
             ecx.evaluate_added_goals_and_make_canonical_response(maximal_certainty)
         })
@@ -130,33 +127,32 @@ where
         goal: Goal<I, Self>,
         assumption: I::Clause,
     ) -> Result<(), NoSolution> {
-        if let Some(trait_clause) = assumption.as_trait_clause() {
-            if trait_clause.polarity() != goal.predicate.polarity {
-                return Err(NoSolution);
-            }
-
-            if trait_clause.def_id() == goal.predicate.def_id() {
-                if DeepRejectCtxt::relate_rigid_rigid(ecx.cx()).args_may_unify(
-                    goal.predicate.trait_ref.args,
-                    trait_clause.skip_binder().trait_ref.args,
-                ) {
-                    return Ok(());
-                }
-            }
-
+        fn trait_def_id_matches<I: Interner>(
+            cx: I,
+            clause_def_id: I::DefId,
+            goal_def_id: I::DefId,
+        ) -> bool {
+            clause_def_id == goal_def_id
             // PERF(sized-hierarchy): Sizedness supertraits aren't elaborated to improve perf, so
-            // check for a `Sized` subtrait when looking for `MetaSized`. `PointeeSized` bounds
-            // are syntactic sugar for a lack of bounds so don't need this.
-            if ecx.cx().is_lang_item(goal.predicate.def_id(), TraitSolverLangItem::MetaSized)
-                && ecx.cx().is_lang_item(trait_clause.def_id(), TraitSolverLangItem::Sized)
-            {
-                let meta_sized_clause =
-                    trait_predicate_with_def_id(ecx.cx(), trait_clause, goal.predicate.def_id());
-                return Self::fast_reject_assumption(ecx, goal, meta_sized_clause);
-            }
+            // check for a `MetaSized` supertrait being matched against a `Sized` assumption.
+            //
+            // `PointeeSized` bounds are syntactic sugar for a lack of bounds so don't need this.
+                || (cx.is_lang_item(clause_def_id, TraitSolverLangItem::Sized)
+                    && cx.is_lang_item(goal_def_id, TraitSolverLangItem::MetaSized))
         }
 
-        Err(NoSolution)
+        if let Some(trait_clause) = assumption.as_trait_clause()
+            && trait_clause.polarity() == goal.predicate.polarity
+            && trait_def_id_matches(ecx.cx(), trait_clause.def_id(), goal.predicate.def_id())
+            && DeepRejectCtxt::relate_rigid_rigid(ecx.cx()).args_may_unify(
+                goal.predicate.trait_ref.args,
+                trait_clause.skip_binder().trait_ref.args,
+            )
+        {
+            return Ok(());
+        } else {
+            Err(NoSolution)
+        }
     }
 
     fn match_assumption(
@@ -233,7 +229,7 @@ where
         }
 
         // We need to make sure to stall any coroutines we are inferring to avoid query cycles.
-        if let Some(cand) = ecx.try_stall_coroutine_witness(goal.predicate.self_ty()) {
+        if let Some(cand) = ecx.try_stall_coroutine(goal.predicate.self_ty()) {
             return cand;
         }
 
@@ -298,7 +294,7 @@ where
         }
 
         // We need to make sure to stall any coroutines we are inferring to avoid query cycles.
-        if let Some(cand) = ecx.try_stall_coroutine_witness(goal.predicate.self_ty()) {
+        if let Some(cand) = ecx.try_stall_coroutine(goal.predicate.self_ty()) {
             return cand;
         }
 
@@ -1223,10 +1219,8 @@ where
             // the type (even if after unification and processing nested goals
             // it does not hold) will disqualify the built-in auto impl.
             //
-            // This differs from the current stable behavior and fixes #84857.
-            // Due to breakage found via crater, we currently instead lint
-            // patterns which can be used to exploit this unsoundness on stable,
-            // see #93367 for more details.
+            // We've originally had a more permissive check here which resulted
+            // in unsoundness, see #84857.
             ty::Bool
             | ty::Char
             | ty::Int(_)
@@ -1305,7 +1299,7 @@ where
     D: SolverDelegate<Interner = I>,
     I: Interner,
 {
-    /// FIXME(#57893): For backwards compatability with the old trait solver implementation,
+    /// FIXME(#57893): For backwards compatibility with the old trait solver implementation,
     /// we need to handle overlap between builtin and user-written impls for trait objects.
     ///
     /// This overlap is unsound in general and something which we intend to fix separately.
@@ -1438,11 +1432,8 @@ where
         self.merge_trait_candidates(candidates)
     }
 
-    fn try_stall_coroutine_witness(
-        &mut self,
-        self_ty: I::Ty,
-    ) -> Option<Result<Candidate<I>, NoSolution>> {
-        if let ty::CoroutineWitness(def_id, _) = self_ty.kind() {
+    fn try_stall_coroutine(&mut self, self_ty: I::Ty) -> Option<Result<Candidate<I>, NoSolution>> {
+        if let ty::Coroutine(def_id, _) = self_ty.kind() {
             match self.typing_mode() {
                 TypingMode::Analysis {
                     defining_opaque_types_and_generators: stalled_generators,

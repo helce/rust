@@ -556,7 +556,7 @@ macro_rules! uint_impl {
         pub const fn strict_add(self, rhs: Self) -> Self {
             let (a, b) = self.overflowing_add(rhs);
             if b { overflow_panic::add() } else { a }
-         }
+        }
 
         /// Unchecked integer addition. Computes `self + rhs`, assuming overflow
         /// cannot occur.
@@ -653,7 +653,7 @@ macro_rules! uint_impl {
         pub const fn strict_add_signed(self, rhs: $SignedT) -> Self {
             let (a, b) = self.overflowing_add_signed(rhs);
             if b { overflow_panic::add() } else { a }
-         }
+        }
 
         /// Checked integer subtraction. Computes `self - rhs`, returning
         /// `None` if overflow occurred.
@@ -713,7 +713,7 @@ macro_rules! uint_impl {
         pub const fn strict_sub(self, rhs: Self) -> Self {
             let (a, b) = self.overflowing_sub(rhs);
             if b { overflow_panic::sub() } else { a }
-         }
+        }
 
         /// Unchecked integer subtraction. Computes `self - rhs`, assuming overflow
         /// cannot occur.
@@ -786,12 +786,12 @@ macro_rules! uint_impl {
         /// # Examples
         ///
         /// ```
-        /// #![feature(mixed_integer_ops_unsigned_sub)]
         #[doc = concat!("assert_eq!(1", stringify!($SelfT), ".checked_sub_signed(2), None);")]
         #[doc = concat!("assert_eq!(1", stringify!($SelfT), ".checked_sub_signed(-2), Some(3));")]
         #[doc = concat!("assert_eq!((", stringify!($SelfT), "::MAX - 2).checked_sub_signed(-4), None);")]
         /// ```
-        #[unstable(feature = "mixed_integer_ops_unsigned_sub", issue = "126043")]
+        #[stable(feature = "mixed_integer_ops_unsigned_sub", since = "1.90.0")]
+        #[rustc_const_stable(feature = "mixed_integer_ops_unsigned_sub", since = "1.90.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline]
@@ -803,6 +803,43 @@ macro_rules! uint_impl {
             } else {
                 None
             }
+        }
+
+        /// Strict subtraction with a signed integer. Computes `self - rhs`,
+        /// panicking if overflow occurred.
+        ///
+        /// # Panics
+        ///
+        /// ## Overflow behavior
+        ///
+        /// This function will always panic on overflow, regardless of whether overflow checks are enabled.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// #![feature(strict_overflow_ops)]
+        #[doc = concat!("assert_eq!(3", stringify!($SelfT), ".strict_sub_signed(2), 1);")]
+        /// ```
+        ///
+        /// The following panic because of overflow:
+        ///
+        /// ```should_panic
+        /// #![feature(strict_overflow_ops)]
+        #[doc = concat!("let _ = 1", stringify!($SelfT), ".strict_sub_signed(2);")]
+        /// ```
+        ///
+        /// ```should_panic
+        /// #![feature(strict_overflow_ops)]
+        #[doc = concat!("let _ = (", stringify!($SelfT), "::MAX).strict_sub_signed(-1);")]
+        /// ```
+        #[unstable(feature = "strict_overflow_ops", issue = "118260")]
+        #[must_use = "this returns the result of the operation, \
+                      without modifying the original"]
+        #[inline]
+        #[track_caller]
+        pub const fn strict_sub_signed(self, rhs: $SignedT) -> Self {
+            let (a, b) = self.overflowing_sub_signed(rhs);
+            if b { overflow_panic::sub() } else { a }
         }
 
         #[doc = concat!(
@@ -913,7 +950,7 @@ macro_rules! uint_impl {
         pub const fn strict_mul(self, rhs: Self) -> Self {
             let (a, b) = self.overflowing_mul(rhs);
             if b { overflow_panic::mul() } else { a }
-         }
+        }
 
         /// Unchecked integer multiplication. Computes `self * rhs`, assuming overflow
         /// cannot occur.
@@ -1933,12 +1970,12 @@ macro_rules! uint_impl {
         /// # Examples
         ///
         /// ```
-        /// #![feature(mixed_integer_ops_unsigned_sub)]
         #[doc = concat!("assert_eq!(1", stringify!($SelfT), ".saturating_sub_signed(2), 0);")]
         #[doc = concat!("assert_eq!(1", stringify!($SelfT), ".saturating_sub_signed(-2), 3);")]
         #[doc = concat!("assert_eq!((", stringify!($SelfT), "::MAX - 2).saturating_sub_signed(-4), ", stringify!($SelfT), "::MAX);")]
         /// ```
-        #[unstable(feature = "mixed_integer_ops_unsigned_sub", issue = "126043")]
+        #[stable(feature = "mixed_integer_ops_unsigned_sub", since = "1.90.0")]
+        #[rustc_const_stable(feature = "mixed_integer_ops_unsigned_sub", since = "1.90.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline]
@@ -2081,12 +2118,12 @@ macro_rules! uint_impl {
         /// # Examples
         ///
         /// ```
-        /// #![feature(mixed_integer_ops_unsigned_sub)]
         #[doc = concat!("assert_eq!(1", stringify!($SelfT), ".wrapping_sub_signed(2), ", stringify!($SelfT), "::MAX);")]
         #[doc = concat!("assert_eq!(1", stringify!($SelfT), ".wrapping_sub_signed(-2), 3);")]
         #[doc = concat!("assert_eq!((", stringify!($SelfT), "::MAX - 2).wrapping_sub_signed(-4), 1);")]
         /// ```
-        #[unstable(feature = "mixed_integer_ops_unsigned_sub", issue = "126043")]
+        #[stable(feature = "mixed_integer_ops_unsigned_sub", since = "1.90.0")]
+        #[rustc_const_stable(feature = "mixed_integer_ops_unsigned_sub", since = "1.90.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline]
@@ -2540,12 +2577,12 @@ macro_rules! uint_impl {
         /// # Examples
         ///
         /// ```
-        /// #![feature(mixed_integer_ops_unsigned_sub)]
         #[doc = concat!("assert_eq!(1", stringify!($SelfT), ".overflowing_sub_signed(2), (", stringify!($SelfT), "::MAX, true));")]
         #[doc = concat!("assert_eq!(1", stringify!($SelfT), ".overflowing_sub_signed(-2), (3, false));")]
         #[doc = concat!("assert_eq!((", stringify!($SelfT), "::MAX - 2).overflowing_sub_signed(-4), (1, true));")]
         /// ```
-        #[unstable(feature = "mixed_integer_ops_unsigned_sub", issue = "126043")]
+        #[stable(feature = "mixed_integer_ops_unsigned_sub", since = "1.90.0")]
+        #[rustc_const_stable(feature = "mixed_integer_ops_unsigned_sub", since = "1.90.0")]
         #[must_use = "this returns the result of the operation, \
                       without modifying the original"]
         #[inline]
@@ -2572,7 +2609,7 @@ macro_rules! uint_impl {
             if size_of::<Self>() == 1 {
                 // Trick LLVM into generating the psadbw instruction when SSE2
                 // is available and this function is autovectorized for u8's.
-                (self as i32).wrapping_sub(other as i32).abs() as Self
+                (self as i32).wrapping_sub(other as i32).unsigned_abs() as Self
             } else {
                 if self < other {
                     other - self

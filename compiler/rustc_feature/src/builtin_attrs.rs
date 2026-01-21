@@ -6,6 +6,7 @@ use AttributeDuplicates::*;
 use AttributeGate::*;
 use AttributeType::*;
 use rustc_data_structures::fx::FxHashMap;
+use rustc_hir::attrs::EncodeCrossCrate;
 use rustc_span::edition::Edition;
 use rustc_span::{Symbol, sym};
 
@@ -111,7 +112,7 @@ pub enum AttributeGate {
     Ungated,
 }
 
-// FIXME(jdonszelmann): move to rustc_attr_data_structures
+// FIXME(jdonszelmann): move to rustc_hir::attrs
 /// A template that the attribute input must match.
 /// Only top-level shape (`#[attr]` vs `#[attr(...)]` vs `#[attr = ...]`) is considered now.
 #[derive(Clone, Copy, Default)]
@@ -368,12 +369,6 @@ macro_rules! experimental {
     };
 }
 
-#[derive(PartialEq)]
-pub enum EncodeCrossCrate {
-    Yes,
-    No,
-}
-
 pub struct BuiltinAttribute {
     pub name: Symbol,
     /// Whether this attribute is encode cross crate.
@@ -620,6 +615,7 @@ pub static BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     ),
 
     // RFC 2632
+    // FIXME(const_trait_impl) remove this
     gated!(
         const_trait, Normal, template!(Word), WarnFollowing, EncodeCrossCrate::No, const_trait_impl,
         "`const_trait` is a temporary placeholder for marking a trait that is suitable for `const` \
@@ -658,6 +654,19 @@ pub static BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         EncodeCrossCrate::Yes, min_generic_const_args, experimental!(type_const),
     ),
 
+    // The `#[loop_match]` and `#[const_continue]` attributes are part of the
+    // lang experiment for RFC 3720 tracked in:
+    //
+    // - https://github.com/rust-lang/rust/issues/132306
+    gated!(
+        const_continue, Normal, template!(Word), ErrorFollowing,
+        EncodeCrossCrate::No, loop_match, experimental!(const_continue)
+    ),
+    gated!(
+        loop_match, Normal, template!(Word), ErrorFollowing,
+        EncodeCrossCrate::No, loop_match, experimental!(loop_match)
+    ),
+
     // ==========================================================================
     // Internal attributes: Stability, deprecation, and unsafe:
     // ==========================================================================
@@ -675,6 +684,10 @@ pub static BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         unstable, Normal,
         template!(List: r#"feature = "name", reason = "...", issue = "N""#), DuplicatesOk,
         EncodeCrossCrate::Yes
+    ),
+    ungated!(
+        unstable_feature_bound, Normal, template!(Word, List: "feat1, feat2, ..."),
+        DuplicatesOk, EncodeCrossCrate::No,
     ),
     ungated!(
         rustc_const_unstable, Normal, template!(List: r#"feature = "name""#),
@@ -1084,7 +1097,7 @@ pub static BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         "the `#[rustc_main]` attribute is used internally to specify test entry point function",
     ),
     rustc_attr!(
-        rustc_skip_during_method_dispatch, Normal, template!(List: "array, boxed_slice"), WarnFollowing,
+        rustc_skip_during_method_dispatch, Normal, template!(List: "array, boxed_slice"), ErrorFollowing,
         EncodeCrossCrate::No,
         "the `#[rustc_skip_during_method_dispatch]` attribute is used to exclude a trait \
         from method dispatch when the receiver is of the following type, for compatibility in \
@@ -1131,6 +1144,10 @@ pub static BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     rustc_attr!(
         TEST, rustc_insignificant_dtor, Normal, template!(Word),
         WarnFollowing, EncodeCrossCrate::Yes
+    ),
+    rustc_attr!(
+        TEST, rustc_no_implicit_bounds, CrateLevel, template!(Word),
+        WarnFollowing, EncodeCrossCrate::No
     ),
     rustc_attr!(
         TEST, rustc_strict_coherence, Normal, template!(Word),

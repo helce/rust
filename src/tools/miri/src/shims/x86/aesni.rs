@@ -1,6 +1,5 @@
 use rustc_abi::CanonAbi;
 use rustc_middle::ty::Ty;
-use rustc_middle::ty::layout::LayoutOf as _;
 use rustc_span::Symbol;
 use rustc_target::callconv::FnAbi;
 
@@ -27,7 +26,8 @@ pub(super) trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             // `state` with the corresponding 128-bit key of `key`.
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_aesdec_si128
             "aesdec" | "aesdec.256" | "aesdec.512" => {
-                let [state, key] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [state, key] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 aes_round(this, state, key, dest, |state, key| {
                     let key = aes::Block::from(key.to_le_bytes());
                     let mut state = aes::Block::from(state.to_le_bytes());
@@ -43,7 +43,8 @@ pub(super) trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             // `state` with the corresponding 128-bit key of `key`.
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_aesdeclast_si128
             "aesdeclast" | "aesdeclast.256" | "aesdeclast.512" => {
-                let [state, key] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [state, key] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
 
                 aes_round(this, state, key, dest, |state, key| {
                     let mut state = aes::Block::from(state.to_le_bytes());
@@ -67,7 +68,8 @@ pub(super) trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             // `state` with the corresponding 128-bit key of `key`.
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_aesenc_si128
             "aesenc" | "aesenc.256" | "aesenc.512" => {
-                let [state, key] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [state, key] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 aes_round(this, state, key, dest, |state, key| {
                     let key = aes::Block::from(key.to_le_bytes());
                     let mut state = aes::Block::from(state.to_le_bytes());
@@ -83,7 +85,8 @@ pub(super) trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             // `state` with the corresponding 128-bit key of `key`.
             // https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html#text=_mm_aesenclast_si128
             "aesenclast" | "aesenclast.256" | "aesenclast.512" => {
-                let [state, key] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [state, key] =
+                    this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 aes_round(this, state, key, dest, |state, key| {
                     let mut state = aes::Block::from(state.to_le_bytes());
                     // `aes::hazmat::cipher_round` does the following operations:
@@ -103,7 +106,7 @@ pub(super) trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             // Used to implement the _mm_aesimc_si128 function.
             // Performs the AES InvMixColumns operation on `op`
             "aesimc" => {
-                let [op] = this.check_shim(abi, CanonAbi::C, link_name, args)?;
+                let [op] = this.check_shim_sig_lenient(abi, CanonAbi::C, link_name, args)?;
                 // Transmute to `u128`
                 let op = op.transmute(this.machine.layouts.u128, this)?;
                 let dest = dest.transmute(this.machine.layouts.u128, this)?;

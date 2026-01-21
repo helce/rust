@@ -379,7 +379,7 @@ fn layout_of_uncached<'tcx>(
 
         // Potentially-wide pointers.
         ty::Ref(_, pointee, _) | ty::RawPtr(pointee, _) => {
-            let mut data_ptr = scalar_unit(Pointer(AddressSpace::DATA));
+            let mut data_ptr = scalar_unit(Pointer(AddressSpace::ZERO));
             if !ty.is_raw_ptr() {
                 data_ptr.valid_range_mut().start = 1;
             }
@@ -435,7 +435,7 @@ fn layout_of_uncached<'tcx>(
                     }
                     ty::Slice(_) | ty::Str => scalar_unit(Int(dl.ptr_sized_integer(), false)),
                     ty::Dynamic(..) => {
-                        let mut vtable = scalar_unit(Pointer(AddressSpace::DATA));
+                        let mut vtable = scalar_unit(Pointer(AddressSpace::ZERO));
                         vtable.valid_range_mut().start = 1;
                         vtable
                     }
@@ -447,14 +447,6 @@ fn layout_of_uncached<'tcx>(
 
             // Effectively a (ptr, meta) tuple.
             tcx.mk_layout(LayoutData::scalar_pair(cx, data_ptr, metadata))
-        }
-
-        ty::Dynamic(_, _, ty::DynStar) => {
-            let mut data = scalar_unit(Pointer(AddressSpace::DATA));
-            data.valid_range_mut().start = 0;
-            let mut vtable = scalar_unit(Pointer(AddressSpace::DATA));
-            vtable.valid_range_mut().start = 1;
-            tcx.mk_layout(LayoutData::scalar_pair(cx, data, vtable))
         }
 
         // Arrays and slices.
@@ -611,12 +603,6 @@ fn layout_of_uncached<'tcx>(
                     .flatten()
             };
 
-            let dont_niche_optimize_enum = def.repr().inhibit_enum_layout_opt()
-                || def
-                    .variants()
-                    .iter_enumerated()
-                    .any(|(i, v)| v.discr != ty::VariantDiscr::Relative(i.as_u32()));
-
             let maybe_unsized = def.is_struct()
                 && def.non_enum_variant().tail_opt().is_some_and(|last_field| {
                     let typing_env = ty::TypingEnv::post_analysis(tcx, def.did());
@@ -633,7 +619,6 @@ fn layout_of_uncached<'tcx>(
                     tcx.layout_scalar_valid_range(def.did()),
                     get_discriminant_type,
                     discriminants_iter(),
-                    dont_niche_optimize_enum,
                     !maybe_unsized,
                 )
                 .map_err(|err| map_error(cx, ty, err))?;
@@ -659,7 +644,6 @@ fn layout_of_uncached<'tcx>(
                     tcx.layout_scalar_valid_range(def.did()),
                     get_discriminant_type,
                     discriminants_iter(),
-                    dont_niche_optimize_enum,
                     !maybe_unsized,
                 ) else {
                     bug!("failed to compute unsized layout of {ty:?}");

@@ -21,6 +21,10 @@ mod transmutability;
 #[unstable(feature = "transmutability", issue = "99571")]
 pub use transmutability::{Assume, TransmuteFrom};
 
+mod drop_guard;
+#[unstable(feature = "drop_guard", issue = "144426")]
+pub use drop_guard::DropGuard;
+
 // This one has to be a re-export (rather than wrapping the underlying intrinsic) so that we can do
 // the special magic "types have equal size" check at the call site.
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -36,7 +40,7 @@ pub use crate::intrinsics::transmute;
 /// * If you want to leak memory, see [`Box::leak`].
 /// * If you want to obtain a raw pointer to the memory, see [`Box::into_raw`].
 /// * If you want to dispose of a value properly, running its destructor, see
-/// [`mem::drop`].
+///   [`mem::drop`].
 ///
 /// # Safety
 ///
@@ -151,7 +155,7 @@ pub const fn forget<T>(t: T) {
 ///
 /// While Rust does not permit unsized locals since its removal in [#111942] it is
 /// still possible to call functions with unsized values from a function argument
-/// or in-place construction.
+/// or place expression.
 ///
 /// ```rust
 /// #![feature(unsized_fn_params, forget_unsized)]
@@ -616,7 +620,7 @@ pub const unsafe fn align_of_val_raw<T: ?Sized>(val: *const T) -> usize {
 #[rustc_const_stable(feature = "const_mem_needs_drop", since = "1.36.0")]
 #[rustc_diagnostic_item = "needs_drop"]
 pub const fn needs_drop<T: ?Sized>() -> bool {
-    intrinsics::needs_drop::<T>()
+    const { intrinsics::needs_drop::<T>() }
 }
 
 /// Returns the value of type `T` represented by the all-zero byte-pattern.
@@ -960,7 +964,7 @@ pub fn drop<T>(_x: T) {}
 ///
 /// This function is not magic; it is literally defined as
 /// ```
-/// pub fn copy<T: Copy>(x: &T) -> T { *x }
+/// pub const fn copy<T: Copy>(x: &T) -> T { *x }
 /// ```
 ///
 /// It is useful when you want to pass a function pointer to a combinator, rather than defining a new closure.
@@ -1215,7 +1219,7 @@ pub const fn discriminant<T>(v: &T) -> Discriminant<T> {
 #[rustc_const_unstable(feature = "variant_count", issue = "73662")]
 #[rustc_diagnostic_item = "mem_variant_count"]
 pub const fn variant_count<T>() -> usize {
-    intrinsics::variant_count::<T>()
+    const { intrinsics::variant_count::<T>() }
 }
 
 /// Provides associated constants for various useful properties of types,

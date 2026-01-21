@@ -15,7 +15,7 @@ use rustc_ast_pretty::pp::Breaks::{Consistent, Inconsistent};
 use rustc_ast_pretty::pp::{self, BoxMarker, Breaks};
 use rustc_ast_pretty::pprust::state::MacHeader;
 use rustc_ast_pretty::pprust::{Comments, PrintState};
-use rustc_attr_data_structures::{AttributeKind, PrintAttribute};
+use rustc_hir::attrs::{AttributeKind, PrintAttribute};
 use rustc_hir::{
     BindingMode, ByRef, ConstArgKind, GenericArg, GenericBound, GenericParam, GenericParamKind,
     HirId, ImplicitSelfKind, LifetimeParamKind, Node, PatKind, PreciseCapturingArg, RangeEnd, Term,
@@ -405,7 +405,7 @@ impl<'a> State<'a> {
                 }
                 self.pclose();
             }
-            hir::TyKind::BareFn(f) => {
+            hir::TyKind::FnPtr(f) => {
                 self.print_ty_fn(f.abi, f.safety, f.decl, None, f.generic_params, f.param_idents);
             }
             hir::TyKind::UnsafeBinder(unsafe_binder) => {
@@ -420,7 +420,6 @@ impl<'a> State<'a> {
                 let syntax = lifetime.tag();
                 match syntax {
                     ast::TraitObjectSyntax::Dyn => self.word_nbsp("dyn"),
-                    ast::TraitObjectSyntax::DynStar => self.word_nbsp("dyn*"),
                     ast::TraitObjectSyntax::None => {}
                 }
                 let mut first = true;
@@ -655,8 +654,8 @@ impl<'a> State<'a> {
                 let (cb, ib) = self.head("extern");
                 self.word_nbsp(abi.to_string());
                 self.bopen(ib);
-                for item in items {
-                    self.ann.nested(self, Nested::ForeignItem(item.id));
+                for &foreign_item in items {
+                    self.ann.nested(self, Nested::ForeignItem(foreign_item));
                 }
                 self.bclose(item.span, cb);
             }
@@ -731,13 +730,22 @@ impl<'a> State<'a> {
 
                 self.space();
                 self.bopen(ib);
-                for impl_item in items {
-                    self.ann.nested(self, Nested::ImplItem(impl_item.id));
+                for &impl_item in items {
+                    self.ann.nested(self, Nested::ImplItem(impl_item));
                 }
                 self.bclose(item.span, cb);
             }
-            hir::ItemKind::Trait(is_auto, safety, ident, generics, bounds, trait_items) => {
+            hir::ItemKind::Trait(
+                constness,
+                is_auto,
+                safety,
+                ident,
+                generics,
+                bounds,
+                trait_items,
+            ) => {
                 let (cb, ib) = self.head("");
+                self.print_constness(constness);
                 self.print_is_auto(is_auto);
                 self.print_safety(safety);
                 self.word_nbsp("trait");
@@ -747,8 +755,8 @@ impl<'a> State<'a> {
                 self.print_where_clause(generics);
                 self.word(" ");
                 self.bopen(ib);
-                for trait_item in trait_items {
-                    self.ann.nested(self, Nested::TraitItem(trait_item.id));
+                for &trait_item in trait_items {
+                    self.ann.nested(self, Nested::TraitItem(trait_item));
                 }
                 self.bclose(item.span, cb);
             }
@@ -784,7 +792,7 @@ impl<'a> State<'a> {
         match constness {
             hir::BoundConstness::Never => {}
             hir::BoundConstness::Always(_) => self.word("const"),
-            hir::BoundConstness::Maybe(_) => self.word("~const"),
+            hir::BoundConstness::Maybe(_) => self.word("[const]"),
         }
         match polarity {
             hir::BoundPolarity::Positive => {}
@@ -1335,6 +1343,10 @@ impl<'a> State<'a> {
                 self.word_nbsp("raw");
                 self.print_mutability(mutability, true);
             }
+            hir::BorrowKind::Pin => {
+                self.word_nbsp("pin");
+                self.print_mutability(mutability, true);
+            }
         }
         self.print_expr_cond_paren(expr, self.precedence(expr) < ExprPrecedence::Prefix);
     }
@@ -1476,7 +1488,7 @@ impl<'a> State<'a> {
                 self.print_expr_addr_of(k, m, expr);
             }
             hir::ExprKind::Lit(lit) => {
-                self.print_literal(lit);
+                self.print_literal(&lit);
             }
             hir::ExprKind::Cast(expr, ty) => {
                 self.print_expr_cond_paren(expr, self.precedence(expr) < ExprPrecedence::Cast);

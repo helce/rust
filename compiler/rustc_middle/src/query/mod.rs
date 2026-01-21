@@ -67,8 +67,8 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rustc_abi::Align;
 use rustc_arena::TypedArena;
-use rustc_ast::expand::StrippedCfgItem;
 use rustc_ast::expand::allocator::AllocatorKind;
 use rustc_data_structures::fingerprint::Fingerprint;
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
@@ -77,6 +77,7 @@ use rustc_data_structures::steal::Steal;
 use rustc_data_structures::svh::Svh;
 use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_errors::ErrorGuaranteed;
+use rustc_hir::attrs::StrippedCfgItem;
 use rustc_hir::def::{DefKind, DocLinkResMap};
 use rustc_hir::def_id::{
     CrateNum, DefId, DefIdMap, LocalDefId, LocalDefIdMap, LocalDefIdSet, LocalModDefId,
@@ -100,7 +101,7 @@ use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::source_map::Spanned;
 use rustc_span::{DUMMY_SP, Span, Symbol};
 use rustc_target::spec::PanicStrategy;
-use {rustc_abi as abi, rustc_ast as ast, rustc_attr_data_structures as attr, rustc_hir as hir};
+use {rustc_abi as abi, rustc_ast as ast, rustc_hir as hir};
 
 use crate::infer::canonical::{self, Canonical};
 use crate::lint::LintExpectation;
@@ -111,7 +112,7 @@ use crate::middle::exported_symbols::{ExportedSymbol, SymbolExportInfo};
 use crate::middle::lib_features::LibFeatures;
 use crate::middle::privacy::EffectiveVisibilities;
 use crate::middle::resolve_bound_vars::{ObjectLifetimeDefault, ResolveBoundVars, ResolvedArg};
-use crate::middle::stability::{self, DeprecationEntry};
+use crate::middle::stability::DeprecationEntry;
 use crate::mir::interpret::{
     EvalStaticInitializerRawResult, EvalToAllocationRawResult, EvalToConstValueResult,
     EvalToValTreeResult, GlobalId, LitToConstInput,
@@ -194,7 +195,6 @@ rustc_queries! {
     }
 
     query resolutions(_: ()) -> &'tcx ty::ResolverGlobalCtxt {
-        no_hash
         desc { "getting the resolver outputs" }
     }
 
@@ -354,7 +354,7 @@ rustc_queries! {
     /// Returns whether the type alias given by `DefId` is lazy.
     ///
     /// I.e., if the type alias expands / ought to expand to a [free] [alias type]
-    /// instead of the underyling aliased type.
+    /// instead of the underlying aliased type.
     ///
     /// Relevant for features `lazy_type_alias` and `type_alias_impl_trait`.
     ///
@@ -439,7 +439,6 @@ rustc_queries! {
     query predicates_of(key: DefId) -> ty::GenericPredicates<'tcx> {
         desc { |tcx| "computing predicates of `{}`", tcx.def_path_str(key) }
         cache_on_disk_if { key.is_local() }
-        feedable
     }
 
     query opaque_types_defined_by(
@@ -850,14 +849,14 @@ rustc_queries! {
     }
 
     /// Compute the conditions that need to hold for a conditionally-const item to be const.
-    /// That is, compute the set of `~const` where clauses for a given item.
+    /// That is, compute the set of `[const]` where clauses for a given item.
     ///
-    /// This can be thought of as the `~const` equivalent of `predicates_of`. These are the
+    /// This can be thought of as the `[const]` equivalent of `predicates_of`. These are the
     /// predicates that need to be proven at usage sites, and can be assumed at definition.
     ///
-    /// This query also computes the `~const` where clauses for associated types, which are
-    /// not "const", but which have item bounds which may be `~const`. These must hold for
-    /// the `~const` item bound to hold.
+    /// This query also computes the `[const]` where clauses for associated types, which are
+    /// not "const", but which have item bounds which may be `[const]`. These must hold for
+    /// the `[const]` item bound to hold.
     query const_conditions(
         key: DefId
     ) -> ty::ConstConditions<'tcx> {
@@ -869,13 +868,13 @@ rustc_queries! {
 
     /// Compute the const bounds that are implied for a conditionally-const item.
     ///
-    /// This can be though of as the `~const` equivalent of `explicit_item_bounds`. These
+    /// This can be though of as the `[const]` equivalent of `explicit_item_bounds`. These
     /// are the predicates that need to proven at definition sites, and can be assumed at
     /// usage sites.
     query explicit_implied_const_bounds(
         key: DefId
     ) -> ty::EarlyBinder<'tcx, &'tcx [(ty::PolyTraitRef<'tcx>, Span)]> {
-        desc { |tcx| "computing the implied `~const` bounds for `{}`",
+        desc { |tcx| "computing the implied `[const]` bounds for `{}`",
             tcx.def_path_str(key)
         }
         separate_provide_extern
@@ -989,7 +988,7 @@ rustc_queries! {
     }
 
     query coroutine_hidden_types(
-        def_id: DefId
+        def_id: DefId,
     ) -> ty::EarlyBinder<'tcx, ty::Binder<'tcx, ty::CoroutineWitnessTypes<TyCtxt<'tcx>>>> {
         desc { "looking up the hidden types stored across await points in a coroutine" }
     }
@@ -1080,23 +1079,12 @@ rustc_queries! {
         desc { |tcx| "comparing impl items against trait for `{}`", tcx.def_path_str(impl_id) }
     }
 
-    /// Given `fn_def_id` of a trait or of an impl that implements a given trait:
-    /// if `fn_def_id` is the def id of a function defined inside a trait, then it creates and returns
-    /// the associated items that correspond to each impl trait in return position for that trait.
-    /// if `fn_def_id` is the def id of a function defined inside an impl that implements a trait, then it
-    /// creates and returns the associated items that correspond to each impl trait in return position
-    /// of the implemented trait.
-    query associated_types_for_impl_traits_in_associated_fn(fn_def_id: DefId) -> &'tcx [DefId] {
-        desc { |tcx| "creating associated items for opaque types returned by `{}`", tcx.def_path_str(fn_def_id) }
-        cache_on_disk_if { fn_def_id.is_local() }
+    /// Given the `item_def_id` of a trait or impl, return a mapping from associated fn def id
+    /// to its associated type items that correspond to the RPITITs in its signature.
+    query associated_types_for_impl_traits_in_trait_or_impl(item_def_id: DefId) -> &'tcx DefIdMap<Vec<DefId>> {
+        arena_cache
+        desc { |tcx| "synthesizing RPITIT items for the opaque types for methods in `{}`", tcx.def_path_str(item_def_id) }
         separate_provide_extern
-    }
-
-    /// Given an impl trait in trait `opaque_ty_def_id`, create and return the corresponding
-    /// associated item.
-    query associated_type_for_impl_trait_in_trait(opaque_ty_def_id: LocalDefId) -> LocalDefId {
-        desc { |tcx| "creating the associated item corresponding to the opaque type `{}`", tcx.def_path_str(opaque_ty_def_id.to_def_id()) }
-        cache_on_disk_if { true }
     }
 
     /// Given an `impl_id`, return the trait it implements along with some header information.
@@ -1283,15 +1271,15 @@ rustc_queries! {
         return_result_from_ensure_ok
     }
 
-    /// Check whether the function has any recursion that could cause the inliner to trigger
-    /// a cycle.
-    query mir_callgraph_reachable(key: (ty::Instance<'tcx>, LocalDefId)) -> bool {
+    /// Return the set of (transitive) callees that may result in a recursive call to `key`.
+    query mir_callgraph_cyclic(key: LocalDefId) -> &'tcx UnordSet<LocalDefId> {
         fatal_cycle
+        arena_cache
         desc { |tcx|
-            "computing if `{}` (transitively) calls `{}`",
-            key.0,
-            tcx.def_path_str(key.1),
+            "computing (transitive) callees of `{}` that may recurse",
+            tcx.def_path_str(key),
         }
+        cache_on_disk_if { true }
     }
 
     /// Obtain all the calls into other local functions
@@ -1311,7 +1299,7 @@ rustc_queries! {
     ///
     /// This query will panic for uninhabited variants and if the passed type is not an enum.
     query tag_for_variant(
-        key: (Ty<'tcx>, abi::VariantIdx)
+        key: PseudoCanonicalInput<'tcx, (Ty<'tcx>, abi::VariantIdx)>,
     ) -> Option<ty::ScalarInt> {
         desc { "computing variant tag for enum" }
     }
@@ -1375,7 +1363,7 @@ rustc_queries! {
     }
 
     /// Converts a type-level constant value into a MIR constant value.
-    query valtree_to_const_val(key: ty::Value<'tcx>) -> mir::ConstValue<'tcx> {
+    query valtree_to_const_val(key: ty::Value<'tcx>) -> mir::ConstValue {
         desc { "converting type-level constant value to MIR constant value"}
     }
 
@@ -1402,9 +1390,11 @@ rustc_queries! {
         eval_always
         desc { "checking effective visibilities" }
     }
-    query check_private_in_public(_: ()) {
-        eval_always
-        desc { "checking for private elements in public interfaces" }
+    query check_private_in_public(module_def_id: LocalModDefId) {
+        desc { |tcx|
+            "checking for private elements in public interfaces for {}",
+            describe_as_module(module_def_id, tcx)
+        }
     }
 
     query reachable_set(_: ()) -> &'tcx LocalDefIdSet {
@@ -1460,25 +1450,36 @@ rustc_queries! {
         feedable
     }
 
-    query lookup_stability(def_id: DefId) -> Option<attr::Stability> {
+    /// Gets the span for the type of the definition.
+    /// Panics if it is not a definition that has a single type.
+    query ty_span(def_id: LocalDefId) -> Span {
+        desc { |tcx| "looking up span for `{}`'s type", tcx.def_path_str(def_id) }
+        cache_on_disk_if { true }
+    }
+
+    query lookup_stability(def_id: DefId) -> Option<hir::Stability> {
         desc { |tcx| "looking up stability of `{}`", tcx.def_path_str(def_id) }
         cache_on_disk_if { def_id.is_local() }
         separate_provide_extern
     }
 
-    query lookup_const_stability(def_id: DefId) -> Option<attr::ConstStability> {
+    query lookup_const_stability(def_id: DefId) -> Option<hir::ConstStability> {
         desc { |tcx| "looking up const stability of `{}`", tcx.def_path_str(def_id) }
         cache_on_disk_if { def_id.is_local() }
         separate_provide_extern
     }
 
-    query lookup_default_body_stability(def_id: DefId) -> Option<attr::DefaultBodyStability> {
+    query lookup_default_body_stability(def_id: DefId) -> Option<hir::DefaultBodyStability> {
         desc { |tcx| "looking up default body stability of `{}`", tcx.def_path_str(def_id) }
         separate_provide_extern
     }
 
     query should_inherit_track_caller(def_id: DefId) -> bool {
         desc { |tcx| "computing should_inherit_track_caller of `{}`", tcx.def_path_str(def_id) }
+    }
+
+    query inherited_align(def_id: DefId) -> Option<Align> {
+        desc { |tcx| "computing inherited_align of `{}`", tcx.def_path_str(def_id) }
     }
 
     query lookup_deprecation_entry(def_id: DefId) -> Option<DeprecationEntry> {
@@ -1506,6 +1507,15 @@ rustc_queries! {
         separate_provide_extern
     }
 
+    /// Returns the `CodegenFnAttrs` for the item at `def_id`.
+    ///
+    /// If possible, use `tcx.codegen_instance_attrs` instead. That function takes the
+    /// instance kind into account.
+    ///
+    /// For example, the `#[naked]` attribute should be applied for `InstanceKind::Item`,
+    /// but should not be applied if the instance kind is `InstanceKind::ReifyShim`.
+    /// Using this query would include the attribute regardless of the actual instance
+    /// kind at the call site.
     query codegen_fn_attrs(def_id: DefId) -> &'tcx CodegenFnAttrs {
         desc { |tcx| "computing codegen attributes of `{}`", tcx.def_path_str(def_id) }
         arena_cache
@@ -2144,9 +2154,6 @@ rustc_queries! {
         desc { |tcx| "collecting child items of module `{}`", tcx.def_path_str(def_id) }
         separate_provide_extern
     }
-    query extern_mod_stmt_cnum(def_id: LocalDefId) -> Option<CrateNum> {
-        desc { |tcx| "computing crate imported by `{}`", tcx.def_path_str(def_id) }
-    }
 
     /// Gets the number of definitions in a foreign crate.
     ///
@@ -2163,6 +2170,18 @@ rustc_queries! {
         separate_provide_extern
         arena_cache
     }
+    /// Mapping from feature name to feature name based on the `implied_by` field of `#[unstable]`
+    /// attributes. If a `#[unstable(feature = "implier", implied_by = "impliee")]` attribute
+    /// exists, then this map will have a `impliee -> implier` entry.
+    ///
+    /// This mapping is necessary unless both the `#[stable]` and `#[unstable]` attributes should
+    /// specify their implications (both `implies` and `implied_by`). If only one of the two
+    /// attributes do (as in the current implementation, `implied_by` in `#[unstable]`), then this
+    /// mapping is necessary for diagnostics. When a "unnecessary feature attribute" error is
+    /// reported, only the `#[stable]` attribute information is available, so the map is necessary
+    /// to know that the feature implies another feature. If it were reversed, and the `#[stable]`
+    /// attribute had an `implies` meta item, then a map would be necessary when avoiding a "use of
+    /// unstable feature" error for a feature that was implied.
     query stability_implications(_: CrateNum) -> &'tcx UnordMap<Symbol, Symbol> {
         arena_cache
         desc { "calculating the implications between `#[unstable]` features defined in a crate" }
@@ -2265,18 +2284,7 @@ rustc_queries! {
     query upvars_mentioned(def_id: DefId) -> Option<&'tcx FxIndexMap<hir::HirId, hir::Upvar>> {
         desc { |tcx| "collecting upvars mentioned in `{}`", tcx.def_path_str(def_id) }
     }
-    query maybe_unused_trait_imports(_: ()) -> &'tcx FxIndexSet<LocalDefId> {
-        desc { "fetching potentially unused trait imports" }
-    }
-    query names_imported_by_glob_use(def_id: LocalDefId) -> &'tcx FxIndexSet<Symbol> {
-        desc { |tcx| "finding names imported by glob use for `{}`", tcx.def_path_str(def_id) }
-    }
 
-    query stability_index(_: ()) -> &'tcx stability::Index {
-        arena_cache
-        eval_always
-        desc { "calculating the stability index for the local crate" }
-    }
     /// All available crates in the graph, including those that should not be user-facing
     /// (such as private crates).
     query crates(_: ()) -> &'tcx [CrateNum] {
@@ -2312,13 +2320,32 @@ rustc_queries! {
         separate_provide_extern
     }
 
-    /// The list of symbols exported from the given crate.
+    /// The list of non-generic symbols exported from the given crate.
     ///
-    /// - All names contained in `exported_symbols(cnum)` are guaranteed to
-    ///   correspond to a publicly visible symbol in `cnum` machine code.
-    /// - The `exported_symbols` sets of different crates do not intersect.
-    query exported_symbols(cnum: CrateNum) -> &'tcx [(ExportedSymbol<'tcx>, SymbolExportInfo)] {
-        desc { "collecting exported symbols for crate `{}`", cnum}
+    /// This is separate from exported_generic_symbols to avoid having
+    /// to deserialize all non-generic symbols too for upstream crates
+    /// in the upstream_monomorphizations query.
+    ///
+    /// - All names contained in `exported_non_generic_symbols(cnum)` are
+    ///   guaranteed to correspond to a publicly visible symbol in `cnum`
+    ///   machine code.
+    /// - The `exported_non_generic_symbols` and `exported_generic_symbols`
+    ///   sets of different crates do not intersect.
+    query exported_non_generic_symbols(cnum: CrateNum) -> &'tcx [(ExportedSymbol<'tcx>, SymbolExportInfo)] {
+        desc { "collecting exported non-generic symbols for crate `{}`", cnum}
+        cache_on_disk_if { *cnum == LOCAL_CRATE }
+        separate_provide_extern
+    }
+
+    /// The list of generic symbols exported from the given crate.
+    ///
+    /// - All names contained in `exported_generic_symbols(cnum)` are
+    ///   guaranteed to correspond to a publicly visible symbol in `cnum`
+    ///   machine code.
+    /// - The `exported_non_generic_symbols` and `exported_generic_symbols`
+    ///   sets of different crates do not intersect.
+    query exported_generic_symbols(cnum: CrateNum) -> &'tcx [(ExportedSymbol<'tcx>, SymbolExportInfo)] {
+        desc { "collecting exported generic symbols for crate `{}`", cnum}
         cache_on_disk_if { *cnum == LOCAL_CRATE }
         separate_provide_extern
     }

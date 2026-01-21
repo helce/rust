@@ -23,7 +23,7 @@ use crate::core::build_steps::doc::DocumentationFormat;
 use crate::core::build_steps::tool::{self, Tool};
 use crate::core::build_steps::vendor::{VENDOR_DIR, Vendor};
 use crate::core::build_steps::{compile, llvm};
-use crate::core::builder::{Builder, Kind, RunConfig, ShouldRun, Step};
+use crate::core::builder::{Builder, Kind, RunConfig, ShouldRun, Step, StepMetadata};
 use crate::core::config::TargetSelection;
 use crate::utils::build_stamp::{self, BuildStamp};
 use crate::utils::channel::{self, Info};
@@ -32,7 +32,7 @@ use crate::utils::helpers::{
     exe, is_dylib, move_file, t, target_supports_cranelift_backend, timeit,
 };
 use crate::utils::tarball::{GeneratedTarball, OverlayKind, Tarball};
-use crate::{Compiler, DependencyType, FileType, LLVM_TOOLS, Mode, trace};
+use crate::{CodegenBackendKind, Compiler, DependencyType, FileType, LLVM_TOOLS, Mode, trace};
 
 pub fn pkgname(builder: &Builder<'_>, component: &str) -> String {
     format!("{}-{}", component, builder.rust_package_vers())
@@ -83,6 +83,10 @@ impl Step for Docs {
         tarball.add_bulk_dir(builder.doc_out(host), dest);
         tarball.add_file(builder.src.join("src/doc/robots.txt"), dest, FileType::Regular);
         Some(tarball.generate())
+    }
+
+    fn metadata(&self) -> Option<StepMetadata> {
+        Some(StepMetadata::dist("docs", self.host))
     }
 }
 
@@ -354,6 +358,10 @@ impl Step for Mingw {
 
         Some(tarball.generate())
     }
+
+    fn metadata(&self) -> Option<StepMetadata> {
+        Some(StepMetadata::dist("mingw", self.host))
+    }
 }
 
 #[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
@@ -540,6 +548,10 @@ impl Step for Rustc {
             }
         }
     }
+
+    fn metadata(&self) -> Option<StepMetadata> {
+        Some(StepMetadata::dist("rustc", self.compiler.host))
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -711,7 +723,7 @@ impl Step for Std {
             return None;
         }
 
-        builder.ensure(compile::Std::new(compiler, target));
+        builder.std(compiler, target);
 
         let mut tarball = Tarball::new(builder, "rust-std", &target.triple);
         tarball.include_target_in_component_name(true);
@@ -722,6 +734,10 @@ impl Step for Std {
         copy_target_libs(builder, target, tarball.image_dir(), &stamp);
 
         Some(tarball.generate())
+    }
+
+    fn metadata(&self) -> Option<StepMetadata> {
+        Some(StepMetadata::dist("std", self.target).built_by(self.compiler))
     }
 }
 
@@ -1002,6 +1018,10 @@ impl Step for Src {
 
         tarball.generate()
     }
+
+    fn metadata(&self) -> Option<StepMetadata> {
+        Some(StepMetadata::dist("src", TargetSelection::default()))
+    }
 }
 
 #[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
@@ -1036,18 +1056,20 @@ impl Step for PlainSourceTarball {
         let src_files = [
             // tidy-alphabetical-start
             ".gitmodules",
-            "bootstrap.example.toml",
-            "Cargo.lock",
-            "Cargo.toml",
-            "configure",
             "CONTRIBUTING.md",
             "COPYRIGHT",
+            "Cargo.lock",
+            "Cargo.toml",
             "LICENSE-APACHE",
-            "license-metadata.json",
             "LICENSE-MIT",
             "README.md",
             "RELEASES.md",
             "REUSE.toml",
+            "bootstrap.example.toml",
+            "configure",
+            "license-metadata.json",
+            "package-lock.json",
+            "package.json",
             "x",
             "x.ps1",
             "x.py",
@@ -1350,10 +1372,10 @@ impl Step for Miri {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct CodegenBackend {
     pub compiler: Compiler,
-    pub backend: String,
+    pub backend: CodegenBackendKind,
 }
 
 impl Step for CodegenBackend {
@@ -1367,7 +1389,7 @@ impl Step for CodegenBackend {
 
     fn make_run(run: RunConfig<'_>) {
         for backend in run.builder.config.codegen_backends(run.target) {
-            if backend == "llvm" {
+            if backend.is_llvm() {
                 continue; // Already built as part of rustc
             }
 
@@ -1390,12 +1412,11 @@ impl Step for CodegenBackend {
             return None;
         }
 
-        if !builder.config.codegen_backends(self.compiler.host).contains(&self.backend.to_string())
-        {
+        if !builder.config.codegen_backends(self.compiler.host).contains(&self.backend) {
             return None;
         }
 
-        if self.backend == "cranelift" && !target_supports_cranelift_backend(self.compiler.host) {
+        if self.backend.is_cranelift() && !target_supports_cranelift_backend(self.compiler.host) {
             builder.info("target not supported by rustc_codegen_cranelift. skipping");
             return None;
         }
@@ -1403,15 +1424,18 @@ impl Step for CodegenBackend {
         let compiler = self.compiler;
         let backend = self.backend;
 
-        let mut tarball =
-            Tarball::new(builder, &format!("rustc-codegen-{backend}"), &compiler.host.triple);
-        if backend == "cranelift" {
+        let mut tarball = Tarball::new(
+            builder,
+            &format!("rustc-codegen-{}", backend.name()),
+            &compiler.host.triple,
+        );
+        if backend.is_cranelift() {
             tarball.set_overlay(OverlayKind::RustcCodegenCranelift);
         } else {
-            panic!("Unknown backend rustc_codegen_{backend}");
+            panic!("Unknown codegen backend {}", backend.name());
         }
         tarball.is_preview(true);
-        tarball.add_legal_and_readme_to(format!("share/doc/rustc_codegen_{backend}"));
+        tarball.add_legal_and_readme_to(format!("share/doc/{}", backend.crate_name()));
 
         let src = builder.sysroot(compiler);
         let backends_src = builder.sysroot_codegen_backends(compiler);
@@ -1423,7 +1447,7 @@ impl Step for CodegenBackend {
         // Don't use custom libdir here because ^lib/ will be resolved again with installer
         let backends_dst = PathBuf::from("lib").join(backends_rel);
 
-        let backend_name = format!("rustc_codegen_{backend}");
+        let backend_name = backend.crate_name();
         let mut found_backend = false;
         for backend in fs::read_dir(&backends_src).unwrap() {
             let file_name = backend.unwrap().file_name();
@@ -1553,9 +1577,12 @@ impl Step for Extended {
         add_component!("analysis" => Analysis { compiler, target });
         add_component!("rustc-codegen-cranelift" => CodegenBackend {
             compiler: builder.compiler(stage, target),
-            backend: "cranelift".to_string(),
+            backend: CodegenBackendKind::Cranelift,
         });
-        add_component!("llvm-bitcode-linker" => LlvmBitcodeLinker {compiler, target});
+        add_component!("llvm-bitcode-linker" => LlvmBitcodeLinker {
+            build_compiler: compiler,
+            target
+        });
 
         let etc = builder.src.join("src/etc/installer");
 
@@ -2149,11 +2176,12 @@ fn maybe_install_llvm(
             builder.install(&llvm_dylib_path, dst_libdir, FileType::NativeLibrary);
         }
         !builder.config.dry_run()
-    } else if let llvm::LlvmBuildStatus::AlreadyBuilt(llvm::LlvmResult { llvm_config, .. }) =
-        llvm::prebuilt_llvm_config(builder, target, true)
+    } else if let llvm::LlvmBuildStatus::AlreadyBuilt(llvm::LlvmResult {
+        host_llvm_config, ..
+    }) = llvm::prebuilt_llvm_config(builder, target, true)
     {
         trace!("LLVM already built, installing LLVM files");
-        let mut cmd = command(llvm_config);
+        let mut cmd = command(host_llvm_config);
         cmd.arg("--libfiles");
         builder.verbose(|| println!("running {cmd:?}"));
         let files = cmd.run_capture_stdout(builder).stdout();
@@ -2321,9 +2349,13 @@ impl Step for LlvmTools {
     }
 }
 
+/// Distributes the `llvm-bitcode-linker` tool so that it can be used by a compiler whose host
+/// is `target`.
 #[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
 pub struct LlvmBitcodeLinker {
-    pub compiler: Compiler,
+    /// The linker will be compiled by this compiler.
+    pub build_compiler: Compiler,
+    /// The linker will by usable by rustc on this host.
     pub target: TargetSelection,
 }
 
@@ -2339,9 +2371,8 @@ impl Step for LlvmBitcodeLinker {
 
     fn make_run(run: RunConfig<'_>) {
         run.builder.ensure(LlvmBitcodeLinker {
-            compiler: run.builder.compiler_for(
-                run.builder.top_stage,
-                run.builder.config.host_target,
+            build_compiler: tool::LlvmBitcodeLinker::get_build_compiler_for_target(
+                run.builder,
                 run.target,
             ),
             target: run.target,
@@ -2349,13 +2380,10 @@ impl Step for LlvmBitcodeLinker {
     }
 
     fn run(self, builder: &Builder<'_>) -> Option<GeneratedTarball> {
-        let compiler = self.compiler;
         let target = self.target;
 
-        builder.ensure(compile::Rustc::new(compiler, target));
-
-        let llbc_linker =
-            builder.ensure(tool::LlvmBitcodeLinker { compiler, target, extra_features: vec![] });
+        let llbc_linker = builder
+            .ensure(tool::LlvmBitcodeLinker::from_build_compiler(self.build_compiler, target));
 
         let self_contained_bin_dir = format!("lib/rustlib/{}/bin/self-contained", target.triple);
 

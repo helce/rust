@@ -354,8 +354,8 @@ declare_features! (
 
     /// Allows `extern "avr-interrupt" fn()` and `extern "avr-non-blocking-interrupt" fn()`.
     (unstable, abi_avr_interrupt, "1.45.0", Some(69664)),
-    /// Allows `extern "C-cmse-nonsecure-call" fn()`.
-    (unstable, abi_c_cmse_nonsecure_call, "1.51.0", Some(81391)),
+    /// Allows `extern "cmse-nonsecure-call" fn()`.
+    (unstable, abi_cmse_nonsecure_call, "1.90.0", Some(81391)),
     /// Allows `extern "custom" fn()`.
     (unstable, abi_custom, "1.89.0", Some(140829)),
     /// Allows `extern "gpu-kernel" fn()`.
@@ -432,20 +432,20 @@ declare_features! (
     (unstable, closure_lifetime_binder, "1.64.0", Some(97362)),
     /// Allows `#[track_caller]` on closures and coroutines.
     (unstable, closure_track_caller, "1.57.0", Some(87417)),
-    /// Allows `extern "C-cmse-nonsecure-entry" fn()`.
+    /// Allows `extern "cmse-nonsecure-entry" fn()`.
     (unstable, cmse_nonsecure_entry, "1.48.0", Some(75835)),
     /// Allows `async {}` expressions in const contexts.
     (unstable, const_async_blocks, "1.53.0", Some(85368)),
     /// Allows `const || {}` closures in const contexts.
     (incomplete, const_closures, "1.68.0", Some(106003)),
-    /// Allows using `~const Destruct` bounds and calling drop impls in const contexts.
+    /// Allows using `[const] Destruct` bounds and calling drop impls in const contexts.
     (unstable, const_destruct, "1.85.0", Some(133214)),
     /// Allows `for _ in _` loops in const contexts.
     (unstable, const_for, "1.56.0", Some(87575)),
     /// Be more precise when looking for live drops in a const context.
     (unstable, const_precise_live_drops, "1.46.0", Some(73255)),
     /// Allows `impl const Trait for T` syntax.
-    (unstable, const_trait_impl, "1.42.0", Some(67792)),
+    (unstable, const_trait_impl, "1.42.0", Some(143874)),
     /// Allows the `?` operator in const contexts.
     (unstable, const_try, "1.56.0", Some(74935)),
     /// Allows use of contracts attributes.
@@ -482,8 +482,6 @@ declare_features! (
     (unstable, doc_cfg_hide, "1.57.0", Some(43781)),
     /// Allows `#[doc(masked)]`.
     (unstable, doc_masked, "1.21.0", Some(44027)),
-    /// Allows `dyn* Trait` objects.
-    (incomplete, dyn_star, "1.65.0", Some(102425)),
     /// Allows the .use postfix syntax `x.use` and use closures `use |x| { ... }`
     (incomplete, ergonomic_clones, "1.87.0", Some(132290)),
     /// Allows exhaustive pattern matching on types that contain uninhabited types.
@@ -553,11 +551,11 @@ declare_features! (
     (unstable, large_assignments, "1.52.0", Some(83518)),
     /// Allow to have type alias types for inter-crate use.
     (incomplete, lazy_type_alias, "1.72.0", Some(112792)),
-    /// Allows `if/while p && let q = r && ...` chains.
-    (unstable, let_chains, "1.37.0", Some(53667)),
     /// Allows using `#[link(kind = "link-arg", name = "...")]`
     /// to pass custom arguments to the linker.
     (unstable, link_arg_attribute, "1.76.0", Some(99427)),
+    /// Allows fused `loop`/`match` for direct intraprocedural jumps.
+    (incomplete, loop_match, "1.90.0", Some(132306)),
     /// Give access to additional metadata about declarative macro meta-variables.
     (unstable, macro_metavar_expr, "1.61.0", Some(83527)),
     /// Provides a way to concatenate identifiers using metavariable expressions.

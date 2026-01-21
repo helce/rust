@@ -317,7 +317,7 @@ impl Definition {
             };
             return match def {
                 Some(def) => SearchScope::file_range(
-                    def.as_ref().original_file_range_with_macro_call_body(db),
+                    def.as_ref().original_file_range_with_macro_call_input(db),
                 ),
                 None => SearchScope::single_file(file_id),
             };
@@ -332,7 +332,7 @@ impl Definition {
             };
             return match def {
                 Some(def) => SearchScope::file_range(
-                    def.as_ref().original_file_range_with_macro_call_body(db),
+                    def.as_ref().original_file_range_with_macro_call_input(db),
                 ),
                 None => SearchScope::single_file(file_id),
             };
@@ -341,7 +341,7 @@ impl Definition {
         if let Definition::SelfType(impl_) = self {
             return match impl_.source(db).map(|src| src.syntax().cloned()) {
                 Some(def) => SearchScope::file_range(
-                    def.as_ref().original_file_range_with_macro_call_body(db),
+                    def.as_ref().original_file_range_with_macro_call_input(db),
                 ),
                 None => SearchScope::single_file(file_id),
             };
@@ -360,7 +360,7 @@ impl Definition {
             };
             return match def {
                 Some(def) => SearchScope::file_range(
-                    def.as_ref().original_file_range_with_macro_call_body(db),
+                    def.as_ref().original_file_range_with_macro_call_input(db),
                 ),
                 None => SearchScope::single_file(file_id),
             };
@@ -429,7 +429,7 @@ pub struct FindUsages<'a> {
     /// The container of our definition should it be an assoc item
     assoc_item_container: Option<hir::AssocItemContainer>,
     /// whether to search for the `Self` type of the definition
-    include_self_kw_refs: Option<hir::Type>,
+    include_self_kw_refs: Option<hir::Type<'a>>,
     /// whether to search for the `self` module
     search_self_mod: bool,
 }
@@ -531,7 +531,7 @@ impl<'a> FindUsages<'a> {
         node.token_at_offset(offset)
             .find(|it| {
                 // `name` is stripped of raw ident prefix. See the comment on name retrieval below.
-                it.text().trim_start_matches("r#") == name
+                it.text().trim_start_matches('\'').trim_start_matches("r#") == name
             })
             .into_iter()
             .flat_map(move |token| {
@@ -938,7 +938,12 @@ impl<'a> FindUsages<'a> {
                     })
                 };
                 // We need to search without the `r#`, hence `as_str` access.
-                self.def.name(sema.db).or_else(self_kw_refs).map(|it| it.as_str().to_smolstr())
+                // We strip `'` from lifetimes and labels as otherwise they may not match with raw-escaped ones,
+                // e.g. if we search `'foo` we won't find `'r#foo`.
+                self.def
+                    .name(sema.db)
+                    .or_else(self_kw_refs)
+                    .map(|it| it.as_str().trim_start_matches('\'').to_smolstr())
             }
         };
         let name = match &name {
@@ -1087,12 +1092,12 @@ impl<'a> FindUsages<'a> {
 
     fn found_self_ty_name_ref(
         &self,
-        self_ty: &hir::Type,
+        self_ty: &hir::Type<'_>,
         name_ref: &ast::NameRef,
         sink: &mut dyn FnMut(EditionedFileId, FileReference) -> bool,
     ) -> bool {
         // See https://github.com/rust-lang/rust-analyzer/pull/15864/files/e0276dc5ddc38c65240edb408522bb869f15afb4#r1389848845
-        let ty_eq = |ty: hir::Type| match (ty.as_adt(), self_ty.as_adt()) {
+        let ty_eq = |ty: hir::Type<'_>| match (ty.as_adt(), self_ty.as_adt()) {
             (Some(ty), Some(self_ty)) => ty == self_ty,
             (None, None) => ty == *self_ty,
             _ => false,
@@ -1315,7 +1320,7 @@ impl<'a> FindUsages<'a> {
     }
 }
 
-fn def_to_ty(sema: &Semantics<'_, RootDatabase>, def: &Definition) -> Option<hir::Type> {
+fn def_to_ty<'db>(sema: &Semantics<'db, RootDatabase>, def: &Definition) -> Option<hir::Type<'db>> {
     match def {
         Definition::Adt(adt) => Some(adt.ty(sema.db)),
         Definition::TypeAlias(it) => Some(it.ty(sema.db)),

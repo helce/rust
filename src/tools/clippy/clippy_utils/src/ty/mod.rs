@@ -6,6 +6,8 @@ use core::ops::ControlFlow;
 use itertools::Itertools;
 use rustc_abi::VariantIdx;
 use rustc_ast::ast::Mutability;
+use rustc_hir::attrs::{AttributeKind};
+use rustc_hir::find_attr;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir as hir;
 use rustc_hir::def::{CtorKind, CtorOf, DefKind, Res};
@@ -20,8 +22,8 @@ use rustc_middle::traits::EvaluationResult;
 use rustc_middle::ty::layout::ValidityRequirement;
 use rustc_middle::ty::{
     self, AdtDef, AliasTy, AssocItem, AssocTag, Binder, BoundRegion, FnSig, GenericArg, GenericArgKind, GenericArgsRef,
-    GenericParamDefKind, IntTy, Region, RegionKind, TraitRef, Ty, TyCtxt, TypeSuperVisitable,
-    TypeVisitable, TypeVisitableExt, TypeVisitor, UintTy, Upcast, VariantDef, VariantDiscr,
+    GenericParamDefKind, IntTy, Region, RegionKind, TraitRef, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable,
+    TypeVisitableExt, TypeVisitor, UintTy, Upcast, VariantDef, VariantDiscr,
 };
 use rustc_span::symbol::Ident;
 use rustc_span::{DUMMY_SP, Span, Symbol, sym};
@@ -31,8 +33,6 @@ use rustc_trait_selection::traits::{Obligation, ObligationCause};
 use std::assert_matches::debug_assert_matches;
 use std::collections::hash_map::Entry;
 use std::iter;
-use rustc_attr_data_structures::find_attr;
-use rustc_attr_data_structures::AttributeKind;
 
 use crate::path_res;
 use crate::paths::{PathNS, lookup_path_str};
@@ -328,14 +328,8 @@ pub fn has_drop<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
 // Returns whether the type has #[must_use] attribute
 pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     match ty.kind() {
-        ty::Adt(adt, _) => find_attr!(
-            cx.tcx.get_all_attrs(adt.did()),
-            AttributeKind::MustUse { ..}
-        ),
-        ty::Foreign(did) => find_attr!(
-            cx.tcx.get_all_attrs(*did),
-            AttributeKind::MustUse { ..}
-        ),
+        ty::Adt(adt, _) => find_attr!(cx.tcx.get_all_attrs(adt.did()), AttributeKind::MustUse { .. }),
+        ty::Foreign(did) => find_attr!(cx.tcx.get_all_attrs(*did), AttributeKind::MustUse { .. }),
         ty::Slice(ty) | ty::Array(ty, _) | ty::RawPtr(ty, _) | ty::Ref(_, ty, _) => {
             // for the Array case we don't need to care for the len == 0 case
             // because we don't want to lint functions returning empty arrays
@@ -345,7 +339,10 @@ pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
         ty::Alias(ty::Opaque, AliasTy { def_id, .. }) => {
             for (predicate, _) in cx.tcx.explicit_item_self_bounds(def_id).skip_binder() {
                 if let ty::ClauseKind::Trait(trait_predicate) = predicate.kind().skip_binder()
-                    && find_attr!(cx.tcx.get_all_attrs(trait_predicate.trait_ref.def_id), AttributeKind::MustUse { ..})
+                    && find_attr!(
+                        cx.tcx.get_all_attrs(trait_predicate.trait_ref.def_id),
+                        AttributeKind::MustUse { .. }
+                    )
                 {
                     return true;
                 }
@@ -355,7 +352,7 @@ pub fn is_must_use_ty<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
         ty::Dynamic(binder, _, _) => {
             for predicate in *binder {
                 if let ty::ExistentialPredicate::Trait(ref trait_ref) = predicate.skip_binder()
-                    && find_attr!(cx.tcx.get_all_attrs(trait_ref.def_id), AttributeKind::MustUse { ..})
+                    && find_attr!(cx.tcx.get_all_attrs(trait_ref.def_id), AttributeKind::MustUse { .. })
                 {
                     return true;
                 }
@@ -496,10 +493,7 @@ pub fn peel_mid_ty_refs_is_mutable(ty: Ty<'_>) -> (Ty<'_>, usize, Mutability) {
 
 /// Returns `true` if the given type is an `unsafe` function.
 pub fn type_is_unsafe_function<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
-    match ty.kind() {
-        ty::FnDef(..) | ty::FnPtr(..) => ty.fn_sig(cx.tcx).safety().is_unsafe(),
-        _ => false,
-    }
+    ty.is_fn() && ty.fn_sig(cx.tcx).safety().is_unsafe()
 }
 
 /// Returns the base type for HIR references and pointers.
@@ -893,7 +887,7 @@ impl AdtVariantInfo {
                     .enumerate()
                     .map(|(i, f)| (i, approx_ty_size(cx, f.ty(cx.tcx, subst))))
                     .collect::<Vec<_>>();
-                fields_size.sort_by(|(_, a_size), (_, b_size)| (a_size.cmp(b_size)));
+                fields_size.sort_by(|(_, a_size), (_, b_size)| a_size.cmp(b_size));
 
                 Self {
                     ind: i,
@@ -902,7 +896,7 @@ impl AdtVariantInfo {
                 }
             })
             .collect::<Vec<_>>();
-        variants_size.sort_by(|a, b| (b.size.cmp(&a.size)));
+        variants_size.sort_by(|a, b| b.size.cmp(&a.size));
         variants_size
     }
 }

@@ -1,12 +1,15 @@
 //! Meta-syntax validation logic of attributes for post-expansion.
 
+use std::slice;
+
 use rustc_ast::token::Delimiter;
 use rustc_ast::tokenstream::DelimSpan;
 use rustc_ast::{
     self as ast, AttrArgs, Attribute, DelimArgs, MetaItem, MetaItemInner, MetaItemKind, NodeId,
-    Safety,
+    Path, Safety,
 };
-use rustc_errors::{Applicability, FatalError, PResult};
+use rustc_attr_parsing::{AttributeParser, Late};
+use rustc_errors::{Applicability, DiagCtxtHandle, FatalError, PResult};
 use rustc_feature::{AttributeSafety, AttributeTemplate, BUILTIN_ATTRIBUTE_MAP, BuiltinAttribute};
 use rustc_session::errors::report_lit_error;
 use rustc_session::lint::BuiltinLintDiag;
@@ -103,7 +106,7 @@ pub fn parse_meta<'a>(psess: &'a ParseSess, attr: &Attribute) -> PResult<'a, Met
                     res
                 } else {
                     // Example cases:
-                    // - `#[foo = 1+1]`: results in `ast::ExprKind::BinOp`.
+                    // - `#[foo = 1+1]`: results in `ast::ExprKind::Binary`.
                     // - `#[foo = include_str!("nonexistent-file.rs")]`:
                     //   results in `ast::ExprKind::Err`. In that case we delay
                     //   the error because an earlier error will have already
@@ -247,14 +250,12 @@ pub fn check_attribute_safety(
 
 // Called by `check_builtin_meta_item` and code that manually denies
 // `unsafe(...)` in `cfg`
-pub fn deny_builtin_meta_unsafety(psess: &ParseSess, meta: &MetaItem) {
+pub fn deny_builtin_meta_unsafety(diag: DiagCtxtHandle<'_>, unsafety: Safety, name: &Path) {
     // This only supports denying unsafety right now - making builtin attributes
     // support unsafety will requite us to thread the actual `Attribute` through
     // for the nice diagnostics.
-    if let Safety::Unsafe(unsafe_span) = meta.unsafety {
-        psess
-            .dcx()
-            .emit_err(errors::InvalidAttrUnsafe { span: unsafe_span, name: meta.path.clone() });
+    if let Safety::Unsafe(unsafe_span) = unsafety {
+        diag.emit_err(errors::InvalidAttrUnsafe { span: unsafe_span, name: name.clone() });
     }
 }
 
@@ -267,11 +268,15 @@ pub fn check_builtin_meta_item(
     deny_unsafety: bool,
 ) {
     if !is_attr_template_compatible(&template, &meta.kind) {
+        // attrs with new parsers are locally validated so excluded here
+        if AttributeParser::<Late>::is_parsed_attribute(slice::from_ref(&name)) {
+            return;
+        }
         emit_malformed_attribute(psess, style, meta.span, name, template);
     }
 
     if deny_unsafety {
-        deny_builtin_meta_unsafety(psess, meta);
+        deny_builtin_meta_unsafety(psess.dcx(), meta.unsafety, &meta.path);
     }
 }
 
@@ -282,27 +287,9 @@ fn emit_malformed_attribute(
     name: Symbol,
     template: AttributeTemplate,
 ) {
-    // attrs with new parsers are locally validated so excluded here
-    if matches!(
-        name,
-        sym::inline
-            | sym::rustc_force_inline
-            | sym::rustc_confusables
-            | sym::repr
-            // FIXME(#82232, #143834): temporarily renamed to mitigate `#[align]` nameres ambiguity
-            | sym::rustc_align
-            | sym::deprecated
-            | sym::optimize
-            | sym::cold
-            | sym::must_use
-    ) {
-        return;
-    }
-
     // Some of previously accepted forms were used in practice,
     // report them as warnings for now.
-    let should_warn =
-        |name| matches!(name, sym::doc | sym::ignore | sym::link | sym::test | sym::bench);
+    let should_warn = |name| matches!(name, sym::doc | sym::link | sym::test | sym::bench);
 
     let error_msg = format!("malformed `{name}` attribute input");
     let mut suggestions = vec![];

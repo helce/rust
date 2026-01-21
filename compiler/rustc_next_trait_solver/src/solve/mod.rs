@@ -148,6 +148,20 @@ where
         }
     }
 
+    fn compute_unstable_feature_goal(
+        &mut self,
+        param_env: <I as Interner>::ParamEnv,
+        symbol: <I as Interner>::Symbol,
+    ) -> QueryResult<I> {
+        if self.may_use_unstable_feature(param_env, symbol) {
+            self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+        } else {
+            self.evaluate_added_goals_and_make_canonical_response(Certainty::Maybe(
+                MaybeCause::Ambiguity,
+            ))
+        }
+    }
+
     #[instrument(level = "trace", skip(self))]
     fn compute_const_evaluatable_goal(
         &mut self,
@@ -191,6 +205,7 @@ where
         goal: Goal<I, (I::Const, I::Ty)>,
     ) -> QueryResult<I> {
         let (ct, ty) = goal.predicate;
+        let ct = self.structurally_normalize_const(goal.param_env, ct)?;
 
         let ct_ty = match ct.kind() {
             ty::ConstKind::Infer(_) => {
@@ -211,7 +226,7 @@ where
             ty::ConstKind::Bound(_, _) => panic!("escaping bound vars in {:?}", ct),
             ty::ConstKind::Value(cv) => cv.ty(),
             ty::ConstKind::Placeholder(placeholder) => {
-                self.cx().find_const_ty_from_env(goal.param_env, placeholder)
+                placeholder.find_const_ty_from_env(goal.param_env)
             }
         };
 
@@ -237,8 +252,6 @@ where
             return None;
         }
 
-        // FIXME(-Znext-solver): Add support to merge region constraints in
-        // responses to deal with trait-system-refactor-initiative#27.
         let one = responses[0];
         if responses[1..].iter().all(|&resp| resp == one) {
             return Some(one);
@@ -373,6 +386,23 @@ fn response_no_constraints_raw<I: Interner>(
 
 /// The result of evaluating a goal.
 pub struct GoalEvaluation<I: Interner> {
+    /// The goal we've evaluated. This is the input goal, but potentially with its
+    /// inference variables resolved. This never applies any inference constraints
+    /// from evaluating the goal.
+    ///
+    /// We rely on this to check whether root goals in HIR typeck had an unresolved
+    /// type inference variable in the input. We must not resolve this after evaluating
+    /// the goal as even if the inference variable has been resolved by evaluating the
+    /// goal itself, this goal may still end up failing due to region uniquification
+    /// later on.
+    ///
+    /// This is used as a minor optimization to avoid re-resolving inference variables
+    /// when reevaluating ambiguous goals. E.g. if we've got a goal `?x: Trait` with `?x`
+    /// already being constrained to `Vec<?y>`, then the first evaluation resolves it to
+    /// `Vec<?y>: Trait`. If this goal is still ambiguous and we later resolve `?y` to `u32`,
+    /// then reevaluating this goal now only needs to resolve `?y` while it would otherwise
+    /// have to resolve both `?x` and `?y`,
+    pub goal: Goal<I, I::Predicate>,
     pub certainty: Certainty,
     pub has_changed: HasChanged,
     /// If the [`Certainty`] was `Maybe`, then keep track of whether the goal has changed

@@ -12,7 +12,7 @@ use crate::core::config::{Config, TargetSelection};
 use crate::utils::exec::command;
 use crate::utils::helpers::t;
 use crate::utils::tarball::GeneratedTarball;
-use crate::{Compiler, Kind};
+use crate::{CodegenBackendKind, Compiler, Kind};
 
 #[cfg(target_os = "illumos")]
 const SHELL: &str = "bash";
@@ -276,7 +276,7 @@ install!((self, builder, _config),
     RustcCodegenCranelift, alias = "rustc-codegen-cranelift", Self::should_build(_config), only_hosts: true, {
         if let Some(tarball) = builder.ensure(dist::CodegenBackend {
             compiler: self.compiler,
-            backend: "cranelift".to_string(),
+            backend: CodegenBackendKind::Cranelift,
         }) {
             install_sh(builder, "rustc-codegen-cranelift", self.compiler.stage, Some(self.target), &tarball);
         } else {
@@ -287,7 +287,7 @@ install!((self, builder, _config),
         }
     };
     LlvmBitcodeLinker, alias = "llvm-bitcode-linker", Self::should_build(_config), only_hosts: true, {
-        if let Some(tarball) = builder.ensure(dist::LlvmBitcodeLinker { compiler: self.compiler, target: self.target }) {
+        if let Some(tarball) = builder.ensure(dist::LlvmBitcodeLinker { build_compiler: self.compiler, target: self.target }) {
             install_sh(builder, "llvm-bitcode-linker", self.compiler.stage, Some(self.target), &tarball);
         } else {
             builder.info(

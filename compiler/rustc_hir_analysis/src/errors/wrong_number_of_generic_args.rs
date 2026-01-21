@@ -393,9 +393,9 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
             let params = if let Some(generics) = node.generics() {
                 generics.params
             } else if let hir::Node::Ty(ty) = node
-                && let hir::TyKind::BareFn(bare_fn) = ty.kind
+                && let hir::TyKind::FnPtr(fn_ptr) = ty.kind
             {
-                bare_fn.generic_params
+                fn_ptr.generic_params
             } else {
                 &[]
             };
@@ -635,7 +635,7 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
                 self.suggest_adding_type_and_const_args(err);
             }
             ExcessTypesOrConsts { .. } => {
-                // this can happen with `~const T` where T isn't a const_trait.
+                // this can happen with `[const] T` where T isn't a `const trait`.
             }
             _ => unreachable!(),
         }
@@ -759,7 +759,7 @@ impl<'a, 'tcx> WrongNumberOfGenericArgs<'a, 'tcx> {
         &self,
         err: &mut Diag<'_, impl EmissionGuarantee>,
     ) {
-        let trait_ = match self.tcx.trait_of_item(self.def_id) {
+        let trait_ = match self.tcx.trait_of_assoc(self.def_id) {
             Some(def_id) => def_id,
             None => return,
         };

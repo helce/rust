@@ -63,7 +63,10 @@ declare_lint_pass! {
         LOSSY_PROVENANCE_CASTS,
         MACRO_EXPANDED_MACRO_EXPORTS_ACCESSED_BY_ABSOLUTE_PATHS,
         MACRO_USE_EXTERN_CRATE,
+        MALFORMED_DIAGNOSTIC_ATTRIBUTES,
+        MALFORMED_DIAGNOSTIC_FORMAT_LITERALS,
         META_VARIABLE_MISUSE,
+        MISPLACED_DIAGNOSTIC_ATTRIBUTES,
         MISSING_ABI,
         MISSING_UNSAFE_ON_EXTERN,
         MUST_NOT_SUSPEND,
@@ -112,8 +115,8 @@ declare_lint_pass! {
         UNFULFILLED_LINT_EXPECTATIONS,
         UNINHABITED_STATIC,
         UNKNOWN_CRATE_TYPES,
+        UNKNOWN_DIAGNOSTIC_ATTRIBUTES,
         UNKNOWN_LINTS,
-        UNKNOWN_OR_MALFORMED_DIAGNOSTIC_ATTRIBUTES,
         UNNAMEABLE_TEST_ITEMS,
         UNNAMEABLE_TYPES,
         UNREACHABLE_CODE,
@@ -123,7 +126,6 @@ declare_lint_pass! {
         UNSTABLE_NAME_COLLISIONS,
         UNSTABLE_SYNTAX_PRE_EXPANSION,
         UNSUPPORTED_CALLING_CONVENTIONS,
-        UNSUPPORTED_FN_PTR_CALLING_CONVENTIONS,
         UNUSED_ASSIGNMENTS,
         UNUSED_ASSOCIATED_TYPE_BOUNDS,
         UNUSED_ATTRIBUTES,
@@ -133,8 +135,8 @@ declare_lint_pass! {
         UNUSED_IMPORTS,
         UNUSED_LABELS,
         UNUSED_LIFETIMES,
-        UNUSED_MACRO_RULES,
         UNUSED_MACROS,
+        UNUSED_MACRO_RULES,
         UNUSED_MUT,
         UNUSED_QUALIFICATIONS,
         UNUSED_UNSAFE,
@@ -1226,7 +1228,7 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// A public `use` declaration should not be used to publicly re-export a
+    /// A public `use` declaration should not be used to publically re-export a
     /// private `extern crate`. `pub extern crate` should be used instead.
     ///
     /// This was historically allowed, but is not the intended behavior
@@ -1813,7 +1815,7 @@ declare_lint! {
     "suggest using `dyn Trait` for trait objects",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/warnings-promoted-to-error.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2021/warnings-promoted-to-error.html>",
     };
 }
 
@@ -2471,7 +2473,7 @@ declare_lint! {
     "unsafe operations in unsafe functions without an explicit unsafe block are deprecated",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionSemanticsChange(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-op-in-unsafe-fn.html>",
         explain_reason: false
     };
     @edition Edition2024 => Warn;
@@ -3444,7 +3446,7 @@ declare_lint! {
     "detects usage of old versions of or-patterns",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/or-patterns-macro-rules.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2021/or-patterns-macro-rules.html>",
     };
 }
 
@@ -3493,7 +3495,7 @@ declare_lint! {
         prelude in future editions",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/prelude.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2021/prelude.html>",
     };
 }
 
@@ -3533,7 +3535,7 @@ declare_lint! {
         prelude in future editions",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/prelude.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/prelude.html>",
     };
 }
 
@@ -3570,7 +3572,7 @@ declare_lint! {
     "identifiers that will be parsed as a prefix in Rust 2021",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/reserving-syntax.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2021/reserving-syntax.html>",
     };
     crate_level_only
 }
@@ -4099,7 +4101,7 @@ declare_lint! {
     "never type fallback affecting unsafe function calls",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionAndFutureReleaseSemanticsChange(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/never-type-fallback.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/never-type-fallback.html>",
         report_in_deps: true,
     };
     @edition Edition2024 => Deny;
@@ -4154,7 +4156,7 @@ declare_lint! {
     "never type fallback affecting unsafe function calls",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionAndFutureReleaseError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/never-type-fallback.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/never-type-fallback.html>",
         report_in_deps: true,
     };
     report_in_external_macro
@@ -4286,31 +4288,105 @@ declare_lint! {
 }
 
 declare_lint! {
-    /// The `unknown_or_malformed_diagnostic_attributes` lint detects unrecognized or otherwise malformed
-    /// diagnostic attributes.
+    /// The `malformed_diagnostic_attributes` lint detects malformed diagnostic attributes.
     ///
     /// ### Example
     ///
     /// ```rust
-    /// #![feature(diagnostic_namespace)]
-    /// #[diagnostic::does_not_exist]
-    /// struct Foo;
+    /// #[diagnostic::do_not_recommend(message = "message")]
+    /// trait Trait {}
     /// ```
     ///
     /// {{produces}}
     ///
+    /// ### Explanation
+    ///
+    /// It is usually a mistake to use options or syntax that is not supported. Check the spelling,
+    /// and check the diagnostic attribute listing for the correct name and syntax. Also consider if
+    /// you are using an old version of the compiler; perhaps the option or syntax is only available
+    /// in a newer version. See the [reference] for a list of diagnostic attributes and the syntax
+    /// of each.
+    ///
+    /// [reference]: https://doc.rust-lang.org/nightly/reference/attributes/diagnostics.html#the-diagnostic-tool-attribute-namespace
+    pub MALFORMED_DIAGNOSTIC_ATTRIBUTES,
+    Warn,
+    "detects malformed diagnostic attributes",
+}
+
+declare_lint! {
+    /// The `misplaced_diagnostic_attributes` lint detects wrongly placed diagnostic attributes.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #[diagnostic::do_not_recommend]
+    /// struct NotUserFacing;
+    /// ```
+    ///
+    /// {{produces}}
     ///
     /// ### Explanation
     ///
-    /// It is usually a mistake to specify a diagnostic attribute that does not exist. Check
-    /// the spelling, and check the diagnostic attribute listing for the correct name. Also
-    /// consider if you are using an old version of the compiler, and the attribute
-    /// is only available in a newer version.
-    pub UNKNOWN_OR_MALFORMED_DIAGNOSTIC_ATTRIBUTES,
+    /// It is usually a mistake to specify a diagnostic attribute on an item it is not meant for.
+    /// For example, `#[diagnostic::do_not_recommend]` can only be placed on trait implementations,
+    /// and does nothing if placed elsewhere. See the [reference] for a list of diagnostic
+    /// attributes and their correct positions.
+    ///
+    /// [reference]: https://doc.rust-lang.org/nightly/reference/attributes/diagnostics.html#the-diagnostic-tool-attribute-namespace
+    pub MISPLACED_DIAGNOSTIC_ATTRIBUTES,
     Warn,
-    "unrecognized or malformed diagnostic attribute",
+    "detects diagnostic attributes that are placed on the wrong item",
 }
 
+declare_lint! {
+    /// The `unknown_diagnostic_attributes` lint detects unknown diagnostic attributes.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #[diagnostic::does_not_exist]
+    /// struct Thing;
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// It is usually a mistake to specify a diagnostic attribute that does not exist. Check the
+    /// spelling, and check the diagnostic attribute listing for the correct name. Also consider if
+    /// you are using an old version of the compiler and the attribute is only available in a newer
+    /// version. See the [reference] for the list of diagnostic attributes.
+    ///
+    /// [reference]: https://doc.rust-lang.org/nightly/reference/attributes/diagnostics.html#the-diagnostic-tool-attribute-namespace
+    pub UNKNOWN_DIAGNOSTIC_ATTRIBUTES,
+    Warn,
+    "detects unknown diagnostic attributes",
+}
+
+declare_lint! {
+    /// The `malformed_diagnostic_format_literals` lint detects malformed diagnostic format
+    /// literals.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #[diagnostic::on_unimplemented(message = "{Self}} does not implement `Trait`")]
+    /// trait Trait {}
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// The `#[diagnostic::on_unimplemented]` attribute accepts string literal values that are
+    /// similar to `format!`'s string literal. See the [reference] for details on what is permitted
+    /// in this string literal.
+    ///
+    /// [reference]: https://doc.rust-lang.org/nightly/reference/attributes/diagnostics.html#the-diagnostic-tool-attribute-namespace
+    pub MALFORMED_DIAGNOSTIC_FORMAT_LITERALS,
+    Warn,
+    "detects diagnostic attribute with malformed diagnostic format literals",
+}
 declare_lint! {
     /// The `ambiguous_glob_imports` lint detects glob imports that should report ambiguity
     /// errors, but previously didn't do that due to rustc bugs.
@@ -4345,11 +4421,12 @@ declare_lint! {
     ///
     /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub AMBIGUOUS_GLOB_IMPORTS,
-    Warn,
+    Deny,
     "detects certain glob imports that require reporting an ambiguity error",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #114095 <https://github.com/rust-lang/rust/issues/114095>",
+        report_in_deps: true,
     };
 }
 
@@ -4664,7 +4741,7 @@ declare_lint! {
     "detects unsafe functions being used as safe functions",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/newly-unsafe-functions.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/newly-unsafe-functions.html>",
     };
 }
 
@@ -4700,7 +4777,7 @@ declare_lint! {
     "detects missing unsafe keyword on extern declarations",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-extern.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-extern.html>",
     };
 }
 
@@ -4741,7 +4818,7 @@ declare_lint! {
     "detects unsafe attributes outside of unsafe",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/unsafe-attributes.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/unsafe-attributes.html>",
     };
 }
 
@@ -4938,7 +5015,7 @@ declare_lint! {
     "Detect and warn on significant change in drop order in tail expression location",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionSemanticsChange(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/temporary-tail-expr-scope.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/temporary-tail-expr-scope.html>",
     };
 }
 
@@ -4977,7 +5054,7 @@ declare_lint! {
     "will be parsed as a guarded string in Rust 2024",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/reserved-syntax.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/reserved-syntax.html>",
     };
     crate_level_only
 }

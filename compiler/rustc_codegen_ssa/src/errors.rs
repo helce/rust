@@ -141,13 +141,6 @@ pub(crate) struct RequiresRustAbi {
 }
 
 #[derive(Diagnostic)]
-#[diag(codegen_ssa_null_on_export, code = E0648)]
-pub(crate) struct NullOnExport {
-    #[primary_span]
-    pub span: Span,
-}
-
-#[derive(Diagnostic)]
 #[diag(codegen_ssa_unsupported_instruction_set, code = E0779)]
 pub(crate) struct UnsupportedInstructionSet {
     #[primary_span]
@@ -464,7 +457,7 @@ impl<G: EmissionGuarantee> Diagnostic<'_, G> for LinkingFailed<'_> {
                 } else if arg.as_encoded_bytes().ends_with(b".rlib") {
                     let rlib_path = Path::new(&arg);
                     let dir = rlib_path.parent().unwrap();
-                    let filename = rlib_path.file_name().unwrap().to_owned();
+                    let filename = rlib_path.file_stem().unwrap().to_owned();
                     if let Some(ArgGroup::Rlibs(parent, rlibs)) = args.last_mut() {
                         if parent == dir {
                             rlibs.push(filename);
@@ -478,7 +471,7 @@ impl<G: EmissionGuarantee> Diagnostic<'_, G> for LinkingFailed<'_> {
                     args.push(ArgGroup::Regular(arg));
                 }
             }
-            let crate_hash = regex::bytes::Regex::new(r"-[0-9a-f]+\.rlib$").unwrap();
+            let crate_hash = regex::bytes::Regex::new(r"-[0-9a-f]+").unwrap();
             self.command.args(args.into_iter().map(|arg_group| {
                 match arg_group {
                     // SAFETY: we are only matching on ASCII, not any surrogate pairs, so any replacements we do will still be valid.
@@ -501,7 +494,11 @@ impl<G: EmissionGuarantee> Diagnostic<'_, G> for LinkingFailed<'_> {
                             Err(_) => false,
                         };
                         let mut arg = dir.into_os_string();
-                        arg.push("/{");
+                        arg.push("/");
+                        let needs_braces = rlibs.len() >= 2;
+                        if needs_braces {
+                            arg.push("{");
+                        }
                         let mut first = true;
                         for mut rlib in rlibs {
                             if !first {
@@ -520,7 +517,10 @@ impl<G: EmissionGuarantee> Diagnostic<'_, G> for LinkingFailed<'_> {
                             }
                             arg.push(rlib);
                         }
-                        arg.push("}.rlib");
+                        if needs_braces {
+                            arg.push("}");
+                        }
+                        arg.push(".rlib");
                         arg
                     }
                 }
@@ -731,13 +731,6 @@ pub struct ArchiveBuildFailure {
 // Public for rustc_codegen_llvm::back::archive
 pub struct UnknownArchiveKind<'a> {
     pub kind: &'a str,
-}
-
-#[derive(Diagnostic)]
-#[diag(codegen_ssa_expected_used_symbol)]
-pub(crate) struct ExpectedUsedSymbol {
-    #[primary_span]
-    pub span: Span,
 }
 
 #[derive(Diagnostic)]
@@ -1116,22 +1109,6 @@ pub(crate) struct InvalidNoSanitize {
 }
 
 #[derive(Diagnostic)]
-#[diag(codegen_ssa_invalid_link_ordinal_nargs)]
-#[note]
-pub(crate) struct InvalidLinkOrdinalNargs {
-    #[primary_span]
-    pub span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(codegen_ssa_illegal_link_ordinal_format)]
-#[note]
-pub(crate) struct InvalidLinkOrdinalFormat {
-    #[primary_span]
-    pub span: Span,
-}
-
-#[derive(Diagnostic)]
 #[diag(codegen_ssa_target_feature_safe_trait)]
 pub(crate) struct TargetFeatureSafeTrait {
     #[primary_span]
@@ -1206,18 +1183,6 @@ pub(crate) struct ErrorCreatingImportLibrary<'a> {
 #[derive(Diagnostic)]
 #[diag(codegen_ssa_aix_strip_not_used)]
 pub(crate) struct AixStripNotUsed;
-
-#[derive(LintDiagnostic)]
-#[diag(codegen_ssa_mixed_export_name_and_no_mangle)]
-pub(crate) struct MixedExportNameAndNoMangle {
-    #[label]
-    pub no_mangle: Span,
-    pub no_mangle_attr: String,
-    #[note]
-    pub export_name: Span,
-    #[suggestion(style = "verbose", code = "", applicability = "machine-applicable")]
-    pub removal_span: Span,
-}
 
 #[derive(Diagnostic, Debug)]
 pub(crate) enum XcrunError {
@@ -1318,3 +1283,31 @@ pub(crate) struct NoMangleNameless {
     pub span: Span,
     pub definition: String,
 }
+
+#[derive(Diagnostic)]
+#[diag(codegen_ssa_feature_not_valid)]
+pub(crate) struct FeatureNotValid<'a> {
+    pub feature: &'a str,
+    #[primary_span]
+    #[label]
+    pub span: Span,
+    #[help]
+    pub plus_hint: bool,
+}
+
+#[derive(Diagnostic)]
+#[diag(codegen_ssa_lto_disallowed)]
+pub(crate) struct LtoDisallowed;
+
+#[derive(Diagnostic)]
+#[diag(codegen_ssa_lto_dylib)]
+pub(crate) struct LtoDylib;
+
+#[derive(Diagnostic)]
+#[diag(codegen_ssa_lto_proc_macro)]
+pub(crate) struct LtoProcMacro;
+
+#[derive(Diagnostic)]
+#[diag(codegen_ssa_dynamic_linking_with_lto)]
+#[note]
+pub(crate) struct DynamicLinkingWithLTO;

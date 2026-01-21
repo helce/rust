@@ -529,7 +529,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // process any deferred resolutions.
         let deferred_call_resolutions = self.remove_deferred_call_resolutions(closure_def_id);
         for deferred_call_resolution in deferred_call_resolutions {
-            deferred_call_resolution.resolve(self);
+            deferred_call_resolution.resolve(&mut FnCtxt::new(
+                self,
+                self.param_env,
+                closure_def_id,
+            ));
         }
     }
 
@@ -1043,7 +1047,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             }
                         }
                     }
-                    lint.note("for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2021/disjoint-capture-in-closures.html>");
+                    lint.note("for more information, see <https://doc.rust-lang.org/edition-guide/rust-2021/disjoint-capture-in-closures.html>");
 
                     let diagnostic_msg = format!(
                         "add a dummy let to cause {migrated_variables_concat} to be fully captured"

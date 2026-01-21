@@ -20,7 +20,7 @@ use std::{cmp, fmt, iter, mem};
 
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync;
-use rustc_macros::{Decodable, Encodable, HashStable_Generic};
+use rustc_macros::{Decodable, Encodable, HashStable_Generic, Walkable};
 use rustc_serialize::{Decodable, Encodable};
 use rustc_span::{DUMMY_SP, Span, SpanDecoder, SpanEncoder, Symbol, sym};
 use thin_vec::ThinVec;
@@ -634,10 +634,8 @@ impl TokenStream {
                     (
                         TokenTree::Token(token_left, Spacing::Alone),
                         TokenTree::Token(token_right, _),
-                    ) if ((token_left.is_ident() && !token_left.is_reserved_ident())
-                        || token_left.is_lit())
-                        && ((token_right.is_ident() && !token_right.is_reserved_ident())
-                            || token_right.is_lit()) =>
+                    ) if (token_left.is_non_reserved_ident() || token_left.is_lit())
+                        && (token_right.is_non_reserved_ident() || token_right.is_lit()) =>
                     {
                         token_left.span
                     }
@@ -979,7 +977,7 @@ impl TokenCursor {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Encodable, Decodable, HashStable_Generic)]
+#[derive(Debug, Copy, Clone, PartialEq, Encodable, Decodable, HashStable_Generic, Walkable)]
 pub struct DelimSpan {
     pub open: Span,
     pub close: Span,

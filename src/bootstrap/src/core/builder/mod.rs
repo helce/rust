@@ -15,14 +15,14 @@ use tracing::instrument;
 
 pub use self::cargo::{Cargo, cargo_profile_var};
 pub use crate::Compiler;
+use crate::core::build_steps::compile::{Std, StdLink};
 use crate::core::build_steps::{
     check, clean, clippy, compile, dist, doc, gcc, install, llvm, run, setup, test, tool, vendor,
 };
 use crate::core::config::flags::Subcommand;
 use crate::core::config::{DryRun, TargetSelection};
 use crate::utils::cache::Cache;
-use crate::utils::exec::{BootstrapCommand, command};
-use crate::utils::execution_context::ExecutionContext;
+use crate::utils::exec::{BootstrapCommand, ExecutionContext, command};
 use crate::utils::helpers::{self, LldThreads, add_dylib_path, exe, libdir, linker_args, t};
 use crate::{Build, Crate, trace};
 
@@ -139,18 +139,40 @@ pub trait Step: 'static + Clone + Debug + PartialEq + Eq + Hash {
 
 /// Metadata that describes an executed step, mostly for testing and tracing.
 #[allow(unused)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct StepMetadata {
-    name: &'static str,
+    name: String,
     kind: Kind,
     target: TargetSelection,
     built_by: Option<Compiler>,
     stage: Option<u32>,
+    /// Additional opaque string printed in the metadata
+    metadata: Option<String>,
 }
 
 impl StepMetadata {
-    pub fn build(name: &'static str, target: TargetSelection) -> Self {
-        Self { name, kind: Kind::Build, target, built_by: None, stage: None }
+    pub fn build(name: &str, target: TargetSelection) -> Self {
+        Self::new(name, target, Kind::Build)
+    }
+
+    pub fn check(name: &str, target: TargetSelection) -> Self {
+        Self::new(name, target, Kind::Check)
+    }
+
+    pub fn doc(name: &str, target: TargetSelection) -> Self {
+        Self::new(name, target, Kind::Doc)
+    }
+
+    pub fn dist(name: &str, target: TargetSelection) -> Self {
+        Self::new(name, target, Kind::Dist)
+    }
+
+    pub fn test(name: &str, target: TargetSelection) -> Self {
+        Self::new(name, target, Kind::Test)
+    }
+
+    fn new(name: &str, target: TargetSelection, kind: Kind) -> Self {
+        Self { name: name.to_string(), kind, target, built_by: None, stage: None, metadata: None }
     }
 
     pub fn built_by(mut self, compiler: Compiler) -> Self {
@@ -161,6 +183,19 @@ impl StepMetadata {
     pub fn stage(mut self, stage: u32) -> Self {
         self.stage = Some(stage);
         self
+    }
+
+    pub fn with_metadata(mut self, metadata: String) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn get_stage(&self) -> Option<u32> {
+        self.stage.or(self
+            .built_by
+            // For std, its stage corresponds to the stage of the compiler that builds it.
+            // For everything else, a stage N things gets built by a stage N-1 compiler.
+            .map(|compiler| if self.name == "std" { compiler.stage } else { compiler.stage + 1 }))
     }
 }
 
@@ -376,8 +411,8 @@ const PATH_REMAP: &[(&str, &[&str])] = &[
         "tests",
         &[
             // tidy-alphabetical-start
-            "tests/assembly",
-            "tests/codegen",
+            "tests/assembly-llvm",
+            "tests/codegen-llvm",
             "tests/codegen-units",
             "tests/coverage",
             "tests/coverage-run-rustdoc",
@@ -810,7 +845,6 @@ pub enum Kind {
     #[value(alias = "r")]
     Run,
     Setup,
-    Suggest,
     Vendor,
     Perf,
 }
@@ -834,7 +868,6 @@ impl Kind {
             Kind::Install => "install",
             Kind::Run => "run",
             Kind::Setup => "setup",
-            Kind::Suggest => "suggest",
             Kind::Vendor => "vendor",
             Kind::Perf => "perf",
         }
@@ -846,7 +879,6 @@ impl Kind {
             Kind::Bench => "Benchmarking",
             Kind::Doc => "Documenting",
             Kind::Run => "Running",
-            Kind::Suggest => "Suggesting",
             Kind::Clippy => "Linting",
             Kind::Perf => "Profiling & benchmarking",
             _ => {
@@ -931,6 +963,7 @@ impl<'a> Builder<'a> {
                 tool::RemoteTestServer,
                 tool::RemoteTestClient,
                 tool::RustInstaller,
+                tool::FeaturesStatusDump,
                 tool::Cargo,
                 tool::RustAnalyzer,
                 tool::RustAnalyzerProcMacroSrv,
@@ -952,6 +985,8 @@ impl<'a> Builder<'a> {
                 tool::CoverageDump,
                 tool::LlvmBitcodeLinker,
                 tool::RustcPerf,
+                tool::WasmComponentLd,
+                tool::LldWrapper
             ),
             Kind::Clippy => describe!(
                 clippy::Std,
@@ -998,6 +1033,7 @@ impl<'a> Builder<'a> {
                 check::Compiletest,
                 check::FeaturesStatusDump,
                 check::CoverageDump,
+                check::Linkchecker,
                 // This has special staging logic, it may run on stage 1 while others run on stage 0.
                 // It takes quite some time to build stage 1, so put this at the end.
                 //
@@ -1009,13 +1045,14 @@ impl<'a> Builder<'a> {
             Kind::Test => describe!(
                 crate::core::build_steps::toolstate::ToolStateCheck,
                 test::Tidy,
+                test::Bootstrap,
                 test::Ui,
                 test::Crashes,
                 test::Coverage,
                 test::MirOpt,
-                test::Codegen,
+                test::CodegenLlvm,
                 test::CodegenUnits,
-                test::Assembly,
+                test::AssemblyLlvm,
                 test::Incremental,
                 test::Debuginfo,
                 test::UiFullDeps,
@@ -1063,8 +1100,6 @@ impl<'a> Builder<'a> {
                 test::RustInstaller,
                 test::TestFloatParse,
                 test::CollectLicenseMetadata,
-                // Run bootstrap close to the end as it's unlikely to fail
-                // test::Bootstrap,
                 // Run run-make last, since these won't pass without make on Windows
                 test::RunMake,
             ),
@@ -1167,7 +1202,7 @@ impl<'a> Builder<'a> {
             Kind::Clean => describe!(clean::CleanAll, clean::Rustc, clean::Std),
             Kind::Vendor => describe!(vendor::Vendor),
             // special-cased in Build::build()
-            Kind::Format | Kind::Suggest | Kind::Perf => vec![],
+            Kind::Format | Kind::Perf => vec![],
             Kind::MiriTest | Kind::MiriSetup => unreachable!(),
         }
     }
@@ -1235,7 +1270,6 @@ impl<'a> Builder<'a> {
             Subcommand::Run { .. } => (Kind::Run, &paths[..]),
             Subcommand::Clean { .. } => (Kind::Clean, &paths[..]),
             Subcommand::Format { .. } => (Kind::Format, &[][..]),
-            Subcommand::Suggest { .. } => (Kind::Suggest, &[][..]),
             Subcommand::Setup { profile: ref path } => (
                 Kind::Setup,
                 path.as_ref().map_or([].as_slice(), |path| std::slice::from_ref(path)),
@@ -1348,6 +1382,49 @@ impl<'a> Builder<'a> {
 
         trace!(target: "COMPILER_FOR", ?resolved_compiler);
         resolved_compiler
+    }
+
+    /// Obtain a standard library for the given target that will be built by the passed compiler.
+    /// The standard library will be linked to the sysroot of the passed compiler.
+    ///
+    /// Prefer using this method rather than manually invoking `Std::new`.
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(
+            level = "trace",
+            name = "Builder::std",
+            target = "STD",
+            skip_all,
+            fields(
+                compiler = ?compiler,
+                target = ?target,
+            ),
+        ),
+    )]
+    pub fn std(&self, compiler: Compiler, target: TargetSelection) {
+        // FIXME: make the `Std` step return some type-level "proof" that std was indeed built,
+        // and then require passing that to all Cargo invocations that we do.
+
+        // The "stage 0" std is always precompiled and comes with the stage0 compiler, so we have
+        // special logic for it, to avoid creating needless and confusing Std steps that don't
+        // actually build anything.
+        if compiler.stage == 0 {
+            if target != compiler.host {
+                panic!(
+                    r"It is not possible to build the standard library for `{target}` using the stage0 compiler.
+You have to build a stage1 compiler for `{}` first, and then use it to build a standard library for `{target}`.
+",
+                    compiler.host
+                )
+            }
+
+            // We still need to link the prebuilt standard library into the ephemeral stage0 sysroot
+            self.ensure(StdLink::from_std(Std::new(compiler, target), compiler));
+        } else {
+            // This step both compiles the std and links it into the compiler's sysroot.
+            // Yes, it's quite magical and side-effecty.. would be nice to refactor later.
+            self.ensure(Std::new(compiler, target));
+        }
     }
 
     pub fn sysroot(&self, compiler: Compiler) -> PathBuf {
@@ -1528,7 +1605,7 @@ impl<'a> Builder<'a> {
             cmd.arg("-Dwarnings");
         }
         cmd.arg("-Znormalize-docs");
-        cmd.args(linker_args(self, compiler.host, LldThreads::Yes));
+        cmd.args(linker_args(self, compiler.host, LldThreads::Yes, compiler.stage));
         cmd
     }
 
@@ -1536,11 +1613,15 @@ impl<'a> Builder<'a> {
     ///
     /// Note that this returns `None` if LLVM is disabled, or if we're in a
     /// check build or dry-run, where there's no need to build all of LLVM.
+    ///
+    /// FIXME(@kobzol)
+    /// **WARNING**: This actually returns the **HOST** LLVM config, not LLVM config for the given
+    /// *target*.
     pub fn llvm_config(&self, target: TargetSelection) -> Option<PathBuf> {
         if self.config.llvm_enabled(target) && self.kind != Kind::Check && !self.config.dry_run() {
-            let llvm::LlvmResult { llvm_config, .. } = self.ensure(llvm::Llvm { target });
-            if llvm_config.is_file() {
-                return Some(llvm_config);
+            let llvm::LlvmResult { host_llvm_config, .. } = self.ensure(llvm::Llvm { target });
+            if host_llvm_config.is_file() {
+                return Some(host_llvm_config);
             }
         }
         None

@@ -149,7 +149,6 @@ pub struct Session {
     pub opts: config::Options,
     pub target_tlib_path: Arc<SearchPath>,
     pub psess: ParseSess,
-    pub sysroot: PathBuf,
     /// Input, input file path and output file path to this compilation process.
     pub io: CompilerIO,
 
@@ -314,6 +313,7 @@ impl Session {
             || self.opts.unstable_opts.query_dep_graph
             || self.opts.unstable_opts.dump_mir.is_some()
             || self.opts.unstable_opts.unpretty.is_some()
+            || self.prof.is_args_recording_enabled()
             || self.opts.output_types.contains_key(&OutputType::Mir)
             || std::env::var_os("RUSTC_LOG").is_some()
         {
@@ -456,8 +456,10 @@ impl Session {
     /// directories are also returned, for example if `--sysroot` is used but tools are missing
     /// (#125246): we also add the bin directories to the sysroot where rustc is located.
     pub fn get_tools_search_paths(&self, self_contained: bool) -> Vec<PathBuf> {
-        let search_paths = filesearch::sysroot_with_fallback(&self.sysroot)
-            .into_iter()
+        let search_paths = self
+            .opts
+            .sysroot
+            .all_paths()
             .map(|sysroot| filesearch::make_target_bin_path(&sysroot, config::host_tuple()));
 
         if self_contained {
@@ -775,8 +777,15 @@ impl Session {
 
     pub fn must_emit_unwind_tables(&self) -> bool {
         // This is used to control the emission of the `uwtable` attribute on
-        // LLVM functions.
+        // LLVM functions. The `uwtable` attribute according to LLVM is:
         //
+        //     This attribute indicates that the ABI being targeted requires that an
+        //     unwind table entry be produced for this function even if we can show
+        //     that no exceptions passes by it. This is normally the case for the
+        //     ELF x86-64 abi, but it can be disabled for some compilation units.
+        //
+        // Typically when we're compiling with `-C panic=abort` we don't need
+        // `uwtable` because we can't generate any exceptions!
         // Unwind tables are needed when compiling with `-C panic=unwind`, but
         // LLVM won't omit unwind tables unless the function is also marked as
         // `nounwind`, so users are allowed to disable `uwtable` emission.
@@ -1028,7 +1037,6 @@ pub fn build_session(
     fluent_resources: Vec<&'static str>,
     driver_lint_caps: FxHashMap<lint::LintId, lint::Level>,
     target: Target,
-    sysroot: PathBuf,
     cfg_version: &'static str,
     ice_file: Option<PathBuf>,
     using_internal_features: &'static AtomicBool,
@@ -1063,7 +1071,7 @@ pub fn build_session(
     }
 
     let host_triple = TargetTuple::from_tuple(config::host_tuple());
-    let (host, target_warnings) = Target::search(&host_triple, &sysroot)
+    let (host, target_warnings) = Target::search(&host_triple, sopts.sysroot.path())
         .unwrap_or_else(|e| dcx.handle().fatal(format!("Error loading host specification: {e}")));
     for warning in target_warnings.warning_messages() {
         dcx.handle().warn(warning)
@@ -1096,13 +1104,14 @@ pub fn build_session(
     let host_triple = config::host_tuple();
     let target_triple = sopts.target_triple.tuple();
     // FIXME use host sysroot?
-    let host_tlib_path = Arc::new(SearchPath::from_sysroot_and_triple(&sysroot, host_triple));
+    let host_tlib_path =
+        Arc::new(SearchPath::from_sysroot_and_triple(sopts.sysroot.path(), host_triple));
     let target_tlib_path = if host_triple == target_triple {
         // Use the same `SearchPath` if host and target triple are identical to avoid unnecessary
         // rescanning of the target lib path and an unnecessary allocation.
         Arc::clone(&host_tlib_path)
     } else {
-        Arc::new(SearchPath::from_sysroot_and_triple(&sysroot, target_triple))
+        Arc::new(SearchPath::from_sysroot_and_triple(sopts.sysroot.path(), target_triple))
     };
 
     let prof = SelfProfilerRef::new(
@@ -1134,7 +1143,6 @@ pub fn build_session(
         opts: sopts,
         target_tlib_path,
         psess,
-        sysroot,
         io,
         incr_comp_session: RwLock::new(IncrCompSession::NotInitialized),
         prof,
@@ -1355,11 +1363,11 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
         sess.dcx().emit_err(errors::InstrumentationNotSupported { us: "XRay".to_string() });
     }
 
-    if let Some(flavor) = sess.opts.cg.linker_flavor {
-        if let Some(compatible_list) = sess.target.linker_flavor.check_compatibility(flavor) {
-            let flavor = flavor.desc();
-            sess.dcx().emit_err(errors::IncompatibleLinkerFlavor { flavor, compatible_list });
-        }
+    if let Some(flavor) = sess.opts.cg.linker_flavor
+        && let Some(compatible_list) = sess.target.linker_flavor.check_compatibility(flavor)
+    {
+        let flavor = flavor.desc();
+        sess.dcx().emit_err(errors::IncompatibleLinkerFlavor { flavor, compatible_list });
     }
 
     if sess.opts.unstable_opts.function_return != FunctionReturn::default() {
@@ -1545,7 +1553,7 @@ impl RemapFileNameExt for rustc_span::FileName {
             "one and only one scope should be passed to for_scope"
         );
         if sess.opts.unstable_opts.remap_path_scope.contains(scope) {
-            self.prefer_remapped_unconditionaly()
+            self.prefer_remapped_unconditionally()
         } else {
             self.prefer_local()
         }

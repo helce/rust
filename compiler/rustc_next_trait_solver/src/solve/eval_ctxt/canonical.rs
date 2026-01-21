@@ -53,20 +53,19 @@ where
 {
     /// Canonicalizes the goal remembering the original values
     /// for each bound variable.
+    ///
+    /// This expects `goal` and `opaque_types` to be eager resolved.
     pub(super) fn canonicalize_goal(
         &self,
+        is_hir_typeck_root_goal: bool,
         goal: Goal<I, I::Predicate>,
+        opaque_types: Vec<(ty::OpaqueTypeKey<I>, I::Ty)>,
     ) -> (Vec<I::GenericArg>, CanonicalInput<I, I::Predicate>) {
-        // We only care about one entry per `OpaqueTypeKey` here,
-        // so we only canonicalize the lookup table and ignore
-        // duplicate entries.
-        let opaque_types = self.delegate.clone_opaque_types_lookup_table();
-        let (goal, opaque_types) = eager_resolve_vars(self.delegate, (goal, opaque_types));
-
         let mut orig_values = Default::default();
         let canonical = Canonicalizer::canonicalize_input(
             self.delegate,
             &mut orig_values,
+            is_hir_typeck_root_goal,
             QueryInput {
                 goal,
                 predefined_opaques_in_body: self
@@ -88,7 +87,7 @@ where
     /// This takes the `shallow_certainty` which represents whether we're confident
     /// that the final result of the current goal only depends on the nested goals.
     ///
-    /// In case this is `Certainy::Maybe`, there may still be additional nested goals
+    /// In case this is `Certainty::Maybe`, there may still be additional nested goals
     /// or inference constraints required for this candidate to be hold. The candidate
     /// always requires all already added constraints and nested goals.
     #[instrument(level = "trace", skip(self), ret)]

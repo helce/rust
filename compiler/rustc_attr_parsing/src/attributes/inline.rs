@@ -2,9 +2,9 @@
 //                      note: need to model better how duplicate attr errors work when not using
 //                      SingleAttributeParser which is what we have two of here.
 
-use rustc_attr_data_structures::lints::AttributeLintKind;
-use rustc_attr_data_structures::{AttributeKind, InlineAttr};
 use rustc_feature::{AttributeTemplate, template};
+use rustc_hir::attrs::{AttributeKind, InlineAttr};
+use rustc_hir::lints::AttributeLintKind;
 use rustc_span::{Symbol, sym};
 
 use super::{AcceptContext, AttributeOrder, OnDuplicate};
@@ -16,7 +16,7 @@ pub(crate) struct InlineParser;
 
 impl<S: Stage> SingleAttributeParser<S> for InlineParser {
     const PATH: &'static [Symbol] = &[sym::inline];
-    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepLast;
+    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepOutermost;
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::WarnButFutureError;
     const TEMPLATE: AttributeTemplate = template!(Word, List: "always|never");
 
@@ -45,10 +45,8 @@ impl<S: Stage> SingleAttributeParser<S> for InlineParser {
             ArgParser::NameValue(_) => {
                 let suggestions =
                     <Self as SingleAttributeParser<S>>::TEMPLATE.suggestions(false, "inline");
-                cx.emit_lint(
-                    AttributeLintKind::IllFormedAttributeInput { suggestions },
-                    cx.attr_span,
-                );
+                let span = cx.attr_span;
+                cx.emit_lint(AttributeLintKind::IllFormedAttributeInput { suggestions }, span);
                 return None;
             }
         }
@@ -59,7 +57,7 @@ pub(crate) struct RustcForceInlineParser;
 
 impl<S: Stage> SingleAttributeParser<S> for RustcForceInlineParser {
     const PATH: &'static [Symbol] = &[sym::rustc_force_inline];
-    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepLast;
+    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepOutermost;
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::WarnButFutureError;
     const TEMPLATE: AttributeTemplate = template!(Word, List: "reason", NameValueStr: "reason");
 

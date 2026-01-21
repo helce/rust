@@ -3859,6 +3859,7 @@ declare_clippy_lint! {
 declare_clippy_lint! {
     /// ### What it does
     /// Checks for usage of `option.map(f).unwrap_or_default()` and `result.map(f).unwrap_or_default()` where f is a function or closure that returns the `bool` type.
+    /// Also checks for equality comparisons like `option.map(f) == Some(true)` and `result.map(f) == Ok(true)`.
     ///
     /// ### Why is this bad?
     /// Readability. These can be written more concisely as `option.is_some_and(f)` and `result.is_ok_and(f)`.
@@ -3869,6 +3870,11 @@ declare_clippy_lint! {
     /// # let result: Result<usize, ()> = Ok(1);
     /// option.map(|a| a > 10).unwrap_or_default();
     /// result.map(|a| a > 10).unwrap_or_default();
+    ///
+    /// option.map(|a| a > 10) == Some(true);
+    /// result.map(|a| a > 10) == Ok(true);
+    /// option.map(|a| a > 10) != Some(true);
+    /// result.map(|a| a > 10) != Ok(true);
     /// ```
     /// Use instead:
     /// ```no_run
@@ -3876,11 +3882,16 @@ declare_clippy_lint! {
     /// # let result: Result<usize, ()> = Ok(1);
     /// option.is_some_and(|a| a > 10);
     /// result.is_ok_and(|a| a > 10);
+    ///
+    /// option.is_some_and(|a| a > 10);
+    /// result.is_ok_and(|a| a > 10);
+    /// option.is_none_or(|a| a > 10);
+    /// !result.is_ok_and(|a| a > 10);
     /// ```
     #[clippy::version = "1.77.0"]
     pub MANUAL_IS_VARIANT_AND,
     pedantic,
-    "using `.map(f).unwrap_or_default()`, which is more succinctly expressed as `is_some_and(f)` or `is_ok_and(f)`"
+    "using `.map(f).unwrap_or_default()` or `.map(f) == Some/Ok(true)`, which are more succinctly expressed as `is_some_and(f)` or `is_ok_and(f)`"
 }
 
 declare_clippy_lint! {
@@ -4426,7 +4437,7 @@ declare_clippy_lint! {
     /// ```no_run
     /// use std::io::{BufReader, Read};
     /// use std::fs::File;
-    /// let file = BufReader::new(std::fs::File::open("./bytes.txt").unwrap());
+    /// let file = BufReader::new(File::open("./bytes.txt").unwrap());
     /// file.bytes();
     /// ```
     #[clippy::version = "1.87.0"]
@@ -5242,6 +5253,7 @@ impl Methods {
                         unused_enumerate_index::check(cx, expr, recv, m_arg);
                         map_clone::check(cx, expr, recv, m_arg, self.msrv);
                         map_with_unused_argument_over_ranges::check(cx, expr, recv, m_arg, self.msrv, span);
+                        manual_is_variant_and::check_map(cx, expr);
                         match method_call(recv) {
                             Some((map_name @ (sym::iter | sym::into_iter), recv2, _, _, _)) => {
                                 iter_kv_map::check(cx, map_name, expr, recv2, m_arg, self.msrv);
@@ -5274,10 +5286,6 @@ impl Methods {
                     }
                     map_identity::check(cx, expr, recv, m_arg, name, span);
                     manual_inspect::check(cx, expr, m_arg, name, span, self.msrv);
-                    crate::useless_conversion::check_function_application(cx, expr, recv, m_arg);
-                },
-                (sym::map_break | sym::map_continue, [m_arg]) => {
-                    crate::useless_conversion::check_function_application(cx, expr, recv, m_arg);
                 },
                 (sym::map_or, [def, map]) => {
                     option_map_or_none::check(cx, expr, recv, def, map);
@@ -5545,7 +5553,7 @@ impl Methods {
         // Handle method calls whose receiver and arguments may come from expansion
         if let ExprKind::MethodCall(path, recv, args, _call_span) = expr.kind {
             match (path.ident.name, args) {
-                (sym::expect, [_]) if !matches!(method_call(recv), Some((sym::ok | sym::err, _, [], _, _))) => {
+                (sym::expect, [_]) => {
                     unwrap_expect_used::check(
                         cx,
                         expr,

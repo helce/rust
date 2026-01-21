@@ -17,7 +17,7 @@ use rustc_span::{
 use smallvec::{SmallVec, smallvec};
 
 use crate::errors::{
-    CountRepetitionMisplaced, MetaVarExprUnrecognizedVar, MetaVarsDifSeqMatchers, MustRepeatOnce,
+    CountRepetitionMisplaced, MetaVarsDifSeqMatchers, MustRepeatOnce, MveUnrecognizedVar,
     NoSyntaxVarsExprRepeat, VarStillRepeating,
 };
 use crate::mbe::macro_parser::NamedMatch;
@@ -283,7 +283,7 @@ pub(super) fn transcribe<'a>(
             }
 
             // There should be no meta-var declarations in the invocation of a macro.
-            mbe::TokenTree::MetaVarDecl(..) => panic!("unexpected `TokenTree::MetaVarDecl`"),
+            mbe::TokenTree::MetaVarDecl { .. } => panic!("unexpected `TokenTree::MetaVarDecl`"),
         }
     }
 }
@@ -776,7 +776,7 @@ fn lockstep_iter_size(
                 size.with(lockstep_iter_size(tt, interpolations, repeats))
             })
         }
-        TokenTree::MetaVar(_, name) | TokenTree::MetaVarDecl(_, name, _) => {
+        TokenTree::MetaVar(_, name) | TokenTree::MetaVarDecl { name, .. } => {
             let name = MacroRulesNormalizedIdent::new(*name);
             match lookup_cur_matched(name, interpolations, repeats) {
                 Some(matched) => match matched {
@@ -879,7 +879,7 @@ where
 {
     let span = ident.span;
     let key = MacroRulesNormalizedIdent::new(ident);
-    interp.get(&key).ok_or_else(|| dcx.create_err(MetaVarExprUnrecognizedVar { span, key }))
+    interp.get(&key).ok_or_else(|| dcx.create_err(MveUnrecognizedVar { span, key }))
 }
 
 /// Used by meta-variable expressions when an user input is out of the actual declared bounds. For

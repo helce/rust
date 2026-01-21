@@ -45,7 +45,8 @@ pub struct CrateDepMultiple {
 #[derive(Subdiagnostic)]
 #[note(metadata_crate_dep_not_static)]
 pub struct NonStaticCrateDep {
-    pub crate_name: Symbol,
+    /// It's different from `crate_name` in main Diagnostic.
+    pub crate_name_: Symbol,
 }
 
 #[derive(Subdiagnostic)]
@@ -813,4 +814,11 @@ pub struct AsyncDropTypesInDependency {
     pub span: Span,
     pub extern_crate: Symbol,
     pub local_crate: Symbol,
+}
+
+#[derive(Diagnostic)]
+#[diag(metadata_raw_dylib_malformed)]
+pub struct RawDylibMalformed {
+    #[primary_span]
+    pub span: Span,
 }

@@ -115,6 +115,6 @@ fn multiple_deref() {
 
     use std::sync::Mutex;
     let mut v1 = Mutex::new(Wrapper(Wrapper(vec![42])));
-    *(*(*v1.lock().unwrap())) = vec![];
+    ***v1.lock().unwrap() = vec![];
     //~^ ERROR: swapping with a temporary value is inefficient
 }

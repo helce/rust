@@ -10,11 +10,12 @@ use rustc_infer::traits::{
     FromSolverError, PredicateObligation, PredicateObligations, TraitEngine,
 };
 use rustc_middle::ty::{
-    self, DelayedSet, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitor, TypingMode,
+    self, DelayedSet, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor,
+    TypingMode,
 };
 use rustc_next_trait_solver::delegate::SolverDelegate as _;
 use rustc_next_trait_solver::solve::{
-    GenerateProofTree, GoalEvaluation, GoalStalledOn, HasChanged, SolverDelegateEvalExt as _,
+    GoalEvaluation, GoalStalledOn, HasChanged, SolverDelegateEvalExt as _,
 };
 use rustc_span::Span;
 use thin_vec::ThinVec;
@@ -106,14 +107,11 @@ impl<'tcx> ObligationStorage<'tcx> {
             self.overflowed.extend(
                 ExtractIf::new(&mut self.pending, |(o, stalled_on)| {
                     let goal = o.as_goal();
-                    let result = <&SolverDelegate<'tcx>>::from(infcx)
-                        .evaluate_root_goal(
-                            goal,
-                            GenerateProofTree::No,
-                            o.cause.span,
-                            stalled_on.take(),
-                        )
-                        .0;
+                    let result = <&SolverDelegate<'tcx>>::from(infcx).evaluate_root_goal(
+                        goal,
+                        o.cause.span,
+                        stalled_on.take(),
+                    );
                     matches!(result, Ok(GoalEvaluation { has_changed: HasChanged::Yes, .. }))
                 })
                 .map(|(o, _)| o),
@@ -199,6 +197,12 @@ where
                     delegate.compute_goal_fast_path(goal, obligation.cause.span)
                 {
                     match certainty {
+                        // This fast path doesn't depend on region identity so it doesn't
+                        // matter if the goal contains inference variables or not, so we
+                        // don't need to call `push_hir_typeck_potentially_region_dependent_goal`
+                        // here.
+                        //
+                        // Only goals proven via the trait solver should be region dependent.
                         Certainty::Yes => {}
                         Certainty::Maybe(_) => {
                             self.obligations.register(obligation, None);
@@ -207,16 +211,9 @@ where
                     continue;
                 }
 
-                let result = delegate
-                    .evaluate_root_goal(
-                        goal,
-                        GenerateProofTree::No,
-                        obligation.cause.span,
-                        stalled_on,
-                    )
-                    .0;
+                let result = delegate.evaluate_root_goal(goal, obligation.cause.span, stalled_on);
                 self.inspect_evaluated_obligation(infcx, &obligation, &result);
-                let GoalEvaluation { certainty, has_changed, stalled_on } = match result {
+                let GoalEvaluation { goal, certainty, has_changed, stalled_on } = match result {
                     Ok(result) => result,
                     Err(NoSolution) => {
                         errors.push(E::from_solver_error(
@@ -227,6 +224,10 @@ where
                     }
                 };
 
+                // We've resolved the goal in `evaluate_root_goal`, avoid redoing this work
+                // in the next iteration. This does not resolve the inference variables
+                // constrained by evaluating the goal.
+                obligation.predicate = goal.predicate;
                 if has_changed == HasChanged::Yes {
                     // We increment the recursion depth here to track the number of times
                     // this goal has resulted in inference progress. This doesn't precisely
@@ -239,7 +240,22 @@ where
                 }
 
                 match certainty {
-                    Certainty::Yes => {}
+                    Certainty::Yes => {
+                        // Goals may depend on structural identity. Region uniquification at the
+                        // start of MIR borrowck may cause things to no longer be so, potentially
+                        // causing an ICE.
+                        //
+                        // While we uniquify root goals in HIR this does not handle cases where
+                        // regions are hidden inside of a type or const inference variable.
+                        //
+                        // FIXME(-Znext-solver): This does not handle inference variables hidden
+                        // inside of an opaque type, e.g. if there's `Opaque = (?x, ?x)` in the
+                        // storage, we can also rely on structural identity of `?x` even if we
+                        // later uniquify it in MIR borrowck.
+                        if infcx.in_hir_typeck && obligation.has_non_region_infer() {
+                            infcx.push_hir_typeck_potentially_region_dependent_goal(obligation);
+                        }
+                    }
                     Certainty::Maybe(_) => self.obligations.register(obligation, stalled_on),
                 }
             }
@@ -264,7 +280,7 @@ where
         &mut self,
         infcx: &InferCtxt<'tcx>,
     ) -> PredicateObligations<'tcx> {
-        let stalled_generators = match infcx.typing_mode() {
+        let stalled_coroutines = match infcx.typing_mode() {
             TypingMode::Analysis { defining_opaque_types_and_generators } => {
                 defining_opaque_types_and_generators
             }
@@ -274,7 +290,7 @@ where
             | TypingMode::PostAnalysis => return Default::default(),
         };
 
-        if stalled_generators.is_empty() {
+        if stalled_coroutines.is_empty() {
             return Default::default();
         }
 
@@ -285,7 +301,7 @@ where
                         .visit_proof_tree(
                             obl.as_goal(),
                             &mut StalledOnCoroutines {
-                                stalled_generators,
+                                stalled_coroutines,
                                 span: obl.cause.span,
                                 cache: Default::default(),
                             },
@@ -307,10 +323,10 @@ where
 ///
 /// This function can be also return false positives, which will lead to poor diagnostics
 /// so we want to keep this visitor *precise* too.
-struct StalledOnCoroutines<'tcx> {
-    stalled_generators: &'tcx ty::List<LocalDefId>,
-    span: Span,
-    cache: DelayedSet<Ty<'tcx>>,
+pub struct StalledOnCoroutines<'tcx> {
+    pub stalled_coroutines: &'tcx ty::List<LocalDefId>,
+    pub span: Span,
+    pub cache: DelayedSet<Ty<'tcx>>,
 }
 
 impl<'tcx> inspect::ProofTreeVisitor<'tcx> for StalledOnCoroutines<'tcx> {
@@ -339,13 +355,15 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for StalledOnCoroutines<'tcx> {
             return ControlFlow::Continue(());
         }
 
-        if let ty::CoroutineWitness(def_id, _) = *ty.kind()
-            && def_id.as_local().is_some_and(|def_id| self.stalled_generators.contains(&def_id))
+        if let ty::Coroutine(def_id, _) = *ty.kind()
+            && def_id.as_local().is_some_and(|def_id| self.stalled_coroutines.contains(&def_id))
         {
-            return ControlFlow::Break(());
+            ControlFlow::Break(())
+        } else if ty.has_coroutines() {
+            ty.super_visit_with(self)
+        } else {
+            ControlFlow::Continue(())
         }
-
-        ty.super_visit_with(self)
     }
 }
 

@@ -13,10 +13,10 @@ use rustc_session::config::{
     CoverageOptions, DebugInfo, DumpMonoStatsFormat, ErrorOutputType, ExternEntry, ExternLocation,
     Externs, FmtDebug, FunctionReturn, InliningThreshold, Input, InstrumentCoverage,
     InstrumentXRay, LinkSelfContained, LinkerPluginLto, LocationDetail, LtoCli, MirIncludeSpans,
-    NextSolverConfig, OomStrategy, Options, OutFileName, OutputType, OutputTypes, PAuthKey, PacRet,
-    Passes, PatchableFunctionEntry, Polonius, ProcMacroExecutionStrategy, Strip, SwitchWithOptPath,
-    SymbolManglingVersion, WasiExecModel, build_configuration, build_session_options,
-    rustc_optgroups,
+    NextSolverConfig, Offload, OomStrategy, Options, OutFileName, OutputType, OutputTypes,
+    PAuthKey, PacRet, Passes, PatchableFunctionEntry, Polonius, ProcMacroExecutionStrategy, Strip,
+    SwitchWithOptPath, SymbolManglingVersion, WasiExecModel, build_configuration,
+    build_session_options, rustc_optgroups,
 };
 use rustc_session::lint::Level;
 use rustc_session::search_paths::SearchPath;
@@ -41,9 +41,11 @@ where
 
     let matches = optgroups().parse(args).unwrap();
     let sessopts = build_session_options(&mut early_dcx, &matches);
-    let sysroot = sessopts.sysroot.clone();
-    let target =
-        rustc_session::config::build_target_config(&early_dcx, &sessopts.target_triple, &sysroot);
+    let target = rustc_session::config::build_target_config(
+        &early_dcx,
+        &sessopts.target_triple,
+        sessopts.sysroot.path(),
+    );
     let hash_kind = sessopts.unstable_opts.src_hash_algorithm(&target);
     let checksum_hash_kind = sessopts.unstable_opts.checksum_hash_algorithm();
     let sm_inputs = Some(SourceMapInputs {
@@ -72,7 +74,6 @@ where
             vec![],
             Default::default(),
             target,
-            sysroot,
             "",
             None,
             &USING_INTERNAL_FEATURES,
@@ -832,6 +833,7 @@ fn test_unstable_options_tracking_hash() {
     tracked!(no_profiler_runtime, true);
     tracked!(no_trait_vptr, true);
     tracked!(no_unique_section_names, true);
+    tracked!(offload, vec![Offload::Enable]);
     tracked!(on_broken_pipe, OnBrokenPipe::Kill);
     tracked!(oom, OomStrategy::Panic);
     tracked!(osx_rpath_install_name, true);

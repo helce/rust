@@ -300,27 +300,6 @@ pub(crate) struct ConcatBytesBadRepeat {
 }
 
 #[derive(Diagnostic)]
-#[diag(builtin_macros_concat_idents_missing_args)]
-pub(crate) struct ConcatIdentsMissingArgs {
-    #[primary_span]
-    pub(crate) span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(builtin_macros_concat_idents_missing_comma)]
-pub(crate) struct ConcatIdentsMissingComma {
-    #[primary_span]
-    pub(crate) span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(builtin_macros_concat_idents_ident_args)]
-pub(crate) struct ConcatIdentsIdentArgs {
-    #[primary_span]
-    pub(crate) span: Span,
-}
-
-#[derive(Diagnostic)]
 #[diag(builtin_macros_bad_derive_target, code = E0774)]
 pub(crate) struct BadDeriveTarget {
     #[primary_span]
@@ -681,6 +660,7 @@ impl Subdiagnostic for FormatUnusedArg {
     fn add_to_diag<G: EmissionGuarantee>(self, diag: &mut Diag<'_, G>) {
         diag.arg("named", self.named);
         let msg = diag.eagerly_translate(crate::fluent_generated::builtin_macros_format_unused_arg);
+        diag.remove_arg("named");
         diag.span_label(self.span, msg);
     }
 }
@@ -973,4 +953,22 @@ pub(crate) struct AsmExpectedOther {
     #[label(builtin_macros_expected_other)]
     pub(crate) span: Span,
     pub(crate) is_inline_asm: bool,
+}
+
+#[derive(Diagnostic)]
+#[diag(builtin_macros_cfg_select_no_matches)]
+pub(crate) struct CfgSelectNoMatches {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(builtin_macros_cfg_select_unreachable)]
+pub(crate) struct CfgSelectUnreachable {
+    #[primary_span]
+    #[label(builtin_macros_label2)]
+    pub span: Span,
+
+    #[label]
+    pub wildcard_span: Span,
 }

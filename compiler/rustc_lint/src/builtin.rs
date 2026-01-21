@@ -21,14 +21,14 @@ use rustc_ast::tokenstream::{TokenStream, TokenTree};
 use rustc_ast::visit::{FnCtxt, FnKind};
 use rustc_ast::{self as ast, *};
 use rustc_ast_pretty::pprust::expr_to_string;
-use rustc_attr_data_structures::{AttributeKind, find_attr};
 use rustc_errors::{Applicability, LintDiagnostic};
 use rustc_feature::GateIssue;
 use rustc_hir as hir;
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{CRATE_DEF_ID, DefId, LocalDefId};
 use rustc_hir::intravisit::FnKind as HirFnKind;
-use rustc_hir::{Body, FnDecl, GenericParamKind, PatKind, PredicateOrigin};
+use rustc_hir::{Body, FnDecl, PatKind, PredicateOrigin, find_attr};
 use rustc_middle::bug;
 use rustc_middle::lint::LevelAndSource;
 use rustc_middle::ty::layout::LayoutOf;
@@ -952,36 +952,34 @@ declare_lint! {
 
 declare_lint_pass!(InvalidNoMangleItems => [NO_MANGLE_CONST_ITEMS, NO_MANGLE_GENERIC_ITEMS]);
 
+impl InvalidNoMangleItems {
+    fn check_no_mangle_on_generic_fn(
+        &self,
+        cx: &LateContext<'_>,
+        attr_span: Span,
+        def_id: LocalDefId,
+    ) {
+        let generics = cx.tcx.generics_of(def_id);
+        if generics.requires_monomorphization(cx.tcx) {
+            cx.emit_span_lint(
+                NO_MANGLE_GENERIC_ITEMS,
+                cx.tcx.def_span(def_id),
+                BuiltinNoMangleGeneric { suggestion: attr_span },
+            );
+        }
+    }
+}
+
 impl<'tcx> LateLintPass<'tcx> for InvalidNoMangleItems {
     fn check_item(&mut self, cx: &LateContext<'_>, it: &hir::Item<'_>) {
         let attrs = cx.tcx.hir_attrs(it.hir_id());
-        let check_no_mangle_on_generic_fn = |attr_span: Span,
-                                             impl_generics: Option<&hir::Generics<'_>>,
-                                             generics: &hir::Generics<'_>,
-                                             span| {
-            for param in
-                generics.params.iter().chain(impl_generics.map(|g| g.params).into_iter().flatten())
-            {
-                match param.kind {
-                    GenericParamKind::Lifetime { .. } => {}
-                    GenericParamKind::Type { .. } | GenericParamKind::Const { .. } => {
-                        cx.emit_span_lint(
-                            NO_MANGLE_GENERIC_ITEMS,
-                            span,
-                            BuiltinNoMangleGeneric { suggestion: attr_span },
-                        );
-                        break;
-                    }
-                }
-            }
-        };
         match it.kind {
-            hir::ItemKind::Fn { generics, .. } => {
-                if let Some(attr_span) = attr::find_by_name(attrs, sym::export_name)
-                    .map(|at| at.span())
-                    .or_else(|| find_attr!(attrs, AttributeKind::NoMangle(span) => *span))
+            hir::ItemKind::Fn { .. } => {
+                if let Some(attr_span) =
+                    find_attr!(attrs, AttributeKind::ExportName {span, ..} => *span)
+                        .or_else(|| find_attr!(attrs, AttributeKind::NoMangle(span) => *span))
                 {
-                    check_no_mangle_on_generic_fn(attr_span, None, generics, it.span);
+                    self.check_no_mangle_on_generic_fn(cx, attr_span, it.owner_id.def_id);
                 }
             }
             hir::ItemKind::Const(..) => {
@@ -1006,22 +1004,19 @@ impl<'tcx> LateLintPass<'tcx> for InvalidNoMangleItems {
                     );
                 }
             }
-            hir::ItemKind::Impl(hir::Impl { generics, items, .. }) => {
-                for it in *items {
-                    if let hir::AssocItemKind::Fn { .. } = it.kind {
-                        let attrs = cx.tcx.hir_attrs(it.id.hir_id());
-                        if let Some(attr_span) = attr::find_by_name(attrs, sym::export_name)
-                            .map(|at| at.span())
-                            .or_else(|| find_attr!(attrs, AttributeKind::NoMangle(span) => *span))
-                        {
-                            check_no_mangle_on_generic_fn(
-                                attr_span,
-                                Some(generics),
-                                cx.tcx.hir_get_generics(it.id.owner_id.def_id).unwrap(),
-                                it.span,
-                            );
-                        }
-                    }
+            _ => {}
+        }
+    }
+
+    fn check_impl_item(&mut self, cx: &LateContext<'_>, it: &hir::ImplItem<'_>) {
+        let attrs = cx.tcx.hir_attrs(it.hir_id());
+        match it.kind {
+            hir::ImplItemKind::Fn { .. } => {
+                if let Some(attr_span) =
+                    find_attr!(attrs, AttributeKind::ExportName {span, ..} => *span)
+                        .or_else(|| find_attr!(attrs, AttributeKind::NoMangle(span) => *span))
+                {
+                    self.check_no_mangle_on_generic_fn(cx, attr_span, it.owner_id.def_id);
                 }
             }
             _ => {}
@@ -1184,11 +1179,11 @@ impl<'tcx> LateLintPass<'tcx> for UngatedAsyncFnTrackCaller {
         if fn_kind.asyncness().is_async()
             && !cx.tcx.features().async_fn_track_caller()
             // Now, check if the function has the `#[track_caller]` attribute
-            && let Some(attr) = cx.tcx.get_attr(def_id, sym::track_caller)
+            && let Some(attr_span) = find_attr!(cx.tcx.get_all_attrs(def_id), AttributeKind::TrackCaller(span) => *span)
         {
             cx.emit_span_lint(
                 UNGATED_ASYNC_FN_TRACK_CALLER,
-                attr.span(),
+                attr_span,
                 BuiltinUngatedAsyncFnTrackCaller { label: span, session: &cx.tcx.sess },
             );
         }
@@ -1524,8 +1519,9 @@ impl<'tcx> LateLintPass<'tcx> for TrivialConstraints {
                     ClauseKind::TypeOutlives(..) |
                     ClauseKind::RegionOutlives(..) => "lifetime",
 
+                    ClauseKind::UnstableFeature(_)
                     // `ConstArgHasType` is never global as `ct` is always a param
-                    ClauseKind::ConstArgHasType(..)
+                    | ClauseKind::ConstArgHasType(..)
                     // Ignore projections, as they can only be global
                     // if the trait bound is global
                     | ClauseKind::Projection(..)
@@ -1589,6 +1585,8 @@ impl EarlyLintPass for DoubleNegations {
         if let ExprKind::Unary(UnOp::Neg, ref inner) = expr.kind
             && let ExprKind::Unary(UnOp::Neg, ref inner2) = inner.kind
             && !matches!(inner2.kind, ExprKind::Unary(UnOp::Neg, _))
+            // Don't lint if this jumps macro expansion boundary (Issue #143980)
+            && expr.span.eq_ctxt(inner.span)
         {
             cx.emit_span_lint(
                 DOUBLE_NEGATIONS,
@@ -1656,7 +1654,7 @@ declare_lint! {
     "`...` range patterns are deprecated",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2021),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2021/warnings-promoted-to-error.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2021/warnings-promoted-to-error.html>",
     };
 }
 
@@ -1837,7 +1835,7 @@ declare_lint! {
     "detects edition keywords being used as an identifier",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionError(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/gen-keyword.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/gen-keyword.html>",
     };
 }
 
@@ -2448,16 +2446,16 @@ impl<'tcx> LateLintPass<'tcx> for InvalidValue {
 
         /// Determine if this expression is a "dangerous initialization".
         fn is_dangerous_init(cx: &LateContext<'_>, expr: &hir::Expr<'_>) -> Option<InitKind> {
-            if let hir::ExprKind::Call(path_expr, args) = expr.kind {
+            if let hir::ExprKind::Call(path_expr, args) = expr.kind
                 // Find calls to `mem::{uninitialized,zeroed}` methods.
-                if let hir::ExprKind::Path(ref qpath) = path_expr.kind {
-                    let def_id = cx.qpath_res(qpath, path_expr.hir_id).opt_def_id()?;
-                    match cx.tcx.get_diagnostic_name(def_id) {
-                        Some(sym::mem_zeroed) => return Some(InitKind::Zeroed),
-                        Some(sym::mem_uninitialized) => return Some(InitKind::Uninit),
-                        Some(sym::transmute) if is_zero(&args[0]) => return Some(InitKind::Zeroed),
-                        _ => {}
-                    }
+                && let hir::ExprKind::Path(ref qpath) = path_expr.kind
+            {
+                let def_id = cx.qpath_res(qpath, path_expr.hir_id).opt_def_id()?;
+                match cx.tcx.get_diagnostic_name(def_id) {
+                    Some(sym::mem_zeroed) => return Some(InitKind::Zeroed),
+                    Some(sym::mem_uninitialized) => return Some(InitKind::Uninit),
+                    Some(sym::transmute) if is_zero(&args[0]) => return Some(InitKind::Zeroed),
+                    _ => {}
                 }
             } else if let hir::ExprKind::MethodCall(_, receiver, ..) = expr.kind {
                 // Find problematic calls to `MaybeUninit::assume_init`.
@@ -2465,14 +2463,14 @@ impl<'tcx> LateLintPass<'tcx> for InvalidValue {
                 if cx.tcx.is_diagnostic_item(sym::assume_init, def_id) {
                     // This is a call to *some* method named `assume_init`.
                     // See if the `self` parameter is one of the dangerous constructors.
-                    if let hir::ExprKind::Call(path_expr, _) = receiver.kind {
-                        if let hir::ExprKind::Path(ref qpath) = path_expr.kind {
-                            let def_id = cx.qpath_res(qpath, path_expr.hir_id).opt_def_id()?;
-                            match cx.tcx.get_diagnostic_name(def_id) {
-                                Some(sym::maybe_uninit_zeroed) => return Some(InitKind::Zeroed),
-                                Some(sym::maybe_uninit_uninit) => return Some(InitKind::Uninit),
-                                _ => {}
-                            }
+                    if let hir::ExprKind::Call(path_expr, _) = receiver.kind
+                        && let hir::ExprKind::Path(ref qpath) = path_expr.kind
+                    {
+                        let def_id = cx.qpath_res(qpath, path_expr.hir_id).opt_def_id()?;
+                        match cx.tcx.get_diagnostic_name(def_id) {
+                            Some(sym::maybe_uninit_zeroed) => return Some(InitKind::Zeroed),
+                            Some(sym::maybe_uninit_uninit) => return Some(InitKind::Uninit),
+                            _ => {}
                         }
                     }
                 }
@@ -2726,13 +2724,13 @@ impl<'tcx> LateLintPass<'tcx> for DerefNullPtr {
                 }
                 // check for call to `core::ptr::null` or `core::ptr::null_mut`
                 hir::ExprKind::Call(path, _) => {
-                    if let hir::ExprKind::Path(ref qpath) = path.kind {
-                        if let Some(def_id) = cx.qpath_res(qpath, path.hir_id).opt_def_id() {
-                            return matches!(
-                                cx.tcx.get_diagnostic_name(def_id),
-                                Some(sym::ptr_null | sym::ptr_null_mut)
-                            );
-                        }
+                    if let hir::ExprKind::Path(ref qpath) = path.kind
+                        && let Some(def_id) = cx.qpath_res(qpath, path.hir_id).opt_def_id()
+                    {
+                        return matches!(
+                            cx.tcx.get_diagnostic_name(def_id),
+                            Some(sym::ptr_null | sym::ptr_null_mut)
+                        );
                     }
                 }
                 _ => {}
@@ -2872,7 +2870,7 @@ impl<'tcx> LateLintPass<'tcx> for AsmLabels {
         if let hir::Expr {
             kind:
                 hir::ExprKind::InlineAsm(hir::InlineAsm {
-                    asm_macro: AsmMacro::Asm | AsmMacro::NakedAsm,
+                    asm_macro: asm_macro @ (AsmMacro::Asm | AsmMacro::NakedAsm),
                     template_strs,
                     options,
                     ..
@@ -2880,6 +2878,15 @@ impl<'tcx> LateLintPass<'tcx> for AsmLabels {
             ..
         } = expr
         {
+            // Non-generic naked functions are allowed to define arbitrary
+            // labels.
+            if *asm_macro == AsmMacro::NakedAsm {
+                let def_id = expr.hir_id.owner.def_id;
+                if !cx.tcx.generics_of(def_id).requires_monomorphization(cx.tcx) {
+                    return;
+                }
+            }
+
             // asm with `options(raw)` does not do replacement with `{` and `}`.
             let raw = options.contains(InlineAsmOptions::RAW);
 

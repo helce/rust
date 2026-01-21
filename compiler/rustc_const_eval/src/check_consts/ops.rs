@@ -149,7 +149,7 @@ impl<'tcx> NonConstOp<'tcx> for FnCallNonConst<'tcx> {
                         debug!(?param_ty);
                         if let Some(generics) = tcx.hir_node_by_def_id(caller).generics() {
                             let constraint = with_no_trimmed_paths!(format!(
-                                "~const {}",
+                                "[const] {}",
                                 trait_ref.print_trait_sugared(),
                             ));
                             suggest_constraining_type_param(
@@ -295,21 +295,18 @@ fn build_error_for_const_call<'tcx>(
                             }
                             let deref = "*".repeat(num_refs);
 
-                            if let Ok(call_str) = ccx.tcx.sess.source_map().span_to_snippet(span) {
-                                if let Some(eq_idx) = call_str.find("==") {
-                                    if let Some(rhs_idx) =
-                                        call_str[(eq_idx + 2)..].find(|c: char| !c.is_whitespace())
-                                    {
-                                        let rhs_pos =
-                                            span.lo() + BytePos::from_usize(eq_idx + 2 + rhs_idx);
-                                        let rhs_span = span.with_lo(rhs_pos).with_hi(rhs_pos);
-                                        sugg = Some(errors::ConsiderDereferencing {
-                                            deref,
-                                            span: span.shrink_to_lo(),
-                                            rhs_span,
-                                        });
-                                    }
-                                }
+                            if let Ok(call_str) = ccx.tcx.sess.source_map().span_to_snippet(span)
+                                && let Some(eq_idx) = call_str.find("==")
+                                && let Some(rhs_idx) =
+                                    call_str[(eq_idx + 2)..].find(|c: char| !c.is_whitespace())
+                            {
+                                let rhs_pos = span.lo() + BytePos::from_usize(eq_idx + 2 + rhs_idx);
+                                let rhs_span = span.with_lo(rhs_pos).with_hi(rhs_pos);
+                                sugg = Some(errors::ConsiderDereferencing {
+                                    deref,
+                                    span: span.shrink_to_lo(),
+                                    rhs_span,
+                                });
                             }
                         }
                         _ => {}
@@ -567,12 +564,7 @@ impl<'tcx> NonConstOp<'tcx> for EscapingCellBorrow {
         DiagImportance::Secondary
     }
     fn build_error(&self, ccx: &ConstCx<'_, 'tcx>, span: Span) -> Diag<'tcx> {
-        ccx.dcx().create_err(errors::InteriorMutableRefEscaping {
-            span,
-            opt_help: matches!(ccx.const_kind(), hir::ConstContext::Static(_)),
-            kind: ccx.const_kind(),
-            teach: ccx.tcx.sess.teach(E0492),
-        })
+        ccx.dcx().create_err(errors::InteriorMutableBorrowEscaping { span, kind: ccx.const_kind() })
     }
 }
 
@@ -580,7 +572,7 @@ impl<'tcx> NonConstOp<'tcx> for EscapingCellBorrow {
 /// This op is for `&mut` borrows in the trailing expression of a constant
 /// which uses the "enclosing scopes rule" to leak its locals into anonymous
 /// static or const items.
-pub(crate) struct EscapingMutBorrow(pub hir::BorrowKind);
+pub(crate) struct EscapingMutBorrow;
 
 impl<'tcx> NonConstOp<'tcx> for EscapingMutBorrow {
     fn status_in_item(&self, _ccx: &ConstCx<'_, 'tcx>) -> Status {
@@ -594,18 +586,7 @@ impl<'tcx> NonConstOp<'tcx> for EscapingMutBorrow {
     }
 
     fn build_error(&self, ccx: &ConstCx<'_, 'tcx>, span: Span) -> Diag<'tcx> {
-        match self.0 {
-            hir::BorrowKind::Raw => ccx.tcx.dcx().create_err(errors::MutableRawEscaping {
-                span,
-                kind: ccx.const_kind(),
-                teach: ccx.tcx.sess.teach(E0764),
-            }),
-            hir::BorrowKind::Ref => ccx.dcx().create_err(errors::MutableRefEscaping {
-                span,
-                kind: ccx.const_kind(),
-                teach: ccx.tcx.sess.teach(E0764),
-            }),
-        }
+        ccx.dcx().create_err(errors::MutableBorrowEscaping { span, kind: ccx.const_kind() })
     }
 }
 

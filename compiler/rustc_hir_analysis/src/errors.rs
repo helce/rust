@@ -127,6 +127,7 @@ pub(crate) enum AssocItemNotFoundSugg<'a> {
     SimilarInOtherTrait {
         #[primary_span]
         span: Span,
+        trait_name: &'a str,
         assoc_kind: &'static str,
         suggested_name: Symbol,
     },
@@ -204,6 +205,7 @@ pub(crate) struct DropImplOnWrongItem {
     #[primary_span]
     #[label]
     pub span: Span,
+    pub trait_: Symbol,
 }
 
 #[derive(Diagnostic)]
@@ -275,13 +277,6 @@ pub(crate) struct CopyImplOnTypeWithDtor {
     #[primary_span]
     #[label]
     pub span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(hir_analysis_multiple_relaxed_default_bounds, code = E0203)]
-pub(crate) struct MultipleRelaxedDefaultBounds {
-    #[primary_span]
-    pub spans: Vec<Span>,
 }
 
 #[derive(Diagnostic)]
@@ -517,6 +512,7 @@ pub(crate) struct ConstImplForNonConstTrait {
     pub trait_name: String,
     #[suggestion(
         applicability = "machine-applicable",
+        // FIXME(const_trait_impl) fix this suggestion
         code = "#[const_trait] ",
         style = "verbose"
     )]
@@ -540,6 +536,7 @@ pub(crate) struct ConstBoundForNonConstTrait {
     pub suggestion_pre: &'static str,
     #[suggestion(
         applicability = "machine-applicable",
+        // FIXME(const_trait_impl) fix this suggestion
         code = "#[const_trait] ",
         style = "verbose"
     )]

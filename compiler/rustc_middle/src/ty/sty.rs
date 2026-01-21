@@ -346,7 +346,7 @@ impl ParamConst {
     }
 
     #[instrument(level = "debug")]
-    pub fn find_ty_from_env<'tcx>(self, env: ParamEnv<'tcx>) -> Ty<'tcx> {
+    pub fn find_const_ty_from_env<'tcx>(self, env: ParamEnv<'tcx>) -> Ty<'tcx> {
         let mut candidates = env.caller_bounds().iter().filter_map(|clause| {
             // `ConstArgHasType` are never desugared to be higher ranked.
             match clause.kind().skip_binder() {
@@ -362,8 +362,19 @@ impl ParamConst {
             }
         });
 
-        let ty = candidates.next().unwrap();
-        assert!(candidates.next().is_none());
+        // N.B. it may be tempting to fix ICEs by making this function return
+        // `Option<Ty<'tcx>>` instead of `Ty<'tcx>`; however, this is generally
+        // considered to be a bandaid solution, since it hides more important
+        // underlying issues with how we construct generics and predicates of
+        // items. It's advised to fix the underlying issue rather than trying
+        // to modify this function.
+        let ty = candidates.next().unwrap_or_else(|| {
+            bug!("cannot find `{self:?}` in param-env: {env:#?}");
+        });
+        assert!(
+            candidates.next().is_none(),
+            "did not expect duplicate `ConstParamHasTy` for `{self:?}` in param-env: {env:#?}"
+        );
         ty
     }
 }
@@ -389,7 +400,7 @@ impl<'tcx> rustc_type_ir::inherent::BoundVarLike<TyCtxt<'tcx>> for BoundTy {
 #[derive(HashStable)]
 pub enum BoundTyKind {
     Anon,
-    Param(DefId, Symbol),
+    Param(DefId),
 }
 
 impl From<BoundVar> for BoundTy {
@@ -474,7 +485,15 @@ impl<'tcx> Ty<'tcx> {
         index: ty::DebruijnIndex,
         bound_ty: ty::BoundTy,
     ) -> Ty<'tcx> {
-        Ty::new(tcx, Bound(index, bound_ty))
+        // Use a pre-interned one when possible.
+        if let ty::BoundTy { var, kind: ty::BoundTyKind::Anon } = bound_ty
+            && let Some(inner) = tcx.types.anon_bound_tys.get(index.as_usize())
+            && let Some(ty) = inner.get(var.as_usize()).copied()
+        {
+            ty
+        } else {
+            Ty::new(tcx, Bound(index, bound_ty))
+        }
     }
 
     #[inline]
@@ -1311,11 +1330,6 @@ impl<'tcx> Ty<'tcx> {
     }
 
     #[inline]
-    pub fn is_dyn_star(self) -> bool {
-        matches!(self.kind(), Dynamic(_, _, ty::DynStar))
-    }
-
-    #[inline]
     pub fn is_enum(self) -> bool {
         matches!(self.kind(), Adt(adt_def, _) if adt_def.is_enum())
     }
@@ -1618,8 +1632,6 @@ impl<'tcx> Ty<'tcx> {
             | ty::Error(_)
             // Extern types have metadata = ().
             | ty::Foreign(..)
-            // `dyn*` has metadata = ().
-            | ty::Dynamic(_, _, ty::DynStar)
             // If returned by `struct_tail_raw` this is a unit struct
             // without any fields, or not a struct, and therefore is Sized.
             | ty::Adt(..)
@@ -1672,7 +1684,7 @@ impl<'tcx> Ty<'tcx> {
     /// This is particularly useful for getting the type of the result of
     /// [`UnOp::PtrMetadata`](crate::mir::UnOp::PtrMetadata).
     ///
-    /// Panics if `self` is not dereferencable.
+    /// Panics if `self` is not dereferenceable.
     #[track_caller]
     pub fn pointee_metadata_ty_or_projection(self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
         let Some(pointee_ty) = self.builtin_deref(true) else {
@@ -1809,8 +1821,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Closure(..)
             | ty::CoroutineClosure(..)
             | ty::Never
-            | ty::Error(_)
-            | ty::Dynamic(_, _, ty::DynStar) => true,
+            | ty::Error(_) => true,
 
             ty::Str | ty::Slice(_) | ty::Dynamic(_, _, ty::Dyn) => match sizedness {
                 SizedTraitKind::Sized => false,
@@ -1832,7 +1843,7 @@ impl<'tcx> Ty<'tcx> {
             ty::Infer(ty::TyVar(_)) => false,
 
             ty::Infer(ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_)) => {
-                bug!("`is_trivially_sized` applied to unexpected type: {:?}", self)
+                bug!("`has_trivial_sizedness` applied to unexpected type: {:?}", self)
             }
         }
     }
@@ -1893,6 +1904,52 @@ impl<'tcx> Ty<'tcx> {
             ty::Param(..) | ty::Placeholder(..) | ty::Bound(..) | ty::Infer(..) | ty::Error(..) => {
                 false
             }
+        }
+    }
+
+    pub fn is_trivially_wf(self, tcx: TyCtxt<'tcx>) -> bool {
+        match *self.kind() {
+            ty::Bool
+            | ty::Char
+            | ty::Int(_)
+            | ty::Uint(_)
+            | ty::Float(_)
+            | ty::Str
+            | ty::Never
+            | ty::Param(_)
+            | ty::Placeholder(_)
+            | ty::Bound(..) => true,
+
+            ty::Slice(ty) => {
+                ty.is_trivially_wf(tcx) && ty.has_trivial_sizedness(tcx, SizedTraitKind::Sized)
+            }
+            ty::RawPtr(ty, _) => ty.is_trivially_wf(tcx),
+
+            ty::FnPtr(sig_tys, _) => {
+                sig_tys.skip_binder().inputs_and_output.iter().all(|ty| ty.is_trivially_wf(tcx))
+            }
+            ty::Ref(_, ty, _) => ty.is_global() && ty.is_trivially_wf(tcx),
+
+            ty::Infer(infer) => match infer {
+                ty::TyVar(_) => false,
+                ty::IntVar(_) | ty::FloatVar(_) => true,
+                ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_) => true,
+            },
+
+            ty::Adt(_, _)
+            | ty::Tuple(_)
+            | ty::Array(..)
+            | ty::Foreign(_)
+            | ty::Pat(_, _)
+            | ty::FnDef(..)
+            | ty::UnsafeBinder(..)
+            | ty::Dynamic(..)
+            | ty::Closure(..)
+            | ty::CoroutineClosure(..)
+            | ty::Coroutine(..)
+            | ty::CoroutineWitness(..)
+            | ty::Alias(..)
+            | ty::Error(_) => false,
         }
     }
 
@@ -1983,7 +2040,7 @@ mod size_asserts {
 
     use super::*;
     // tidy-alphabetical-start
-    static_assert_size!(ty::RegionKind<'_>, 24);
-    static_assert_size!(ty::TyKind<'_>, 24);
+    static_assert_size!(TyKind<'_>, 24);
+    static_assert_size!(ty::WithCachedTypeInfo<TyKind<'_>>, 48);
     // tidy-alphabetical-end
 }

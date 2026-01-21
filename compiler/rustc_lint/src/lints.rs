@@ -1,4 +1,3 @@
-#![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::untranslatable_diagnostic)]
 use std::num::NonZero;
 
@@ -1090,6 +1089,7 @@ pub(crate) struct DeprecatedLintNameFromCommandLine<'a> {
 #[diag(lint_renamed_lint)]
 pub(crate) struct RenamedLint<'a> {
     pub name: &'a str,
+    pub replace: &'a str,
     #[subdiagnostic]
     pub suggestion: RenamedLintSuggestion<'a>,
 }
@@ -1110,6 +1110,7 @@ pub(crate) enum RenamedLintSuggestion<'a> {
 #[diag(lint_renamed_lint)]
 pub(crate) struct RenamedLintFromCommandLine<'a> {
     pub name: &'a str,
+    pub replace: &'a str,
     #[subdiagnostic]
     pub suggestion: RenamedLintSuggestion<'a>,
     #[subdiagnostic]
@@ -1354,6 +1355,8 @@ pub(crate) struct NonUpperCaseGlobal<'a> {
     pub name: &'a str,
     #[subdiagnostic]
     pub sub: NonUpperCaseGlobalSub,
+    #[subdiagnostic]
+    pub usages: Vec<NonUpperCaseGlobalSubTool>,
 }
 
 #[derive(Subdiagnostic)]
@@ -1363,12 +1366,27 @@ pub(crate) enum NonUpperCaseGlobalSub {
         #[primary_span]
         span: Span,
     },
-    #[suggestion(lint_suggestion, code = "{replace}", applicability = "maybe-incorrect")]
+    #[suggestion(lint_suggestion, code = "{replace}")]
     Suggestion {
         #[primary_span]
         span: Span,
+        #[applicability]
+        applicability: Applicability,
         replace: String,
     },
+}
+
+#[derive(Subdiagnostic)]
+#[suggestion(
+    lint_suggestion,
+    code = "{replace}",
+    applicability = "machine-applicable",
+    style = "tool-only"
+)]
+pub(crate) struct NonUpperCaseGlobalSubTool {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) replace: String,
 }
 
 // noop_method_call.rs
@@ -1727,6 +1745,20 @@ pub(crate) struct OverflowingUInt<'a> {
 pub(crate) struct OverflowingLiteral<'a> {
     pub ty: &'a str,
     pub lit: String,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_surrogate_char_cast)]
+#[note]
+pub(crate) struct SurrogateCharCast {
+    pub literal: u128,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_too_large_char_cast)]
+#[note]
+pub(crate) struct TooLargeCharCast {
+    pub literal: u128,
 }
 
 #[derive(LintDiagnostic)]
@@ -3064,6 +3096,14 @@ pub(crate) struct HiddenGlobReexports {
 }
 
 #[derive(LintDiagnostic)]
+#[diag(lint_reexport_private_dependency)]
+pub(crate) struct ReexportPrivateDependency {
+    pub name: String,
+    pub kind: String,
+    pub krate: Symbol,
+}
+
+#[derive(LintDiagnostic)]
 #[diag(lint_unnecessary_qualification)]
 pub(crate) struct UnusedQualifications {
     #[suggestion(style = "verbose", code = "", applicability = "machine-applicable")]
@@ -3319,11 +3359,10 @@ impl Subdiagnostic for MismatchedLifetimeSyntaxesSuggestion {
 
             Explicit { lifetime_name, suggestions, tool_only } => {
                 diag.arg("lifetime_name", lifetime_name);
-
                 let msg = diag.eagerly_translate(
                     fluent::lint_mismatched_lifetime_syntaxes_suggestion_explicit,
                 );
-
+                diag.remove_arg("lifetime_name");
                 diag.multipart_suggestion_with_style(
                     msg,
                     suggestions,

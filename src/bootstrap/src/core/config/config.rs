@@ -45,12 +45,13 @@ use crate::core::config::{
     DebuginfoLevel, DryRun, GccCiMode, LlvmLibunwind, Merge, ReplaceOpt, RustcLto, SplitDebuginfo,
     StringOrBool, set, threads_from_config,
 };
-use crate::core::download::is_download_ci_available;
+use crate::core::download::{
+    DownloadContext, download_beta_toolchain, is_download_ci_available, maybe_download_rustfmt,
+};
 use crate::utils::channel;
-use crate::utils::exec::command;
-use crate::utils::execution_context::ExecutionContext;
+use crate::utils::exec::{ExecutionContext, command};
 use crate::utils::helpers::{exe, get_host_target};
-use crate::{GitInfo, OnceLock, TargetSelection, check_ci_llvm, helpers, t};
+use crate::{CodegenBackendKind, GitInfo, OnceLock, TargetSelection, check_ci_llvm, helpers, t};
 
 /// Each path in this list is considered "allowed" in the `download-rustc="if-unchanged"` logic.
 /// This means they can be modified and changes to these paths should never trigger a compiler build
@@ -111,6 +112,7 @@ pub struct Config {
     pub include_default_paths: bool,
     pub rustc_error_format: Option<String>,
     pub json_output: bool,
+    pub compile_time_deps: bool,
     pub test_compare_mode: bool,
     pub color: Color,
     pub patch_binaries_for_nix: Option<bool>,
@@ -206,7 +208,7 @@ pub struct Config {
     pub rustc_default_linker: Option<String>,
     pub rust_optimize_tests: bool,
     pub rust_dist_src: bool,
-    pub rust_codegen_backends: Vec<String>,
+    pub rust_codegen_backends: Vec<CodegenBackendKind>,
     pub rust_verify_llvm_ir: bool,
     pub rust_thin_lto_import_instr_limit: Option<u32>,
     pub rust_randomize_layout: bool,
@@ -296,9 +298,18 @@ pub struct Config {
     /// Command for visual diff display, e.g. `diff-tool --color=always`.
     pub compiletest_diff_tool: Option<String>,
 
+    /// Whether to allow running both `compiletest` self-tests and `compiletest`-managed test suites
+    /// against the stage 0 (rustc, std).
+    ///
+    /// This is only intended to be used when the stage 0 compiler is actually built from in-tree
+    /// sources.
+    pub compiletest_allow_stage0: bool,
+
     /// Whether to use the precompiled stage0 libtest with compiletest.
     pub compiletest_use_stage0_libtest: bool,
 
+    /// Default value for `--extra-checks`
+    pub tidy_extra_checks: Option<String>,
     pub is_running_on_ci: bool,
 
     /// Cache for determining path modifications
@@ -339,7 +350,7 @@ impl Config {
             channel: "dev".to_string(),
             codegen_tests: true,
             rust_dist_src: true,
-            rust_codegen_backends: vec!["llvm".to_owned()],
+            rust_codegen_backends: vec![CodegenBackendKind::Llvm],
             deny_warnings: true,
             bindir: "bin".into(),
             dist_include_mingw_linker: true,
@@ -421,6 +432,7 @@ impl Config {
             jobs: flags_jobs,
             warnings: flags_warnings,
             json_output: flags_json_output,
+            compile_time_deps: flags_compile_time_deps,
             color: flags_color,
             bypass_bootstrap_lock: flags_bypass_bootstrap_lock,
             rust_profile_generate: flags_rust_profile_generate,
@@ -468,6 +480,7 @@ impl Config {
         config.include_default_paths = flags_include_default_paths;
         config.rustc_error_format = flags_rustc_error_format;
         config.json_output = flags_json_output;
+        config.compile_time_deps = flags_compile_time_deps;
         config.on_fail = flags_on_fail;
         config.cmd = flags_cmd;
         config.incremental = flags_incremental;
@@ -694,7 +707,7 @@ impl Config {
         config.change_id = toml.change_id.inner;
 
         let Build {
-            mut description,
+            description,
             build,
             host,
             target,
@@ -744,8 +757,10 @@ impl Config {
             optimized_compiler_builtins,
             jobs,
             compiletest_diff_tool,
+            compiletest_allow_stage0,
             compiletest_use_stage0_libtest,
-            mut ccache,
+            tidy_extra_checks,
+            ccache,
             exclude,
         } = toml.build.unwrap_or_default();
 
@@ -791,13 +806,19 @@ impl Config {
             );
         }
 
+        config.patch_binaries_for_nix = patch_binaries_for_nix;
+        config.bootstrap_cache_path = bootstrap_cache_path;
+        config.llvm_assertions =
+            toml.llvm.as_ref().is_some_and(|llvm| llvm.assertions.unwrap_or(false));
+
         config.initial_rustc = if let Some(rustc) = rustc {
             if !flags_skip_stage0_validation {
                 config.check_stage0_version(&rustc, "rustc");
             }
             rustc
         } else {
-            config.download_beta_toolchain();
+            let dwn_ctx = DownloadContext::from(&config);
+            download_beta_toolchain(dwn_ctx);
             config
                 .out
                 .join(config.host_target)
@@ -809,7 +830,7 @@ impl Config {
         config.initial_sysroot = t!(PathBuf::from_str(
             command(&config.initial_rustc)
                 .args(["--print", "sysroot"])
-                .run_always()
+                .run_in_dry_run()
                 .run_capture_stdout(&config)
                 .stdout()
                 .trim()
@@ -823,7 +844,8 @@ impl Config {
             }
             cargo
         } else {
-            config.download_beta_toolchain();
+            let dwn_ctx = DownloadContext::from(&config);
+            download_beta_toolchain(dwn_ctx);
             config.initial_sysroot.join("bin").join(exe("cargo", config.host_target))
         };
 
@@ -859,7 +881,6 @@ impl Config {
         config.reuse = reuse.map(PathBuf::from);
         config.submodules = submodules;
         config.android_ndk = android_ndk;
-        config.bootstrap_cache_path = bootstrap_cache_path;
         set(&mut config.low_priority, low_priority);
         set(&mut config.compiler_docs, compiler_docs);
         set(&mut config.library_docs_private_items, library_docs_private_items);
@@ -878,7 +899,6 @@ impl Config {
         set(&mut config.local_rebuild, local_rebuild);
         set(&mut config.print_step_timings, print_step_timings);
         set(&mut config.print_step_rusage, print_step_rusage);
-        config.patch_binaries_for_nix = patch_binaries_for_nix;
 
         config.verbose = cmp::max(config.verbose, flags_verbose as usize);
 
@@ -886,9 +906,6 @@ impl Config {
         config.verbose_tests = config.is_verbose();
 
         config.apply_install_config(toml.install);
-
-        config.llvm_assertions =
-            toml.llvm.as_ref().is_some_and(|llvm| llvm.assertions.unwrap_or(false));
 
         let file_content = t!(fs::read_to_string(config.src.join("src/ci/channel")));
         let ci_channel = file_content.trim_end();
@@ -938,7 +955,8 @@ impl Config {
         config.rust_profile_use = flags_rust_profile_use;
         config.rust_profile_generate = flags_rust_profile_generate;
 
-        config.apply_rust_config(toml.rust, flags_warnings, &mut description);
+        config.apply_target_config(toml.target);
+        config.apply_rust_config(toml.rust, flags_warnings);
 
         config.reproducible_artifacts = flags_reproducible_artifact;
         config.description = description;
@@ -959,11 +977,9 @@ impl Config {
             config.channel = channel;
         }
 
-        config.apply_llvm_config(toml.llvm, &mut ccache);
+        config.apply_llvm_config(toml.llvm);
 
         config.apply_gcc_config(toml.gcc);
-
-        config.apply_target_config(toml.target);
 
         match ccache {
             Some(StringOrBool::String(ref s)) => config.ccache = Some(s.to_string()),
@@ -991,8 +1007,12 @@ impl Config {
 
         config.apply_dist_config(toml.dist);
 
-        config.initial_rustfmt =
-            if let Some(r) = rustfmt { Some(r) } else { config.maybe_download_rustfmt() };
+        config.initial_rustfmt = if let Some(r) = rustfmt {
+            Some(r)
+        } else {
+            let dwn_ctx = DownloadContext::from(&config);
+            maybe_download_rustfmt(dwn_ctx)
+        };
 
         if matches!(config.lld_mode, LldMode::SelfContained)
             && !config.lld_enabled
@@ -1004,15 +1024,18 @@ impl Config {
         }
 
         if config.lld_enabled && config.is_system_llvm(config.host_target) {
-            eprintln!(
-                "Warning: LLD is enabled when using external llvm-config. LLD will not be built and copied to the sysroot."
-            );
+            panic!("Cannot enable LLD with `rust.lld = true` when using external llvm-config.");
         }
 
         config.optimized_compiler_builtins =
             optimized_compiler_builtins.unwrap_or(config.channel != "dev");
+
         config.compiletest_diff_tool = compiletest_diff_tool;
+
+        config.compiletest_allow_stage0 = compiletest_allow_stage0.unwrap_or(false);
         config.compiletest_use_stage0_libtest = compiletest_use_stage0_libtest.unwrap_or(true);
+
+        config.tidy_extra_checks = tidy_extra_checks;
 
         let download_rustc = config.download_rustc_commit.is_some();
         config.explicit_stage_from_cli = flags_stage.is_some();
@@ -1023,9 +1046,9 @@ impl Config {
             || install_stage.is_some()
             || check_stage.is_some()
             || bench_stage.is_some();
-        // See https://github.com/rust-lang/compiler-team/issues/326
+
         config.stage = match config.cmd {
-            Subcommand::Check { .. } => flags_stage.or(check_stage).unwrap_or(0),
+            Subcommand::Check { .. } => flags_stage.or(check_stage).unwrap_or(1),
             Subcommand::Clippy { .. } | Subcommand::Fix => flags_stage.or(check_stage).unwrap_or(1),
             // `download-rustc` only has a speed-up for stage2 builds. Default to stage2 unless explicitly overridden.
             Subcommand::Doc { .. } => {
@@ -1047,9 +1070,28 @@ impl Config {
             | Subcommand::Run { .. }
             | Subcommand::Setup { .. }
             | Subcommand::Format { .. }
-            | Subcommand::Suggest { .. }
             | Subcommand::Vendor { .. } => flags_stage.unwrap_or(0),
         };
+
+        // Now check that the selected stage makes sense, and if not, print a warning and end
+        match (config.stage, &config.cmd) {
+            (0, Subcommand::Build) => {
+                eprintln!("WARNING: cannot build anything on stage 0. Use at least stage 1.");
+                exit!(1);
+            }
+            (0, Subcommand::Check { .. }) => {
+                eprintln!("WARNING: cannot check anything on stage 0. Use at least stage 1.");
+                exit!(1);
+            }
+            _ => {}
+        }
+
+        if config.compile_time_deps && !matches!(config.cmd, Subcommand::Check { .. }) {
+            eprintln!(
+                "WARNING: Can't use --compile-time-deps with any subcommand other than check."
+            );
+            exit!(1);
+        }
 
         // CI should always run stage 2 builds, unless it specifically states otherwise
         #[cfg(not(test))]
@@ -1075,7 +1117,6 @@ impl Config {
                 | Subcommand::Run { .. }
                 | Subcommand::Setup { .. }
                 | Subcommand::Format { .. }
-                | Subcommand::Suggest { .. }
                 | Subcommand::Vendor { .. }
                 | Subcommand::Perf { .. } => {}
             }
@@ -1385,11 +1426,11 @@ impl Config {
         // all the git commands below are actually executed, because some follow-up code
         // in bootstrap might depend on the submodules being checked out. Furthermore, not all
         // the command executions below work with an empty output (produced during dry run).
-        // Therefore, all commands below are marked with `run_always()`, so that they also run in
+        // Therefore, all commands below are marked with `run_in_dry_run()`, so that they also run in
         // dry run mode.
         let submodule_git = || {
             let mut cmd = helpers::git(Some(&absolute_path));
-            cmd.run_always();
+            cmd.run_in_dry_run();
             cmd
         };
 
@@ -1399,7 +1440,7 @@ impl Config {
         let checked_out_hash = checked_out_hash.trim_end();
         // Determine commit that the submodule *should* have.
         let recorded = helpers::git(Some(&self.src))
-            .run_always()
+            .run_in_dry_run()
             .args(["ls-tree", "HEAD"])
             .arg(relative_path)
             .run_capture_stdout(self)
@@ -1419,7 +1460,7 @@ impl Config {
 
         helpers::git(Some(&self.src))
             .allow_failure()
-            .run_always()
+            .run_in_dry_run()
             .args(["submodule", "-q", "sync"])
             .arg(relative_path)
             .run(self);
@@ -1430,12 +1471,12 @@ impl Config {
             // even though that has no relation to the upstream for the submodule.
             let current_branch = helpers::git(Some(&self.src))
                 .allow_failure()
-                .run_always()
+                .run_in_dry_run()
                 .args(["symbolic-ref", "--short", "HEAD"])
                 .run_capture(self);
 
             let mut git = helpers::git(Some(&self.src)).allow_failure();
-            git.run_always();
+            git.run_in_dry_run();
             if current_branch.is_success() {
                 // If there is a tag named after the current branch, git will try to disambiguate by prepending `heads/` to the branch name.
                 // This syntax isn't accepted by `branch.{branch}`. Strip it.
@@ -1706,7 +1747,7 @@ impl Config {
             .unwrap_or(self.profiler)
     }
 
-    pub fn codegen_backends(&self, target: TargetSelection) -> &[String] {
+    pub fn codegen_backends(&self, target: TargetSelection) -> &[CodegenBackendKind] {
         self.target_config
             .get(&target)
             .and_then(|cfg| cfg.codegen_backends.as_deref())
@@ -1717,7 +1758,7 @@ impl Config {
         self.target_config.get(&target).and_then(|cfg| cfg.jemalloc).unwrap_or(self.jemalloc)
     }
 
-    pub fn default_codegen_backend(&self, target: TargetSelection) -> Option<String> {
+    pub fn default_codegen_backend(&self, target: TargetSelection) -> Option<CodegenBackendKind> {
         self.codegen_backends(target).first().cloned()
     }
 
@@ -1733,7 +1774,7 @@ impl Config {
     }
 
     pub fn llvm_enabled(&self, target: TargetSelection) -> bool {
-        self.codegen_backends(target).contains(&"llvm".to_owned())
+        self.codegen_backends(target).contains(&CodegenBackendKind::Llvm)
     }
 
     pub fn llvm_libunwind(&self, target: TargetSelection) -> LlvmLibunwind {

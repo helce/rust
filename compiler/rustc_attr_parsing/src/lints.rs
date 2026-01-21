@@ -1,6 +1,6 @@
-use rustc_attr_data_structures::lints::{AttributeLint, AttributeLintKind};
 use rustc_errors::{DiagArgValue, LintEmitter};
 use rustc_hir::HirId;
+use rustc_hir::lints::{AttributeLint, AttributeLintKind};
 
 use crate::session_diagnostics;
 
@@ -28,5 +28,11 @@ pub fn emit_attribute_lint<L: LintEmitter>(lint: &AttributeLint<HirId>, lint_emi
                 },
             );
         }
+        AttributeLintKind::EmptyAttribute { first_span } => lint_emitter.emit_node_span_lint(
+            rustc_session::lint::builtin::UNUSED_ATTRIBUTES,
+            *id,
+            *first_span,
+            session_diagnostics::EmptyAttributeList { attr_span: *first_span },
+        ),
     }
 }

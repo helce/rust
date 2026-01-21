@@ -10,8 +10,8 @@ use rustc_type_ir::inherent::*;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
 use rustc_type_ir::solve::SizedTraitKind;
 use rustc_type_ir::{
-    self as ty, Interner, TypeFoldable, TypeSuperVisitable, TypeVisitable, TypeVisitableExt as _,
-    TypeVisitor, TypingMode, Upcast as _, elaborate,
+    self as ty, Interner, TypeFlags, TypeFoldable, TypeSuperVisitable, TypeVisitable,
+    TypeVisitableExt as _, TypeVisitor, TypingMode, Upcast as _, elaborate,
 };
 use tracing::{debug, instrument};
 
@@ -132,6 +132,7 @@ where
         })
         .enter(|ecx| {
             Self::match_assumption(ecx, goal, assumption, |ecx| {
+                ecx.try_evaluate_added_goals()?;
                 source.set(ecx.characterize_param_env_assumption(goal.param_env, assumption)?);
                 ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
             })
@@ -383,10 +384,10 @@ where
 
         let mut candidates = vec![];
 
-        if let TypingMode::Coherence = self.typing_mode() {
-            if let Ok(candidate) = self.consider_coherence_unknowable_candidate(goal) {
-                return vec![candidate];
-            }
+        if let TypingMode::Coherence = self.typing_mode()
+            && let Ok(candidate) = self.consider_coherence_unknowable_candidate(goal)
+        {
+            return vec![candidate];
         }
 
         self.assemble_alias_bound_candidates(goal, &mut candidates);
@@ -1069,8 +1070,10 @@ where
             } else {
                 ControlFlow::Continue(())
             }
-        } else {
+        } else if ty.has_type_flags(TypeFlags::HAS_PLACEHOLDER | TypeFlags::HAS_RE_INFER) {
             ty.super_visit_with(self)
+        } else {
+            ControlFlow::Continue(())
         }
     }
 
@@ -1086,8 +1089,10 @@ where
             } else {
                 ControlFlow::Continue(())
             }
-        } else {
+        } else if ct.has_type_flags(TypeFlags::HAS_PLACEHOLDER | TypeFlags::HAS_RE_INFER) {
             ct.super_visit_with(self)
+        } else {
+            ControlFlow::Continue(())
         }
     }
 

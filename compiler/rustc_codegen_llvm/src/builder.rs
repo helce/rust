@@ -3,6 +3,7 @@ use std::ops::Deref;
 use std::{iter, ptr};
 
 pub(crate) mod autodiff;
+pub(crate) mod gpu_offload;
 
 use libc::{c_char, c_uint, size_t};
 use rustc_abi as abi;
@@ -14,6 +15,7 @@ use rustc_codegen_ssa::mir::place::PlaceRef;
 use rustc_codegen_ssa::traits::*;
 use rustc_data_structures::small_c_str::SmallCStr;
 use rustc_hir::def_id::DefId;
+use rustc_middle::bug;
 use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 use rustc_middle::ty::layout::{
     FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTypingEnv, LayoutError, LayoutOfHelpers,
@@ -23,7 +25,7 @@ use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
 use rustc_sanitizers::{cfi, kcfi};
 use rustc_session::config::OptLevel;
 use rustc_span::Span;
-use rustc_target::callconv::FnAbi;
+use rustc_target::callconv::{FnAbi, PassMode};
 use rustc_target::spec::{HasTargetSpec, SanitizerSet, Target};
 use smallvec::SmallVec;
 use tracing::{debug, instrument};
@@ -116,6 +118,74 @@ impl<'a, 'll, CX: Borrow<SCx<'ll>>> GenericBuilder<'a, 'll, CX> {
             llvm::LLVMPositionBuilderAtEnd(bx.llbuilder, llbb);
         }
         bx
+    }
+
+    // The generic builder has less functionality and thus (unlike the other alloca) we can not
+    // easily jump to the beginning of the function to place our allocas there. We trust the user
+    // to manually do that. FIXME(offload): improve the genericCx and add more llvm wrappers to
+    // handle this.
+    pub(crate) fn direct_alloca(&mut self, ty: &'ll Type, align: Align, name: &str) -> &'ll Value {
+        let val = unsafe {
+            let alloca = llvm::LLVMBuildAlloca(self.llbuilder, ty, UNNAMED);
+            llvm::LLVMSetAlignment(alloca, align.bytes() as c_uint);
+            // Cast to default addrspace if necessary
+            llvm::LLVMBuildPointerCast(self.llbuilder, alloca, self.cx.type_ptr(), UNNAMED)
+        };
+        if name != "" {
+            let name = std::ffi::CString::new(name).unwrap();
+            llvm::set_value_name(val, &name.as_bytes());
+        }
+        val
+    }
+
+    pub(crate) fn inbounds_gep(
+        &mut self,
+        ty: &'ll Type,
+        ptr: &'ll Value,
+        indices: &[&'ll Value],
+    ) -> &'ll Value {
+        unsafe {
+            llvm::LLVMBuildGEPWithNoWrapFlags(
+                self.llbuilder,
+                ty,
+                ptr,
+                indices.as_ptr(),
+                indices.len() as c_uint,
+                UNNAMED,
+                GEPNoWrapFlags::InBounds,
+            )
+        }
+    }
+
+    pub(crate) fn store(&mut self, val: &'ll Value, ptr: &'ll Value, align: Align) -> &'ll Value {
+        debug!("Store {:?} -> {:?}", val, ptr);
+        assert_eq!(self.cx.type_kind(self.cx.val_ty(ptr)), TypeKind::Pointer);
+        unsafe {
+            let store = llvm::LLVMBuildStore(self.llbuilder, val, ptr);
+            llvm::LLVMSetAlignment(store, align.bytes() as c_uint);
+            store
+        }
+    }
+
+    pub(crate) fn load(&mut self, ty: &'ll Type, ptr: &'ll Value, align: Align) -> &'ll Value {
+        unsafe {
+            let load = llvm::LLVMBuildLoad2(self.llbuilder, ty, ptr, UNNAMED);
+            llvm::LLVMSetAlignment(load, align.bytes() as c_uint);
+            load
+        }
+    }
+
+    fn memset(&mut self, ptr: &'ll Value, fill_byte: &'ll Value, size: &'ll Value, align: Align) {
+        unsafe {
+            llvm::LLVMRustBuildMemSet(
+                self.llbuilder,
+                ptr,
+                align.bytes() as c_uint,
+                fill_byte,
+                size,
+                false,
+            );
+        }
     }
 }
 
@@ -302,10 +372,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
             return;
         }
 
-        let id_str = "branch_weights";
-        let id = unsafe {
-            llvm::LLVMMDStringInContext2(self.cx.llcx, id_str.as_ptr().cast(), id_str.len())
-        };
+        let id = self.cx.create_metadata(b"branch_weights");
 
         // For switch instructions with 2 targets, the `llvm.expect` intrinsic is used.
         // This function handles switch instructions with more than 2 targets and it needs to
@@ -538,16 +605,6 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
     }
 
-    fn dynamic_alloca(&mut self, size: &'ll Value, align: Align) -> &'ll Value {
-        unsafe {
-            let alloca =
-                llvm::LLVMBuildArrayAlloca(self.llbuilder, self.cx().type_i8(), size, UNNAMED);
-            llvm::LLVMSetAlignment(alloca, align.bytes() as c_uint);
-            // Cast to default addrspace if necessary
-            llvm::LLVMBuildPointerCast(self.llbuilder, alloca, self.cx().type_ptr(), UNNAMED)
-        }
-    }
-
     fn load(&mut self, ty: &'ll Type, ptr: &'ll Value, align: Align) -> &'ll Value {
         unsafe {
             let load = llvm::LLVMBuildLoad2(self.llbuilder, ty, ptr, UNNAMED);
@@ -631,10 +688,10 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                         bx.nonnull_metadata(load);
                     }
 
-                    if let Some(pointee) = layout.pointee_info_at(bx, offset) {
-                        if let Some(_) = pointee.safe {
-                            bx.align_metadata(load, pointee.align);
-                        }
+                    if let Some(pointee) = layout.pointee_info_at(bx, offset)
+                        && let Some(_) = pointee.safe
+                    {
+                        bx.align_metadata(load, pointee.align);
                     }
                 }
                 abi::Primitive::Float(_) => {}
@@ -647,17 +704,16 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         } else if place.layout.is_llvm_immediate() {
             let mut const_llval = None;
             let llty = place.layout.llvm_type(self);
-            unsafe {
-                if let Some(global) = llvm::LLVMIsAGlobalVariable(place.val.llval) {
-                    if llvm::LLVMIsGlobalConstant(global) == llvm::True {
-                        if let Some(init) = llvm::LLVMGetInitializer(global) {
-                            if self.val_ty(init) == llty {
-                                const_llval = Some(init);
-                            }
+            if let Some(global) = llvm::LLVMIsAGlobalVariable(place.val.llval) {
+                if llvm::LLVMIsGlobalConstant(global) == llvm::True {
+                    if let Some(init) = llvm::LLVMGetInitializer(global) {
+                        if self.val_ty(init) == llty {
+                            const_llval = Some(init);
                         }
                     }
                 }
             }
+
             let llval = const_llval.unwrap_or_else(|| {
                 let load = self.load(llty, place.val.llval, place.val.align);
                 if let abi::BackendRepr::Scalar(scalar) = place.layout.backend_repr {
@@ -1166,11 +1222,10 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         (self.extract_value(landing_pad, 0), self.extract_value(landing_pad, 1))
     }
 
-    fn filter_landing_pad(&mut self, pers_fn: &'ll Value) -> (&'ll Value, &'ll Value) {
+    fn filter_landing_pad(&mut self, pers_fn: &'ll Value) {
         let ty = self.type_struct(&[self.type_ptr(), self.type_i32()], false);
         let landing_pad = self.landing_pad(ty, pers_fn, 1);
         self.add_clause(landing_pad, self.const_array(self.type_ptr(), &[]));
-        (self.extract_value(landing_pad, 0), self.extract_value(landing_pad, 1))
     }
 
     fn resume(&mut self, exn0: &'ll Value, exn1: &'ll Value) {
@@ -1375,6 +1430,28 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
             fn_abi.apply_attrs_callsite(self, call);
         }
         call
+    }
+
+    fn tail_call(
+        &mut self,
+        llty: Self::Type,
+        fn_attrs: Option<&CodegenFnAttrs>,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        llfn: Self::Value,
+        args: &[Self::Value],
+        funclet: Option<&Self::Funclet>,
+        instance: Option<Instance<'tcx>>,
+    ) {
+        let call = self.call(llty, fn_attrs, Some(fn_abi), llfn, args, funclet, instance);
+        llvm::LLVMRustSetTailCallKind(call, llvm::TailCallKind::MustTail);
+
+        match &fn_abi.ret.mode {
+            PassMode::Ignore | PassMode::Indirect { .. } => self.ret_void(),
+            PassMode::Direct(_) | PassMode::Pair { .. } => self.ret(call),
+            mode @ PassMode::Cast { .. } => {
+                bug!("Encountered `PassMode::{mode:?}` during codegen")
+            }
+        }
     }
 
     fn zext(&mut self, val: &'ll Value, dest_ty: &'ll Type) -> &'ll Value {
@@ -1732,7 +1809,7 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
             } else {
                 cfi::typeid_for_fnabi(self.tcx, fn_abi, options)
             };
-            let typeid_metadata = self.cx.typeid_metadata(typeid).unwrap();
+            let typeid_metadata = self.cx.create_metadata(typeid.as_bytes());
             let dbg_loc = self.get_dbg_loc();
 
             // Test whether the function pointer is associated with the type identifier using the

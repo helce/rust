@@ -124,7 +124,7 @@ error: swapping with a temporary value is inefficient
   --> tests/ui/swap_with_temporary.rs:118:5
    |
 LL |     swap(&mut vec![], &mut v1.lock().unwrap());
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use assignment instead: `*(*(*v1.lock().unwrap())) = vec![]`
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use assignment instead: `***v1.lock().unwrap() = vec![]`
    |
 note: this expression returns a temporary value
   --> tests/ui/swap_with_temporary.rs:118:15

@@ -152,8 +152,14 @@ pub(crate) fn try_inline(
     };
 
     cx.inlined.insert(did.into());
-    let mut item =
-        crate::clean::generate_item_with_correct_attrs(cx, kind, did, name, import_def_id, None);
+    let mut item = crate::clean::generate_item_with_correct_attrs(
+        cx,
+        kind,
+        did,
+        name,
+        import_def_id.as_slice(),
+        None,
+    );
     // The visibility needs to reflect the one from the reexport and not from the "source" DefId.
     item.inner.inline_stmt_id = import_def_id;
     ret.push(item);
@@ -211,7 +217,7 @@ pub(crate) fn try_inline_glob(
 }
 
 pub(crate) fn load_attrs<'hir>(cx: &DocContext<'hir>, did: DefId) -> &'hir [hir::Attribute] {
-    cx.tcx.get_attrs_unchecked(did)
+    cx.tcx.get_all_attrs(did)
 }
 
 pub(crate) fn item_relative_path(tcx: TyCtxt<'_>, def_id: DefId) -> Vec<Symbol> {
@@ -293,7 +299,7 @@ pub(super) fn build_function(cx: &mut DocContext<'_>, def_id: DefId) -> Box<clea
     let sig = cx.tcx.fn_sig(def_id).instantiate_identity();
     // The generics need to be cleaned before the signature.
     let mut generics = clean_ty_generics(cx, def_id);
-    let bound_vars = clean_bound_vars(sig.bound_vars());
+    let bound_vars = clean_bound_vars(sig.bound_vars(), cx);
 
     // At the time of writing early & late-bound params are stored separately in rustc,
     // namely in `generics.params` and `bound_vars` respectively.
@@ -493,7 +499,7 @@ pub(crate) fn build_impl(
             impl_
                 .items
                 .iter()
-                .map(|item| tcx.hir_impl_item(item.id))
+                .map(|&item| tcx.hir_impl_item(item))
                 .filter(|item| {
                     // Filter out impl items whose corresponding trait item has `doc(hidden)`
                     // not to document such impl items.

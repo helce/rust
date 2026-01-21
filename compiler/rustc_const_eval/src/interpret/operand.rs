@@ -8,11 +8,12 @@ use rustc_abi as abi;
 use rustc_abi::{BackendRepr, HasDataLayout, Size};
 use rustc_hir::def::Namespace;
 use rustc_middle::mir::interpret::ScalarSizeMismatch;
-use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv, LayoutOf, TyAndLayout};
+use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv, TyAndLayout};
 use rustc_middle::ty::print::{FmtPrinter, PrettyPrinter};
 use rustc_middle::ty::{ConstInt, ScalarInt, Ty, TyCtxt};
 use rustc_middle::{bug, mir, span_bug, ty};
 use rustc_span::DUMMY_SP;
+use tracing::field::Empty;
 use tracing::trace;
 
 use super::{
@@ -20,6 +21,7 @@ use super::{
     OffsetMode, PlaceTy, Pointer, Projectable, Provenance, Scalar, alloc_range, err_ub,
     from_known_layout, interp_ok, mir_assign_valid_types, throw_ub,
 };
+use crate::enter_trace_span;
 
 /// An `Immediate` represents a single immediate self-contained Rust value.
 ///
@@ -770,6 +772,13 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         mir_place: mir::Place<'tcx>,
         layout: Option<TyAndLayout<'tcx>>,
     ) -> InterpResult<'tcx, OpTy<'tcx, M::Provenance>> {
+        let _span = enter_trace_span!(
+            M,
+            step::eval_place_to_op,
+            ?mir_place,
+            tracing_separate_thread = Empty
+        );
+
         // Do not use the layout passed in as argument if the base we are looking at
         // here is not the entire place.
         let layout = if mir_place.projection.is_empty() { layout } else { None };
@@ -813,6 +822,9 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
         mir_op: &mir::Operand<'tcx>,
         layout: Option<TyAndLayout<'tcx>>,
     ) -> InterpResult<'tcx, OpTy<'tcx, M::Provenance>> {
+        let _span =
+            enter_trace_span!(M, step::eval_operand, ?mir_op, tracing_separate_thread = Empty);
+
         use rustc_middle::mir::Operand::*;
         let op = match mir_op {
             // FIXME: do some more logic on `move` to invalidate the old location
@@ -836,7 +848,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
 
     pub(crate) fn const_val_to_op(
         &self,
-        val_val: mir::ConstValue<'tcx>,
+        val_val: mir::ConstValue,
         ty: Ty<'tcx>,
         layout: Option<TyAndLayout<'tcx>>,
     ) -> InterpResult<'tcx, OpTy<'tcx, M::Provenance>> {
@@ -860,9 +872,8 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             }
             mir::ConstValue::Scalar(x) => adjust_scalar(x)?.into(),
             mir::ConstValue::ZeroSized => Immediate::Uninit,
-            mir::ConstValue::Slice { data, meta } => {
+            mir::ConstValue::Slice { alloc_id, meta } => {
                 // This is const data, no mutation allowed.
-                let alloc_id = self.tcx.reserve_and_set_memory_alloc(data);
                 let ptr = Pointer::new(CtfeProvenance::from(alloc_id).as_immutable(), Size::ZERO);
                 Immediate::new_slice(self.global_root_pointer(ptr)?.into(), meta, self)
             }
@@ -878,9 +889,9 @@ mod size_asserts {
 
     use super::*;
     // tidy-alphabetical-start
-    static_assert_size!(Immediate, 48);
     static_assert_size!(ImmTy<'_>, 64);
-    static_assert_size!(Operand, 56);
+    static_assert_size!(Immediate, 48);
     static_assert_size!(OpTy<'_>, 72);
+    static_assert_size!(Operand, 56);
     // tidy-alphabetical-end
 }

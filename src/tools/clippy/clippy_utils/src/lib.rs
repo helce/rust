@@ -28,7 +28,6 @@
 extern crate indexmap;
 extern crate rustc_abi;
 extern crate rustc_ast;
-extern crate rustc_attr_data_structures;
 extern crate rustc_attr_parsing;
 extern crate rustc_const_eval;
 extern crate rustc_data_structures;
@@ -77,7 +76,8 @@ pub mod visitors;
 pub use self::attrs::*;
 pub use self::check_proc_macro::{is_from_proc_macro, is_span_if, is_span_match};
 pub use self::hir_utils::{
-    HirEqInterExpr, SpanlessEq, SpanlessHash, both, count_eq, eq_expr_value, hash_expr, hash_stmt, is_bool, over,
+    HirEqInterExpr, SpanlessEq, SpanlessHash, both, count_eq, eq_expr_value, has_ambiguous_literal_in_expr, hash_expr,
+    hash_stmt, is_bool, over,
 };
 
 use core::mem;
@@ -89,7 +89,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use itertools::Itertools;
 use rustc_abi::Integer;
 use rustc_ast::ast::{self, LitKind, RangeLimits};
-use rustc_attr_data_structures::{AttributeKind, find_attr};
+use rustc_ast::join_path_syms;
+use rustc_hir::attrs::{AttributeKind};
+use rustc_hir::find_attr;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::packed::Pu128;
 use rustc_data_structures::unhash::UnindexMap;
@@ -106,13 +108,13 @@ use rustc_hir::{
     Param, Pat, PatExpr, PatExprKind, PatKind, Path, PathSegment, QPath, Stmt, StmtKind, TraitFn, TraitItem,
     TraitItemKind, TraitRef, TyKind, UnOp, def,
 };
-use rustc_lexer::{TokenKind, tokenize};
+use rustc_lexer::{FrontmatterAllowed, TokenKind, tokenize};
 use rustc_lint::{LateContext, Level, Lint, LintContext};
 use rustc_middle::hir::nested_filter;
 use rustc_middle::hir::place::PlaceBase;
 use rustc_middle::lint::LevelAndSource;
 use rustc_middle::mir::{AggregateKind, Operand, RETURN_PLACE, Rvalue, StatementKind, TerminatorKind};
-use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow};
+use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow, PointerCoercion};
 use rustc_middle::ty::layout::IntegerExt;
 use rustc_middle::ty::{
     self as rustc_ty, Binder, BorrowKind, ClosureKind, EarlyBinder, GenericArgKind, GenericArgsRef, IntTy, Ty, TyCtxt,
@@ -122,7 +124,7 @@ use rustc_span::hygiene::{ExpnKind, MacroKind};
 use rustc_span::source_map::SourceMap;
 use rustc_span::symbol::{Ident, Symbol, kw};
 use rustc_span::{InnerSpan, Span};
-use source::walk_span_to_context;
+use source::{SpanRangeExt, walk_span_to_context};
 use visitors::{Visitable, for_each_unconsumed_temporary};
 
 use crate::consts::{ConstEvalCtxt, Constant, mir_to_const};
@@ -347,7 +349,7 @@ pub fn is_ty_alias(qpath: &QPath<'_>) -> bool {
 /// Checks if the given method call expression calls an inherent method.
 pub fn is_inherent_method_call(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     if let Some(method_id) = cx.typeck_results().type_dependent_def_id(expr.hir_id) {
-        cx.tcx.trait_of_item(method_id).is_none()
+        cx.tcx.trait_of_assoc(method_id).is_none()
     } else {
         false
     }
@@ -355,7 +357,7 @@ pub fn is_inherent_method_call(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
 
 /// Checks if a method is defined in an impl of a diagnostic item
 pub fn is_diag_item_method(cx: &LateContext<'_>, def_id: DefId, diag_item: Symbol) -> bool {
-    if let Some(impl_did) = cx.tcx.impl_of_method(def_id)
+    if let Some(impl_did) = cx.tcx.impl_of_assoc(def_id)
         && let Some(adt) = cx.tcx.type_of(impl_did).instantiate_identity().ty_adt_def()
     {
         return cx.tcx.is_diagnostic_item(diag_item, adt.did());
@@ -365,7 +367,7 @@ pub fn is_diag_item_method(cx: &LateContext<'_>, def_id: DefId, diag_item: Symbo
 
 /// Checks if a method is in a diagnostic item trait
 pub fn is_diag_trait_item(cx: &LateContext<'_>, def_id: DefId, diag_item: Symbol) -> bool {
-    if let Some(trait_did) = cx.tcx.trait_of_item(def_id) {
+    if let Some(trait_did) = cx.tcx.trait_of_assoc(def_id) {
         return cx.tcx.is_diagnostic_item(diag_item, trait_did);
     }
     false
@@ -618,7 +620,7 @@ fn is_default_equivalent_ctor(cx: &LateContext<'_>, def_id: DefId, path: &QPath<
 
     if let QPath::TypeRelative(_, method) = path
         && method.ident.name == sym::new
-        && let Some(impl_did) = cx.tcx.impl_of_method(def_id)
+        && let Some(impl_did) = cx.tcx.impl_of_assoc(def_id)
         && let Some(adt) = cx.tcx.type_of(impl_did).instantiate_identity().ty_adt_def()
     {
         return std_types_symbols.iter().any(|&symbol| {
@@ -1761,7 +1763,7 @@ pub fn has_attr(attrs: &[hir::Attribute], symbol: Symbol) -> bool {
 }
 
 pub fn has_repr_attr(cx: &LateContext<'_>, hir_id: HirId) -> bool {
-    find_attr!(cx.tcx.hir_attrs(hir_id), AttributeKind::Repr(..))
+    find_attr!(cx.tcx.hir_attrs(hir_id), AttributeKind::Repr { .. })
 }
 
 pub fn any_parent_has_attr(tcx: TyCtxt<'_>, node: HirId, symbol: Symbol) -> bool {
@@ -1784,9 +1786,9 @@ pub fn in_automatically_derived(tcx: TyCtxt<'_>, id: HirId) -> bool {
     tcx.hir_parent_owner_iter(id)
         .filter(|(_, node)| matches!(node, OwnerNode::Item(item) if matches!(item.kind, ItemKind::Impl(_))))
         .any(|(id, _)| {
-            has_attr(
+            find_attr!(
                 tcx.hir_attrs(tcx.local_def_id_to_hir_id(id.def_id)),
-                sym::automatically_derived,
+                AttributeKind::AutomaticallyDerived(..)
             )
         })
 }
@@ -1886,10 +1888,7 @@ pub fn is_must_use_func_call(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
         _ => None,
     };
 
-    did.is_some_and(|did| find_attr!(
-            cx.tcx.get_all_attrs(did),
-            AttributeKind::MustUse { ..}
-        ))
+    did.is_some_and(|did| find_attr!(cx.tcx.get_all_attrs(did), AttributeKind::MustUse { .. }))
 }
 
 /// Checks if a function's body represents the identity function. Looks for bodies of the form:
@@ -1898,6 +1897,7 @@ pub fn is_must_use_func_call(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
 /// * `|x| { return x }`
 /// * `|x| { return x; }`
 /// * `|(x, y)| (x, y)`
+/// * `|[x, y]| [x, y]`
 ///
 /// Consider calling [`is_expr_untyped_identity_function`] or [`is_expr_identity_function`] instead.
 fn is_body_identity_function(cx: &LateContext<'_>, func: &Body<'_>) -> bool {
@@ -1908,9 +1908,9 @@ fn is_body_identity_function(cx: &LateContext<'_>, func: &Body<'_>) -> bool {
             .get(pat.hir_id)
             .is_some_and(|mode| matches!(mode.0, ByRef::Yes(_)))
         {
-            // If a tuple `(x, y)` is of type `&(i32, i32)`, then due to match ergonomics,
-            // the inner patterns become references. Don't consider this the identity function
-            // as that changes types.
+            // If the parameter is `(x, y)` of type `&(T, T)`, or `[x, y]` of type `&[T; 2]`, then
+            // due to match ergonomics, the inner patterns become references. Don't consider this
+            // the identity function as that changes types.
             return false;
         }
 
@@ -1922,6 +1922,13 @@ fn is_body_identity_function(cx: &LateContext<'_>, func: &Body<'_>) -> bool {
                 if dotdot.as_opt_usize().is_none() && pats.len() == tup.len() =>
             {
                 pats.iter().zip(tup).all(|(pat, expr)| check_pat(cx, pat, expr))
+            },
+            (PatKind::Slice(before, slice, after), ExprKind::Array(arr))
+                if slice.is_none() && before.len() + after.len() == arr.len() =>
+            {
+                (before.iter().chain(after))
+                    .zip(arr)
+                    .all(|(pat, expr)| check_pat(cx, pat, expr))
             },
             _ => false,
         }
@@ -2713,7 +2720,7 @@ impl<'tcx> ExprUseNode<'tcx> {
 }
 
 /// Gets the context an expression's value is used in.
-pub fn expr_use_ctxt<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'tcx>) -> ExprUseCtxt<'tcx> {
+pub fn expr_use_ctxt<'tcx>(cx: &LateContext<'tcx>, e: &Expr<'tcx>) -> ExprUseCtxt<'tcx> {
     let mut adjustments = [].as_slice();
     let mut is_ty_unified = false;
     let mut moved_before_use = false;
@@ -2767,7 +2774,7 @@ pub fn expr_use_ctxt<'tcx>(cx: &LateContext<'tcx>, e: &'tcx Expr<'tcx>) -> ExprU
 /// Tokenizes the input while keeping the text associated with each token.
 pub fn tokenize_with_text(s: &str) -> impl Iterator<Item = (TokenKind, &str, InnerSpan)> {
     let mut pos = 0;
-    tokenize(s).map(move |t| {
+    tokenize(s, FrontmatterAllowed::No).map(move |t| {
         let end = pos + t.len;
         let range = pos as usize..end as usize;
         let inner = InnerSpan::new(range.start, range.end);
@@ -2782,7 +2789,7 @@ pub fn span_contains_comment(sm: &SourceMap, span: Span) -> bool {
     let Ok(snippet) = sm.span_to_snippet(span) else {
         return false;
     };
-    return tokenize(&snippet).any(|token| {
+    return tokenize(&snippet, FrontmatterAllowed::No).any(|token| {
         matches!(
             token.kind,
             TokenKind::BlockComment { .. } | TokenKind::LineComment { .. }
@@ -2790,6 +2797,19 @@ pub fn span_contains_comment(sm: &SourceMap, span: Span) -> bool {
     });
 }
 
+/// Checks whether a given span has any significant token. A significant token is a non-whitespace
+/// token, including comments unless `skip_comments` is set.
+/// This is useful to determine if there are any actual code tokens in the span that are omitted in
+/// the late pass, such as platform-specific code.
+pub fn span_contains_non_whitespace(cx: &impl source::HasSession, span: Span, skip_comments: bool) -> bool {
+    matches!(span.get_source_text(cx), Some(snippet) if tokenize_with_text(&snippet).any(|(token, _, _)|
+        match token {
+            TokenKind::Whitespace => false,
+            TokenKind::BlockComment { .. } | TokenKind::LineComment { .. } => !skip_comments,
+            _ => true,
+        }
+    ))
+}
 /// Returns all the comments a given span contains
 ///
 /// Comments are returned wrapped with their relevant delimiters
@@ -3234,8 +3254,8 @@ fn maybe_get_relative_path(from: &DefPath, to: &DefPath, max_super: usize) -> St
                 // a::b::c  ::d::sym refers to
                 // e::f::sym:: ::
                 // result should be super::super::super::super::e::f
-                if let DefPathData::TypeNs(s) = l {
-                    path.push(s.to_string());
+                if let DefPathData::TypeNs(sym) = l {
+                    path.push(sym);
                 }
                 if let DefPathData::TypeNs(_) = r {
                     go_up_by += 1;
@@ -3245,7 +3265,7 @@ fn maybe_get_relative_path(from: &DefPath, to: &DefPath, max_super: usize) -> St
             // a::b::sym:: ::    refers to
             // c::d::e  ::f::sym
             // when looking at `f`
-            Left(DefPathData::TypeNs(sym)) => path.push(sym.to_string()),
+            Left(DefPathData::TypeNs(sym)) => path.push(sym),
             // consider:
             // a::b::c  ::d::sym refers to
             // e::f::sym:: ::
@@ -3257,17 +3277,15 @@ fn maybe_get_relative_path(from: &DefPath, to: &DefPath, max_super: usize) -> St
 
     if go_up_by > max_super {
         // `super` chain would be too long, just use the absolute path instead
-        once(String::from("crate"))
-            .chain(to.data.iter().filter_map(|el| {
-                if let DefPathData::TypeNs(sym) = el.data {
-                    Some(sym.to_string())
-                } else {
-                    None
-                }
-            }))
-            .join("::")
+        join_path_syms(once(kw::Crate).chain(to.data.iter().filter_map(|el| {
+            if let DefPathData::TypeNs(sym) = el.data {
+                Some(sym)
+            } else {
+                None
+            }
+        })))
     } else {
-        repeat_n(String::from("super"), go_up_by).chain(path).join("::")
+        join_path_syms(repeat_n(kw::Super, go_up_by).chain(path))
     }
 }
 
@@ -3486,4 +3504,76 @@ pub fn is_expr_default<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> 
     } else {
         false
     }
+}
+
+/// Checks if `expr` may be directly used as the return value of its enclosing body.
+/// The following cases are covered:
+/// - `expr` as the last expression of the body, or of a block that can be used as the return value
+/// - `return expr`
+/// - then or else part of a `if` in return position
+/// - arm body of a `match` in a return position
+/// - `break expr` or `break 'label expr` if the loop or block being exited is used as a return
+///   value
+///
+/// Contrary to [`TyCtxt::hir_get_fn_id_for_return_block()`], if `expr` is part of a
+/// larger expression, for example a field expression of a `struct`, it will not be
+/// considered as matching the condition and will return `false`.
+///
+/// Also, even if `expr` is assigned to a variable which is later returned, this function
+/// will still return `false` because `expr` is not used *directly* as the return value
+/// as it goes through the intermediate variable.
+pub fn potential_return_of_enclosing_body(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    let enclosing_body_owner = cx
+        .tcx
+        .local_def_id_to_hir_id(cx.tcx.hir_enclosing_body_owner(expr.hir_id));
+    let mut prev_id = expr.hir_id;
+    let mut skip_until_id = None;
+    for (hir_id, node) in cx.tcx.hir_parent_iter(expr.hir_id) {
+        if hir_id == enclosing_body_owner {
+            return true;
+        }
+        if let Some(id) = skip_until_id {
+            prev_id = hir_id;
+            if id == hir_id {
+                skip_until_id = None;
+            }
+            continue;
+        }
+        match node {
+            Node::Block(Block { expr, .. }) if expr.is_some_and(|expr| expr.hir_id == prev_id) => {},
+            Node::Arm(arm) if arm.body.hir_id == prev_id => {},
+            Node::Expr(expr) => match expr.kind {
+                ExprKind::Ret(_) => return true,
+                ExprKind::If(_, then, opt_else)
+                    if then.hir_id == prev_id || opt_else.is_some_and(|els| els.hir_id == prev_id) => {},
+                ExprKind::Match(_, arms, _) if arms.iter().any(|arm| arm.hir_id == prev_id) => {},
+                ExprKind::Block(block, _) if block.hir_id == prev_id => {},
+                ExprKind::Break(
+                    Destination {
+                        target_id: Ok(target_id),
+                        ..
+                    },
+                    _,
+                ) => skip_until_id = Some(target_id),
+                _ => break,
+            },
+            _ => break,
+        }
+        prev_id = hir_id;
+    }
+
+    // `expr` is used as part of "something" and is not returned directly from its
+    // enclosing body.
+    false
+}
+
+/// Checks if the expression has adjustments that require coercion, for example: dereferencing with
+/// overloaded deref, coercing pointers and `dyn` objects.
+pub fn expr_adjustment_requires_coercion(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    cx.typeck_results().expr_adjustments(expr).iter().any(|adj| {
+        matches!(
+            adj.kind,
+            Adjust::Deref(Some(_)) | Adjust::Pointer(PointerCoercion::Unsize) | Adjust::NeverToAny
+        )
+    })
 }

@@ -15,11 +15,14 @@ pub use self::closure::*;
 use crate::inherent::*;
 #[cfg(feature = "nightly")]
 use crate::visit::TypeVisitable;
-use crate::{self as ty, DebruijnIndex, Interner};
+use crate::{self as ty, DebruijnIndex, FloatTy, IntTy, Interner, UintTy};
 
 mod closure;
 
 /// Specifies how a trait object is represented.
+///
+/// This used to have a variant `DynStar`, but that variant has been removed,
+/// and it's likely this whole enum will be removed soon.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[cfg_attr(
     feature = "nightly",
@@ -28,13 +31,6 @@ mod closure;
 pub enum DynKind {
     /// An unsized `dyn Trait` object
     Dyn,
-    /// A sized `dyn* Trait` object
-    ///
-    /// These objects are represented as a `(data, vtable)` pair where `data` is a value of some
-    /// ptr-sized and ptr-aligned dynamically determined type `T` and `vtable` is a pointer to the
-    /// vtable of `impl T for Trait`. This allows a `dyn*` object to be treated agnostically with
-    /// respect to whether it points to a `Box<T>`, `Rc<T>`, etc.
-    DynStar,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -371,7 +367,6 @@ impl<I: Interner> fmt::Debug for TyKind<I> {
             UnsafeBinder(binder) => write!(f, "{:?}", binder),
             Dynamic(p, r, repr) => match repr {
                 DynKind::Dyn => write!(f, "dyn {p:?} + {r:?}"),
-                DynKind::DynStar => write!(f, "dyn* {p:?} + {r:?}"),
             },
             Closure(d, s) => f.debug_tuple("Closure").field(d).field(&s).finish(),
             CoroutineClosure(d, s) => f.debug_tuple("CoroutineClosure").field(d).field(&s).finish(),
@@ -511,160 +506,6 @@ impl<I: Interner> AliasTy<I> {
     /// as well.
     pub fn trait_ref(self, interner: I) -> ty::TraitRef<I> {
         self.trait_ref_and_own_args(interner).0
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(
-    feature = "nightly",
-    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
-)]
-pub enum IntTy {
-    Isize,
-    I8,
-    I16,
-    I32,
-    I64,
-    I128,
-}
-
-impl IntTy {
-    pub fn name_str(&self) -> &'static str {
-        match *self {
-            IntTy::Isize => "isize",
-            IntTy::I8 => "i8",
-            IntTy::I16 => "i16",
-            IntTy::I32 => "i32",
-            IntTy::I64 => "i64",
-            IntTy::I128 => "i128",
-        }
-    }
-
-    pub fn bit_width(&self) -> Option<u64> {
-        Some(match *self {
-            IntTy::Isize => return None,
-            IntTy::I8 => 8,
-            IntTy::I16 => 16,
-            IntTy::I32 => 32,
-            IntTy::I64 => 64,
-            IntTy::I128 => 128,
-        })
-    }
-
-    pub fn normalize(&self, target_width: u32) -> Self {
-        match self {
-            IntTy::Isize => match target_width {
-                16 => IntTy::I16,
-                32 => IntTy::I32,
-                64 => IntTy::I64,
-                _ => unreachable!(),
-            },
-            _ => *self,
-        }
-    }
-
-    pub fn to_unsigned(self) -> UintTy {
-        match self {
-            IntTy::Isize => UintTy::Usize,
-            IntTy::I8 => UintTy::U8,
-            IntTy::I16 => UintTy::U16,
-            IntTy::I32 => UintTy::U32,
-            IntTy::I64 => UintTy::U64,
-            IntTy::I128 => UintTy::U128,
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
-#[cfg_attr(
-    feature = "nightly",
-    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
-)]
-pub enum UintTy {
-    Usize,
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-}
-
-impl UintTy {
-    pub fn name_str(&self) -> &'static str {
-        match *self {
-            UintTy::Usize => "usize",
-            UintTy::U8 => "u8",
-            UintTy::U16 => "u16",
-            UintTy::U32 => "u32",
-            UintTy::U64 => "u64",
-            UintTy::U128 => "u128",
-        }
-    }
-
-    pub fn bit_width(&self) -> Option<u64> {
-        Some(match *self {
-            UintTy::Usize => return None,
-            UintTy::U8 => 8,
-            UintTy::U16 => 16,
-            UintTy::U32 => 32,
-            UintTy::U64 => 64,
-            UintTy::U128 => 128,
-        })
-    }
-
-    pub fn normalize(&self, target_width: u32) -> Self {
-        match self {
-            UintTy::Usize => match target_width {
-                16 => UintTy::U16,
-                32 => UintTy::U32,
-                64 => UintTy::U64,
-                _ => unreachable!(),
-            },
-            _ => *self,
-        }
-    }
-
-    pub fn to_signed(self) -> IntTy {
-        match self {
-            UintTy::Usize => IntTy::Isize,
-            UintTy::U8 => IntTy::I8,
-            UintTy::U16 => IntTy::I16,
-            UintTy::U32 => IntTy::I32,
-            UintTy::U64 => IntTy::I64,
-            UintTy::U128 => IntTy::I128,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(
-    feature = "nightly",
-    derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
-)]
-pub enum FloatTy {
-    F16,
-    F32,
-    F64,
-    F128,
-}
-
-impl FloatTy {
-    pub fn name_str(self) -> &'static str {
-        match self {
-            FloatTy::F16 => "f16",
-            FloatTy::F32 => "f32",
-            FloatTy::F64 => "f64",
-            FloatTy::F128 => "f128",
-        }
-    }
-
-    pub fn bit_width(self) -> u64 {
-        match self {
-            FloatTy::F16 => 16,
-            FloatTy::F32 => 32,
-            FloatTy::F64 => 64,
-            FloatTy::F128 => 128,
-        }
     }
 }
 
@@ -862,24 +703,6 @@ impl fmt::Display for InferTy {
             FreshIntTy(v) => write!(f, "FreshIntTy({v})"),
             FreshFloatTy(v) => write!(f, "FreshFloatTy({v})"),
         }
-    }
-}
-
-impl fmt::Debug for IntTy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name_str())
-    }
-}
-
-impl fmt::Debug for UintTy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name_str())
-    }
-}
-
-impl fmt::Debug for FloatTy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name_str())
     }
 }
 
@@ -1155,4 +978,5 @@ pub struct FnHeader<I: Interner> {
 #[derive(TypeVisitable_Generic, TypeFoldable_Generic, Lift_Generic)]
 pub struct CoroutineWitnessTypes<I: Interner> {
     pub types: I::Tys,
+    pub assumptions: I::RegionAssumptions,
 }

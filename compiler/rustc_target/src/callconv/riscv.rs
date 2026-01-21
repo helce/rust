@@ -393,16 +393,14 @@ fn classify_arg<'a, Ty, C>(
 }
 
 fn extend_integer_width<Ty>(arg: &mut ArgAbi<'_, Ty>, xlen: u64) {
-    if let BackendRepr::Scalar(scalar) = arg.layout.backend_repr {
-        if let Primitive::Int(i, _) = scalar.primitive() {
-            // 32-bit integers are always sign-extended
-            if i.size().bits() == 32 && xlen > 32 {
-                if let PassMode::Direct(ref mut attrs) = arg.mode {
-                    attrs.ext(ArgExtension::Sext);
-                    return;
-                }
-            }
-        }
+    if let BackendRepr::Scalar(scalar) = arg.layout.backend_repr
+        && let Primitive::Int(i, _) = scalar.primitive()
+        && i.size().bits() == 32
+        && xlen > 32
+        && let PassMode::Direct(ref mut attrs) = arg.mode
+    {
+        attrs.ext(ArgExtension::Sext);
+        return;
     }
 
     arg.extend_integer_width_to(xlen);
@@ -418,7 +416,7 @@ where
         "ilp32d" | "lp64d" => 64,
         _ => 0,
     };
-    let xlen = cx.data_layout().pointer_size.bits();
+    let xlen = cx.data_layout().pointer_size().bits();
 
     let mut avail_gprs = 8;
     let mut avail_fprs = 8;
@@ -448,7 +446,7 @@ where
     Ty: TyAbiInterface<'a, C> + Copy,
     C: HasDataLayout + HasTargetSpec,
 {
-    let xlen = cx.data_layout().pointer_size.bits();
+    let xlen = cx.data_layout().pointer_size().bits();
 
     for arg in fn_abi.args.iter_mut() {
         if arg.is_ignore() {

@@ -339,6 +339,14 @@ fn register_builtins(store: &mut LintStore) {
 
     add_lint_group!("deprecated_safe", DEPRECATED_SAFE_2024);
 
+    add_lint_group!(
+        "unknown_or_malformed_diagnostic_attributes",
+        MALFORMED_DIAGNOSTIC_ATTRIBUTES,
+        MALFORMED_DIAGNOSTIC_FORMAT_LITERALS,
+        MISPLACED_DIAGNOSTIC_ATTRIBUTES,
+        UNKNOWN_DIAGNOSTIC_ATTRIBUTES
+    );
+
     // Register renamed and removed lints.
     store.register_renamed("single_use_lifetime", "single_use_lifetimes");
     store.register_renamed("elided_lifetime_in_path", "elided_lifetimes_in_paths");
@@ -608,6 +616,7 @@ fn register_builtins(store: &mut LintStore) {
         "converted into hard error, see issue #127323 \
          <https://github.com/rust-lang/rust/issues/127323> for more information",
     );
+    store.register_removed("unsupported_fn_ptr_calling_conventions", "converted into hard error");
     store.register_removed(
         "undefined_naked_function_abi",
         "converted into hard error, see PR #139001 \

@@ -32,7 +32,7 @@ use crate::ty::{
 
 #[derive(Copy, Clone, Debug)]
 pub struct Discr<'tcx> {
-    /// Bit representation of the discriminant (e.g., `-128i8` is `0xFF_u128`).
+    /// Bit representation of the discriminant (e.g., `-1i8` is `0xFF_u128`).
     pub val: u128,
     pub ty: Ty<'tcx>,
 }
@@ -768,6 +768,7 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn def_kind_descr(self, def_kind: DefKind, def_id: DefId) -> &'static str {
         match def_kind {
             DefKind::AssocFn if self.associated_item(def_id).is_method() => "method",
+            DefKind::AssocTy if self.opt_rpitit_info(def_id).is_some() => "opaque type",
             DefKind::Closure if let Some(coroutine_kind) = self.coroutine_kind(def_id) => {
                 match coroutine_kind {
                     hir::CoroutineKind::Desugared(
@@ -1051,9 +1052,11 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for FreeAliasTypeExpander<'tcx> {
         }
 
         self.depth += 1;
-        ensure_sufficient_stack(|| {
+        let ty = ensure_sufficient_stack(|| {
             self.tcx.type_of(alias.def_id).instantiate(self.tcx, alias.args).fold_with(self)
-        })
+        });
+        self.depth -= 1;
+        ty
     }
 
     fn fold_const(&mut self, ct: ty::Const<'tcx>) -> ty::Const<'tcx> {
@@ -1680,7 +1683,7 @@ pub fn intrinsic_raw(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<ty::Intrinsi
             _ => true,
         };
         Some(ty::IntrinsicDef {
-            name: tcx.item_name(def_id.into()),
+            name: tcx.item_name(def_id),
             must_be_overridden,
             const_stable: tcx.has_attr(def_id, sym::rustc_intrinsic_const_stable_indirect),
         })
