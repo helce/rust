@@ -1095,7 +1095,6 @@ class RoaringBitmap {
         // compressed form, even when loaded into memory. This decoder
         // turns the containers into objects, but uses byte array
         // slices of the original format for the data payload.
-        global.atob = require("atob");
         const strdecoded = atob(str);
         const u8array = new Uint8Array(strdecoded.length);
         for (let j = 0; j < strdecoded.length; ++j) {
