@@ -2389,6 +2389,7 @@ impl Step for LlvmBitcodeLinker {
 
         // Prepare the image directory
         let mut tarball = Tarball::new(builder, "llvm-bitcode-linker", &target.triple);
+        tarball.permit_symlinks(true);
         tarball.set_overlay(OverlayKind::LlvmBitcodeLinker);
         tarball.is_preview(true);
 
