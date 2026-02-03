@@ -1,4 +1,3 @@
-//@ ignore-e2k disable musl checks on e2k builds
 use run_make_support::{rustc, serde_json};
 
 // Please do NOT add more targets to this list!

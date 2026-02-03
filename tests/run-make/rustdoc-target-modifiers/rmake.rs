@@ -5,6 +5,8 @@
 //!
 //! Please see https://github.com/rust-lang/rust/issues/144521.
 
+//@ needs-llvm-components: aarch64
+
 use run_make_support::{rustc, rustdoc};
 
 fn main() {
