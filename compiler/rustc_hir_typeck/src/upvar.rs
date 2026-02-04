@@ -1747,7 +1747,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     fn should_log_capture_analysis(&self, closure_def_id: LocalDefId) -> bool {
-        self.tcx.has_attr(closure_def_id, sym::rustc_capture_analysis)
+        self.has_rustc_attrs && self.tcx.has_attr(closure_def_id, sym::rustc_capture_analysis)
     }
 
     fn log_capture_analysis_first_pass(
@@ -2391,13 +2391,11 @@ fn migration_suggestion_for_2229(
 /// let mut p = Point { x: 10, y: 10 };
 ///
 /// let c = || {
-///     p.x     += 10;
-/// // ^ E1 ^
+///     p.x += 10; // E1
 ///     // ...
 ///     // More code
 ///     // ...
 ///     p.x += 10; // E2
-/// // ^ E2 ^
 /// };
 /// ```
 /// `CaptureKind` associated with both `E1` and `E2` will be ByRef(MutBorrow),

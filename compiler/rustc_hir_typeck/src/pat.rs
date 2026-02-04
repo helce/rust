@@ -605,7 +605,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             },
             PatKind::Struct(_, fields, has_rest_pat) => match opt_path_res.unwrap() {
                 Ok(ResolvedPat { ty, kind: ResolvedPatKind::Struct { variant } }) => self
-                    .check_pat_struct(pat, fields, has_rest_pat, ty, variant, expected, pat_info),
+                    .check_pat_struct(
+                        pat,
+                        fields,
+                        has_rest_pat.is_some(),
+                        ty,
+                        variant,
+                        expected,
+                        pat_info,
+                    ),
                 Err(guar) => {
                     let ty_err = Ty::new_error(self.tcx, guar);
                     for field in fields {
@@ -1756,7 +1764,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let missing_parentheses = match (expected.kind(), fields, had_err) {
             // #67037: only do this if we could successfully type-check the expected type against
             // the tuple struct pattern. Otherwise the args could get out of range on e.g.,
-            // `let P() = U;` where `P != U` with `struct P<T>(T);`.
+            // `let P() = U;` where `P != U` with `struct Box<T>(T);`.
             (ty::Adt(_, args), [field], Ok(())) => {
                 let field_ty = self.field_ty(pat_span, field, args);
                 match field_ty.kind() {
@@ -2428,7 +2436,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let len = unmentioned_fields.len();
         let (prefix, postfix, sp) = match fields {
             [] => match &pat.kind {
-                PatKind::Struct(path, [], false) => {
+                PatKind::Struct(path, [], None) => {
                     (" { ", " }", path.span().shrink_to_hi().until(pat.span.shrink_to_hi()))
                 }
                 _ => return err,

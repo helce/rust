@@ -51,6 +51,7 @@ mod statement;
 mod syntax;
 mod terminator;
 
+pub mod loops;
 pub mod traversal;
 pub mod visit;
 
@@ -62,9 +63,7 @@ pub use terminator::*;
 
 pub use self::generic_graph::graphviz_safe_def_name;
 pub use self::graphviz::write_mir_graphviz;
-pub use self::pretty::{
-    PassWhere, create_dump_file, display_allocation, dump_enabled, dump_mir, write_mir_pretty,
-};
+pub use self::pretty::{MirDumper, PassWhere, display_allocation, write_mir_pretty};
 
 /// Types for locals
 pub type LocalDecls<'tcx> = IndexSlice<Local, LocalDecl<'tcx>>;
@@ -113,48 +112,6 @@ impl MirPhase {
             MirPhase::Built => (1, 1),
             MirPhase::Analysis(analysis_phase) => (2, 1 + analysis_phase as usize),
             MirPhase::Runtime(runtime_phase) => (3, 1 + runtime_phase as usize),
-        }
-    }
-
-    /// Parses a `MirPhase` from a pair of strings. Panics if this isn't possible for any reason.
-    pub fn parse(dialect: String, phase: Option<String>) -> Self {
-        match &*dialect.to_ascii_lowercase() {
-            "built" => {
-                assert!(phase.is_none(), "Cannot specify a phase for `Built` MIR");
-                MirPhase::Built
-            }
-            "analysis" => Self::Analysis(AnalysisPhase::parse(phase)),
-            "runtime" => Self::Runtime(RuntimePhase::parse(phase)),
-            _ => bug!("Unknown MIR dialect: '{}'", dialect),
-        }
-    }
-}
-
-impl AnalysisPhase {
-    pub fn parse(phase: Option<String>) -> Self {
-        let Some(phase) = phase else {
-            return Self::Initial;
-        };
-
-        match &*phase.to_ascii_lowercase() {
-            "initial" => Self::Initial,
-            "post_cleanup" | "post-cleanup" | "postcleanup" => Self::PostCleanup,
-            _ => bug!("Unknown analysis phase: '{}'", phase),
-        }
-    }
-}
-
-impl RuntimePhase {
-    pub fn parse(phase: Option<String>) -> Self {
-        let Some(phase) = phase else {
-            return Self::Initial;
-        };
-
-        match &*phase.to_ascii_lowercase() {
-            "initial" => Self::Initial,
-            "post_cleanup" | "post-cleanup" | "postcleanup" => Self::PostCleanup,
-            "optimized" => Self::Optimized,
-            _ => bug!("Unknown runtime phase: '{}'", phase),
         }
     }
 }
@@ -1017,7 +974,8 @@ pub struct LocalDecl<'tcx> {
     /// ```
     /// fn foo(x: &str) {
     ///     #[allow(unused_mut)]
-    ///     let mut x: u32 = { // <- one unused mut
+    ///     let mut x: u32 = {
+    ///         //^ one unused mut
     ///         let mut y: u32 = x.parse().unwrap();
     ///         y + 2
     ///     };

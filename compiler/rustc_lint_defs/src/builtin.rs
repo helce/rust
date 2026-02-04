@@ -62,6 +62,7 @@ declare_lint_pass! {
         LONG_RUNNING_CONST_EVAL,
         LOSSY_PROVENANCE_CASTS,
         MACRO_EXPANDED_MACRO_EXPORTS_ACCESSED_BY_ABSOLUTE_PATHS,
+        MACRO_EXTENDED_TEMPORARY_SCOPES,
         MACRO_USE_EXTERN_CRATE,
         MALFORMED_DIAGNOSTIC_ATTRIBUTES,
         MALFORMED_DIAGNOSTIC_FORMAT_LITERALS,
@@ -217,6 +218,7 @@ declare_lint! {
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #57571 <https://github.com/rust-lang/rust/issues/57571>",
+        report_in_deps: true,
     };
     crate_level_only
 }
@@ -2156,6 +2158,7 @@ declare_lint! {
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #52234 <https://github.com/rust-lang/rust/issues/52234>",
+        report_in_deps: true,
     };
     crate_level_only
 }
@@ -2299,18 +2302,18 @@ declare_lint! {
 
 declare_lint! {
     /// The `inline_no_sanitize` lint detects incompatible use of
-    /// [`#[inline(always)]`][inline] and [`#[no_sanitize(...)]`][no_sanitize].
+    /// [`#[inline(always)]`][inline] and [`#[sanitize(xyz = "off")]`][sanitize].
     ///
     /// [inline]: https://doc.rust-lang.org/reference/attributes/codegen.html#the-inline-attribute
-    /// [no_sanitize]: https://doc.rust-lang.org/nightly/unstable-book/language-features/no-sanitize.html
+    /// [sanitize]: https://doc.rust-lang.org/nightly/unstable-book/language-features/no-sanitize.html
     ///
     /// ### Example
     ///
     /// ```rust
-    /// #![feature(no_sanitize)]
+    /// #![cfg_attr(not(bootstrap), feature(sanitize))]
     ///
     /// #[inline(always)]
-    /// #[no_sanitize(address)]
+    /// #[cfg_attr(not(bootstrap), sanitize(address = "off"))]
     /// fn x() {}
     ///
     /// fn main() {
@@ -2323,11 +2326,11 @@ declare_lint! {
     /// ### Explanation
     ///
     /// The use of the [`#[inline(always)]`][inline] attribute prevents the
-    /// the [`#[no_sanitize(...)]`][no_sanitize] attribute from working.
+    /// the [`#[sanitize(xyz = "off")]`][sanitize] attribute from working.
     /// Consider temporarily removing `inline` attribute.
     pub INLINE_NO_SANITIZE,
     Warn,
-    "detects incompatible use of `#[inline(always)]` and `#[no_sanitize(...)]`",
+    r#"detects incompatible use of `#[inline(always)]` and `#[sanitize(... = "off")]`"#,
 }
 
 declare_lint! {
@@ -2839,7 +2842,7 @@ declare_lint! {
     /// [issue #79813]: https://github.com/rust-lang/rust/issues/79813
     /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub SEMICOLON_IN_EXPRESSIONS_FROM_MACROS,
-    Warn,
+    Deny,
     "trailing semicolon in macro body used as expression",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
@@ -2887,11 +2890,12 @@ declare_lint! {
     /// struct S { /* fields */ }
     /// ```
     pub LEGACY_DERIVE_HELPERS,
-    Warn,
+    Deny,
     "detects derive helper attributes that are used before they are introduced",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #79202 <https://github.com/rust-lang/rust/issues/79202>",
+        report_in_deps: true,
     };
 }
 
@@ -4624,11 +4628,12 @@ declare_lint! {
     ///
     /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub PRIVATE_MACRO_USE,
-    Warn,
+    Deny,
     "detects certain macro bindings that should not be re-exported",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #120192 <https://github.com/rust-lang/rust/issues/120192>",
+        report_in_deps: true,
     };
 }
 
@@ -4828,13 +4833,16 @@ declare_lint! {
     ///
     /// ### Example
     ///
-    /// ```rust
+    #[cfg_attr(not(bootstrap), doc = "```rust,compile_fail")]
+    #[cfg_attr(bootstrap, doc = "```rust")]
     /// #![doc = in_root!()]
     ///
     /// macro_rules! in_root { () => { "" } }
     ///
     /// fn main() {}
-    /// ```
+    #[cfg_attr(not(bootstrap), doc = "```")]
+    #[cfg_attr(bootstrap, doc = "```")]
+    // ^ Needed to avoid tidy warning about odd number of backticks
     ///
     /// {{produces}}
     ///
@@ -4853,11 +4861,12 @@ declare_lint! {
     ///
     /// [future-incompatible]: ../index.md#future-incompatible-lints
     pub OUT_OF_SCOPE_MACRO_CALLS,
-    Warn,
+    Deny,
     "detects out of scope calls to `macro_rules` in key-value attributes",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #124535 <https://github.com/rust-lang/rust/issues/124535>",
+        report_in_deps: true,
     };
 }
 
@@ -5098,5 +5107,143 @@ declare_lint! {
         reason: FutureIncompatibilityReason::FutureReleaseError,
         reference: "issue #134375 <https://github.com/rust-lang/rust/issues/134375>",
         report_in_deps: true,
+    };
+}
+
+declare_lint! {
+    /// The `tail_call_track_caller` lint detects usage of `become` attempting to tail call
+    /// a function marked with `#[track_caller]`.
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// #![feature(explicit_tail_calls)]
+    /// #![expect(incomplete_features)]
+    ///
+    /// #[track_caller]
+    /// fn f() {}
+    ///
+    /// fn g() {
+    ///     become f();
+    /// }
+    ///
+    /// g();
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Explanation
+    ///
+    /// Due to implementation details of tail calls and `#[track_caller]` attribute, calls to
+    /// functions marked with `#[track_caller]` cannot become tail calls. As such using `become`
+    /// is no different than a normal call (except for changes in drop order).
+    pub TAIL_CALL_TRACK_CALLER,
+    Warn,
+    "detects tail calls of functions marked with `#[track_caller]`",
+    @feature_gate = explicit_tail_calls;
+}
+declare_lint! {
+    /// The `inline_always_mismatching_target_features` lint will trigger when a
+    /// function with the `#[inline(always)]` and `#[target_feature(enable = "...")]`
+    /// attributes is called and cannot be inlined due to missing target features in the caller.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore (fails on x86_64)
+    /// #[inline(always)]
+    /// #[target_feature(enable = "fp16")]
+    /// unsafe fn callee() {
+    ///     // operations using fp16 types
+    /// }
+    ///
+    /// // Caller does not enable the required target feature
+    /// fn caller() {
+    ///     unsafe { callee(); }
+    /// }
+    ///
+    /// fn main() {
+    ///     caller();
+    /// }
+    /// ```
+    ///
+    /// This will produce:
+    ///
+    /// ```text
+    /// warning: call to `#[inline(always)]`-annotated `callee` requires the same target features. Function will not have `alwaysinline` attribute applied
+    ///   --> $DIR/builtin.rs:5192:14
+    ///    |
+    /// 10 |     unsafe { callee(); }
+    ///    |              ^^^^^^^^
+    ///    |
+    /// note: `fp16` target feature enabled in `callee` here but missing from `caller`
+    ///   --> $DIR/builtin.rs:5185:1
+    ///    |
+    /// 3  | #[target_feature(enable = "fp16")]
+    ///    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    /// 4  | unsafe fn callee() {
+    ///    | ------------------
+    ///    = note: `#[warn(inline_always_mismatching_target_features)]` on by default
+    /// warning: 1 warning emitted
+    /// ```
+    ///
+    /// ### Explanation
+    ///
+    /// Inlining a function with a target feature attribute into a caller that
+    /// lacks the corresponding target feature can lead to unsound behavior.
+    /// LLVM may select the wrong instructions or registers, or reorder
+    /// operations, potentially resulting in runtime errors.
+    pub INLINE_ALWAYS_MISMATCHING_TARGET_FEATURES,
+    Warn,
+    r#"detects when a function annotated with `#[inline(always)]` and `#[target_feature(enable = "..")]` is inlined into a caller without the required target feature"#,
+}
+
+declare_lint! {
+    /// The `macro_extended_temporary_scopes` lint detects borrowed temporary
+    /// values in arguments to `pin!` and formatting macros which have longer
+    /// lifetimes than intended due to a bug in the compiler. For more
+    /// information on temporary scopes and lifetime extension, see the
+    /// [Rust Reference].
+    ///
+    /// [Rust Reference]: https://doc.rust-lang.org/reference/destructors.html#temporary-scopes
+    ///
+    /// ### Example
+    ///
+    /// ```rust
+    /// # fn cond() -> bool { true }
+    /// # fn build_string() -> String { String::new() }
+    /// fn main() {
+    ///     println!("{:?}{}", (), if cond() { &build_string() } else { "" });
+    /// }
+    /// ```
+    ///
+    /// {{produces}}
+    ///
+    /// ### Recommended fix
+    ///
+    /// To extend the lifetimes of temporaries borrowed in macro arguments,
+    /// create separate definitions for them with `let` statements.
+    ///
+    /// ```rust
+    /// # fn cond() -> bool { true }
+    /// # fn build_string() -> String { String::new() }
+    /// fn main() {
+    ///     let string = if cond() { &build_string() } else { "" };
+    ///     println!("{:?}{}", (), string);
+    /// }
+    /// ```
+    ///
+    /// ### Explanation
+    ///
+    /// Due to a compiler bug, `pin!` and formatting macros were able to extend
+    /// the lifetimes of temporaries borrowed in their arguments past their
+    /// usual scopes. The bug is fixed in future Rust versions, so we issue this
+    /// future-incompatibility warning for code that may stop compiling or may
+    /// change in behavior thereafter.
+    pub MACRO_EXTENDED_TEMPORARY_SCOPES,
+    Warn,
+    "detects when a lifetime-extended temporary borrowed in a macro argument has a future-incompatible scope.",
+    @future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::FutureReleaseError,
+        reference: "<https://doc.rust-lang.org/rustc/lints/listing/warn-by-default.html#macro-extended-temporary-scopes>",
     };
 }

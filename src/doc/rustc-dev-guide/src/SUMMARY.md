@@ -103,11 +103,11 @@
 	- [The `rustdoc-json` test suite](./rustdoc-internals/rustdoc-json-test-suite.md)
 - [GPU offload internals](./offload/internals.md)
     - [Installation](./offload/installation.md)
+    - [Usage](./offload/usage.md)
 - [Autodiff internals](./autodiff/internals.md)
     - [Installation](./autodiff/installation.md)
     - [How to debug](./autodiff/debugging.md)
     - [Autodiff flags](./autodiff/flags.md)
-    - [Current limitations](./autodiff/limitations.md)
 
 # Source Code Representation
 
@@ -176,6 +176,7 @@
     - [Next-gen trait solving](./solve/trait-solving.md)
         - [Invariants of the type system](./solve/invariants.md)
         - [The solver](./solve/the-solver.md)
+        - [Candidate preference](./solve/candidate-preference.md)
         - [Canonicalization](./solve/canonicalization.md)
         - [Coinduction](./solve/coinduction.md)
         - [Caching](./solve/caching.md)

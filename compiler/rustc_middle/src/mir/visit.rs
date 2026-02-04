@@ -531,13 +531,20 @@ macro_rules! make_mir_visitor {
                         unwind: _,
                         replace: _,
                         drop: _,
-                        async_fut: _,
+                        async_fut,
                     } => {
                         self.visit_place(
                             place,
                             PlaceContext::MutatingUse(MutatingUseContext::Drop),
                             location
                         );
+                        if let Some(async_fut) = async_fut {
+                            self.visit_local(
+                                $(&$mutability)? *async_fut,
+                                PlaceContext::MutatingUse(MutatingUseContext::Borrow),
+                                location
+                            );
+                        }
                     }
 
                     TerminatorKind::Call {
@@ -1205,18 +1212,19 @@ macro_rules! visit_place_fns {
             self.super_projection_elem(place_ref, elem, context, location);
         }
 
-        fn super_place(&mut self, place: &Place<'tcx>, context: PlaceContext, location: Location) {
-            let mut context = context;
-
-            if !place.projection.is_empty() {
-                if context.is_use() {
-                    // ^ Only change the context if it is a real use, not a "use" in debuginfo.
-                    context = if context.is_mutating_use() {
-                        PlaceContext::MutatingUse(MutatingUseContext::Projection)
-                    } else {
-                        PlaceContext::NonMutatingUse(NonMutatingUseContext::Projection)
-                    };
-                }
+        fn super_place(
+            &mut self,
+            place: &Place<'tcx>,
+            mut context: PlaceContext,
+            location: Location,
+        ) {
+            if !place.projection.is_empty() && context.is_use() {
+                // ^ Only change the context if it is a real use, not a "use" in debuginfo.
+                context = if context.is_mutating_use() {
+                    PlaceContext::MutatingUse(MutatingUseContext::Projection)
+                } else {
+                    PlaceContext::NonMutatingUse(NonMutatingUseContext::Projection)
+                };
             }
 
             self.visit_local(place.local, context, location);
@@ -1239,7 +1247,7 @@ macro_rules! visit_place_fns {
             &mut self,
             _place_ref: PlaceRef<'tcx>,
             elem: PlaceElem<'tcx>,
-            _context: PlaceContext,
+            context: PlaceContext,
             location: Location,
         ) {
             match elem {
@@ -1252,7 +1260,12 @@ macro_rules! visit_place_fns {
                 ProjectionElem::Index(local) => {
                     self.visit_local(
                         local,
-                        PlaceContext::NonMutatingUse(NonMutatingUseContext::Copy),
+                        if context.is_use() {
+                            // ^ Only change the context if it is a real use, not a "use" in debuginfo.
+                            PlaceContext::NonMutatingUse(NonMutatingUseContext::Copy)
+                        } else {
+                            context
+                        },
                         location,
                     );
                 }
@@ -1399,6 +1412,24 @@ impl PlaceContext {
             self,
             PlaceContext::NonMutatingUse(NonMutatingUseContext::RawBorrow)
                 | PlaceContext::MutatingUse(MutatingUseContext::RawBorrow)
+        )
+    }
+
+    /// Returns `true` if this place context may be used to know the address of the given place.
+    #[inline]
+    pub fn may_observe_address(self) -> bool {
+        matches!(
+            self,
+            PlaceContext::NonMutatingUse(
+                NonMutatingUseContext::SharedBorrow
+                    | NonMutatingUseContext::RawBorrow
+                    | NonMutatingUseContext::FakeBorrow
+            ) | PlaceContext::MutatingUse(
+                MutatingUseContext::Drop
+                    | MutatingUseContext::Borrow
+                    | MutatingUseContext::RawBorrow
+                    | MutatingUseContext::AsmOutput
+            )
         )
     }
 

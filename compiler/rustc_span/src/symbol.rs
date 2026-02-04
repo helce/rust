@@ -3,10 +3,11 @@
 //! type, and vice versa.
 
 use std::hash::{Hash, Hasher};
+use std::ops::Deref;
 use std::{fmt, str};
 
 use rustc_arena::DroplessArena;
-use rustc_data_structures::fx::FxIndexSet;
+use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
 use rustc_data_structures::stable_hasher::{
     HashStable, StableCompare, StableHasher, ToStableHashKey,
 };
@@ -20,18 +21,17 @@ mod tests;
 
 // The proc macro code for this is in `compiler/rustc_macros/src/symbols.rs`.
 symbols! {
-    // This list includes things that are definitely keywords (e.g. `if`),
-    // a few things that are definitely not keywords (e.g. the empty symbol,
-    // `{{root}}`) and things where there is disagreement between people and/or
-    // documents (such as the Rust Reference) about whether it is a keyword
-    // (e.g. `_`).
+    // This list includes things that are definitely keywords (e.g. `if`), a
+    // few things that are definitely not keywords (e.g. `{{root}}`) and things
+    // where there is disagreement between people and/or documents (such as the
+    // Rust Reference) about whether it is a keyword (e.g. `_`).
     //
     // If you modify this list, adjust any relevant `Symbol::{is,can_be}_*`
     // predicates and `used_keywords`. Also consider adding new keywords to the
     // `ui/parser/raw/raw-idents.rs` test.
     Keywords {
-        // Special reserved identifiers used internally for elided lifetimes,
-        // unnamed method parameters, crate root module, error recovery etc.
+        // Special reserved identifiers used internally for unnamed method
+        // parameters, crate root module, etc.
         // Matching predicates: `is_special`/`is_reserved`
         //
         // tidy-alphabetical-start
@@ -279,6 +279,7 @@ symbols! {
         IterPeekable,
         Iterator,
         IteratorItem,
+        IteratorMap,
         Layout,
         Left,
         LinkedList,
@@ -324,6 +325,7 @@ symbols! {
         RangeSub,
         RangeTo,
         RangeToInclusive,
+        RangeToInclusiveCopy,
         Rc,
         RcWeak,
         Ready,
@@ -390,6 +392,7 @@ symbols! {
         __D,
         __H,
         __S,
+        __T,
         __awaitee,
         __try_var,
         _t,
@@ -444,6 +447,7 @@ symbols! {
         altivec,
         alu32,
         always,
+        analysis,
         and,
         and_then,
         anon,
@@ -462,6 +466,7 @@ symbols! {
         arm,
         arm_target_feature,
         array,
+        as_dash_needed: "as-needed",
         as_ptr,
         as_ref,
         as_str,
@@ -536,13 +541,16 @@ symbols! {
         att_syntax,
         attr,
         attr_literals,
+        attribute,
         attributes,
         audit_that,
         augmented_assignments,
         auto_traits,
+        autodiff,
         autodiff_forward,
         autodiff_reverse,
         automatically_derived,
+        available_externally,
         avx,
         avx10_target_feature,
         avx512_target_feature,
@@ -584,7 +592,9 @@ symbols! {
         btreemap_contains_key,
         btreemap_insert,
         btreeset_iter,
+        built,
         builtin_syntax,
+        bundle,
         c,
         c_dash_variadic,
         c_str,
@@ -674,6 +684,7 @@ symbols! {
         cold_path,
         collapse_debuginfo,
         column,
+        common,
         compare_bytes,
         compare_exchange,
         compare_exchange_weak,
@@ -741,6 +752,7 @@ symbols! {
         contracts_ensures,
         contracts_internals,
         contracts_requires,
+        convert,
         convert_identity,
         copy,
         copy_closures,
@@ -808,6 +820,7 @@ symbols! {
         decl_macro,
         declare_lint_pass,
         decode,
+        decorated,
         default_alloc_error_handler,
         default_field_values,
         default_fn,
@@ -842,11 +855,13 @@ symbols! {
         derive_const,
         derive_const_issue: "118304",
         derive_default_enum,
+        derive_from,
         derive_smart_pointer,
         destruct,
         destructuring_assignment,
         diagnostic,
         diagnostic_namespace,
+        dialect,
         direct,
         discriminant_kind,
         discriminant_type,
@@ -856,6 +871,7 @@ symbols! {
         div,
         div_assign,
         diverging_block_default,
+        dl,
         do_not_recommend,
         doc,
         doc_alias,
@@ -891,6 +907,7 @@ symbols! {
         e,
         e2k_target_feature,
         edition_panic,
+        effective_target_features,
         effects,
         eh_catch_typeinfo,
         eh_personality,
@@ -955,6 +972,7 @@ symbols! {
         extern_prelude,
         extern_system_varargs,
         extern_types,
+        extern_weak,
         external,
         external_doc,
         f,
@@ -1050,6 +1068,7 @@ symbols! {
         fn_ptr_addr,
         fn_ptr_trait,
         forbid,
+        force_target_feature,
         forget,
         format,
         format_args,
@@ -1062,6 +1081,7 @@ symbols! {
         format_macro,
         format_placeholder,
         format_unsafe_arg,
+        framework,
         freeze,
         freeze_impls,
         freg,
@@ -1203,6 +1223,7 @@ symbols! {
         infer_static_outlives_requirements,
         inherent_associated_types,
         inherit,
+        initial,
         inlateout,
         inline,
         inline_const,
@@ -1212,6 +1233,7 @@ symbols! {
         instruction_set,
         integer_: "integer", // underscore to avoid clashing with the function `sym::integer` below
         integral,
+        internal,
         internal_features,
         into_async_iter_into_iter,
         into_future,
@@ -1248,6 +1270,7 @@ symbols! {
         iterator,
         iterator_collect_fn,
         kcfi,
+        kernel_address,
         keylocker_x86,
         keyword,
         kind,
@@ -1259,6 +1282,7 @@ symbols! {
         lang,
         lang_items,
         large_assignments,
+        last,
         lateout,
         lazy_normalization_consts,
         lazy_type_alias,
@@ -1279,6 +1303,7 @@ symbols! {
         link_arg_attribute,
         link_args,
         link_cfg,
+        link_dash_arg: "link-arg",
         link_llvm_intrinsics,
         link_name,
         link_ordinal,
@@ -1286,6 +1311,8 @@ symbols! {
         linkage,
         linker,
         linker_messages,
+        linkonce,
+        linkonce_odr,
         lint_reasons,
         literal,
         load,
@@ -1311,8 +1338,10 @@ symbols! {
         lt,
         m68k_target_feature,
         macro_at_most_once_rep,
+        macro_attr,
         macro_attributes_in_derive_output,
         macro_concat,
+        macro_derive,
         macro_escape,
         macro_export,
         macro_lifetime_matcher,
@@ -1508,11 +1537,13 @@ symbols! {
         noop_method_borrow,
         noop_method_clone,
         noop_method_deref,
+        noprefix,
         noreturn,
         nostack,
         not,
         notable_trait,
         note,
+        nvptx_target_feature,
         object_safe_for_dispatch,
         of,
         off,
@@ -1533,6 +1564,7 @@ symbols! {
         opt_out_copy,
         optimize,
         optimize_attribute,
+        optimized,
         optin_builtin_traits,
         option,
         option_env,
@@ -1580,6 +1612,7 @@ symbols! {
         panic_const_shl_overflow,
         panic_const_shr_overflow,
         panic_const_sub_overflow,
+        panic_display,
         panic_fmt,
         panic_handler,
         panic_impl,
@@ -1614,6 +1647,7 @@ symbols! {
         pattern_types,
         permissions_from_mode,
         phantom_data,
+        phase,
         pic,
         pie,
         pin,
@@ -1630,6 +1664,7 @@ symbols! {
         poll,
         poll_next,
         position,
+        post_cleanup: "post-cleanup",
         post_dash_lto: "post-lto",
         postfix_match,
         powerpc_target_feature,
@@ -1716,6 +1751,7 @@ symbols! {
         quote,
         range_inclusive_new,
         range_step,
+        raw_dash_dylib: "raw-dylib",
         raw_dylib,
         raw_dylib_elf,
         raw_eq,
@@ -1731,6 +1767,7 @@ symbols! {
         readonly,
         realloc,
         reason,
+        reborrow,
         receiver,
         receiver_target,
         recursion_limit,
@@ -1793,6 +1830,7 @@ symbols! {
         roundf128,
         rt,
         rtm_target_feature,
+        runtime,
         rust,
         rust_2015,
         rust_2018,
@@ -1811,6 +1849,7 @@ symbols! {
         rustc_abi,
         // FIXME(#82232, #143834): temporary name to mitigate `#[align]` nameres ambiguity
         rustc_align,
+        rustc_align_static,
         rustc_allocator,
         rustc_allocator_zeroed,
         rustc_allow_const_fn_unstable,
@@ -1825,7 +1864,6 @@ symbols! {
         rustc_coherence_is_core,
         rustc_coinductive,
         rustc_confusables,
-        rustc_const_panic_str,
         rustc_const_stable,
         rustc_const_stable_indirect,
         rustc_const_unstable,
@@ -2062,6 +2100,7 @@ symbols! {
         staged_api,
         start,
         state,
+        static_align,
         static_in_const,
         static_nobundle,
         static_recursion,
@@ -2127,6 +2166,7 @@ symbols! {
         target_family,
         target_feature,
         target_feature_11,
+        target_feature_inline_always,
         target_has_atomic,
         target_has_atomic_equal_alignment,
         target_has_atomic_load_store,
@@ -2245,11 +2285,14 @@ symbols! {
         unboxed_closures,
         unchecked_add,
         unchecked_div,
+        unchecked_funnel_shl,
+        unchecked_funnel_shr,
         unchecked_mul,
         unchecked_rem,
         unchecked_shl,
         unchecked_shr,
         unchecked_sub,
+        undecorated,
         underscore_const_names,
         underscore_imports,
         underscore_lifetimes,
@@ -2321,6 +2364,7 @@ symbols! {
         va_start,
         val,
         validity,
+        value,
         values,
         var,
         variant_count,
@@ -2337,6 +2381,7 @@ symbols! {
         vecdeque_iter,
         vecdeque_reserve,
         vector,
+        verbatim,
         version,
         vfp2,
         vis,
@@ -2357,8 +2402,11 @@ symbols! {
         wasm_abi,
         wasm_import_module,
         wasm_target_feature,
+        weak,
+        weak_odr,
         where_clause_attrs,
         while_let,
+        whole_dash_archive: "whole-archive",
         width,
         windows,
         windows_subsystem,
@@ -2389,9 +2437,11 @@ symbols! {
         yield_expr,
         ymm_reg,
         yreg,
+        zca,
         zfh,
         zfhmin,
         zmm_reg,
+        ztso,
         // tidy-alphabetical-end
     }
 }
@@ -2506,8 +2556,14 @@ impl fmt::Debug for Ident {
 /// except that AST identifiers don't keep the rawness flag, so we have to guess it.
 impl fmt::Display for Ident {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&IdentPrinter::new(self.name, self.is_raw_guess(), None), f)
+        fmt::Display::fmt(&IdentPrinter::new(self.name, self.guess_print_mode(), None), f)
     }
+}
+
+pub enum IdentPrintMode {
+    Normal,
+    RawIdent,
+    RawLifetime,
 }
 
 /// The most general type to print identifiers.
@@ -2525,7 +2581,7 @@ impl fmt::Display for Ident {
 /// done for a token stream or a single token.
 pub struct IdentPrinter {
     symbol: Symbol,
-    is_raw: bool,
+    mode: IdentPrintMode,
     /// Span used for retrieving the crate name to which `$crate` refers to,
     /// if this field is `None` then the `$crate` conversion doesn't happen.
     convert_dollar_crate: Option<Span>,
@@ -2533,46 +2589,66 @@ pub struct IdentPrinter {
 
 impl IdentPrinter {
     /// The most general `IdentPrinter` constructor. Do not use this.
-    pub fn new(symbol: Symbol, is_raw: bool, convert_dollar_crate: Option<Span>) -> IdentPrinter {
-        IdentPrinter { symbol, is_raw, convert_dollar_crate }
+    pub fn new(
+        symbol: Symbol,
+        mode: IdentPrintMode,
+        convert_dollar_crate: Option<Span>,
+    ) -> IdentPrinter {
+        IdentPrinter { symbol, mode, convert_dollar_crate }
     }
 
     /// This implementation is supposed to be used when printing identifiers
     /// as a part of pretty-printing for larger AST pieces.
     /// Do not use this either.
-    pub fn for_ast_ident(ident: Ident, is_raw: bool) -> IdentPrinter {
-        IdentPrinter::new(ident.name, is_raw, Some(ident.span))
+    pub fn for_ast_ident(ident: Ident, mode: IdentPrintMode) -> IdentPrinter {
+        IdentPrinter::new(ident.name, mode, Some(ident.span))
     }
 }
 
 impl fmt::Display for IdentPrinter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_raw {
-            f.write_str("r#")?;
-        } else if self.symbol == kw::DollarCrate {
-            if let Some(span) = self.convert_dollar_crate {
+        let s = match self.mode {
+            IdentPrintMode::Normal
+                if self.symbol == kw::DollarCrate
+                    && let Some(span) = self.convert_dollar_crate =>
+            {
                 let converted = span.ctxt().dollar_crate_name();
                 if !converted.is_path_segment_keyword() {
                     f.write_str("::")?;
                 }
-                return fmt::Display::fmt(&converted, f);
+                converted
             }
-        }
-        fmt::Display::fmt(&self.symbol, f)
+            IdentPrintMode::Normal => self.symbol,
+            IdentPrintMode::RawIdent => {
+                f.write_str("r#")?;
+                self.symbol
+            }
+            IdentPrintMode::RawLifetime => {
+                f.write_str("'r#")?;
+                let s = self
+                    .symbol
+                    .as_str()
+                    .strip_prefix("'")
+                    .expect("only lifetime idents should be passed with RawLifetime mode");
+                Symbol::intern(s)
+            }
+        };
+        s.fmt(f)
     }
 }
 
 /// An newtype around `Ident` that calls [Ident::normalize_to_macro_rules] on
-/// construction.
-// FIXME(matthewj, petrochenkov) Use this more often, add a similar
-// `ModernIdent` struct and use that as well.
+/// construction for "local variable hygiene" comparisons.
+///
+/// Use this type when you need to compare identifiers according to macro_rules hygiene.
+/// This ensures compile-time safety and avoids manual normalization calls.
 #[derive(Copy, Clone, Eq, PartialEq, Hash)]
 pub struct MacroRulesNormalizedIdent(Ident);
 
 impl MacroRulesNormalizedIdent {
     #[inline]
     pub fn new(ident: Ident) -> Self {
-        Self(ident.normalize_to_macro_rules())
+        MacroRulesNormalizedIdent(ident.normalize_to_macro_rules())
     }
 }
 
@@ -2585,6 +2661,48 @@ impl fmt::Debug for MacroRulesNormalizedIdent {
 impl fmt::Display for MacroRulesNormalizedIdent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// An newtype around `Ident` that calls [Ident::normalize_to_macros_2_0] on
+/// construction for "item hygiene" comparisons.
+///
+/// Identifiers with same string value become same if they came from the same macro 2.0 macro
+/// (e.g., `macro` item, but not `macro_rules` item) and stay different if they came from
+/// different macro 2.0 macros.
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+pub struct Macros20NormalizedIdent(pub Ident);
+
+impl Macros20NormalizedIdent {
+    #[inline]
+    pub fn new(ident: Ident) -> Self {
+        Macros20NormalizedIdent(ident.normalize_to_macros_2_0())
+    }
+
+    // dummy_span does not need to be normalized, so we can use `Ident` directly
+    pub fn with_dummy_span(name: Symbol) -> Self {
+        Macros20NormalizedIdent(Ident::with_dummy_span(name))
+    }
+}
+
+impl fmt::Debug for Macros20NormalizedIdent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Display for Macros20NormalizedIdent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// By impl Deref, we can access the wrapped Ident as if it were a normal Ident
+/// such as `norm_ident.name` instead of `norm_ident.0.name`.
+impl Deref for Macros20NormalizedIdent {
+    type Target = Ident;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -2754,11 +2872,20 @@ impl Interner {
         let byte_strs = FxIndexSet::from_iter(
             init.iter().copied().chain(extra.iter().copied()).map(|str| str.as_bytes()),
         );
-        assert_eq!(
-            byte_strs.len(),
-            init.len() + extra.len(),
-            "duplicate symbols in the rustc symbol list and the extra symbols added by the driver",
-        );
+
+        // The order in which duplicates are reported is irrelevant.
+        #[expect(rustc::potential_query_instability)]
+        if byte_strs.len() != init.len() + extra.len() {
+            panic!(
+                "duplicate symbols in the rustc symbol list and the extra symbols added by the driver: {:?}",
+                FxHashSet::intersection(
+                    &init.iter().copied().collect(),
+                    &extra.iter().copied().collect(),
+                )
+                .collect::<Vec<_>>()
+            )
+        }
+
         Interner(Lock::new(InternerInner { arena: Default::default(), byte_strs }))
     }
 
@@ -2948,6 +3075,29 @@ impl Ident {
     /// How was it written originally? Did it use the raw form? Let's try to guess.
     pub fn is_raw_guess(self) -> bool {
         self.name.can_be_raw() && self.is_reserved()
+    }
+
+    /// Given the name of a lifetime without the first quote (`'`),
+    /// returns whether the lifetime name is reserved (therefore invalid)
+    pub fn is_reserved_lifetime(self) -> bool {
+        self.is_reserved() && ![kw::Underscore, kw::Static].contains(&self.name)
+    }
+
+    pub fn is_raw_lifetime_guess(self) -> bool {
+        let name_without_apostrophe = self.without_first_quote();
+        name_without_apostrophe.name != self.name
+            && name_without_apostrophe.name.can_be_raw()
+            && name_without_apostrophe.is_reserved_lifetime()
+    }
+
+    pub fn guess_print_mode(self) -> IdentPrintMode {
+        if self.is_raw_lifetime_guess() {
+            IdentPrintMode::RawLifetime
+        } else if self.is_raw_guess() {
+            IdentPrintMode::RawIdent
+        } else {
+            IdentPrintMode::Normal
+        }
     }
 
     /// Whether this would be the identifier for a tuple field like `self.0`, as

@@ -576,7 +576,7 @@ pub fn try_evaluate_const<'tcx>(
                                     let args =
                                         replace_param_and_infer_args_with_placeholder(tcx, uv.args);
                                     let typing_env = infcx
-                                        .typing_env(tcx.erase_regions(param_env))
+                                        .typing_env(tcx.erase_and_anonymize_regions(param_env))
                                         .with_post_analysis_normalized(tcx);
                                     (args, typing_env)
                                 }
@@ -589,7 +589,7 @@ pub fn try_evaluate_const<'tcx>(
                         }
                     } else {
                         let typing_env = infcx
-                            .typing_env(tcx.erase_regions(param_env))
+                            .typing_env(tcx.erase_and_anonymize_regions(param_env))
                             .with_post_analysis_normalized(tcx);
                         (uv.args, typing_env)
                     }
@@ -634,14 +634,14 @@ pub fn try_evaluate_const<'tcx>(
                     }
 
                     let typing_env = infcx
-                        .typing_env(tcx.erase_regions(param_env))
+                        .typing_env(tcx.erase_and_anonymize_regions(param_env))
                         .with_post_analysis_normalized(tcx);
                     (uv.args, typing_env)
                 }
             };
 
             let uv = ty::UnevaluatedConst::new(uv.def, args);
-            let erased_uv = tcx.erase_regions(uv);
+            let erased_uv = tcx.erase_and_anonymize_regions(uv);
 
             use rustc_middle::mir::interpret::ErrorHandled;
             // FIXME: `def_span` will point at the definition of this const; ideally, we'd point at
@@ -706,7 +706,10 @@ fn replace_param_and_infer_args_with_placeholder<'tcx>(
                 self.idx += 1;
                 ty::Const::new_placeholder(
                     self.tcx,
-                    ty::PlaceholderConst { universe: ty::UniverseIndex::ROOT, bound: idx },
+                    ty::PlaceholderConst {
+                        universe: ty::UniverseIndex::ROOT,
+                        bound: ty::BoundConst { var: idx },
+                    },
                 )
             } else {
                 c.super_fold_with(self)
@@ -760,7 +763,7 @@ fn instantiate_and_check_impossible_predicates<'tcx>(
     // Specifically check trait fulfillment to avoid an error when trying to resolve
     // associated items.
     if let Some(trait_def_id) = tcx.trait_of_assoc(key.0) {
-        let trait_ref = ty::TraitRef::from_method(tcx, trait_def_id, key.1);
+        let trait_ref = ty::TraitRef::from_assoc(tcx, trait_def_id, key.1);
         predicates.push(trait_ref.upcast(tcx));
     }
 

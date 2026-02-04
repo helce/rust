@@ -403,12 +403,6 @@ pub enum BoundTyKind {
     Param(DefId),
 }
 
-impl From<BoundVar> for BoundTy {
-    fn from(var: BoundVar) -> Self {
-        BoundTy { var, kind: BoundTyKind::Anon }
-    }
-}
-
 /// Constructors for `Ty`
 impl<'tcx> Ty<'tcx> {
     /// Avoid using this in favour of more specific `new_*` methods, where possible.
@@ -827,10 +821,38 @@ impl<'tcx> Ty<'tcx> {
     #[inline]
     pub fn new_coroutine_witness(
         tcx: TyCtxt<'tcx>,
-        id: DefId,
+        def_id: DefId,
         args: GenericArgsRef<'tcx>,
     ) -> Ty<'tcx> {
-        Ty::new(tcx, CoroutineWitness(id, args))
+        if cfg!(debug_assertions) {
+            tcx.debug_assert_args_compatible(tcx.typeck_root_def_id(def_id), args);
+        }
+        Ty::new(tcx, CoroutineWitness(def_id, args))
+    }
+
+    pub fn new_coroutine_witness_for_coroutine(
+        tcx: TyCtxt<'tcx>,
+        def_id: DefId,
+        coroutine_args: GenericArgsRef<'tcx>,
+    ) -> Ty<'tcx> {
+        tcx.debug_assert_args_compatible(def_id, coroutine_args);
+        // HACK: Coroutine witness types are lifetime erased, so they
+        // never reference any lifetime args from the coroutine. We erase
+        // the regions here since we may get into situations where a
+        // coroutine is recursively contained within itself, leading to
+        // witness types that differ by region args. This means that
+        // cycle detection in fulfillment will not kick in, which leads
+        // to unnecessary overflows in async code. See the issue:
+        // <https://github.com/rust-lang/rust/issues/145151>.
+        let args =
+            ty::GenericArgs::for_item(tcx, tcx.typeck_root_def_id(def_id), |def, _| {
+                match def.kind {
+                    ty::GenericParamDefKind::Lifetime => tcx.lifetimes.re_erased.into(),
+                    ty::GenericParamDefKind::Type { .. }
+                    | ty::GenericParamDefKind::Const { .. } => coroutine_args[def.index as usize],
+                }
+            });
+        Ty::new_coroutine_witness(tcx, def_id, args)
     }
 
     // misc
@@ -989,6 +1011,14 @@ impl<'tcx> rustc_type_ir::inherent::Ty<TyCtxt<'tcx>> for Ty<'tcx> {
         args: ty::GenericArgsRef<'tcx>,
     ) -> Self {
         Ty::new_coroutine_witness(interner, def_id, args)
+    }
+
+    fn new_coroutine_witness_for_coroutine(
+        interner: TyCtxt<'tcx>,
+        def_id: DefId,
+        coroutine_args: ty::GenericArgsRef<'tcx>,
+    ) -> Self {
+        Ty::new_coroutine_witness_for_coroutine(interner, def_id, coroutine_args)
     }
 
     fn new_ptr(interner: TyCtxt<'tcx>, ty: Self, mutbl: hir::Mutability) -> Self {
@@ -1462,7 +1492,7 @@ impl<'tcx> Ty<'tcx> {
         }
     }
 
-    /// Returns the type and mutability of `*ty`.
+    /// Returns the type of `*ty`.
     ///
     /// The parameter `explicit` indicates if this is an *explicit* dereference.
     /// Some types -- notably raw ptrs -- can only be dereferenced explicitly.

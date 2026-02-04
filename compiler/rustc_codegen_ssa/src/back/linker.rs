@@ -11,8 +11,9 @@ use rustc_metadata::{
 };
 use rustc_middle::bug;
 use rustc_middle::middle::dependency_format::Linkage;
-use rustc_middle::middle::exported_symbols;
-use rustc_middle::middle::exported_symbols::{ExportedSymbol, SymbolExportInfo, SymbolExportKind};
+use rustc_middle::middle::exported_symbols::{
+    self, ExportedSymbol, SymbolExportInfo, SymbolExportKind, SymbolExportLevel,
+};
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
 use rustc_session::config::{self, CrateType, DebugInfo, LinkerPluginLto, Lto, OptLevel, Strip};
@@ -22,6 +23,8 @@ use tracing::{debug, warn};
 
 use super::command::Command;
 use super::symbol_export;
+use crate::back::symbol_export::allocator_shim_symbols;
+use crate::base::needs_allocator_shim_for_linking;
 use crate::errors;
 
 #[cfg(test)]
@@ -1805,11 +1808,18 @@ pub(crate) fn exported_symbols(
             .collect();
     }
 
-    if let CrateType::ProcMacro = crate_type {
+    let mut symbols = if let CrateType::ProcMacro = crate_type {
         exported_symbols_for_proc_macro_crate(tcx)
     } else {
         exported_symbols_for_non_proc_macro(tcx, crate_type)
+    };
+
+    if crate_type == CrateType::Dylib || crate_type == CrateType::ProcMacro {
+        let metadata_symbol_name = exported_symbols::metadata_symbol_name(tcx);
+        symbols.push((metadata_symbol_name, SymbolExportKind::Data));
     }
+
+    symbols
 }
 
 fn exported_symbols_for_non_proc_macro(
@@ -1820,7 +1830,7 @@ fn exported_symbols_for_non_proc_macro(
     let export_threshold = symbol_export::crates_export_threshold(&[crate_type]);
     for_each_exported_symbols_include_dep(tcx, crate_type, |symbol, info, cnum| {
         // Do not export mangled symbols from cdylibs and don't attempt to export compiler-builtins
-        // from any cdylib. The latter doesn't work anyway as we use hidden visibility for
+        // from any dylib. The latter doesn't work anyway as we use hidden visibility for
         // compiler-builtins. Most linkers silently ignore it, but ld64 gives a warning.
         if info.level.is_below_threshold(export_threshold) && !tcx.is_compiler_builtins(cnum) {
             symbols.push((
@@ -1830,6 +1840,14 @@ fn exported_symbols_for_non_proc_macro(
             symbol_export::extend_exported_symbols(&mut symbols, tcx, symbol, cnum);
         }
     });
+
+    // Mark allocator shim symbols as exported only if they were generated.
+    if export_threshold == SymbolExportLevel::Rust
+        && needs_allocator_shim_for_linking(tcx.dependency_formats(()), crate_type)
+        && tcx.allocator_kind(()).is_some()
+    {
+        symbols.extend(allocator_shim_symbols(tcx));
+    }
 
     symbols
 }
@@ -1842,12 +1860,8 @@ fn exported_symbols_for_proc_macro_crate(tcx: TyCtxt<'_>) -> Vec<(String, Symbol
 
     let stable_crate_id = tcx.stable_crate_id(LOCAL_CRATE);
     let proc_macro_decls_name = tcx.sess.generate_proc_macro_decls_symbol(stable_crate_id);
-    let metadata_symbol_name = exported_symbols::metadata_symbol_name(tcx);
 
-    vec![
-        (proc_macro_decls_name, SymbolExportKind::Data),
-        (metadata_symbol_name, SymbolExportKind::Data),
-    ]
+    vec![(proc_macro_decls_name, SymbolExportKind::Data)]
 }
 
 pub(crate) fn linked_symbols(

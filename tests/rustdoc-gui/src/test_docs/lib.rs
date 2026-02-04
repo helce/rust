@@ -161,6 +161,10 @@ pub enum AnEnum {
 /// Some keyword.
 pub mod keyword {}
 
+#[doc(attribute = "forbid")]
+/// Some attribute.
+pub mod repr {}
+
 /// Just some type alias.
 pub type SomeType = u32;
 
@@ -765,5 +769,19 @@ pub mod impls_indent {
     impl Context {
         /// bla
         pub fn bar() {}
+    }
+}
+
+pub mod tooltips {
+    pub struct X;
+
+    impl X {
+        pub fn bar() -> Vec<u8> {
+            Vec::new()
+        }
+    }
+
+    pub fn bar() -> Vec<u8> {
+        Vec::new()
     }
 }

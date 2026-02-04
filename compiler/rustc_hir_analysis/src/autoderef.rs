@@ -1,7 +1,7 @@
+use rustc_hir::limit::Limit;
 use rustc_infer::infer::InferCtxt;
 use rustc_infer::traits::PredicateObligations;
 use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
-use rustc_session::Limit;
 use rustc_span::def_id::{LOCAL_CRATE, LocalDefId};
 use rustc_span::{ErrorGuaranteed, Span};
 use rustc_trait_selection::traits::ObligationCtxt;
@@ -202,14 +202,10 @@ impl<'a, 'tcx> Autoderef<'a, 'tcx> {
         Some((normalized_ty, ocx.into_pending_obligations()))
     }
 
-    /// Returns the final type we ended up with, which may be an inference
-    /// variable (we will resolve it first, if we want).
-    pub fn final_ty(&self, resolve: bool) -> Ty<'tcx> {
-        if resolve {
-            self.infcx.resolve_vars_if_possible(self.state.cur_ty)
-        } else {
-            self.state.cur_ty
-        }
+    /// Returns the final type we ended up with, which may be an unresolved
+    /// inference variable.
+    pub fn final_ty(&self) -> Ty<'tcx> {
+        self.state.cur_ty
     }
 
     pub fn step_count(&self) -> usize {

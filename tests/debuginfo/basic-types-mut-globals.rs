@@ -6,6 +6,7 @@
 
 //@ compile-flags:-g
 //@ min-gdb-version: 11.2
+//@ disable-gdb-pretty-printers
 
 // gdb-command:run
 
@@ -75,8 +76,6 @@
 // gdb-check:$30 = 9.25
 
 #![allow(unused_variables)]
-#![feature(omit_gdb_pretty_printer_section)]
-#![omit_gdb_pretty_printer_section]
 #![feature(f16)]
 
 static mut B: bool = false;

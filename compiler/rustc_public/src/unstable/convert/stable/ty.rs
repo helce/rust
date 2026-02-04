@@ -656,13 +656,13 @@ impl<'tcx> Stable<'tcx> for rustc_middle::ty::GenericParamDefKind {
 
     fn stable(&self, _: &mut Tables<'_, BridgeTys>, _: &CompilerCtxt<'_, BridgeTys>) -> Self::T {
         use crate::ty::GenericParamDefKind;
-        match self {
+        match *self {
             ty::GenericParamDefKind::Lifetime => GenericParamDefKind::Lifetime,
             ty::GenericParamDefKind::Type { has_default, synthetic } => {
-                GenericParamDefKind::Type { has_default: *has_default, synthetic: *synthetic }
+                GenericParamDefKind::Type { has_default, synthetic }
             }
-            ty::GenericParamDefKind::Const { has_default, synthetic: _ } => {
-                GenericParamDefKind::Const { has_default: *has_default }
+            ty::GenericParamDefKind::Const { has_default } => {
+                GenericParamDefKind::Const { has_default }
             }
         }
     }
@@ -1076,14 +1076,21 @@ impl<'tcx> Stable<'tcx> for ty::AssocKind {
     }
 }
 
-impl<'tcx> Stable<'tcx> for ty::AssocItemContainer {
-    type T = crate::ty::AssocItemContainer;
+impl<'tcx> Stable<'tcx> for ty::AssocContainer {
+    type T = crate::ty::AssocContainer;
 
-    fn stable(&self, _: &mut Tables<'_, BridgeTys>, _: &CompilerCtxt<'_, BridgeTys>) -> Self::T {
-        use crate::ty::AssocItemContainer;
+    fn stable(
+        &self,
+        tables: &mut Tables<'_, BridgeTys>,
+        _: &CompilerCtxt<'_, BridgeTys>,
+    ) -> Self::T {
+        use crate::ty::AssocContainer;
         match self {
-            ty::AssocItemContainer::Trait => AssocItemContainer::Trait,
-            ty::AssocItemContainer::Impl => AssocItemContainer::Impl,
+            ty::AssocContainer::Trait => AssocContainer::Trait,
+            ty::AssocContainer::InherentImpl => AssocContainer::InherentImpl,
+            ty::AssocContainer::TraitImpl(trait_item_id) => {
+                AssocContainer::TraitImpl(tables.assoc_def(trait_item_id.unwrap()))
+            }
         }
     }
 }
@@ -1100,7 +1107,6 @@ impl<'tcx> Stable<'tcx> for ty::AssocItem {
             def_id: tables.assoc_def(self.def_id),
             kind: self.kind.stable(tables, cx),
             container: self.container.stable(tables, cx),
-            trait_item_def_id: self.trait_item_def_id.map(|did| tables.assoc_def(did)),
         }
     }
 }

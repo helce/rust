@@ -1,5 +1,6 @@
 //@ compile-flags:-g
 //@ min-gdb-version: 11.2
+//@ disable-gdb-pretty-printers
 
 // gdb-command:run
 // gdb-command:whatis unit
@@ -54,8 +55,6 @@
 // gdb-command:continue
 
 #![allow(unused_variables)]
-#![feature(omit_gdb_pretty_printer_section)]
-#![omit_gdb_pretty_printer_section]
 #![feature(f16)]
 
 fn main() {

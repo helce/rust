@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use rustc_ast::ast;
 use rustc_errors::codes::*;
+use rustc_hir::limit::Limit;
 use rustc_macros::{Diagnostic, Subdiagnostic};
-use rustc_session::Limit;
 use rustc_span::{Ident, MacroRulesNormalizedIdent, Span, Symbol};
 
 #[derive(Diagnostic)]
@@ -481,4 +481,23 @@ mod metavar_exprs {
         pub span: Span,
         pub key: MacroRulesNormalizedIdent,
     }
+}
+
+#[derive(Diagnostic)]
+#[diag(expand_macro_args_bad_delim)]
+pub(crate) struct MacroArgsBadDelim {
+    #[primary_span]
+    pub span: Span,
+    #[subdiagnostic]
+    pub sugg: MacroArgsBadDelimSugg,
+    pub rule_kw: Symbol,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(expand_macro_args_bad_delim_sugg, applicability = "machine-applicable")]
+pub(crate) struct MacroArgsBadDelimSugg {
+    #[suggestion_part(code = "(")]
+    pub open: Span,
+    #[suggestion_part(code = ")")]
+    pub close: Span,
 }

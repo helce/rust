@@ -1,7 +1,6 @@
 use derive_where::derive_where;
 #[cfg(feature = "nightly")]
 use rustc_macros::{Decodable_NoContext, Encodable_NoContext, HashStable_NoContext};
-use rustc_type_ir_macros::{TypeFoldable_Generic, TypeVisitable_Generic};
 
 use crate::fold::TypeFoldable;
 use crate::inherent::*;
@@ -19,8 +18,7 @@ use crate::{self as ty, Interner};
 ///
 /// If neither of these functions are available, feel free to reach out to
 /// t-types for help.
-#[derive_where(Clone, Copy, Hash, PartialEq, Eq, Debug; I: Interner)]
-#[derive(TypeVisitable_Generic, TypeFoldable_Generic)]
+#[derive_where(Clone, Copy, Hash, PartialEq, Debug; I: Interner)]
 #[cfg_attr(
     feature = "nightly",
     derive(Encodable_NoContext, Decodable_NoContext, HashStable_NoContext)
@@ -92,6 +90,8 @@ pub enum TypingMode<I: Interner> {
     PostAnalysis,
 }
 
+impl<I: Interner> Eq for TypingMode<I> {}
+
 impl<I: Interner> TypingMode<I> {
     /// Analysis outside of a body does not define any opaque types.
     pub fn non_body_analysis() -> TypingMode<I> {
@@ -148,10 +148,6 @@ pub trait InferCtxtLike: Sized {
         true
     }
 
-    fn in_hir_typeck(&self) -> bool {
-        false
-    }
-
     fn typing_mode(&self) -> TypingMode<Self::Interner>;
 
     fn universe(&self) -> ty::UniverseIndex;
@@ -162,6 +158,7 @@ pub trait InferCtxtLike: Sized {
     fn universe_of_ct(&self, ct: ty::ConstVid) -> Option<ty::UniverseIndex>;
 
     fn root_ty_var(&self, var: ty::TyVid) -> ty::TyVid;
+    fn sub_unification_table_root_var(&self, var: ty::TyVid) -> ty::TyVid;
     fn root_const_var(&self, var: ty::ConstVid) -> ty::ConstVid;
 
     fn opportunistic_resolve_ty_var(&self, vid: ty::TyVid) -> <Self::Interner as Interner>::Ty;
@@ -201,6 +198,7 @@ pub trait InferCtxtLike: Sized {
     ) -> U;
 
     fn equate_ty_vids_raw(&self, a: ty::TyVid, b: ty::TyVid);
+    fn sub_unify_ty_vids_raw(&self, a: ty::TyVid, b: ty::TyVid);
     fn equate_int_vids_raw(&self, a: ty::IntVid, b: ty::IntVid);
     fn equate_float_vids_raw(&self, a: ty::FloatVid, b: ty::FloatVid);
     fn equate_const_vids_raw(&self, a: ty::ConstVid, b: ty::ConstVid);

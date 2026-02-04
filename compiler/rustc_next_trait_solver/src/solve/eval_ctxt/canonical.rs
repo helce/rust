@@ -16,7 +16,8 @@ use rustc_type_ir::data_structures::HashSet;
 use rustc_type_ir::inherent::*;
 use rustc_type_ir::relate::solver_relating::RelateExt;
 use rustc_type_ir::{
-    self as ty, Canonical, CanonicalVarValues, InferCtxtLike, Interner, TypeFoldable,
+    self as ty, Canonical, CanonicalVarKind, CanonicalVarValues, InferCtxtLike, Interner,
+    TypeFoldable,
 };
 use tracing::{debug, instrument, trace};
 
@@ -56,24 +57,23 @@ where
     ///
     /// This expects `goal` and `opaque_types` to be eager resolved.
     pub(super) fn canonicalize_goal(
-        &self,
-        is_hir_typeck_root_goal: bool,
+        delegate: &D,
         goal: Goal<I, I::Predicate>,
         opaque_types: Vec<(ty::OpaqueTypeKey<I>, I::Ty)>,
     ) -> (Vec<I::GenericArg>, CanonicalInput<I, I::Predicate>) {
         let mut orig_values = Default::default();
         let canonical = Canonicalizer::canonicalize_input(
-            self.delegate,
+            delegate,
             &mut orig_values,
-            is_hir_typeck_root_goal,
             QueryInput {
                 goal,
-                predefined_opaques_in_body: self
+                predefined_opaques_in_body: delegate
                     .cx()
                     .mk_predefined_opaques_in_body(PredefinedOpaquesData { opaque_types }),
             },
         );
-        let query_input = ty::CanonicalQueryInput { canonical, typing_mode: self.typing_mode() };
+        let query_input =
+            ty::CanonicalQueryInput { canonical, typing_mode: delegate.typing_mode() };
         (orig_values, query_input)
     }
 
@@ -273,28 +273,23 @@ where
     /// - we apply the `external_constraints` returned by the query, returning
     ///   the `normalization_nested_goals`
     pub(super) fn instantiate_and_apply_query_response(
-        &mut self,
+        delegate: &D,
         param_env: I::ParamEnv,
         original_values: &[I::GenericArg],
         response: CanonicalResponse<I>,
+        span: I::Span,
     ) -> (NestedNormalizationGoals<I>, Certainty) {
         let instantiation = Self::compute_query_response_instantiation_values(
-            self.delegate,
+            delegate,
             &original_values,
             &response,
-            self.origin_span,
+            span,
         );
 
         let Response { var_values, external_constraints, certainty } =
-            self.delegate.instantiate_canonical(response, instantiation);
+            delegate.instantiate_canonical(response, instantiation);
 
-        Self::unify_query_var_values(
-            self.delegate,
-            param_env,
-            &original_values,
-            var_values,
-            self.origin_span,
-        );
+        Self::unify_query_var_values(delegate, param_env, &original_values, var_values, span);
 
         let ExternalConstraintsData {
             region_constraints,
@@ -302,8 +297,8 @@ where
             normalization_nested_goals,
         } = &*external_constraints;
 
-        self.register_region_constraints(region_constraints);
-        self.register_new_opaque_types(opaque_types);
+        Self::register_region_constraints(delegate, region_constraints, span);
+        Self::register_new_opaque_types(delegate, opaque_types, span);
 
         (normalization_nested_goals.clone(), certainty)
     }
@@ -342,7 +337,16 @@ where
         {
             match result_value.kind() {
                 ty::GenericArgKind::Type(t) => {
-                    if let ty::Bound(debruijn, b) = t.kind() {
+                    // We disable the instantiation guess for inference variables
+                    // and only use it for placeholders. We need to handle the
+                    // `sub_root` of type inference variables which would make this
+                    // more involved. They are also a lot rarer than region variables.
+                    if let ty::Bound(debruijn, b) = t.kind()
+                        && !matches!(
+                            response.variables.get(b.var().as_usize()).unwrap(),
+                            CanonicalVarKind::Ty { .. }
+                        )
+                    {
                         assert_eq!(debruijn, ty::INNERMOST);
                         opt_values[b.var()] = Some(*original_value);
                     }
@@ -361,39 +365,33 @@ where
                 }
             }
         }
-
-        let var_values = delegate.cx().mk_args_from_iter(
-            response.variables.iter().enumerate().map(|(index, var_kind)| {
-                if var_kind.universe() != ty::UniverseIndex::ROOT {
-                    // A variable from inside a binder of the query. While ideally these shouldn't
-                    // exist at all (see the FIXME at the start of this method), we have to deal with
-                    // them for now.
-                    delegate.instantiate_canonical_var_with_infer(var_kind, span, |idx| {
-                        prev_universe + idx.index()
-                    })
-                } else if var_kind.is_existential() {
-                    // As an optimization we sometimes avoid creating a new inference variable here.
-                    //
-                    // All new inference variables we create start out in the current universe of the caller.
-                    // This is conceptually wrong as these inference variables would be able to name
-                    // more placeholders then they should be able to. However the inference variables have
-                    // to "come from somewhere", so by equating them with the original values of the caller
-                    // later on, we pull them down into their correct universe again.
-                    if let Some(v) = opt_values[ty::BoundVar::from_usize(index)] {
-                        v
-                    } else {
-                        delegate
-                            .instantiate_canonical_var_with_infer(var_kind, span, |_| prev_universe)
-                    }
+        CanonicalVarValues::instantiate(delegate.cx(), response.variables, |var_values, kind| {
+            if kind.universe() != ty::UniverseIndex::ROOT {
+                // A variable from inside a binder of the query. While ideally these shouldn't
+                // exist at all (see the FIXME at the start of this method), we have to deal with
+                // them for now.
+                delegate.instantiate_canonical_var(kind, span, &var_values, |idx| {
+                    prev_universe + idx.index()
+                })
+            } else if kind.is_existential() {
+                // As an optimization we sometimes avoid creating a new inference variable here.
+                //
+                // All new inference variables we create start out in the current universe of the caller.
+                // This is conceptually wrong as these inference variables would be able to name
+                // more placeholders then they should be able to. However the inference variables have
+                // to "come from somewhere", so by equating them with the original values of the caller
+                // later on, we pull them down into their correct universe again.
+                if let Some(v) = opt_values[ty::BoundVar::from_usize(var_values.len())] {
+                    v
                 } else {
-                    // For placeholders which were already part of the input, we simply map this
-                    // universal bound variable back the placeholder of the input.
-                    original_values[var_kind.expect_placeholder_index()]
+                    delegate.instantiate_canonical_var(kind, span, &var_values, |_| prev_universe)
                 }
-            }),
-        );
-
-        CanonicalVarValues { var_values }
+            } else {
+                // For placeholders which were already part of the input, we simply map this
+                // universal bound variable back the placeholder of the input.
+                original_values[kind.expect_placeholder_index()]
+            }
+        })
     }
 
     /// Unify the `original_values` with the `var_values` returned by the canonical query..
@@ -426,21 +424,26 @@ where
     }
 
     fn register_region_constraints(
-        &mut self,
+        delegate: &D,
         outlives: &[ty::OutlivesPredicate<I, I::GenericArg>],
+        span: I::Span,
     ) {
         for &ty::OutlivesPredicate(lhs, rhs) in outlives {
             match lhs.kind() {
-                ty::GenericArgKind::Lifetime(lhs) => self.register_region_outlives(lhs, rhs),
-                ty::GenericArgKind::Type(lhs) => self.register_ty_outlives(lhs, rhs),
+                ty::GenericArgKind::Lifetime(lhs) => delegate.sub_regions(rhs, lhs, span),
+                ty::GenericArgKind::Type(lhs) => delegate.register_ty_outlives(lhs, rhs, span),
                 ty::GenericArgKind::Const(_) => panic!("const outlives: {lhs:?}: {rhs:?}"),
             }
         }
     }
 
-    fn register_new_opaque_types(&mut self, opaque_types: &[(ty::OpaqueTypeKey<I>, I::Ty)]) {
+    fn register_new_opaque_types(
+        delegate: &D,
+        opaque_types: &[(ty::OpaqueTypeKey<I>, I::Ty)],
+        span: I::Span,
+    ) {
         for &(key, ty) in opaque_types {
-            let prev = self.delegate.register_hidden_type_in_storage(key, ty, self.origin_span);
+            let prev = delegate.register_hidden_type_in_storage(key, ty, span);
             // We eagerly resolve inference variables when computing the query response.
             // This can cause previously distinct opaque type keys to now be structurally equal.
             //
@@ -449,7 +452,7 @@ where
             // types here. However, doing so is difficult as it may result in nested goals and
             // any errors may make it harder to track the control flow for diagnostics.
             if let Some(prev) = prev {
-                self.delegate.add_duplicate_opaque_type(key, prev, self.origin_span);
+                delegate.add_duplicate_opaque_type(key, prev, span);
             }
         }
     }

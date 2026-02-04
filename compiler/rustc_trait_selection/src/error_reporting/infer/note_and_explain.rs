@@ -537,7 +537,7 @@ impl<T> Trait<T> for X {
                 }
             }
             TypeError::TargetFeatureCast(def_id) => {
-                let target_spans = find_attr!(tcx.get_all_attrs(def_id), AttributeKind::TargetFeature(.., span) => *span);
+                let target_spans = find_attr!(tcx.get_all_attrs(def_id), AttributeKind::TargetFeature{attr_span: span, was_forced: false, ..} => *span);
                 diag.note(
                     "functions with `#[target_feature]` can only be coerced to `unsafe` function pointers"
                 );
@@ -629,7 +629,11 @@ impl<T> Trait<T> for X {
         let tcx = self.tcx;
 
         // Don't suggest constraining a projection to something containing itself
-        if self.tcx.erase_regions(values.found).contains(self.tcx.erase_regions(values.expected)) {
+        if self
+            .tcx
+            .erase_and_anonymize_regions(values.found)
+            .contains(self.tcx.erase_and_anonymize_regions(values.expected))
+        {
             return;
         }
 
@@ -653,7 +657,6 @@ impl<T> Trait<T> for X {
             )
         );
         let impl_comparison = matches!(cause_code, ObligationCauseCode::CompareImplItem { .. });
-        let assoc = tcx.associated_item(proj_ty.def_id);
         if impl_comparison {
             // We do not want to suggest calling functions when the reason of the
             // type error is a comparison of an `impl` with its `trait`.
@@ -661,7 +664,7 @@ impl<T> Trait<T> for X {
             let point_at_assoc_fn = if callable_scope
                 && self.point_at_methods_that_satisfy_associated_type(
                     diag,
-                    assoc.container_id(tcx),
+                    tcx.parent(proj_ty.def_id),
                     current_method_ident,
                     proj_ty.def_id,
                     values.expected,
@@ -854,11 +857,11 @@ fn foo(&self) -> Self::T { String::new() }
                     && self.infcx.can_eq(param_env, assoc_ty, found)
                 {
                     let msg = match assoc_item.container {
-                        ty::AssocItemContainer::Trait => {
+                        ty::AssocContainer::Trait => {
                             "associated type defaults can't be assumed inside the \
                                             trait defining them"
                         }
-                        ty::AssocItemContainer::Impl => {
+                        ty::AssocContainer::InherentImpl | ty::AssocContainer::TraitImpl(_) => {
                             "associated type is `default` and may be overridden"
                         }
                     };
@@ -946,8 +949,8 @@ fn foo(&self) -> Self::T { String::new() }
     }
 
     pub fn format_generic_args(&self, args: &[ty::GenericArg<'tcx>]) -> String {
-        FmtPrinter::print_string(self.tcx, hir::def::Namespace::TypeNS, |cx| {
-            cx.path_generic_args(|_| Ok(()), args)
+        FmtPrinter::print_string(self.tcx, hir::def::Namespace::TypeNS, |p| {
+            p.print_path_with_generic_args(|_| Ok(()), args)
         })
         .expect("could not write to `String`.")
     }

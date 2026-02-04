@@ -52,11 +52,11 @@ use rustc_trait_selection::traits::{self, FulfillmentError};
 use tracing::{debug, instrument};
 
 use crate::check::check_abi;
+use crate::check_c_variadic_abi;
 use crate::errors::{AmbiguousLifetimeBound, BadReturnTypeNotation};
 use crate::hir_ty_lowering::errors::{GenericsArgsErrExtend, prohibit_assoc_item_constraint};
 use crate::hir_ty_lowering::generics::{check_generic_arg_count, lower_generic_args};
 use crate::middle::resolve_bound_vars as rbv;
-use crate::require_c_abi_if_c_variadic;
 
 /// A path segment that is semantically allowed to have generic arguments.
 #[derive(Debug)]
@@ -1135,9 +1135,10 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                         );
                     }
                 } else {
+                    let trait_ =
+                        tcx.short_string(bound.print_only_trait_path(), err.long_ty_path());
                     err.note(format!(
-                        "associated {assoc_kind_str} `{assoc_ident}` could derive from `{}`",
-                        bound.print_only_trait_path(),
+                        "associated {assoc_kind_str} `{assoc_ident}` could derive from `{trait_}`",
                     ));
                 }
             }
@@ -2107,9 +2108,11 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 let name = tcx.item_name(param_def_id);
                 ty::Const::new_param(tcx, ty::ParamConst::new(index, name))
             }
-            Some(rbv::ResolvedArg::LateBound(debruijn, index, _)) => {
-                ty::Const::new_bound(tcx, debruijn, ty::BoundVar::from_u32(index))
-            }
+            Some(rbv::ResolvedArg::LateBound(debruijn, index, _)) => ty::Const::new_bound(
+                tcx,
+                debruijn,
+                ty::BoundConst { var: ty::BoundVar::from_u32(index) },
+            ),
             Some(rbv::ResolvedArg::Error(guar)) => ty::Const::new_error(tcx, guar),
             arg => bug!("unexpected bound var resolution for {:?}: {arg:?}", path_hir_id),
         }
@@ -2409,7 +2412,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
                 Ty::new_tup_from_iter(tcx, fields.iter().map(|t| self.lower_ty(t)))
             }
             hir::TyKind::FnPtr(bf) => {
-                require_c_abi_if_c_variadic(tcx, bf.decl, bf.abi, hir_ty.span);
+                check_c_variadic_abi(tcx, bf.decl, bf.abi, hir_ty.span);
 
                 Ty::new_fn_ptr(
                     tcx,
@@ -2729,7 +2732,7 @@ impl<'tcx> dyn HirTyLowerer<'tcx> + '_ {
         };
         let i = tcx.parent_hir_node(fn_hir_id).expect_item().expect_impl();
 
-        let trait_ref = self.lower_impl_trait_ref(i.of_trait.as_ref()?, self.lower_ty(i.self_ty));
+        let trait_ref = self.lower_impl_trait_ref(&i.of_trait?.trait_ref, self.lower_ty(i.self_ty));
 
         let assoc = tcx.associated_items(trait_ref.def_id).find_by_ident_and_kind(
             tcx,

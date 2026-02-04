@@ -1,3 +1,4 @@
+use itertools::Itertools as _;
 use rustc_abi::{self as abi, FIRST_VARIANT};
 use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv, LayoutOf, TyAndLayout};
@@ -111,14 +112,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     let size = bx.const_usize(dest.layout.size.bytes());
 
                     // Use llvm.memset.p0i8.* to initialize all same byte arrays
-                    if let Some(int) = bx.cx().const_to_opt_u128(v, false) {
-                        let bytes = &int.to_le_bytes()[..cg_elem.layout.size.bytes_usize()];
-                        let first = bytes[0];
-                        if bytes[1..].iter().all(|&b| b == first) {
-                            let fill = bx.cx().const_u8(first);
-                            bx.memset(start, fill, size, dest.val.align, MemFlags::empty());
-                            return true;
-                        }
+                    if let Some(int) = bx.cx().const_to_opt_u128(v, false)
+                        && let bytes = &int.to_le_bytes()[..cg_elem.layout.size.bytes_usize()]
+                        && let Ok(&byte) = bytes.iter().all_equal_value()
+                    {
+                        let fill = bx.cx().const_u8(byte);
+                        bx.memset(start, fill, size, dest.val.align, MemFlags::empty());
+                        return true;
                     }
 
                     // Use llvm.memset.p0i8.* to initialize byte arrays
@@ -130,13 +130,10 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     false
                 };
 
-                match cg_elem.val {
-                    OperandValue::Immediate(v) => {
-                        if try_init_all_same(bx, v) {
-                            return;
-                        }
-                    }
-                    _ => (),
+                if let OperandValue::Immediate(v) = cg_elem.val
+                    && try_init_all_same(bx, v)
+                {
+                    return;
                 }
 
                 let count = self
@@ -1051,14 +1048,14 @@ pub(super) fn transmute_scalar<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     imm = match (from_scalar.primitive(), to_scalar.primitive()) {
         (Int(..) | Float(_), Int(..) | Float(_)) => bx.bitcast(imm, to_backend_ty),
         (Pointer(..), Pointer(..)) => bx.pointercast(imm, to_backend_ty),
-        (Int(..), Pointer(..)) => bx.ptradd(bx.const_null(bx.type_ptr()), imm),
+        (Int(..), Pointer(..)) => bx.inttoptr(imm, to_backend_ty),
         (Pointer(..), Int(..)) => {
             // FIXME: this exposes the provenance, which shouldn't be necessary.
             bx.ptrtoint(imm, to_backend_ty)
         }
         (Float(_), Pointer(..)) => {
             let int_imm = bx.bitcast(imm, bx.cx().type_isize());
-            bx.ptradd(bx.const_null(bx.type_ptr()), int_imm)
+            bx.inttoptr(int_imm, to_backend_ty)
         }
         (Pointer(..), Float(_)) => {
             // FIXME: this exposes the provenance, which shouldn't be necessary.

@@ -83,14 +83,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         *self.deferred_cast_checks.borrow_mut() = deferred_cast_checks;
     }
 
-    pub(in super::super) fn check_transmutes(&self) {
-        let mut deferred_transmute_checks = self.deferred_transmute_checks.borrow_mut();
-        debug!("FnCtxt::check_transmutes: {} deferred checks", deferred_transmute_checks.len());
-        for (from, to, hir_id) in deferred_transmute_checks.drain(..) {
-            self.check_transmute(from, to, hir_id);
-        }
-    }
-
     pub(in super::super) fn check_asms(&self) {
         let mut deferred_asm_checks = self.deferred_asm_checks.borrow_mut();
         debug!("FnCtxt::check_asm: {} deferred checks", deferred_asm_checks.len());
@@ -1589,25 +1581,63 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // e.g. `reuse HasSelf::method;` should suggest `reuse HasSelf::method($args);`.
                 full_call_span.shrink_to_hi()
             };
+
+            // Controls how the arguments should be listed in the suggestion.
+            enum ArgumentsFormatting {
+                SingleLine,
+                Multiline { fallback_indent: String, brace_indent: String },
+            }
+            let arguments_formatting = {
+                let mut provided_inputs = matched_inputs.iter().filter_map(|a| *a);
+                if let Some(brace_indent) = source_map.indentation_before(suggestion_span)
+                    && let Some(first_idx) = provided_inputs.by_ref().next()
+                    && let Some(last_idx) = provided_inputs.by_ref().next()
+                    && let (_, first_span) = provided_arg_tys[first_idx]
+                    && let (_, last_span) = provided_arg_tys[last_idx]
+                    && source_map.is_multiline(first_span.to(last_span))
+                    && let Some(fallback_indent) = source_map.indentation_before(first_span)
+                {
+                    ArgumentsFormatting::Multiline { fallback_indent, brace_indent }
+                } else {
+                    ArgumentsFormatting::SingleLine
+                }
+            };
+
             let mut suggestion = "(".to_owned();
             let mut needs_comma = false;
             for (expected_idx, provided_idx) in matched_inputs.iter_enumerated() {
                 if needs_comma {
-                    suggestion += ", ";
-                } else {
-                    needs_comma = true;
+                    suggestion += ",";
                 }
-                let suggestion_text = if let Some(provided_idx) = provided_idx
+                match &arguments_formatting {
+                    ArgumentsFormatting::SingleLine if needs_comma => suggestion += " ",
+                    ArgumentsFormatting::SingleLine => {}
+                    ArgumentsFormatting::Multiline { .. } => suggestion += "\n",
+                }
+                needs_comma = true;
+                let (suggestion_span, suggestion_text) = if let Some(provided_idx) = provided_idx
                     && let (_, provided_span) = provided_arg_tys[*provided_idx]
                     && let Ok(arg_text) = source_map.span_to_snippet(provided_span)
                 {
-                    arg_text
+                    (Some(provided_span), arg_text)
                 } else {
                     // Propose a placeholder of the correct type
                     let (_, expected_ty) = formal_and_expected_inputs[expected_idx];
-                    ty_to_snippet(expected_ty, expected_idx)
+                    (None, ty_to_snippet(expected_ty, expected_idx))
                 };
+                if let ArgumentsFormatting::Multiline { fallback_indent, .. } =
+                    &arguments_formatting
+                {
+                    let indent = suggestion_span
+                        .and_then(|span| source_map.indentation_before(span))
+                        .unwrap_or_else(|| fallback_indent.clone());
+                    suggestion += &indent;
+                }
                 suggestion += &suggestion_text;
+            }
+            if let ArgumentsFormatting::Multiline { brace_indent, .. } = arguments_formatting {
+                suggestion += ",\n";
+                suggestion += &brace_indent;
             }
             suggestion += ")";
             err.span_suggestion_verbose(
@@ -1882,7 +1912,22 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             hir::StmtKind::Expr(ref expr) => {
                 // Check with expected type of `()`.
                 self.check_expr_has_type_or_error(expr, self.tcx.types.unit, |err| {
-                    if expr.can_have_side_effects() {
+                    if self.is_next_stmt_expr_continuation(stmt.hir_id)
+                        && let hir::ExprKind::Match(..) | hir::ExprKind::If(..) = expr.kind
+                    {
+                        // We have something like `match () { _ => true } && true`. Suggest
+                        // wrapping in parentheses. We find the statement or expression
+                        // following the `match` (`&& true`) and see if it is something that
+                        // can reasonably be interpreted as a binop following an expression.
+                        err.multipart_suggestion(
+                            "parentheses are required to parse this as an expression",
+                            vec![
+                                (expr.span.shrink_to_lo(), "(".to_string()),
+                                (expr.span.shrink_to_hi(), ")".to_string()),
+                            ],
+                            Applicability::MachineApplicable,
+                        );
+                    } else if expr.can_have_side_effects() {
                         self.suggest_semicolon_at_end(expr.span, err);
                     }
                 });
@@ -2309,7 +2354,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // We want it to always point to the trait item.
             // If we're pointing at an inherent function, we don't need to do anything,
             // so we fetch the parent and verify if it's a trait item.
-            && let maybe_trait_item_def_id = assoc_item.trait_item_def_id.unwrap_or(def_id)
+            && let Ok(maybe_trait_item_def_id) = assoc_item.trait_item_or_self()
             && let maybe_trait_def_id = self.tcx.parent(maybe_trait_item_def_id)
             // Just an easy way to check "trait_def_id == Fn/FnMut/FnOnce"
             && let Some(call_kind) = self.tcx.fn_trait_kind_from_def_id(maybe_trait_def_id)

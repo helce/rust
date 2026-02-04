@@ -1,12 +1,11 @@
 use clippy_utils::diagnostics::{span_lint_and_sugg, span_lint_hir_and_then};
 use clippy_utils::source::{snippet_with_applicability, snippet_with_context};
 use clippy_utils::sugg::has_enclosing_paren;
-use clippy_utils::ty::{implements_trait, is_manually_drop};
+use clippy_utils::ty::{adjust_derefs_manually_drop, implements_trait, is_manually_drop};
 use clippy_utils::{
     DefinedTy, ExprUseNode, expr_use_ctxt, get_parent_expr, is_block_like, is_lint_allowed, path_to_local,
     peel_middle_ty_refs,
 };
-use core::mem;
 use rustc_ast::util::parser::ExprPrecedence;
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_errors::Applicability;
@@ -365,7 +364,7 @@ impl<'tcx> LateLintPass<'tcx> for Dereferencing<'tcx> {
                                 //   priority.
                                 if let Some(fn_id) = typeck.type_dependent_def_id(hir_id)
                                     && let Some(trait_id) = cx.tcx.trait_of_assoc(fn_id)
-                                    && let arg_ty = cx.tcx.erase_regions(adjusted_ty)
+                                    && let arg_ty = cx.tcx.erase_and_anonymize_regions(adjusted_ty)
                                     && let ty::Ref(_, sub_ty, _) = *arg_ty.kind()
                                     && let args =
                                         typeck.node_args_opt(hir_id).map(|args| &args[1..]).unwrap_or_default()
@@ -705,14 +704,6 @@ fn try_parse_ref_op<'tcx>(
         arg,
         call_path_id,
     ))
-}
-
-// Checks if the adjustments contains a deref of `ManuallyDrop<_>`
-fn adjust_derefs_manually_drop<'tcx>(adjustments: &'tcx [Adjustment<'tcx>], mut ty: Ty<'tcx>) -> bool {
-    adjustments.iter().any(|a| {
-        let ty = mem::replace(&mut ty, a.target);
-        matches!(a.kind, Adjust::Deref(Some(ref op)) if op.mutbl == Mutability::Mut) && is_manually_drop(ty)
-    })
 }
 
 // Checks whether the type for a deref call actually changed the type, not just the mutability of

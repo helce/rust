@@ -28,25 +28,19 @@ pub(crate) fn apply_to_callsite(callsite: &Value, idx: AttributePlace, attrs: &[
     }
 }
 
-pub(crate) fn has_attr(llfn: &Value, idx: AttributePlace, attr: AttributeKind) -> bool {
-    llvm::HasAttributeAtIndex(llfn, idx, attr)
-}
-
-pub(crate) fn has_string_attr(llfn: &Value, name: &str) -> bool {
-    llvm::HasStringAttribute(llfn, name)
-}
-
-pub(crate) fn remove_from_llfn(llfn: &Value, place: AttributePlace, kind: AttributeKind) {
-    llvm::RemoveRustEnumAttributeAtIndex(llfn, place, kind);
-}
-
-pub(crate) fn remove_string_attr_from_llfn(llfn: &Value, name: &str) {
-    llvm::RemoveStringAttrFromFn(llfn, name);
-}
-
 /// Get LLVM attribute for the provided inline heuristic.
-#[inline]
-fn inline_attr<'ll>(cx: &CodegenCx<'ll, '_>, inline: InlineAttr) -> Option<&'ll Attribute> {
+pub(crate) fn inline_attr<'ll, 'tcx>(
+    cx: &CodegenCx<'ll, 'tcx>,
+    instance: ty::Instance<'tcx>,
+) -> Option<&'ll Attribute> {
+    // `optnone` requires `noinline`
+    let codegen_fn_attrs = cx.tcx.codegen_fn_attrs(instance.def_id());
+    let inline = match (codegen_fn_attrs.inline, &codegen_fn_attrs.optimize) {
+        (_, OptimizeAttr::DoNotOptimize) => InlineAttr::Never,
+        (InlineAttr::None, _) if instance.def.requires_inline(cx.tcx) => InlineAttr::Hint,
+        (inline, _) => inline,
+    };
+
     if !cx.tcx.sess.opts.unstable_opts.inline_llvm {
         // disable LLVM inlining
         return Some(AttributeKind::NoInline.create_attr(cx.llcx));
@@ -302,6 +296,19 @@ pub(crate) fn tune_cpu_attr<'ll>(cx: &CodegenCx<'ll, '_>) -> Option<&'ll Attribu
         .map(|tune_cpu| llvm::CreateAttrStringValue(cx.llcx, "tune-cpu", tune_cpu))
 }
 
+/// Get the `target-features` LLVM attribute.
+pub(crate) fn target_features_attr<'ll>(
+    cx: &CodegenCx<'ll, '_>,
+    function_features: Vec<String>,
+) -> Option<&'ll Attribute> {
+    let global_features = cx.tcx.global_backend_features(()).iter().map(String::as_str);
+    let function_features = function_features.iter().map(String::as_str);
+    let target_features =
+        global_features.chain(function_features).intersperse(",").collect::<String>();
+    (!target_features.is_empty())
+        .then(|| llvm::CreateAttrStringValue(cx.llcx, "target-features", &target_features))
+}
+
 /// Get the `NonLazyBind` LLVM attribute,
 /// if the codegen options allow skipping the PLT.
 pub(crate) fn non_lazy_bind_attr<'ll>(cx: &CodegenCx<'ll, '_>) -> Option<&'ll Attribute> {
@@ -361,14 +368,6 @@ pub(crate) fn llfn_attrs_from_instance<'ll, 'tcx>(
         }
         OptimizeAttr::Speed => {}
     }
-
-    // `optnone` requires `noinline`
-    let inline = match (codegen_fn_attrs.inline, &codegen_fn_attrs.optimize) {
-        (_, OptimizeAttr::DoNotOptimize) => InlineAttr::Never,
-        (InlineAttr::None, _) if instance.def.requires_inline(cx.tcx) => InlineAttr::Hint,
-        (inline, _) => inline,
-    };
-    to_add.extend(inline_attr(cx, inline));
 
     if cx.sess().must_emit_unwind_tables() {
         to_add.push(uwtable_attr(cx.llcx, cx.sess().opts.unstable_opts.use_sync_unwind));
@@ -494,6 +493,14 @@ pub(crate) fn llfn_attrs_from_instance<'ll, 'tcx>(
     let function_features =
         codegen_fn_attrs.target_features.iter().map(|f| f.name.as_str()).collect::<Vec<&str>>();
 
+    // Apply function attributes as per usual if there are no user defined
+    // target features otherwise this will get applied at the callsite.
+    if function_features.is_empty() {
+        if let Some(inline_attr) = inline_attr(cx, instance) {
+            to_add.push(inline_attr);
+        }
+    }
+
     let function_features = function_features
         .iter()
         // Convert to LLVMFeatures and filter out unavailable ones
@@ -513,19 +520,13 @@ pub(crate) fn llfn_attrs_from_instance<'ll, 'tcx>(
             to_add.push(llvm::CreateAttrStringValue(cx.llcx, "wasm-import-module", module));
 
             let name =
-                codegen_fn_attrs.link_name.unwrap_or_else(|| cx.tcx.item_name(instance.def_id()));
+                codegen_fn_attrs.symbol_name.unwrap_or_else(|| cx.tcx.item_name(instance.def_id()));
             let name = name.as_str();
             to_add.push(llvm::CreateAttrStringValue(cx.llcx, "wasm-import-name", name));
         }
     }
 
-    let global_features = cx.tcx.global_backend_features(()).iter().map(|s| s.as_str());
-    let function_features = function_features.iter().map(|s| s.as_str());
-    let target_features: String =
-        global_features.chain(function_features).intersperse(",").collect();
-    if !target_features.is_empty() {
-        to_add.push(llvm::CreateAttrStringValue(cx.llcx, "target-features", &target_features));
-    }
+    to_add.extend(target_features_attr(cx, function_features));
 
     attributes::apply_to_llfn(llfn, Function, &to_add);
 }

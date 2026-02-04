@@ -16,10 +16,11 @@ use std::{cmp, fmt, fs, iter};
 
 use externs::{ExternOpt, split_extern_opt};
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
-use rustc_data_structures::stable_hasher::{StableOrd, ToStableHashKey};
+use rustc_data_structures::stable_hasher::{StableHasher, StableOrd, ToStableHashKey};
 use rustc_errors::emitter::HumanReadableErrorType;
 use rustc_errors::{ColorConfig, DiagArgValue, DiagCtxtFlags, IntoDiagArg};
 use rustc_feature::UnstableFeatures;
+use rustc_hashes::Hash64;
 use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 use rustc_span::edition::{DEFAULT_EDITION, EDITION_NAME_LIST, Edition, LATEST_STABLE_EDITION};
 use rustc_span::source_map::FilePathMapping;
@@ -69,6 +70,7 @@ pub const PRINT_KINDS: &[(&str, PrintKind)] = &[
     ("target-libdir", PrintKind::TargetLibdir),
     ("target-list", PrintKind::TargetList),
     ("target-spec-json", PrintKind::TargetSpecJson),
+    ("target-spec-json-schema", PrintKind::TargetSpecJsonSchema),
     ("tls-models", PrintKind::TlsModels),
     // tidy-alphabetical-end
 ];
@@ -182,14 +184,7 @@ pub enum InstrumentCoverage {
 pub struct CoverageOptions {
     pub level: CoverageLevel,
 
-    /// `-Zcoverage-options=no-mir-spans`: Don't extract block coverage spans
-    /// from MIR statements/terminators, making it easier to inspect/debug
-    /// branch and MC/DC coverage mappings.
-    ///
-    /// For internal debugging only. If other code changes would make it hard
-    /// to keep supporting this flag, remove it.
-    pub no_mir_spans: bool,
-
+    /// **(internal test-only flag)**
     /// `-Zcoverage-options=discard-all-spans-in-codegen`: During codegen,
     /// discard all coverage spans as though they were invalid. Needed by
     /// regression tests for #133606, because we don't have an easy way to
@@ -197,7 +192,7 @@ pub struct CoverageOptions {
     pub discard_all_spans_in_codegen: bool,
 }
 
-/// Controls whether branch coverage or MC/DC coverage is enabled.
+/// Controls whether branch coverage is enabled.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub enum CoverageLevel {
     /// Instrument for coverage at the MIR block level.
@@ -221,9 +216,6 @@ pub enum CoverageLevel {
     /// instrumentation, so it might be removed in the future when MC/DC is
     /// sufficiently complete, or if it is making MC/DC changes difficult.
     Condition,
-    /// Instrument for MC/DC. Mostly a superset of condition coverage, but might
-    /// differ in some corner cases.
-    Mcdc,
 }
 
 // The different settings that the `-Z offload` flag can have.
@@ -1052,6 +1044,7 @@ pub enum PrintKind {
     TargetLibdir,
     TargetList,
     TargetSpecJson,
+    TargetSpecJsonSchema,
     TlsModels,
     // tidy-alphabetical-end
 }
@@ -1205,7 +1198,34 @@ pub struct OutputFilenames {
 pub const RLINK_EXT: &str = "rlink";
 pub const RUST_CGU_EXT: &str = "rcgu";
 pub const DWARF_OBJECT_EXT: &str = "dwo";
+pub const MAX_FILENAME_LENGTH: usize = 143; // ecryptfs limits filenames to 143 bytes see #49914
 
+/// Ensure the filename is not too long, as some filesystems have a limit.
+/// If the filename is too long, hash part of it and append the hash to the filename.
+/// This is a workaround for long crate names generating overly long filenames.
+fn maybe_strip_file_name(mut path: PathBuf) -> PathBuf {
+    if path.file_name().map_or(0, |name| name.len()) > MAX_FILENAME_LENGTH {
+        let filename = path.file_name().unwrap().to_string_lossy();
+        let hash_len = 64 / 4; // Hash64 is 64 bits encoded in hex
+        let hyphen_len = 1; // the '-' we insert between hash and suffix
+
+        // number of bytes of suffix we can keep so that "hash-<suffix>" fits
+        let allowed_suffix = MAX_FILENAME_LENGTH.saturating_sub(hash_len + hyphen_len);
+
+        // number of bytes to remove from the start
+        let stripped_bytes = filename.len().saturating_sub(allowed_suffix);
+
+        // ensure we don't cut in a middle of a char
+        let split_at = filename.ceil_char_boundary(stripped_bytes);
+
+        let mut hasher = StableHasher::new();
+        filename[..split_at].hash(&mut hasher);
+        let hash = hasher.finish::<Hash64>();
+
+        path.set_file_name(format!("{:x}-{}", hash, &filename[split_at..]));
+    }
+    path
+}
 impl OutputFilenames {
     pub fn new(
         out_directory: PathBuf,
@@ -1298,7 +1318,7 @@ impl OutputFilenames {
         }
 
         let temps_directory = self.temps_directory.as_ref().unwrap_or(&self.out_directory);
-        self.with_directory_and_extension(temps_directory, &extension)
+        maybe_strip_file_name(self.with_directory_and_extension(temps_directory, &extension))
     }
 
     pub fn temp_path_for_diagnostic(&self, ext: &str) -> PathBuf {
@@ -2314,7 +2334,8 @@ fn is_print_request_stable(print_kind: PrintKind) -> bool {
         | PrintKind::CheckCfg
         | PrintKind::CrateRootLintLevels
         | PrintKind::SupportedCrateTypes
-        | PrintKind::TargetSpecJson => false,
+        | PrintKind::TargetSpecJson
+        | PrintKind::TargetSpecJsonSchema => false,
         _ => true,
     }
 }
@@ -2838,16 +2859,27 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
         // This is the location used by the `rustc-dev` `rustup` component.
         real_source_base_dir("lib/rustlib/rustc-src/rust", "compiler/rustc/src/main.rs");
 
-    let mut search_paths = vec![];
-    for s in &matches.opt_strs("L") {
-        search_paths.push(SearchPath::from_cli_opt(
-            sysroot.path(),
-            &target_triple,
-            early_dcx,
-            s,
-            unstable_opts.unstable_options,
-        ));
-    }
+    // We eagerly scan all files in each passed -L path. If the same directory is passed multiple
+    // times, and the directory contains a lot of files, this can take a lot of time.
+    // So we remove -L paths that were passed multiple times, and keep only the first occurrence.
+    // We still have to keep the original order of the -L arguments.
+    let search_paths: Vec<SearchPath> = {
+        let mut seen_search_paths = FxHashSet::default();
+        let search_path_matches: Vec<String> = matches.opt_strs("L");
+        search_path_matches
+            .iter()
+            .filter(|p| seen_search_paths.insert(*p))
+            .map(|path| {
+                SearchPath::from_cli_opt(
+                    sysroot.path(),
+                    &target_triple,
+                    early_dcx,
+                    &path,
+                    unstable_opts.unstable_options,
+                )
+            })
+            .collect()
+    };
 
     let working_dir = std::env::current_dir().unwrap_or_else(|e| {
         early_dcx.early_fatal(format!("Current directory is invalid: {e}"));

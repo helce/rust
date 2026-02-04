@@ -1,4 +1,4 @@
-///! Definition of `InferCtxtLike` from the librarified type layer.
+//! Definition of `InferCtxtLike` from the librarified type layer.
 use rustc_hir::def_id::DefId;
 use rustc_middle::traits::ObligationCause;
 use rustc_middle::ty::relate::RelateResult;
@@ -20,10 +20,6 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
 
     fn next_trait_solver(&self) -> bool {
         self.next_trait_solver
-    }
-
-    fn in_hir_typeck(&self) -> bool {
-        self.in_hir_typeck
     }
 
     fn typing_mode(&self) -> ty::TypingMode<'tcx> {
@@ -61,6 +57,10 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
 
     fn root_ty_var(&self, var: ty::TyVid) -> ty::TyVid {
         self.root_var(var)
+    }
+
+    fn sub_unification_table_root_var(&self, var: ty::TyVid) -> ty::TyVid {
+        self.sub_unification_table_root_var(var)
     }
 
     fn root_const_var(&self, var: ty::ConstVid) -> ty::ConstVid {
@@ -181,6 +181,10 @@ impl<'tcx> rustc_type_ir::InferCtxtLike for InferCtxt<'tcx> {
 
     fn equate_ty_vids_raw(&self, a: ty::TyVid, b: ty::TyVid) {
         self.inner.borrow_mut().type_variables().equate(a, b);
+    }
+
+    fn sub_unify_ty_vids_raw(&self, a: ty::TyVid, b: ty::TyVid) {
+        self.sub_unify_ty_vids_raw(a, b);
     }
 
     fn equate_int_vids_raw(&self, a: ty::IntVid, b: ty::IntVid) {

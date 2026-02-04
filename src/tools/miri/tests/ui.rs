@@ -60,6 +60,7 @@ fn build_native_lib(target: &str) -> PathBuf {
             native_lib_path.to_str().unwrap(),
             // FIXME: Automate gathering of all relevant C source files in the directory.
             "tests/native-lib/scalar_arguments.c",
+            "tests/native-lib/aggregate_arguments.c",
             "tests/native-lib/ptr_read_access.c",
             "tests/native-lib/ptr_write_access.c",
             // Ensure we notice serious problems in the C code.
@@ -248,7 +249,8 @@ regexes! {
     // erase alloc ids
     "alloc[0-9]+"                    => "ALLOC",
     // erase thread ids
-    r"unnamed-[0-9]+"               => "unnamed-ID",
+    r"unnamed-[0-9]+"                => "unnamed-ID",
+    r"thread '(?P<name>.*?)' \(\d+\) panicked" => "thread '$name' ($$TID) panicked",
     // erase borrow tags
     "<[0-9]+>"                       => "<TAG>",
     "<[0-9]+="                       => "<TAG=",

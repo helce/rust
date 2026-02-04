@@ -937,6 +937,7 @@ fn test_const_swap_ptr() {
         assert!(*s2.0.ptr == 1);
 
         // Swap them back, again as an array.
+        // FIXME(#146291): we should be swapping back at type `u8` but that currently does not work.
         unsafe {
             ptr::swap_nonoverlapping(
                 ptr::from_mut(&mut s1).cast::<T>(),
@@ -948,10 +949,6 @@ fn test_const_swap_ptr() {
         // Make sure they still work.
         assert!(*s1.0.ptr == 1);
         assert!(*s2.0.ptr == 666);
-
-        // This is where we'd swap again using a `u8` type and a `count` of `size_of::<T>()` if it
-        // were not for the limitation of `swap_nonoverlapping` around pointers crossing multiple
-        // elements.
     };
 }
 

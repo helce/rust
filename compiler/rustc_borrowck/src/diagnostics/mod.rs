@@ -6,7 +6,9 @@ use rustc_abi::{FieldIdx, VariantIdx};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_errors::{Applicability, Diag, EmissionGuarantee, MultiSpan, listify};
 use rustc_hir::def::{CtorKind, Namespace};
-use rustc_hir::{self as hir, CoroutineKind, LangItem};
+use rustc_hir::{
+    self as hir, CoroutineKind, GenericBound, LangItem, WhereBoundPredicate, WherePredicateKind,
+};
 use rustc_index::{IndexSlice, IndexVec};
 use rustc_infer::infer::{BoundRegionConversionTime, NllRegionVariableOrigin};
 use rustc_infer::traits::SelectionError;
@@ -19,6 +21,7 @@ use rustc_middle::ty::print::Print;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::{bug, span_bug};
 use rustc_mir_dataflow::move_paths::{InitLocation, LookupResult, MoveOutIndex};
+use rustc_session::lint::builtin::MACRO_EXTENDED_TEMPORARY_SCOPES;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::source_map::Spanned;
 use rustc_span::{DUMMY_SP, ErrorGuaranteed, Span, Symbol, sym};
@@ -51,7 +54,7 @@ mod conflict_errors;
 mod explain_borrow;
 mod move_errors;
 mod mutability_errors;
-mod opaque_suggestions;
+mod opaque_types;
 mod region_errors;
 
 pub(crate) use bound_region_errors::{ToUniverseInfo, UniverseInfo};
@@ -613,7 +616,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
     /// Return the name of the provided `Ty` (that must be a reference) with a synthesized lifetime
     /// name where required.
     pub(super) fn get_name_for_ty(&self, ty: Ty<'tcx>, counter: usize) -> String {
-        let mut printer = ty::print::FmtPrinter::new(self.infcx.tcx, Namespace::TypeNS);
+        let mut p = ty::print::FmtPrinter::new(self.infcx.tcx, Namespace::TypeNS);
 
         // We need to add synthesized lifetimes where appropriate. We do
         // this by hooking into the pretty printer and telling it to label the
@@ -624,19 +627,19 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 | ty::RePlaceholder(ty::PlaceholderRegion {
                     bound: ty::BoundRegion { kind: br, .. },
                     ..
-                }) => printer.region_highlight_mode.highlighting_bound_region(br, counter),
+                }) => p.region_highlight_mode.highlighting_bound_region(br, counter),
                 _ => {}
             }
         }
 
-        ty.print(&mut printer).unwrap();
-        printer.into_buffer()
+        ty.print(&mut p).unwrap();
+        p.into_buffer()
     }
 
     /// Returns the name of the provided `Ty` (that must be a reference)'s region with a
     /// synthesized lifetime name where required.
     pub(super) fn get_region_name_for_ty(&self, ty: Ty<'tcx>, counter: usize) -> String {
-        let mut printer = ty::print::FmtPrinter::new(self.infcx.tcx, Namespace::TypeNS);
+        let mut p = ty::print::FmtPrinter::new(self.infcx.tcx, Namespace::TypeNS);
 
         let region = if let ty::Ref(region, ..) = ty.kind() {
             match region.kind() {
@@ -644,7 +647,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 | ty::RePlaceholder(ty::PlaceholderRegion {
                     bound: ty::BoundRegion { kind: br, .. },
                     ..
-                }) => printer.region_highlight_mode.highlighting_bound_region(br, counter),
+                }) => p.region_highlight_mode.highlighting_bound_region(br, counter),
                 _ => {}
             }
             region
@@ -652,31 +655,72 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             bug!("ty for annotation of borrow region is not a reference");
         };
 
-        region.print(&mut printer).unwrap();
-        printer.into_buffer()
+        region.print(&mut p).unwrap();
+        p.into_buffer()
     }
 
     /// Add a note to region errors and borrow explanations when higher-ranked regions in predicates
     /// implicitly introduce an "outlives `'static`" constraint.
+    ///
+    /// This is very similar to `fn suggest_static_lifetime_for_gat_from_hrtb` which handles this
+    /// note for failed type tests instead of outlives errors.
     fn add_placeholder_from_predicate_note<G: EmissionGuarantee>(
         &self,
-        err: &mut Diag<'_, G>,
+        diag: &mut Diag<'_, G>,
         path: &[OutlivesConstraint<'tcx>],
     ) {
-        let predicate_span = path.iter().find_map(|constraint| {
+        let tcx = self.infcx.tcx;
+        let Some((gat_hir_id, generics)) = path.iter().find_map(|constraint| {
             let outlived = constraint.sub;
             if let Some(origin) = self.regioncx.definitions.get(outlived)
-                && let NllRegionVariableOrigin::Placeholder(_) = origin.origin
-                && let ConstraintCategory::Predicate(span) = constraint.category
+                && let NllRegionVariableOrigin::Placeholder(placeholder) = origin.origin
+                && let Some(id) = placeholder.bound.kind.get_id()
+                && let Some(placeholder_id) = id.as_local()
+                && let gat_hir_id = tcx.local_def_id_to_hir_id(placeholder_id)
+                && let Some(generics_impl) =
+                    tcx.parent_hir_node(tcx.parent_hir_id(gat_hir_id)).generics()
             {
-                Some(span)
+                Some((gat_hir_id, generics_impl))
             } else {
                 None
             }
-        });
+        }) else {
+            return;
+        };
 
-        if let Some(span) = predicate_span {
-            err.span_note(span, "due to current limitations in the borrow checker, this implies a `'static` lifetime");
+        // Look for the where-bound which introduces the placeholder.
+        // As we're using the HIR, we need to handle both `for<'a> T: Trait<'a>`
+        // and `T: for<'a> Trait`<'a>.
+        for pred in generics.predicates {
+            let WherePredicateKind::BoundPredicate(WhereBoundPredicate {
+                bound_generic_params,
+                bounds,
+                ..
+            }) = pred.kind
+            else {
+                continue;
+            };
+            if bound_generic_params
+                .iter()
+                .rfind(|bgp| tcx.local_def_id_to_hir_id(bgp.def_id) == gat_hir_id)
+                .is_some()
+            {
+                diag.span_note(pred.span, fluent::borrowck_limitations_implies_static);
+                return;
+            }
+            for bound in bounds.iter() {
+                if let GenericBound::Trait(bound) = bound {
+                    if bound
+                        .bound_generic_params
+                        .iter()
+                        .rfind(|bgp| tcx.local_def_id_to_hir_id(bgp.def_id) == gat_hir_id)
+                        .is_some()
+                    {
+                        diag.span_note(bound.span, fluent::borrowck_limitations_implies_static);
+                        return;
+                    }
+                }
+            }
         }
     }
 
@@ -1536,5 +1580,34 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
     /// Skip over locals that begin with an underscore or have no name
     pub(crate) fn local_excluded_from_unused_mut_lint(&self, index: Local) -> bool {
         self.local_name(index).is_none_or(|name| name.as_str().starts_with('_'))
+    }
+
+    /// Report a temporary whose scope will shorten in Rust 1.92 due to #145838.
+    pub(crate) fn lint_macro_extended_temporary_scope(
+        &self,
+        future_drop: Location,
+        borrow: &BorrowData<'tcx>,
+    ) {
+        let tcx = self.infcx.tcx;
+        let temp_decl = &self.body.local_decls[borrow.borrowed_place.local];
+        let temp_span = temp_decl.source_info.span;
+        let lint_root = self.body.source_scopes[temp_decl.source_info.scope]
+            .local_data
+            .as_ref()
+            .unwrap_crate_local()
+            .lint_root;
+
+        let mut labels = MultiSpan::from_span(temp_span);
+        labels.push_span_label(temp_span, "this expression creates a temporary value...");
+        labels.push_span_label(
+            self.body.source_info(future_drop).span,
+            "...which will be dropped at the end of this block in Rust 1.92",
+        );
+
+        tcx.node_span_lint(MACRO_EXTENDED_TEMPORARY_SCOPES, lint_root, labels, |diag| {
+            diag.primary_message("temporary lifetime will be shortened in Rust 1.92");
+            diag.note("consider using a `let` binding to create a longer lived value");
+            diag.note("some temporaries were previously incorrectly lifetime-extended since Rust 1.89 in formatting macros, and since Rust 1.88 in `pin!()`");
+        });
     }
 }

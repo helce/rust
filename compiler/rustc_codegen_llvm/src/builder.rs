@@ -35,7 +35,7 @@ use crate::attributes;
 use crate::common::Funclet;
 use crate::context::{CodegenCx, FullCx, GenericCx, SCx};
 use crate::llvm::{
-    self, AtomicOrdering, AtomicRmwBinOp, BasicBlock, False, GEPNoWrapFlags, Metadata, True,
+    self, AtomicOrdering, AtomicRmwBinOp, BasicBlock, GEPNoWrapFlags, Metadata, TRUE, ToLlvmBool,
 };
 use crate::type_::Type;
 use crate::type_of::LayoutLlvmExt;
@@ -493,8 +493,8 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         unsafe {
             let add = llvm::LLVMBuildAdd(self.llbuilder, a, b, UNNAMED);
             if llvm::LLVMIsAInstruction(add).is_some() {
-                llvm::LLVMSetNUW(add, True);
-                llvm::LLVMSetNSW(add, True);
+                llvm::LLVMSetNUW(add, TRUE);
+                llvm::LLVMSetNSW(add, TRUE);
             }
             add
         }
@@ -503,8 +503,8 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         unsafe {
             let sub = llvm::LLVMBuildSub(self.llbuilder, a, b, UNNAMED);
             if llvm::LLVMIsAInstruction(sub).is_some() {
-                llvm::LLVMSetNUW(sub, True);
-                llvm::LLVMSetNSW(sub, True);
+                llvm::LLVMSetNUW(sub, TRUE);
+                llvm::LLVMSetNSW(sub, TRUE);
             }
             sub
         }
@@ -513,8 +513,8 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         unsafe {
             let mul = llvm::LLVMBuildMul(self.llbuilder, a, b, UNNAMED);
             if llvm::LLVMIsAInstruction(mul).is_some() {
-                llvm::LLVMSetNUW(mul, True);
-                llvm::LLVMSetNSW(mul, True);
+                llvm::LLVMSetNUW(mul, TRUE);
+                llvm::LLVMSetNSW(mul, TRUE);
             }
             mul
         }
@@ -528,7 +528,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
             // an instruction, so we need to check before setting the flag.
             // (See also `LLVMBuildNUWNeg` which also needs a check.)
             if llvm::LLVMIsAInstruction(or).is_some() {
-                llvm::LLVMSetIsDisjoint(or, True);
+                llvm::LLVMSetIsDisjoint(or, TRUE);
             }
             or
         }
@@ -557,13 +557,25 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         let (size, signed) = ty.int_size_and_signed(self.tcx);
         let width = size.bits();
 
-        if oop == OverflowOp::Sub && !signed {
-            // Emit sub and icmp instead of llvm.usub.with.overflow. LLVM considers these
-            // to be the canonical form. It will attempt to reform llvm.usub.with.overflow
-            // in the backend if profitable.
-            let sub = self.sub(lhs, rhs);
-            let cmp = self.icmp(IntPredicate::IntULT, lhs, rhs);
-            return (sub, cmp);
+        if !signed {
+            match oop {
+                OverflowOp::Sub => {
+                    // Emit sub and icmp instead of llvm.usub.with.overflow. LLVM considers these
+                    // to be the canonical form. It will attempt to reform llvm.usub.with.overflow
+                    // in the backend if profitable.
+                    let sub = self.sub(lhs, rhs);
+                    let cmp = self.icmp(IntPredicate::IntULT, lhs, rhs);
+                    return (sub, cmp);
+                }
+                OverflowOp::Add => {
+                    // Like with sub above, using icmp is the preferred form. See
+                    // <https://rust-lang.zulipchat.com/#narrow/channel/187780-t-compiler.2Fllvm/topic/.60uadd.2Ewith.2Eoverflow.60.20.28again.29/near/533041085>
+                    let add = self.add(lhs, rhs);
+                    let cmp = self.icmp(IntPredicate::IntULT, add, lhs);
+                    return (add, cmp);
+                }
+                OverflowOp::Mul => {}
+            }
         }
 
         let oop_str = match oop {
@@ -617,7 +629,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
     fn volatile_load(&mut self, ty: &'ll Type, ptr: &'ll Value) -> &'ll Value {
         unsafe {
             let load = llvm::LLVMBuildLoad2(self.llbuilder, ty, ptr, UNNAMED);
-            llvm::LLVMSetVolatile(load, llvm::True);
+            llvm::LLVMSetVolatile(load, llvm::TRUE);
             load
         }
     }
@@ -705,7 +717,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
             let mut const_llval = None;
             let llty = place.layout.llvm_type(self);
             if let Some(global) = llvm::LLVMIsAGlobalVariable(place.val.llval) {
-                if llvm::LLVMIsGlobalConstant(global) == llvm::True {
+                if llvm::LLVMIsGlobalConstant(global).is_true() {
                     if let Some(init) = llvm::LLVMGetInitializer(global) {
                         if self.val_ty(init) == llty {
                             const_llval = Some(init);
@@ -826,7 +838,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 if flags.contains(MemFlags::UNALIGNED) { 1 } else { align.bytes() as c_uint };
             llvm::LLVMSetAlignment(store, align);
             if flags.contains(MemFlags::VOLATILE) {
-                llvm::LLVMSetVolatile(store, llvm::True);
+                llvm::LLVMSetVolatile(store, llvm::TRUE);
             }
             if flags.contains(MemFlags::NONTEMPORAL) {
                 // Make sure that the current target architectures supports "sane" non-temporal
@@ -944,7 +956,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         let trunc = self.trunc(val, dest_ty);
         unsafe {
             if llvm::LLVMIsAInstruction(trunc).is_some() {
-                llvm::LLVMSetNUW(trunc, True);
+                llvm::LLVMSetNUW(trunc, TRUE);
             }
         }
         trunc
@@ -956,7 +968,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         let trunc = self.trunc(val, dest_ty);
         unsafe {
             if llvm::LLVMIsAInstruction(trunc).is_some() {
-                llvm::LLVMSetNSW(trunc, True);
+                llvm::LLVMSetNSW(trunc, TRUE);
             }
         }
         trunc
@@ -1055,13 +1067,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
 
     fn intcast(&mut self, val: &'ll Value, dest_ty: &'ll Type, is_signed: bool) -> &'ll Value {
         unsafe {
-            llvm::LLVMBuildIntCast2(
-                self.llbuilder,
-                val,
-                dest_ty,
-                if is_signed { True } else { False },
-                UNNAMED,
-            )
+            llvm::LLVMBuildIntCast2(self.llbuilder, val, dest_ty, is_signed.to_llvm_bool(), UNNAMED)
         }
     }
 
@@ -1217,7 +1223,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         let ty = self.type_struct(&[self.type_ptr(), self.type_i32()], false);
         let landing_pad = self.landing_pad(ty, pers_fn, 0);
         unsafe {
-            llvm::LLVMSetCleanup(landing_pad, llvm::True);
+            llvm::LLVMSetCleanup(landing_pad, llvm::TRUE);
         }
         (self.extract_value(landing_pad, 0), self.extract_value(landing_pad, 1))
     }
@@ -1305,7 +1311,6 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         failure_order: rustc_middle::ty::AtomicOrdering,
         weak: bool,
     ) -> (&'ll Value, &'ll Value) {
-        let weak = if weak { llvm::True } else { llvm::False };
         unsafe {
             let value = llvm::LLVMBuildAtomicCmpXchg(
                 self.llbuilder,
@@ -1314,9 +1319,9 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 src,
                 AtomicOrdering::from_generic(order),
                 AtomicOrdering::from_generic(failure_order),
-                llvm::False, // SingleThreaded
+                llvm::FALSE, // SingleThreaded
             );
-            llvm::LLVMSetWeak(value, weak);
+            llvm::LLVMSetWeak(value, weak.to_llvm_bool());
             let val = self.extract_value(value, 0);
             let success = self.extract_value(value, 1);
             (val, success)
@@ -1327,15 +1332,13 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         &mut self,
         op: rustc_codegen_ssa::common::AtomicRmwBinOp,
         dst: &'ll Value,
-        mut src: &'ll Value,
+        src: &'ll Value,
         order: rustc_middle::ty::AtomicOrdering,
+        ret_ptr: bool,
     ) -> &'ll Value {
-        // The only RMW operation that LLVM supports on pointers is compare-exchange.
-        let requires_cast_to_int = self.val_ty(src) == self.type_ptr()
-            && op != rustc_codegen_ssa::common::AtomicRmwBinOp::AtomicXchg;
-        if requires_cast_to_int {
-            src = self.ptrtoint(src, self.type_isize());
-        }
+        // FIXME: If `ret_ptr` is true and `src` is not a pointer, we *should* tell LLVM that the
+        // LHS is a pointer and the operation should be provenance-preserving, but LLVM does not
+        // currently support that (https://github.com/llvm/llvm-project/issues/120837).
         let mut res = unsafe {
             llvm::LLVMBuildAtomicRMW(
                 self.llbuilder,
@@ -1343,10 +1346,10 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 dst,
                 src,
                 AtomicOrdering::from_generic(order),
-                llvm::False, // SingleThreaded
+                llvm::FALSE, // SingleThreaded
             )
         };
-        if requires_cast_to_int {
+        if ret_ptr && self.val_ty(res) != self.type_ptr() {
             res = self.inttoptr(res, self.type_ptr());
         }
         res
@@ -1358,14 +1361,14 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         scope: SynchronizationScope,
     ) {
         let single_threaded = match scope {
-            SynchronizationScope::SingleThread => llvm::True,
-            SynchronizationScope::CrossThread => llvm::False,
+            SynchronizationScope::SingleThread => true,
+            SynchronizationScope::CrossThread => false,
         };
         unsafe {
             llvm::LLVMBuildFence(
                 self.llbuilder,
                 AtomicOrdering::from_generic(order),
-                single_threaded,
+                single_threaded.to_llvm_bool(),
                 UNNAMED,
             );
         }
@@ -1389,7 +1392,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
     fn call(
         &mut self,
         llty: &'ll Type,
-        fn_attrs: Option<&CodegenFnAttrs>,
+        fn_call_attrs: Option<&CodegenFnAttrs>,
         fn_abi: Option<&FnAbi<'tcx, Ty<'tcx>>>,
         llfn: &'ll Value,
         args: &[&'ll Value],
@@ -1406,10 +1409,10 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         }
 
         // Emit CFI pointer type membership test
-        self.cfi_type_test(fn_attrs, fn_abi, instance, llfn);
+        self.cfi_type_test(fn_call_attrs, fn_abi, instance, llfn);
 
         // Emit KCFI operand bundle
-        let kcfi_bundle = self.kcfi_operand_bundle(fn_attrs, fn_abi, instance, llfn);
+        let kcfi_bundle = self.kcfi_operand_bundle(fn_call_attrs, fn_abi, instance, llfn);
         if let Some(kcfi_bundle) = kcfi_bundle.as_ref().map(|b| b.as_ref()) {
             bundles.push(kcfi_bundle);
         }
@@ -1426,6 +1429,29 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
                 c"".as_ptr(),
             )
         };
+
+        if let Some(instance) = instance {
+            // Attributes on the function definition being called
+            let fn_defn_attrs = self.cx.tcx.codegen_fn_attrs(instance.def_id());
+            if let Some(fn_call_attrs) = fn_call_attrs
+                && !fn_call_attrs.target_features.is_empty()
+                // If there is an inline attribute and a target feature that matches
+                // we will add the attribute to the callsite otherwise we'll omit
+                // this and not add the attribute to prevent soundness issues.
+                && let Some(inlining_rule) = attributes::inline_attr(&self.cx, instance)
+                && self.cx.tcx.is_target_feature_call_safe(
+                    &fn_call_attrs.target_features,
+                    &fn_defn_attrs.target_features,
+                )
+            {
+                attributes::apply_to_callsite(
+                    call,
+                    llvm::AttributePlace::Function,
+                    &[inlining_rule],
+                );
+            }
+        }
+
         if let Some(fn_abi) = fn_abi {
             fn_abi.apply_attrs_callsite(self, call);
         }
@@ -1443,7 +1469,7 @@ impl<'a, 'll, 'tcx> BuilderMethods<'a, 'tcx> for Builder<'a, 'll, 'tcx> {
         instance: Option<Instance<'tcx>>,
     ) {
         let call = self.call(llty, fn_attrs, Some(fn_abi), llfn, args, funclet, instance);
-        llvm::LLVMRustSetTailCallKind(call, llvm::TailCallKind::MustTail);
+        llvm::LLVMSetTailCallKind(call, llvm::TailCallKind::MustTail);
 
         match &fn_abi.ret.mode {
             PassMode::Ignore | PassMode::Indirect { .. } => self.ret_void(),
@@ -1686,7 +1712,11 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
             return;
         }
 
-        self.call_intrinsic(intrinsic, &[self.val_ty(ptr)], &[self.cx.const_u64(size), ptr]);
+        if crate::llvm_util::get_version() >= (22, 0, 0) {
+            self.call_intrinsic(intrinsic, &[self.val_ty(ptr)], &[ptr]);
+        } else {
+            self.call_intrinsic(intrinsic, &[self.val_ty(ptr)], &[self.cx.const_u64(size), ptr]);
+        }
     }
 }
 impl<'a, 'll, CX: Borrow<SCx<'ll>>> GenericBuilder<'a, 'll, CX> {
@@ -1885,49 +1915,5 @@ impl<'a, 'll, 'tcx> Builder<'a, 'll, 'tcx> {
         index: &'ll Value,
     ) {
         self.call_intrinsic("llvm.instrprof.increment", &[], &[fn_name, hash, num_counters, index]);
-    }
-
-    /// Emits a call to `llvm.instrprof.mcdc.parameters`.
-    ///
-    /// This doesn't produce any code directly, but is used as input by
-    /// the LLVM pass that handles coverage instrumentation.
-    ///
-    /// (See clang's [`CodeGenPGO::emitMCDCParameters`] for comparison.)
-    ///
-    /// [`CodeGenPGO::emitMCDCParameters`]:
-    ///     https://github.com/rust-lang/llvm-project/blob/5399a24/clang/lib/CodeGen/CodeGenPGO.cpp#L1124
-    #[instrument(level = "debug", skip(self))]
-    pub(crate) fn mcdc_parameters(
-        &mut self,
-        fn_name: &'ll Value,
-        hash: &'ll Value,
-        bitmap_bits: &'ll Value,
-    ) {
-        self.call_intrinsic("llvm.instrprof.mcdc.parameters", &[], &[fn_name, hash, bitmap_bits]);
-    }
-
-    #[instrument(level = "debug", skip(self))]
-    pub(crate) fn mcdc_tvbitmap_update(
-        &mut self,
-        fn_name: &'ll Value,
-        hash: &'ll Value,
-        bitmap_index: &'ll Value,
-        mcdc_temp: &'ll Value,
-    ) {
-        let args = &[fn_name, hash, bitmap_index, mcdc_temp];
-        self.call_intrinsic("llvm.instrprof.mcdc.tvbitmap.update", &[], args);
-    }
-
-    #[instrument(level = "debug", skip(self))]
-    pub(crate) fn mcdc_condbitmap_reset(&mut self, mcdc_temp: &'ll Value) {
-        self.store(self.const_i32(0), mcdc_temp, self.tcx.data_layout.i32_align.abi);
-    }
-
-    #[instrument(level = "debug", skip(self))]
-    pub(crate) fn mcdc_condbitmap_update(&mut self, cond_index: &'ll Value, mcdc_temp: &'ll Value) {
-        let align = self.tcx.data_layout.i32_align.abi;
-        let current_tv_index = self.load(self.cx.type_i32(), mcdc_temp, align);
-        let new_tv_index = self.add(current_tv_index, cond_index);
-        self.store(new_tv_index, mcdc_temp, align);
     }
 }

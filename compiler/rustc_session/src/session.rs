@@ -1,12 +1,12 @@
 use std::any::Any;
-use std::ops::{Div, Mul};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::{env, fmt, io};
+use std::{env, io};
 
 use rand::{RngCore, rng};
+use rustc_ast::NodeId;
 use rustc_data_structures::base_n::{CASE_INSENSITIVE, ToBaseN};
 use rustc_data_structures::flock;
 use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
@@ -22,8 +22,9 @@ use rustc_errors::timings::TimingSectionHandler;
 use rustc_errors::translation::Translator;
 use rustc_errors::{
     Diag, DiagCtxt, DiagCtxtHandle, DiagMessage, Diagnostic, ErrorGuaranteed, FatalAbort,
-    TerminalUrl, fallback_fluent_bundle,
+    LintEmitter, TerminalUrl, fallback_fluent_bundle,
 };
+use rustc_hir::limit::Limit;
 use rustc_macros::HashStable_Generic;
 pub use rustc_span::def_id::StableCrateId;
 use rustc_span::edition::Edition;
@@ -39,11 +40,12 @@ use rustc_target::spec::{
 use crate::code_stats::CodeStats;
 pub use crate::code_stats::{DataTypeKind, FieldInfo, FieldKind, SizeKind, VariantInfo};
 use crate::config::{
-    self, CoverageLevel, CrateType, DebugInfo, ErrorOutputType, FunctionReturn, Input,
-    InstrumentCoverage, OptLevel, OutFileName, OutputType, RemapPathScopeComponents,
+    self, CoverageLevel, CoverageOptions, CrateType, DebugInfo, ErrorOutputType, FunctionReturn,
+    Input, InstrumentCoverage, OptLevel, OutFileName, OutputType, RemapPathScopeComponents,
     SwitchWithOptPath,
 };
 use crate::filesearch::FileSearch;
+use crate::lint::LintId;
 use crate::parse::{ParseSess, add_feature_diagnostics};
 use crate::search_paths::SearchPath;
 use crate::{errors, filesearch, lint};
@@ -58,64 +60,6 @@ pub enum CtfeBacktrace {
     Capture,
     /// Capture a backtrace at the point the error is created and immediately print it out.
     Immediate,
-}
-
-/// New-type wrapper around `usize` for representing limits. Ensures that comparisons against
-/// limits are consistent throughout the compiler.
-#[derive(Clone, Copy, Debug, HashStable_Generic)]
-pub struct Limit(pub usize);
-
-impl Limit {
-    /// Create a new limit from a `usize`.
-    pub fn new(value: usize) -> Self {
-        Limit(value)
-    }
-
-    /// Create a new unlimited limit.
-    pub fn unlimited() -> Self {
-        Limit(usize::MAX)
-    }
-
-    /// Check that `value` is within the limit. Ensures that the same comparisons are used
-    /// throughout the compiler, as mismatches can cause ICEs, see #72540.
-    #[inline]
-    pub fn value_within_limit(&self, value: usize) -> bool {
-        value <= self.0
-    }
-}
-
-impl From<usize> for Limit {
-    fn from(value: usize) -> Self {
-        Self::new(value)
-    }
-}
-
-impl fmt::Display for Limit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl Div<usize> for Limit {
-    type Output = Limit;
-
-    fn div(self, rhs: usize) -> Self::Output {
-        Limit::new(self.0 / rhs)
-    }
-}
-
-impl Mul<usize> for Limit {
-    type Output = Limit;
-
-    fn mul(self, rhs: usize) -> Self::Output {
-        Limit::new(self.0 * rhs)
-    }
-}
-
-impl rustc_errors::IntoDiagArg for Limit {
-    fn into_diag_arg(self, _: &mut Option<std::path::PathBuf>) -> rustc_errors::DiagArgValue {
-        self.to_string().into_diag_arg(&mut None)
-    }
 }
 
 #[derive(Clone, Copy, Debug, HashStable_Generic)]
@@ -139,7 +83,10 @@ pub struct CompilerIO {
     pub temps_dir: Option<PathBuf>,
 }
 
-pub trait LintStoreMarker: Any + DynSync + DynSend {}
+pub trait DynLintStore: Any + DynSync + DynSend {
+    /// Provides a way to access lint groups without depending on `rustc_lint`
+    fn lint_groups_iter(&self) -> Box<dyn Iterator<Item = LintGroup> + '_>;
+}
 
 /// Represents the data associated with a compilation
 /// session for a single crate.
@@ -164,7 +111,7 @@ pub struct Session {
     pub code_stats: CodeStats,
 
     /// This only ever stores a `LintStore` but we don't want a dependency on that type here.
-    pub lint_store: Option<Arc<dyn LintStoreMarker>>,
+    pub lint_store: Option<Arc<dyn DynLintStore>>,
 
     /// Cap lint level specified by a driver specifically.
     pub driver_lint_caps: FxHashMap<lint::LintId, lint::Level>,
@@ -219,6 +166,20 @@ pub struct Session {
     pub invocation_temp: Option<String>,
 }
 
+impl LintEmitter for &'_ Session {
+    type Id = NodeId;
+
+    fn emit_node_span_lint(
+        self,
+        lint: &'static rustc_lint_defs::Lint,
+        node_id: Self::Id,
+        span: impl Into<rustc_errors::MultiSpan>,
+        decorator: impl for<'a> rustc_errors::LintDiagnostic<'a, ()> + DynSend + 'static,
+    ) {
+        self.psess.buffer_lint(lint, span, node_id, decorator);
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum CodegenUnits {
     /// Specified by the user. In this case we try fairly hard to produce the
@@ -238,6 +199,12 @@ impl CodegenUnits {
             CodegenUnits::Default(n) => n,
         }
     }
+}
+
+pub struct LintGroup {
+    pub name: &'static str,
+    pub lints: Vec<LintId>,
+    pub is_externally_loaded: bool,
 }
 
 impl Session {
@@ -354,19 +321,11 @@ impl Session {
             && self.opts.unstable_opts.coverage_options.level >= CoverageLevel::Condition
     }
 
-    pub fn instrument_coverage_mcdc(&self) -> bool {
-        self.instrument_coverage()
-            && self.opts.unstable_opts.coverage_options.level >= CoverageLevel::Mcdc
-    }
-
-    /// True if `-Zcoverage-options=no-mir-spans` was passed.
-    pub fn coverage_no_mir_spans(&self) -> bool {
-        self.opts.unstable_opts.coverage_options.no_mir_spans
-    }
-
-    /// True if `-Zcoverage-options=discard-all-spans-in-codegen` was passed.
-    pub fn coverage_discard_all_spans_in_codegen(&self) -> bool {
-        self.opts.unstable_opts.coverage_options.discard_all_spans_in_codegen
+    /// Provides direct access to the `CoverageOptions` struct, so that
+    /// individual flags for debugging/testing coverage instrumetation don't
+    /// need separate accessors.
+    pub fn coverage_options(&self) -> &CoverageOptions {
+        &self.opts.unstable_opts.coverage_options
     }
 
     pub fn is_sanitizer_cfi_enabled(&self) -> bool {
@@ -602,6 +561,13 @@ impl Session {
             ("", "")
         } else {
             (&*self.target.staticlib_prefix, &*self.target.staticlib_suffix)
+        }
+    }
+
+    pub fn lint_groups_iter(&self) -> Box<dyn Iterator<Item = LintGroup> + '_> {
+        match self.lint_store {
+            Some(ref lint_store) => lint_store.lint_groups_iter(),
+            None => Box::new(std::iter::empty()),
         }
     }
 }
@@ -1373,6 +1339,12 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
     if sess.opts.unstable_opts.function_return != FunctionReturn::default() {
         if sess.target.arch != "x86" && sess.target.arch != "x86_64" {
             sess.dcx().emit_err(errors::FunctionReturnRequiresX86OrX8664);
+        }
+    }
+
+    if sess.opts.unstable_opts.indirect_branch_cs_prefix {
+        if sess.target.arch != "x86" && sess.target.arch != "x86_64" {
+            sess.dcx().emit_err(errors::IndirectBranchCsPrefixRequiresX86OrX8664);
         }
     }
 

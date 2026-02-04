@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::hash_map;
 use std::rc::Rc;
 
+use itertools::Itertools as _;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
 use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_errors::Subdiagnostic;
@@ -12,8 +13,8 @@ use rustc_index::{IndexSlice, IndexVec};
 use rustc_macros::{LintDiagnostic, Subdiagnostic};
 use rustc_middle::bug;
 use rustc_middle::mir::{
-    self, BasicBlock, Body, ClearCrossCrate, Local, Location, Place, StatementKind, TerminatorKind,
-    dump_mir,
+    self, BackwardIncompatibleDropReason, BasicBlock, Body, ClearCrossCrate, Local, Location,
+    MirDumper, Place, StatementKind, TerminatorKind,
 };
 use rustc_middle::ty::significant_drop_order::{
     extract_component_with_significant_dtor, ty_dtor_span,
@@ -206,7 +207,11 @@ pub(crate) fn run_lint<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId, body: &Body<
     let mut ty_dropped_components = UnordMap::default();
     for (block, data) in body.basic_blocks.iter_enumerated() {
         for (statement_index, stmt) in data.statements.iter().enumerate() {
-            if let StatementKind::BackwardIncompatibleDropHint { place, reason: _ } = &stmt.kind {
+            if let StatementKind::BackwardIncompatibleDropHint {
+                place,
+                reason: BackwardIncompatibleDropReason::Edition2024,
+            } = &stmt.kind
+            {
                 let ty = place.ty(body, tcx).ty;
                 if ty_dropped_components
                     .entry(ty)
@@ -227,7 +232,10 @@ pub(crate) fn run_lint<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId, body: &Body<
         return;
     }
 
-    dump_mir(tcx, false, "lint_tail_expr_drop_order", &0 as _, body, |_, _| Ok(()));
+    if let Some(dumper) = MirDumper::new(tcx, "lint_tail_expr_drop_order", body) {
+        dumper.dump_mir(body);
+    }
+
     let locals_with_user_names = collect_user_names(body);
     let is_closure_like = tcx.is_closure_like(def_id.to_def_id());
 
@@ -336,9 +344,9 @@ pub(crate) fn run_lint<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId, body: &Body<
             // Suppose that all BIDs point into the same local,
             // we can remove the this local from the observed drops,
             // so that we can focus our diagnosis more on the others.
-            if candidates.iter().all(|&(_, place)| candidates[0].1.local == place.local) {
+            if let Ok(local) = candidates.iter().map(|&(_, place)| place.local).all_equal_value() {
                 for path_idx in all_locals_dropped.iter() {
-                    if move_data.move_paths[path_idx].place.local == candidates[0].1.local {
+                    if move_data.move_paths[path_idx].place.local == local {
                         to_exclude.insert(path_idx);
                     }
                 }

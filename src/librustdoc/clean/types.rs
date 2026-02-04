@@ -226,15 +226,28 @@ impl ExternalCrate {
     }
 
     pub(crate) fn keywords(&self, tcx: TyCtxt<'_>) -> impl Iterator<Item = (DefId, Symbol)> {
-        fn as_keyword(did: DefId, tcx: TyCtxt<'_>) -> Option<(DefId, Symbol)> {
+        self.retrieve_keywords_or_documented_attributes(tcx, sym::keyword)
+    }
+    pub(crate) fn documented_attributes(
+        &self,
+        tcx: TyCtxt<'_>,
+    ) -> impl Iterator<Item = (DefId, Symbol)> {
+        self.retrieve_keywords_or_documented_attributes(tcx, sym::attribute)
+    }
+
+    fn retrieve_keywords_or_documented_attributes(
+        &self,
+        tcx: TyCtxt<'_>,
+        name: Symbol,
+    ) -> impl Iterator<Item = (DefId, Symbol)> {
+        let as_target = move |did: DefId, tcx: TyCtxt<'_>| -> Option<(DefId, Symbol)> {
             tcx.get_attrs(did, sym::doc)
                 .flat_map(|attr| attr.meta_item_list().unwrap_or_default())
-                .filter(|meta| meta.has_name(sym::keyword))
+                .filter(|meta| meta.has_name(name))
                 .find_map(|meta| meta.value_str())
                 .map(|value| (did, value))
-        }
-
-        self.mapped_root_modules(tcx, as_keyword)
+        };
+        self.mapped_root_modules(tcx, as_target)
     }
 
     pub(crate) fn primitives(
@@ -480,10 +493,28 @@ impl Item {
         }
     }
 
+    /// If the item has doc comments from a reexport, returns the item id of that reexport,
+    /// otherwise returns returns the item id.
+    ///
+    /// This is used as a key for caching intra-doc link resolution,
+    /// to prevent two reexports of the same item from using the same cache.
+    pub(crate) fn item_or_reexport_id(&self) -> ItemId {
+        // added documentation on a reexport is always prepended.
+        self.attrs
+            .doc_strings
+            .first()
+            .map(|x| x.item_id)
+            .flatten()
+            .map(ItemId::from)
+            .unwrap_or(self.item_id)
+    }
+
     pub(crate) fn links(&self, cx: &Context<'_>) -> Vec<RenderedLink> {
         use crate::html::format::{href, link_tooltip};
 
-        let Some(links) = cx.cache().intra_doc_links.get(&self.item_id) else { return vec![] };
+        let Some(links) = cx.cache().intra_doc_links.get(&self.item_or_reexport_id()) else {
+            return vec![];
+        };
         links
             .iter()
             .filter_map(|ItemLink { link: s, link_text, page_id: id, fragment }| {
@@ -574,6 +605,20 @@ impl Item {
     pub(crate) fn is_keyword(&self) -> bool {
         self.type_() == ItemType::Keyword
     }
+    pub(crate) fn is_attribute(&self) -> bool {
+        self.type_() == ItemType::Attribute
+    }
+    /// Returns `true` if the item kind is one of the following:
+    ///
+    /// * `ItemType::Primitive`
+    /// * `ItemType::Keyword`
+    /// * `ItemType::Attribute`
+    ///
+    /// They are considered fake because they only exist thanks to their
+    /// `#[doc(primitive|keyword|attribute)]` attribute.
+    pub(crate) fn is_fake_item(&self) -> bool {
+        matches!(self.type_(), ItemType::Primitive | ItemType::Keyword | ItemType::Attribute)
+    }
     pub(crate) fn is_stripped(&self) -> bool {
         match self.kind {
             StrippedItem(..) => true,
@@ -645,16 +690,13 @@ impl Item {
                 // rustc's `is_const_fn` returns `true` for associated functions that have an `impl const` parent
                 // or that have a `const trait` parent. Do not display those as `const` in rustdoc because we
                 // won't be printing correct syntax plus the syntax is unstable.
-                match tcx.opt_associated_item(def_id) {
-                    Some(ty::AssocItem {
-                        container: ty::AssocItemContainer::Impl,
-                        trait_item_def_id: Some(_),
-                        ..
-                    })
-                    | Some(ty::AssocItem { container: ty::AssocItemContainer::Trait, .. }) => {
-                        hir::Constness::NotConst
-                    }
-                    None | Some(_) => hir::Constness::Const,
+                if let Some(assoc) = tcx.opt_associated_item(def_id)
+                    && let ty::AssocContainer::Trait | ty::AssocContainer::TraitImpl(_) =
+                        assoc.container
+                {
+                    hir::Constness::NotConst
+                } else {
+                    hir::Constness::Const
                 }
             } else {
                 hir::Constness::NotConst
@@ -717,7 +759,9 @@ impl Item {
             // Primitives and Keywords are written in the source code as private modules.
             // The modules need to be private so that nobody actually uses them, but the
             // keywords and primitives that they are documenting are public.
-            ItemKind::KeywordItem | ItemKind::PrimitiveItem(_) => return Some(Visibility::Public),
+            ItemKind::KeywordItem | ItemKind::PrimitiveItem(_) | ItemKind::AttributeItem => {
+                return Some(Visibility::Public);
+            }
             // Variant fields inherit their enum's visibility.
             StructFieldItem(..) if is_field_vis_inherited(tcx, def_id) => {
                 return None;
@@ -732,17 +776,13 @@ impl Item {
             | RequiredAssocTypeItem(..)
             | RequiredMethodItem(..)
             | MethodItem(..) => {
-                let assoc_item = tcx.associated_item(def_id);
-                let is_trait_item = match assoc_item.container {
-                    ty::AssocItemContainer::Trait => true,
-                    ty::AssocItemContainer::Impl => {
-                        // Trait impl items always inherit the impl's visibility --
-                        // we don't want to show `pub`.
-                        tcx.impl_trait_ref(tcx.parent(assoc_item.def_id)).is_some()
+                match tcx.associated_item(def_id).container {
+                    // Trait impl items always inherit the impl's visibility --
+                    // we don't want to show `pub`.
+                    ty::AssocContainer::Trait | ty::AssocContainer::TraitImpl(_) => {
+                        return None;
                     }
-                };
-                if is_trait_item {
-                    return None;
+                    ty::AssocContainer::InherentImpl => {}
                 }
             }
             _ => {}
@@ -763,13 +803,13 @@ impl Item {
             .iter()
             .filter_map(|attr| match attr {
                 hir::Attribute::Parsed(AttributeKind::LinkSection { name, .. }) => {
-                    Some(format!("#[link_section = \"{name}\"]"))
+                    Some(format!("#[unsafe(link_section = \"{name}\")]"))
                 }
                 hir::Attribute::Parsed(AttributeKind::NoMangle(..)) => {
-                    Some("#[no_mangle]".to_string())
+                    Some("#[unsafe(no_mangle)]".to_string())
                 }
                 hir::Attribute::Parsed(AttributeKind::ExportName { name, .. }) => {
-                    Some(format!("#[export_name = \"{name}\"]"))
+                    Some(format!("#[unsafe(export_name = \"{name}\")]"))
                 }
                 hir::Attribute::Parsed(AttributeKind::NonExhaustive(..)) => {
                     Some("#[non_exhaustive]".to_string())
@@ -924,7 +964,12 @@ pub(crate) enum ItemKind {
     AssocTypeItem(Box<TypeAlias>, Vec<GenericBound>),
     /// An item that has been stripped by a rustdoc pass
     StrippedItem(Box<ItemKind>),
+    /// This item represents a module with a `#[doc(keyword = "...")]` attribute which is used
+    /// to generate documentation for Rust keywords.
     KeywordItem,
+    /// This item represents a module with a `#[doc(attribute = "...")]` attribute which is used
+    /// to generate documentation for Rust builtin attributes.
+    AttributeItem,
 }
 
 impl ItemKind {
@@ -965,7 +1010,8 @@ impl ItemKind {
             | RequiredAssocTypeItem(..)
             | AssocTypeItem(..)
             | StrippedItem(_)
-            | KeywordItem => [].iter(),
+            | KeywordItem
+            | AttributeItem => [].iter(),
         }
     }
 
@@ -1069,7 +1115,8 @@ pub(crate) fn extract_cfg_from_attrs<'a, I: Iterator<Item = &'a hir::Attribute> 
 
     // treat #[target_feature(enable = "feat")] attributes as if they were
     // #[doc(cfg(target_feature = "feat"))] attributes as well
-    if let Some(features) = find_attr!(attrs, AttributeKind::TargetFeature(features, _) => features)
+    if let Some(features) =
+        find_attr!(attrs, AttributeKind::TargetFeature { features, .. } => features)
     {
         for (feature, _) in features {
             cfg &= Cfg::Cfg(sym::target_feature, Some(*feature));
@@ -1342,7 +1389,7 @@ pub(crate) enum GenericParamDefKind {
     Lifetime { outlives: ThinVec<Lifetime> },
     Type { bounds: ThinVec<GenericBound>, default: Option<Box<Type>>, synthetic: bool },
     // Option<Box<String>> makes this type smaller than `Option<String>` would.
-    Const { ty: Box<Type>, default: Option<Box<String>>, synthetic: bool },
+    Const { ty: Box<Type>, default: Option<Box<String>> },
 }
 
 impl GenericParamDefKind {
@@ -1534,10 +1581,10 @@ impl Type {
         matches!(self, Type::Path { path: Path { res: Res::Def(DefKind::TyAlias, _), .. } })
     }
 
-    /// Check if two types are "the same" for documentation purposes.
+    /// Check if this type is a subtype of another type for documentation purposes.
     ///
     /// This is different from `Eq`, because it knows that things like
-    /// `Placeholder` are possible matches for everything.
+    /// `Infer` and generics have special subtyping rules.
     ///
     /// This relation is not commutative when generics are involved:
     ///
@@ -1548,8 +1595,8 @@ impl Type {
     /// let cache = Cache::new(false);
     /// let generic = Type::Generic(rustc_span::symbol::sym::Any);
     /// let unit = Type::Primitive(PrimitiveType::Unit);
-    /// assert!(!generic.is_same(&unit, &cache));
-    /// assert!(unit.is_same(&generic, &cache));
+    /// assert!(!generic.is_doc_subtype_of(&unit, &cache));
+    /// assert!(unit.is_doc_subtype_of(&generic, &cache));
     /// ```
     ///
     /// An owned type is also the same as its borrowed variants (this is commutative),

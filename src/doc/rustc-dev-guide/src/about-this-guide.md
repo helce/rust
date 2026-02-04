@@ -73,8 +73,7 @@ You might also find the following sites useful:
 - [compiler-team] -- the home-base for the Rust compiler team, with description
   of the team procedures, active working groups, and the team calendar.
 - [std-dev-guide] -- a similar guide for developing the standard library.
-- [The t-compiler zulip][z]
-- `#contribute` and `#wg-rustup` on [Discord](https://discord.gg/rust-lang).
+- [The t-compiler Zulip][z]
 - The [Rust Internals forum][rif], a place to ask questions and
   discuss Rust's internals
 - The [Rust reference][rr], even though it doesn't specifically talk about

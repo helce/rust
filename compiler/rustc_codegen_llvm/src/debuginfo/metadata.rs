@@ -19,7 +19,9 @@ use rustc_middle::ty::{
     self, AdtKind, CoroutineArgsExt, ExistentialTraitRef, Instance, Ty, TyCtxt, Visibility,
 };
 use rustc_session::config::{self, DebugInfo, Lto};
-use rustc_span::{DUMMY_SP, FileName, FileNameDisplayPreference, SourceFile, Symbol, hygiene};
+use rustc_span::{
+    DUMMY_SP, FileName, FileNameDisplayPreference, SourceFile, Span, Symbol, hygiene,
+};
 use rustc_symbol_mangling::typeid_for_trait_ref;
 use rustc_target::spec::DebuginfoKind;
 use smallvec::smallvec;
@@ -101,16 +103,17 @@ fn build_fixed_size_array_di_node<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
     unique_type_id: UniqueTypeId<'tcx>,
     array_type: Ty<'tcx>,
+    span: Span,
 ) -> DINodeCreationResult<'ll> {
     let ty::Array(element_type, len) = array_type.kind() else {
         bug!("build_fixed_size_array_di_node() called with non-ty::Array type `{:?}`", array_type)
     };
 
-    let element_type_di_node = type_di_node(cx, *element_type);
+    let element_type_di_node = spanned_type_di_node(cx, *element_type, span);
 
     return_if_di_node_created_in_meantime!(cx, unique_type_id);
 
-    let (size, align) = cx.size_and_align_of(array_type);
+    let (size, align) = cx.spanned_size_and_align_of(array_type, span);
 
     let upper_bound = len
         .try_to_target_usize(cx.tcx)
@@ -423,6 +426,14 @@ fn build_slice_type_di_node<'ll, 'tcx>(
 /// This function will look up the debuginfo node in the TypeMap. If it can't find it, it
 /// will create the node by dispatching to the corresponding `build_*_di_node()` function.
 pub(crate) fn type_di_node<'ll, 'tcx>(cx: &CodegenCx<'ll, 'tcx>, t: Ty<'tcx>) -> &'ll DIType {
+    spanned_type_di_node(cx, t, DUMMY_SP)
+}
+
+pub(crate) fn spanned_type_di_node<'ll, 'tcx>(
+    cx: &CodegenCx<'ll, 'tcx>,
+    t: Ty<'tcx>,
+    span: Span,
+) -> &'ll DIType {
     let unique_type_id = UniqueTypeId::for_ty(cx.tcx, t);
 
     if let Some(existing_di_node) = debug_context(cx).type_map.di_node_for_unique_id(unique_type_id)
@@ -437,7 +448,7 @@ pub(crate) fn type_di_node<'ll, 'tcx>(cx: &CodegenCx<'ll, 'tcx>, t: Ty<'tcx>) ->
             build_basic_type_di_node(cx, t)
         }
         ty::Tuple(elements) if elements.is_empty() => build_basic_type_di_node(cx, t),
-        ty::Array(..) => build_fixed_size_array_di_node(cx, unique_type_id, t),
+        ty::Array(..) => build_fixed_size_array_di_node(cx, unique_type_id, t, span),
         ty::Slice(_) | ty::Str => build_slice_type_di_node(cx, t, unique_type_id),
         ty::Dynamic(..) => build_dyn_type_di_node(cx, t, unique_type_id),
         ty::Foreign(..) => build_foreign_type_di_node(cx, t, unique_type_id),
@@ -460,7 +471,7 @@ pub(crate) fn type_di_node<'ll, 'tcx>(cx: &CodegenCx<'ll, 'tcx>, t: Ty<'tcx>) ->
         ty::Adt(def, ..) => match def.adt_kind() {
             AdtKind::Struct => build_struct_type_di_node(cx, unique_type_id),
             AdtKind::Union => build_union_type_di_node(cx, unique_type_id),
-            AdtKind::Enum => enums::build_enum_type_di_node(cx, unique_type_id),
+            AdtKind::Enum => enums::build_enum_type_di_node(cx, unique_type_id, span),
         },
         ty::Tuple(_) => build_tuple_type_di_node(cx, unique_type_id),
         _ => bug!("debuginfo: unexpected type in type_di_node(): {:?}", t),
@@ -1425,7 +1436,7 @@ fn build_vtable_type_di_node<'ll, 'tcx>(
 
     let vtable_entries = if let Some(poly_trait_ref) = poly_trait_ref {
         let trait_ref = poly_trait_ref.with_self_ty(tcx, ty);
-        let trait_ref = tcx.erase_regions(trait_ref);
+        let trait_ref = tcx.erase_and_anonymize_regions(trait_ref);
 
         tcx.vtable_entries(trait_ref)
     } else {
@@ -1552,7 +1563,7 @@ pub(crate) fn apply_vcall_visibility_metadata<'ll, 'tcx>(
     // Unwrap potential addrspacecast
     let vtable = find_vtable_behind_cast(vtable);
     let trait_ref_self = trait_ref.with_self_ty(cx.tcx, ty);
-    let trait_ref_self = cx.tcx.erase_regions(trait_ref_self);
+    let trait_ref_self = cx.tcx.erase_and_anonymize_regions(trait_ref_self);
     let trait_def_id = trait_ref_self.def_id;
     let trait_vis = cx.tcx.visibility(trait_def_id);
 

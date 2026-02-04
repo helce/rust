@@ -81,10 +81,17 @@ fn sizedness_constraint_for_ty<'tcx>(
 fn defaultness(tcx: TyCtxt<'_>, def_id: LocalDefId) -> hir::Defaultness {
     match tcx.hir_node_by_def_id(def_id) {
         hir::Node::Item(hir::Item {
-            kind: hir::ItemKind::Impl(hir::Impl { defaultness, of_trait: Some(_), .. }),
+            kind:
+                hir::ItemKind::Impl(hir::Impl {
+                    of_trait: Some(hir::TraitImplHeader { defaultness, .. }),
+                    ..
+                }),
             ..
         })
-        | hir::Node::ImplItem(hir::ImplItem { defaultness, .. })
+        | hir::Node::ImplItem(hir::ImplItem {
+            impl_kind: hir::ImplItemImplKind::Trait { defaultness, .. },
+            ..
+        })
         | hir::Node::TraitItem(hir::TraitItem { defaultness, .. }) => *defaultness,
         node => {
             bug!("`defaultness` called on {:?}", node);
@@ -161,7 +168,7 @@ fn param_env(tcx: TyCtxt<'_>, def_id: DefId) -> ty::ParamEnv<'_> {
 
     if tcx.def_kind(def_id) == DefKind::AssocFn
         && let assoc_item = tcx.associated_item(def_id)
-        && assoc_item.container == ty::AssocItemContainer::Trait
+        && assoc_item.container == ty::AssocContainer::Trait
         && assoc_item.defaultness(tcx).has_value()
     {
         let sig = tcx.fn_sig(def_id).instantiate_identity();

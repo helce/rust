@@ -6,7 +6,7 @@ use rustc_index::{Idx, IndexVec};
 use rustc_middle::ty::{Binder, EarlyBinder};
 use rustc_span::Symbol;
 
-use crate::rmeta::{LazyArray, LazyTable, LazyValue};
+use crate::rmeta::{LazyArray, LazyValue};
 
 pub(crate) trait ParameterizedOverTcx: 'static {
     type Value<'tcx>;
@@ -46,10 +46,6 @@ impl<T: ParameterizedOverTcx> ParameterizedOverTcx for LazyValue<T> {
 
 impl<T: ParameterizedOverTcx> ParameterizedOverTcx for LazyArray<T> {
     type Value<'tcx> = LazyArray<T::Value<'tcx>>;
-}
-
-impl<I: 'static, T: ParameterizedOverTcx> ParameterizedOverTcx for LazyTable<I, T> {
-    type Value<'tcx> = LazyTable<I, T::Value<'tcx>>;
 }
 
 macro_rules! trivially_parameterized_over_tcx {
@@ -106,7 +102,7 @@ trivially_parameterized_over_tcx! {
     rustc_middle::middle::resolve_bound_vars::ObjectLifetimeDefault,
     rustc_middle::mir::ConstQualifs,
     rustc_middle::ty::AnonConstKind,
-    rustc_middle::ty::AssocItemContainer,
+    rustc_middle::ty::AssocContainer,
     rustc_middle::ty::AsyncDestructor,
     rustc_middle::ty::Asyncness,
     rustc_middle::ty::DeducedParamAttrs,
@@ -154,7 +150,6 @@ parameterized_over_tcx! {
     rustc_middle::mir::CoroutineLayout,
     rustc_middle::mir::interpret::ConstAllocation,
     rustc_middle::ty::Clause,
-    rustc_middle::ty::ClauseKind,
     rustc_middle::ty::Const,
     rustc_middle::ty::ConstConditions,
     rustc_middle::ty::FnSig,

@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 use std::{io, str};
 
 use ast::token::IdentIsRaw;
-use rustc_ast::ptr::P;
 use rustc_ast::token::{self, Delimiter, Token};
 use rustc_ast::tokenstream::{DelimSpacing, DelimSpan, Spacing, TokenStream, TokenTree};
 use rustc_ast::{self as ast, PatKind, visit};
@@ -23,6 +22,7 @@ use rustc_span::{
 };
 use termcolor::WriteColor;
 
+use crate::lexer::StripTokens;
 use crate::parser::{ForceCollect, Parser};
 use crate::{new_parser_from_source_str, source_str_to_stream, unwrap_or_emit_fatal};
 
@@ -36,6 +36,7 @@ fn string_to_parser(psess: &ParseSess, source_str: String) -> Parser<'_> {
         psess,
         PathBuf::from("bogofile").into(),
         source_str,
+        StripTokens::Nothing,
     ))
 }
 
@@ -2240,8 +2241,8 @@ fn parse_item_from_source_str(
     name: FileName,
     source: String,
     psess: &ParseSess,
-) -> PResult<'_, Option<P<ast::Item>>> {
-    unwrap_or_emit_fatal(new_parser_from_source_str(psess, name, source))
+) -> PResult<'_, Option<Box<ast::Item>>> {
+    unwrap_or_emit_fatal(new_parser_from_source_str(psess, name, source, StripTokens::Nothing))
         .parse_item(ForceCollect::No)
 }
 
@@ -2251,12 +2252,12 @@ fn sp(a: u32, b: u32) -> Span {
 }
 
 /// Parses a string, return an expression.
-fn string_to_expr(source_str: String) -> P<ast::Expr> {
+fn string_to_expr(source_str: String) -> Box<ast::Expr> {
     with_error_checking_parse(source_str, &psess(), |p| p.parse_expr())
 }
 
 /// Parses a string, returns an item.
-fn string_to_item(source_str: String) -> Option<P<ast::Item>> {
+fn string_to_item(source_str: String) -> Option<Box<ast::Item>> {
     with_error_checking_parse(source_str, &psess(), |p| p.parse_item(ForceCollect::No))
 }
 
@@ -2520,8 +2521,9 @@ fn ttdelim_span() {
         name: FileName,
         source: String,
         psess: &ParseSess,
-    ) -> PResult<'_, P<ast::Expr>> {
-        unwrap_or_emit_fatal(new_parser_from_source_str(psess, name, source)).parse_expr()
+    ) -> PResult<'_, Box<ast::Expr>> {
+        unwrap_or_emit_fatal(new_parser_from_source_str(psess, name, source, StripTokens::Nothing))
+            .parse_expr()
     }
 
     create_default_session_globals_then(|| {

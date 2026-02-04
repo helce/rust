@@ -9,8 +9,6 @@ For more details about how rustdoc works, see the
 
 [Rustdoc internals]: ./rustdoc-internals.md
 
-<!-- toc -->
-
 `rustdoc` uses `rustc` internals (and, of course, the standard library), so you
 will have to build the compiler and `std` once before you can build `rustdoc`.
 
@@ -109,7 +107,7 @@ This comes with several caveats: in particular, rustdoc *cannot* run any parts o
 require type-checking bodies; for example it cannot generate `.rlib` files or run most lints.
 We want to move away from this model eventually, but we need some alternative for
 [the people using it][async-std]; see [various][zulip stop accepting broken code]
-[previous][rustdoc meeting 2024-07-08] [zulip][compiler meeting 2023-01-26] [discussion][notriddle rfc].
+[previous][rustdoc meeting 2024-07-08] [Zulip][compiler meeting 2023-01-26] [discussion][notriddle rfc].
 For examples of code that breaks if this hack is removed, see
 [`tests/rustdoc-ui/error-in-impl-trait`].
 

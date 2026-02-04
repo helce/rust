@@ -16,6 +16,7 @@ use rustc_macros::{HashStable, TyDecodable, TyEncodable};
 use rustc_span::{DUMMY_SP, Span};
 use tracing::debug;
 
+use crate::mir::BackwardIncompatibleDropReason;
 use crate::ty::TyCtxt;
 
 /// Represents a statically-describable scope that can be used to
@@ -96,6 +97,7 @@ impl fmt::Debug for Scope {
             ScopeData::Destruction => write!(fmt, "Destruction({:?})", self.local_id),
             ScopeData::IfThen => write!(fmt, "IfThen({:?})", self.local_id),
             ScopeData::IfThenRescope => write!(fmt, "IfThen[edition2024]({:?})", self.local_id),
+            ScopeData::MatchGuard => write!(fmt, "MatchGuard({:?})", self.local_id),
             ScopeData::Remainder(fsi) => write!(
                 fmt,
                 "Remainder {{ block: {:?}, first_statement_index: {}}}",
@@ -130,6 +132,11 @@ pub enum ScopeData {
     /// Used for variables introduced in an if-let expression,
     /// whose lifetimes do not cross beyond this scope.
     IfThenRescope,
+
+    /// Scope of the condition and body of a match arm with a guard
+    /// Used for variables introduced in an if-let guard,
+    /// whose lifetimes do not cross beyond this scope.
+    MatchGuard,
 
     /// Scope following a `let id = expr;` binding in a block.
     Remainder(FirstStatementIndex),
@@ -215,6 +222,10 @@ pub struct ScopeTree {
     /// variable is declared.
     var_map: FxIndexMap<hir::ItemLocalId, Scope>,
 
+    /// Maps from bindings to their future scopes after #145838 for the
+    /// `macro_extended_temporary_scopes` lint.
+    var_compatibility_map: FxIndexMap<hir::ItemLocalId, Scope>,
+
     /// Identifies expressions which, if captured into a temporary, ought to
     /// have a temporary whose lifetime extends to the end of the enclosing *block*,
     /// and not the enclosing *statement*. Expressions that are not present in this
@@ -236,6 +247,19 @@ pub struct ScopeTree {
 pub struct RvalueCandidate {
     pub target: hir::ItemLocalId,
     pub lifetime: Option<Scope>,
+    pub compat: ScopeCompatibility,
+}
+
+/// Marks extended temporary scopes that will be shortened by #145838 and thus need to be linted on
+/// by the `macro_extended_temporary_scopes` future-incompatibility warning.
+#[derive(TyEncodable, TyDecodable, Clone, Copy, Debug, Eq, PartialEq, HashStable)]
+pub enum ScopeCompatibility {
+    /// Marks a scope that was extended past a temporary destruction scope by a non-extending
+    /// `super let` initializer.
+    FutureIncompatible { shortens_to: Scope },
+    /// Marks an extended temporary scope that was not extended by a non-extending `super let`
+    /// initializer.
+    FutureCompatible,
 }
 
 impl ScopeTree {
@@ -254,6 +278,11 @@ impl ScopeTree {
         self.var_map.insert(var, lifetime);
     }
 
+    pub fn record_future_incompatible_var_scope(&mut self, var: hir::ItemLocalId, lifetime: Scope) {
+        assert!(var != lifetime.local_id);
+        self.var_compatibility_map.insert(var, lifetime);
+    }
+
     pub fn record_rvalue_candidate(&mut self, var: HirId, candidate: RvalueCandidate) {
         debug!("record_rvalue_candidate(var={var:?}, candidate={candidate:?})");
         if let Some(lifetime) = &candidate.lifetime {
@@ -267,9 +296,14 @@ impl ScopeTree {
         self.parent_map.get(&id).cloned()
     }
 
-    /// Returns the lifetime of the local variable `var_id`, if any.
-    pub fn var_scope(&self, var_id: hir::ItemLocalId) -> Option<Scope> {
-        self.var_map.get(&var_id).cloned()
+    /// Returns the lifetime of the local variable `var_id`, if any, as well as whether it is
+    /// shortening after #145838.
+    pub fn var_scope(&self, var_id: hir::ItemLocalId) -> (Option<Scope>, ScopeCompatibility) {
+        let compat = match self.var_compatibility_map.get(&var_id) {
+            Some(&shortens_to) => ScopeCompatibility::FutureIncompatible { shortens_to },
+            None => ScopeCompatibility::FutureCompatible,
+        };
+        (self.var_map.get(&var_id).cloned(), compat)
     }
 
     /// Returns `true` if `subscope` is equal to or is lexically nested inside `superscope`, and
@@ -292,5 +326,49 @@ impl ScopeTree {
         debug!("is_subscope_of({:?}, {:?})=true", subscope, superscope);
 
         true
+    }
+
+    /// Returns the scope of non-lifetime-extended temporaries within a given scope, as well as
+    /// whether we've recorded a potential backwards-incompatible change to lint on.
+    /// Returns `None` when no enclosing temporary scope is found, such as for static items.
+    pub fn default_temporary_scope(
+        &self,
+        inner: Scope,
+    ) -> (Option<Scope>, Option<(Scope, BackwardIncompatibleDropReason)>) {
+        let mut id = inner;
+        let mut backwards_incompatible = None;
+
+        while let Some(&p) = self.parent_map.get(&id) {
+            match p.data {
+                ScopeData::Destruction => {
+                    debug!("temporary_scope({inner:?}) = {id:?} [enclosing]");
+                    return (Some(id), backwards_incompatible);
+                }
+                ScopeData::IfThenRescope | ScopeData::MatchGuard => {
+                    debug!("temporary_scope({inner:?}) = {p:?} [enclosing]");
+                    return (Some(p), backwards_incompatible);
+                }
+                ScopeData::Node
+                | ScopeData::CallSite
+                | ScopeData::Arguments
+                | ScopeData::IfThen
+                | ScopeData::Remainder(_) => {
+                    // If we haven't already passed through a backwards-incompatible node,
+                    // then check if we are passing through one now and record it if so.
+                    // This is for now only working for cases where a temporary lifetime is
+                    // *shortened*.
+                    if backwards_incompatible.is_none() {
+                        backwards_incompatible = self
+                            .backwards_incompatible_scope
+                            .get(&p.local_id)
+                            .map(|&s| (s, BackwardIncompatibleDropReason::Edition2024));
+                    }
+                    id = p
+                }
+            }
+        }
+
+        debug!("temporary_scope({inner:?}) = None");
+        (None, backwards_incompatible)
     }
 }

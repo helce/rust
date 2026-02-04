@@ -6,6 +6,7 @@
 
 //@ compile-flags:-g
 //@ min-gdb-version: 11.2
+//@ disable-gdb-pretty-printers
 
 // === GDB TESTS ===================================================================================
 
@@ -113,8 +114,6 @@
 // cdb-check:s                : [...] [Type: ref$<str$>]
 
 #![allow(unused_variables)]
-#![feature(omit_gdb_pretty_printer_section)]
-#![omit_gdb_pretty_printer_section]
 #![feature(f16)]
 
 fn main() {
