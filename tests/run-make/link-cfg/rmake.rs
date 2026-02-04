@@ -10,7 +10,6 @@
 // and execution should be successful.
 // See https://github.com/rust-lang/rust/pull/37545
 
-//@ needs-llvm-components x86
 //@ ignore-cross-compile
 // Reason: the compiled binary is executed
 //@ needs-llvm-components: x86
