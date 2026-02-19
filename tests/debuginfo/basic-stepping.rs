@@ -5,6 +5,7 @@
 //@ ignore-aarch64: Doesn't work yet.
 //@ ignore-loongarch64: Doesn't work yet.
 //@ ignore-riscv64: Doesn't work yet.
+//@ ignore-e2k: Doesn't work yet.
 //@ compile-flags: -g
 
 // gdb-command: run
