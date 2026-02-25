@@ -2,9 +2,7 @@ use hir::Node;
 use hir::def_id::DefId;
 use rustc_hir as hir;
 use rustc_middle::bug;
-use rustc_middle::middle::region::{
-    ScopeCompatibility, RvalueCandidate, Scope, ScopeTree,
-};
+use rustc_middle::middle::region::{RvalueCandidate, Scope, ScopeTree};
 use rustc_middle::ty::RvalueScopes;
 use tracing::debug;
 
@@ -31,7 +29,6 @@ fn record_rvalue_scope_rec(
     rvalue_scopes: &mut RvalueScopes,
     mut expr: &hir::Expr<'_>,
     lifetime: Option<Scope>,
-    compat: ScopeCompatibility,
 ) {
     loop {
         // Note: give all the expressions matching `ET` with the
@@ -40,7 +37,7 @@ fn record_rvalue_scope_rec(
         // into a temporary, we request the temporary scope of the
         // outer expression.
 
-        rvalue_scopes.record_rvalue_scope(expr.hir_id.local_id, lifetime, compat);
+        rvalue_scopes.record_rvalue_scope(expr.hir_id.local_id, lifetime);
 
         match expr.kind {
             hir::ExprKind::AddrOf(_, _, subexpr)
@@ -61,7 +58,7 @@ fn record_rvalue_scope(
     candidate: &RvalueCandidate,
 ) {
     debug!("resolve_rvalue_scope(expr={expr:?}, candidate={candidate:?})");
-    record_rvalue_scope_rec(rvalue_scopes, expr, candidate.lifetime, candidate.compat)
+    record_rvalue_scope_rec(rvalue_scopes, expr, candidate.lifetime)
     // FIXME(@dingxiangfei2009): handle the candidates in the function call arguments
 }
 

@@ -412,16 +412,11 @@ pub fn structurally_relate_tys<I: Interner, R: TypeRelation<I>>(
 
         (ty::Foreign(a_id), ty::Foreign(b_id)) if a_id == b_id => Ok(Ty::new_foreign(cx, a_id)),
 
-        (ty::Dynamic(a_obj, a_region, a_repr), ty::Dynamic(b_obj, b_region, b_repr))
-            if a_repr == b_repr =>
-        {
-            Ok(Ty::new_dynamic(
-                cx,
-                relation.relate(a_obj, b_obj)?,
-                relation.relate(a_region, b_region)?,
-                a_repr,
-            ))
-        }
+        (ty::Dynamic(a_obj, a_region), ty::Dynamic(b_obj, b_region)) => Ok(Ty::new_dynamic(
+            cx,
+            relation.relate(a_obj, b_obj)?,
+            relation.relate(a_region, b_region)?,
+        )),
 
         (ty::Coroutine(a_id, a_args), ty::Coroutine(b_id, b_args)) if a_id == b_id => {
             // All Coroutine types with the same id represent
@@ -613,8 +608,8 @@ pub fn structurally_relate_consts<I: Interner, R: TypeRelation<I>>(
         // be stabilized.
         (ty::ConstKind::Unevaluated(au), ty::ConstKind::Unevaluated(bu)) if au.def == bu.def => {
             if cfg!(debug_assertions) {
-                let a_ty = cx.type_of(au.def).instantiate(cx, au.args);
-                let b_ty = cx.type_of(bu.def).instantiate(cx, bu.args);
+                let a_ty = cx.type_of(au.def.into()).instantiate(cx, au.args);
+                let b_ty = cx.type_of(bu.def.into()).instantiate(cx, bu.args);
                 assert_eq!(a_ty, b_ty);
             }
 

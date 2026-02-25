@@ -597,6 +597,7 @@ class RustBuild(object):
         self.download_url = (
             os.getenv("RUSTUP_DIST_SERVER") or self.stage0_data["dist_server"]
         )
+        self.jobs = self.get_toml("jobs", "build") or "default"
 
         self.build = args.build or self.build_triple()
 
@@ -1040,6 +1041,9 @@ class RustBuild(object):
         # See also: <https://github.com/rust-lang/rust/issues/70208>.
         if "CARGO_BUILD_TARGET" in env:
             del env["CARGO_BUILD_TARGET"]
+        # if in CI, don't use incremental build when building bootstrap.
+        if "GITHUB_ACTIONS" in env:
+            env["CARGO_INCREMENTAL"] = "0"
         env["CARGO_TARGET_DIR"] = build_dir
         env["RUSTC"] = self.rustc()
         env["LD_LIBRARY_PATH"] = (
@@ -1142,11 +1146,13 @@ class RustBuild(object):
         args = [
             self.cargo(),
             "build",
+            "--jobs=" + self.jobs,
             "--manifest-path",
             os.path.join(self.rust_root, "src/bootstrap/Cargo.toml"),
             "-Zroot-dir=" + self.rust_root,
         ]
-        args.extend("--verbose" for _ in range(self.verbose))
+        # verbose cargo output is very noisy, so only enable it with -vv
+        args.extend("--verbose" for _ in range(self.verbose - 1))
 
         if "BOOTSTRAP_TRACING" in env:
             args.append("--features=tracing")
@@ -1190,8 +1196,6 @@ class RustBuild(object):
             return "<commit>"
         cmd = [
             "git",
-            "-C",
-            repo_path,
             "rev-list",
             "--author",
             author_email,
@@ -1199,7 +1203,9 @@ class RustBuild(object):
             "HEAD",
         ]
         try:
-            commit = subprocess.check_output(cmd, universal_newlines=True).strip()
+            commit = subprocess.check_output(
+                cmd, universal_newlines=True, cwd=repo_path
+            ).strip()
             return commit or "<commit>"
         except subprocess.CalledProcessError:
             return "<commit>"
@@ -1374,11 +1380,26 @@ def main():
         sys.argv[1] = "-h"
 
     args = parse_args(sys.argv)
-    help_triggered = args.help or len(sys.argv) == 1
 
-    # If the user is asking for help, let them know that the whole download-and-build
+    # Root help (e.g., x.py --help) prints help from the saved file to save the time
+    if len(sys.argv) == 1 or sys.argv[1] in ["-h", "--help"]:
+        try:
+            with open(
+                os.path.join(os.path.dirname(__file__), "../etc/xhelp"), "r"
+            ) as f:
+                # The file from bootstrap func already has newline.
+                print(f.read(), end="")
+                sys.exit(0)
+        except Exception as error:
+            eprint(
+                f"ERROR: unable to run help: {error}\n",
+                "x.py run generate-help may solve the problem.",
+            )
+            sys.exit(1)
+
+    # If the user is asking for other helps, let them know that the whole download-and-build
     # process has to happen before anything is printed out.
-    if help_triggered:
+    if args.help:
         eprint(
             "INFO: Downloading and building bootstrap before processing --help command.\n"
             "      See src/bootstrap/README.md for help with common commands."
@@ -1396,13 +1417,14 @@ def main():
             eprint(error)
         success_word = "unsuccessfully"
 
-    if not help_triggered:
+    if not args.help:
         eprint(
             "Build completed",
             success_word,
             "in",
             format_build_time(time() - start_time),
         )
+
     sys.exit(exit_code)
 
 

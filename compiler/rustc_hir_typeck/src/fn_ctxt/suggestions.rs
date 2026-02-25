@@ -1953,7 +1953,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         }
                     }
                 }
-                self.suggest_derive(diag, &[(trait_ref.upcast(self.tcx), None, None)]);
+                self.suggest_derive(diag, &vec![(trait_ref.upcast(self.tcx), None, None)]);
             }
         }
     }
@@ -3021,6 +3021,28 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         )
                     {
                         let deref_kind = if checked_ty.is_box() {
+                            // detect Box::new(..)
+                            if let ExprKind::Call(box_new, [_]) = expr.kind
+                                && let ExprKind::Path(qpath) = &box_new.kind
+                                && let Res::Def(DefKind::AssocFn, fn_id) =
+                                    self.typeck_results.borrow().qpath_res(qpath, box_new.hir_id)
+                                && let Some(impl_id) = self.tcx.inherent_impl_of_assoc(fn_id)
+                                && self.tcx.type_of(impl_id).skip_binder().is_box()
+                                && self.tcx.item_name(fn_id) == sym::new
+                            {
+                                let l_paren = self.tcx.sess.source_map().next_point(box_new.span);
+                                let r_paren = self.tcx.sess.source_map().end_point(expr.span);
+                                return Some((
+                                    vec![
+                                        (box_new.span.to(l_paren), String::new()),
+                                        (r_paren, String::new()),
+                                    ],
+                                    "consider removing the Box".to_string(),
+                                    Applicability::MachineApplicable,
+                                    false,
+                                    false,
+                                ));
+                            }
                             "unboxing the value"
                         } else if checked_ty.is_ref() {
                             "dereferencing the borrow"
@@ -3614,7 +3636,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 .must_apply_modulo_regions()
         {
             let sm = self.tcx.sess.source_map();
-            if let Ok(rhs_snippet) = sm.span_to_snippet(rhs_expr.span)
+            // If the span of rhs_expr or lhs_expr is in an external macro,
+            // we just suppress the suggestion. See issue #139050
+            if !rhs_expr.span.in_external_macro(sm)
+                && !lhs_expr.span.in_external_macro(sm)
+                && let Ok(rhs_snippet) = sm.span_to_snippet(rhs_expr.span)
                 && let Ok(lhs_snippet) = sm.span_to_snippet(lhs_expr.span)
             {
                 err.note(format!("`{rhs_ty}` implements `PartialEq<{lhs_ty}>`"));

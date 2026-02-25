@@ -878,6 +878,21 @@ impl<'test> TestCx<'test> {
                     prefix = self.error_prefix(),
                     n = not_found.len(),
                 );
+
+                // FIXME: Ideally, we should check this at the place where we actually parse error annotations.
+                // it's better to use (negated) heuristic inside normalize_output if possible
+                if let Some(human_format) = self.props.compile_flags.iter().find(|flag| {
+                    // `human`, `human-unicode`, `short` will not generate JSON output
+                    flag.contains("error-format")
+                        && (flag.contains("short") || flag.contains("human"))
+                }) {
+                    let msg = format!(
+                        "tests with compile flag `{}` should not have error annotations such as `//~ ERROR`",
+                        human_format
+                    ).color(Color::Red);
+                    writeln!(self.stdout, "{}", msg);
+                }
+
                 for error in &not_found {
                     print_error(error);
                     let mut suggestions = Vec::new();
@@ -1322,6 +1337,7 @@ impl<'test> TestCx<'test> {
 
         rustc.args(&["--crate-type", "rlib"]);
         rustc.arg("-Cpanic=abort");
+        rustc.args(self.props.core_stubs_compile_flags.clone());
 
         let res = self.compose_and_run(rustc, self.config.compile_lib_path.as_path(), None, None);
         if !res.status.success() {
@@ -1431,6 +1447,12 @@ impl<'test> TestCx<'test> {
         }
 
         aux_rustc.arg("-L").arg(&aux_dir);
+
+        if aux_props.add_core_stubs {
+            let minicore_path = self.build_minicore();
+            aux_rustc.arg("--extern");
+            aux_rustc.arg(&format!("minicore={}", minicore_path));
+        }
 
         let auxres = aux_cx.compose_and_run(
             aux_rustc,
@@ -1816,8 +1838,9 @@ impl<'test> TestCx<'test> {
 
         // Add `-A unused` before `config` flags and in-test (`props`) flags, so that they can
         // overwrite this.
+        // Don't allow `unused_attributes` since these are usually actual mistakes, rather than just unused code.
         if let AllowUnused::Yes = allow_unused {
-            rustc.args(&["-A", "unused"]);
+            rustc.args(&["-A", "unused", "-W", "unused_attributes"]);
         }
 
         // Allow tests to use internal features.
@@ -1858,20 +1881,21 @@ impl<'test> TestCx<'test> {
             }
         }
 
-        rustc.args(&self.props.compile_flags);
-
         // FIXME(jieyouxu): we should report a fatal error or warning if user wrote `-Cpanic=` with
-        // something that's not `abort` and `-Cforce-unwind-tables` with a value that is not `yes`,
-        // however, by moving this last we should override previous `-Cpanic`s and
-        // `-Cforce-unwind-tables`s. Note that checking here is very fragile, because we'd have to
-        // account for all possible compile flag splittings (they have some... intricacies and are
-        // not yet normalized).
+        // something that's not `abort` and `-Cforce-unwind-tables` with a value that is not `yes`.
+        //
+        // We could apply these last and override any provided flags. That would ensure that the
+        // build works, but some tests want to exercise that mixing panic modes in specific ways is
+        // rejected. So we enable aborting panics and unwind tables before adding flags, just to
+        // change the default.
         //
         // `minicore` requires `#![no_std]` and `#![no_core]`, which means no unwinding panics.
         if self.props.add_core_stubs {
             rustc.arg("-Cpanic=abort");
             rustc.arg("-Cforce-unwind-tables=yes");
         }
+
+        rustc.args(&self.props.compile_flags);
 
         rustc
     }
@@ -2655,7 +2679,7 @@ impl<'test> TestCx<'test> {
 
             // The alloc-id appears in pretty-printed allocations.
             normalized = static_regex!(
-                r"╾─*a(lloc)?([0-9]+)(\+0x[0-9]+)?(<imm>)?( \([0-9]+ ptr bytes\))?─*╼"
+                r"╾─*a(lloc)?([0-9]+)(\+0x[0-9a-f]+)?(<imm>)?( \([0-9]+ ptr bytes\))?─*╼"
             )
             .replace_all(&normalized, |caps: &Captures<'_>| {
                 // Renumber the captured index.

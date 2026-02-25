@@ -62,7 +62,6 @@ declare_lint_pass! {
         LONG_RUNNING_CONST_EVAL,
         LOSSY_PROVENANCE_CASTS,
         MACRO_EXPANDED_MACRO_EXPORTS_ACCESSED_BY_ABSOLUTE_PATHS,
-        MACRO_EXTENDED_TEMPORARY_SCOPES,
         MACRO_USE_EXTERN_CRATE,
         MALFORMED_DIAGNOSTIC_ATTRIBUTES,
         MALFORMED_DIAGNOSTIC_FORMAT_LITERALS,
@@ -1602,7 +1601,7 @@ declare_lint! {
     "detects patterns whose meaning will change in Rust 2024",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionSemanticsChange(Edition::Edition2024),
-        reference: "<https://doc.rust-lang.org/nightly/edition-guide/rust-2024/match-ergonomics.html>",
+        reference: "<https://doc.rust-lang.org/edition-guide/rust-2024/match-ergonomics.html>",
     };
 }
 
@@ -2310,10 +2309,10 @@ declare_lint! {
     /// ### Example
     ///
     /// ```rust
-    /// #![cfg_attr(not(bootstrap), feature(sanitize))]
+    /// #![feature(sanitize)]
     ///
     /// #[inline(always)]
-    /// #[cfg_attr(not(bootstrap), sanitize(address = "off"))]
+    /// #[sanitize(address = "off")]
     /// fn x() {}
     ///
     /// fn main() {
@@ -4066,7 +4065,6 @@ declare_lint! {
     /// ### Example
     ///
     /// ```rust,compile_fail
-    /// #![deny(never_type_fallback_flowing_into_unsafe)]
     /// fn main() {
     ///     if true {
     ///         // return has type `!` which, is some cases, causes never type fallback
@@ -4101,7 +4099,7 @@ declare_lint! {
     /// [`!`]: https://doc.rust-lang.org/core/primitive.never.html
     /// [`()`]: https://doc.rust-lang.org/core/primitive.unit.html
     pub NEVER_TYPE_FALLBACK_FLOWING_INTO_UNSAFE,
-    Warn,
+    Deny,
     "never type fallback affecting unsafe function calls",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionAndFutureReleaseSemanticsChange(Edition::Edition2024),
@@ -4123,7 +4121,7 @@ declare_lint! {
     /// ### Example
     ///
     /// ```rust,compile_fail,edition2021
-    /// #![deny(dependency_on_unit_never_type_fallback)]
+    /// # #![deny(dependency_on_unit_never_type_fallback)]
     /// fn main() {
     ///     if true {
     ///         // return has type `!` which, is some cases, causes never type fallback
@@ -4156,7 +4154,7 @@ declare_lint! {
     ///
     /// See [Tracking Issue for making `!` fall back to `!`](https://github.com/rust-lang/rust/issues/123748).
     pub DEPENDENCY_ON_UNIT_NEVER_TYPE_FALLBACK,
-    Warn,
+    Deny,
     "never type fallback affecting unsafe function calls",
     @future_incompatible = FutureIncompatibleInfo {
         reason: FutureIncompatibilityReason::EditionAndFutureReleaseError(Edition::Edition2024),
@@ -4192,8 +4190,13 @@ declare_lint! {
     /// You can't have multiple arguments in a `#[macro_export(..)]`, or mention arguments other than `local_inner_macros`.
     ///
     pub INVALID_MACRO_EXPORT_ARGUMENTS,
-    Warn,
+    Deny,
     "\"invalid_parameter\" isn't a valid argument for `#[macro_export]`",
+    @future_incompatible = FutureIncompatibleInfo {
+        reason: FutureIncompatibilityReason::FutureReleaseError,
+        reference: "issue #57571 <https://github.com/rust-lang/rust/issues/57571>",
+        report_in_deps: true,
+    };
 }
 
 declare_lint! {
@@ -4833,16 +4836,13 @@ declare_lint! {
     ///
     /// ### Example
     ///
-    #[cfg_attr(not(bootstrap), doc = "```rust,compile_fail")]
-    #[cfg_attr(bootstrap, doc = "```rust")]
+    /// ```rust,compile_fail
     /// #![doc = in_root!()]
     ///
     /// macro_rules! in_root { () => { "" } }
     ///
     /// fn main() {}
-    #[cfg_attr(not(bootstrap), doc = "```")]
-    #[cfg_attr(bootstrap, doc = "```")]
-    // ^ Needed to avoid tidy warning about odd number of backticks
+    /// ```
     ///
     /// {{produces}}
     ///
@@ -5195,55 +5195,4 @@ declare_lint! {
     pub INLINE_ALWAYS_MISMATCHING_TARGET_FEATURES,
     Warn,
     r#"detects when a function annotated with `#[inline(always)]` and `#[target_feature(enable = "..")]` is inlined into a caller without the required target feature"#,
-}
-
-declare_lint! {
-    /// The `macro_extended_temporary_scopes` lint detects borrowed temporary
-    /// values in arguments to `pin!` and formatting macros which have longer
-    /// lifetimes than intended due to a bug in the compiler. For more
-    /// information on temporary scopes and lifetime extension, see the
-    /// [Rust Reference].
-    ///
-    /// [Rust Reference]: https://doc.rust-lang.org/reference/destructors.html#temporary-scopes
-    ///
-    /// ### Example
-    ///
-    /// ```rust
-    /// # fn cond() -> bool { true }
-    /// # fn build_string() -> String { String::new() }
-    /// fn main() {
-    ///     println!("{:?}{}", (), if cond() { &build_string() } else { "" });
-    /// }
-    /// ```
-    ///
-    /// {{produces}}
-    ///
-    /// ### Recommended fix
-    ///
-    /// To extend the lifetimes of temporaries borrowed in macro arguments,
-    /// create separate definitions for them with `let` statements.
-    ///
-    /// ```rust
-    /// # fn cond() -> bool { true }
-    /// # fn build_string() -> String { String::new() }
-    /// fn main() {
-    ///     let string = if cond() { &build_string() } else { "" };
-    ///     println!("{:?}{}", (), string);
-    /// }
-    /// ```
-    ///
-    /// ### Explanation
-    ///
-    /// Due to a compiler bug, `pin!` and formatting macros were able to extend
-    /// the lifetimes of temporaries borrowed in their arguments past their
-    /// usual scopes. The bug is fixed in future Rust versions, so we issue this
-    /// future-incompatibility warning for code that may stop compiling or may
-    /// change in behavior thereafter.
-    pub MACRO_EXTENDED_TEMPORARY_SCOPES,
-    Warn,
-    "detects when a lifetime-extended temporary borrowed in a macro argument has a future-incompatible scope.",
-    @future_incompatible = FutureIncompatibleInfo {
-        reason: FutureIncompatibilityReason::FutureReleaseError,
-        reference: "<https://doc.rust-lang.org/rustc/lints/listing/warn-by-default.html#macro-extended-temporary-scopes>",
-    };
 }

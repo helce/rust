@@ -631,6 +631,9 @@
 //@ revisions: wasm32_wasip2
 //@ [wasm32_wasip2] compile-flags: --target wasm32-wasip2
 //@ [wasm32_wasip2] needs-llvm-components: webassembly
+//@ revisions: wasm32_wasip3
+//@ [wasm32_wasip3] compile-flags: --target wasm32-wasip3
+//@ [wasm32_wasip3] needs-llvm-components: webassembly
 //@ revisions: wasm32_wali_linux_musl
 //@ [wasm32_wali_linux_musl] compile-flags: --target wasm32-wali-linux-musl
 //@ [wasm32_wali_linux_musl] needs-llvm-components: webassembly
@@ -703,6 +706,9 @@
 //@ revisions: x86_64_unknown_managarm_mlibc
 //@ [x86_64_unknown_managarm_mlibc] compile-flags: --target x86_64-unknown-managarm-mlibc
 //@ [x86_64_unknown_managarm_mlibc] needs-llvm-components: x86
+//@ revisions: x86_64_unknown_motor
+//@ [x86_64_unknown_motor] compile-flags: --target x86_64-unknown-motor
+//@ [x86_64_unknown_motor] needs-llvm-components: x86
 //@ revisions: x86_64_unknown_netbsd
 //@ [x86_64_unknown_netbsd] compile-flags: --target x86_64-unknown-netbsd
 //@ [x86_64_unknown_netbsd] needs-llvm-components: x86

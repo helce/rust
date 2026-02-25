@@ -61,10 +61,6 @@ required-issue-label = "regression-from-stable-to-beta"
 # if the above conditions matches, the PR will receive these labels
 add-labels = ["beta-nominated"]
 
-[backport.t-compiler-stable-backport]
-required-pr-labels = ["T-compiler"]
-required-issue-label = "regression-from-stable-to-stable"
-add-labels = ["stable-nominated"]
 
 # ------------------------------------------------------------------------------
 # Ping groups
@@ -742,13 +738,15 @@ message_on_reopen = "PR #{number} has been reopened. Pinging @*T-rustdoc*."
 [notify-zulip."beta-nominated".compiler]
 required_labels = ["T-compiler"]
 zulip_stream = 474880 # #t-compiler/backports
-topic = "#{number}: beta-nominated"
+topic = "#{number}: beta-backport nomination"
 message_on_add = [
     """\
-@**channel** PR #{number} "{title}" has been nominated for beta backport.
+PR #{number} "{title}" fixes a regression.
+{recipients}, please evaluate nominating this PR for backport.
+The following poll is a vibe-check and not binding.
 """,
     """\
-/poll Approve beta backport of #{number}?
+/poll Should #{number} be beta backported?
 approve
 decline
 don't know
@@ -1051,6 +1049,12 @@ cc = ["@rust-lang/clippy"]
 
 [mentions."src/tools/compiletest"]
 cc = ["@jieyouxu"]
+
+[mentions."src/tools/compiletest/src/directives"]
+message = """
+`compiletest` directives have been modified. Please add or update docs for the
+new or modified directive in `src/doc/rustc-dev-guide/`.
+"""
 
 [mentions."src/tools/miri"]
 message = "The Miri subtree was changed"
@@ -1366,7 +1370,9 @@ compiler = [
     "@jackh726",
     "@jieyouxu",
     "@jdonszelmann",
+    "@JonathanBrouwer",
     "@lcnr",
+    "@madsmtm",
     "@Nadrieril",
     "@nnethercote",
     "@oli-obk",
@@ -1382,6 +1388,7 @@ libs = [
     "@tgross35",
     "@thomcc",
     "@ibraheemdev",
+    "@joboet",
 ]
 infra-ci = [
     "@Mark-Simulacrum",
@@ -1401,6 +1408,7 @@ docs = [
 ]
 codegen = [
     "@dianqk",
+    "@madsmtm",
     "@saethlin",
     "@workingjubilee",
     "@WaffleLapkin",
@@ -1597,7 +1605,7 @@ labels = ["has-merge-commits", "S-waiting-on-author"]
 format = "rustc"
 project-name = "Rust"
 changelog-path = "RELEASES.md"
-changelog-branch = "master"
+changelog-branch = "main"
 
 [shortcut]
 

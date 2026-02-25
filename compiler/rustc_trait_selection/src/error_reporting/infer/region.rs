@@ -430,7 +430,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 let mut alt_span = None;
                 if let Some(ty) = ty
                     && sub.is_static()
-                    && let ty::Dynamic(preds, _, ty::DynKind::Dyn) = ty.kind()
+                    && let ty::Dynamic(preds, _) = ty.kind()
                     && let Some(def_id) = preds.principal_def_id()
                 {
                     for (clause, span) in
@@ -574,7 +574,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         let Some(impl_def_id) = self.tcx.trait_impl_of_assoc(impl_item_def_id.to_def_id()) else {
             return;
         };
-        let trait_ref = self.tcx.impl_trait_ref(impl_def_id).unwrap();
+        let trait_ref = self.tcx.impl_trait_ref(impl_def_id);
         let trait_args = trait_ref
             .instantiate_identity()
             // Replace the explicit self type with `Self` for better suggestion rendering

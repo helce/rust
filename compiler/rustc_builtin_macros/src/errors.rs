@@ -3,8 +3,28 @@ use rustc_errors::{
     Diag, DiagCtxtHandle, Diagnostic, EmissionGuarantee, Level, MultiSpan, SingleLabelManySpans,
     Subdiagnostic,
 };
-use rustc_macros::{Diagnostic, Subdiagnostic};
+use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_span::{Ident, Span, Symbol};
+
+#[derive(LintDiagnostic)]
+#[diag(builtin_macros_avoid_intel_syntax)]
+pub(crate) struct AvoidIntelSyntax;
+
+#[derive(LintDiagnostic)]
+#[diag(builtin_macros_avoid_att_syntax)]
+pub(crate) struct AvoidAttSyntax;
+
+#[derive(LintDiagnostic)]
+#[diag(builtin_macros_incomplete_include)]
+pub(crate) struct IncompleteInclude;
+
+#[derive(LintDiagnostic)]
+#[diag(builtin_macros_unnameable_test_items)]
+pub(crate) struct UnnameableTestItems;
+
+#[derive(LintDiagnostic)]
+#[diag(builtin_macros_duplicate_macro_attribute)]
+pub(crate) struct DuplicateMacroAttribute;
 
 #[derive(Diagnostic)]
 #[diag(builtin_macros_requires_cfg_pattern)]
@@ -932,7 +952,7 @@ pub(crate) struct AttributeOnlyUsableWithCrateType<'a> {
 }
 
 #[derive(Diagnostic)]
-#[diag(builtin_macros_source_uitls_expected_item)]
+#[diag(builtin_macros_source_utils_expected_item)]
 pub(crate) struct ExpectedItem<'a> {
     #[primary_span]
     pub span: Span,

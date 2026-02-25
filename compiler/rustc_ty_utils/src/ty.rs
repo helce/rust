@@ -40,7 +40,7 @@ fn sizedness_constraint_for_ty<'tcx>(
         | ty::CoroutineWitness(..)
         | ty::Never => None,
 
-        ty::Str | ty::Slice(..) | ty::Dynamic(_, _, ty::Dyn) => match sizedness {
+        ty::Str | ty::Slice(..) | ty::Dynamic(_, _) => match sizedness {
             // Never `Sized`
             SizedTraitKind::Sized => Some(ty),
             // Always `MetaSized`
@@ -235,7 +235,7 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for ImplTraitInTraitFinder<'_, 'tcx> {
             // bounds of the RPITIT. Shift these binders back out when
             // constructing the top-level projection predicate.
             let shifted_alias_ty = fold_regions(self.tcx, unshifted_alias_ty, |re, depth| {
-                if let ty::ReBound(index, bv) = re.kind() {
+                if let ty::ReBound(ty::BoundVarIndexKind::Bound(index), bv) = re.kind() {
                     if depth != ty::INNERMOST {
                         return ty::Region::new_error_with_message(
                             self.tcx,
@@ -353,6 +353,7 @@ fn impl_self_is_guaranteed_unsized<'tcx>(tcx: TyCtxt<'tcx>, impl_def_id: DefId) 
 
     let tail = tcx.struct_tail_raw(
         tcx.type_of(impl_def_id).instantiate_identity(),
+        &cause,
         |ty| {
             ocx.structurally_normalize_ty(&cause, param_env, ty).unwrap_or_else(|_| {
                 Ty::new_error_with_message(
@@ -366,7 +367,7 @@ fn impl_self_is_guaranteed_unsized<'tcx>(tcx: TyCtxt<'tcx>, impl_def_id: DefId) 
     );
 
     match tail.kind() {
-        ty::Dynamic(_, _, ty::Dyn) | ty::Slice(_) | ty::Str => true,
+        ty::Dynamic(_, _) | ty::Slice(_) | ty::Str => true,
         ty::Bool
         | ty::Char
         | ty::Int(_)

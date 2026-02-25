@@ -78,8 +78,6 @@ pub enum GoalSource {
     ImplWhereBound,
     /// Const conditions that need to hold for `[const]` alias bounds to hold.
     AliasBoundConstCondition,
-    /// Instantiating a higher-ranked goal and re-proving it.
-    InstantiateHigherRanked,
     /// Predicate required for an alias projection to be well-formed.
     /// This is used in three places:
     /// 1. projecting to an opaque whose hidden type is already registered in
@@ -109,18 +107,29 @@ pub struct QueryInput<I: Interner, P> {
 
 impl<I: Interner, P: Eq> Eq for QueryInput<I, P> {}
 
-/// Opaques that are defined in the inference context before a query is called.
-#[derive_where(Clone, Hash, PartialEq, Debug, Default; I: Interner)]
-#[derive(TypeVisitable_Generic, TypeFoldable_Generic)]
-#[cfg_attr(
-    feature = "nightly",
-    derive(Decodable_NoContext, Encodable_NoContext, HashStable_NoContext)
-)]
-pub struct PredefinedOpaquesData<I: Interner> {
-    pub opaque_types: Vec<(ty::OpaqueTypeKey<I>, I::Ty)>,
+/// Which trait candidates should be preferred over other candidates? By default, prefer where
+/// bounds over alias bounds. For marker traits, prefer alias bounds over where bounds.
+#[derive(Clone, Copy, Debug)]
+pub enum CandidatePreferenceMode {
+    /// Prefers where bounds over alias bounds
+    Default,
+    /// Prefers alias bounds over where bounds
+    Marker,
 }
 
-impl<I: Interner> Eq for PredefinedOpaquesData<I> {}
+impl CandidatePreferenceMode {
+    /// Given `trait_def_id`, which candidate preference mode should be used?
+    pub fn compute<I: Interner>(cx: I, trait_id: I::TraitId) -> CandidatePreferenceMode {
+        let is_sizedness_or_auto_or_default_goal = cx.is_sizedness_trait(trait_id)
+            || cx.trait_is_auto(trait_id)
+            || cx.is_default_trait(trait_id);
+        if is_sizedness_or_auto_or_default_goal {
+            CandidatePreferenceMode::Marker
+        } else {
+            CandidatePreferenceMode::Default
+        }
+    }
+}
 
 /// Possible ways the given goal can be proven.
 #[derive_where(Clone, Copy, Hash, PartialEq, Debug; I: Interner)]
@@ -178,7 +187,7 @@ pub enum CandidateSource<I: Interner> {
     ///     let _y = x.clone();
     /// }
     /// ```
-    AliasBound,
+    AliasBound(AliasBoundKind),
     /// A candidate that is registered only during coherence to represent some
     /// yet-unknown impl that could be produced downstream without violating orphan
     /// rules.
@@ -194,6 +203,15 @@ pub enum ParamEnvSource {
     NonGlobal,
     // Not considered unless there are non-global param-env candidates too.
     Global,
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
+#[derive(TypeVisitable_Generic, TypeFoldable_Generic)]
+pub enum AliasBoundKind {
+    /// Alias bound from the self type of a projection
+    SelfBounds,
+    // Alias bound having recursed on the self type of a projection
+    NonSelfBounds,
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
@@ -269,11 +287,70 @@ impl<I: Interner> NestedNormalizationGoals<I> {
 #[cfg_attr(feature = "nightly", derive(HashStable_NoContext))]
 pub enum Certainty {
     Yes,
-    Maybe(MaybeCause),
+    Maybe { cause: MaybeCause, opaque_types_jank: OpaqueTypesJank },
+}
+
+/// Supporting not-yet-defined opaque types in HIR typeck is somewhat
+/// challenging. Ideally we'd normalize them to a new inference variable
+/// and just defer type inference which relies on the opaque until we've
+/// constrained the hidden type.
+///
+/// This doesn't work for method and function calls as we need to guide type
+/// inference for the function arguments. We treat not-yet-defined opaque types
+/// as if they were rigid instead in these places.
+///
+/// When we encounter a `?hidden_type_of_opaque: Trait<?var>` goal, we use the
+/// item bounds and blanket impls to guide inference by constraining other type
+/// variables, see `EvalCtxt::try_assemble_bounds_via_registered_opaques`. We
+/// always keep the certainty as `Maybe` so that we properly prove these goals
+/// once the hidden type has been constrained.
+///
+/// If we fail to prove the trait goal via item bounds or blanket impls, the
+/// goal would have errored if the opaque type were rigid. In this case, we
+/// set `OpaqueTypesJank::ErrorIfRigidSelfTy` in the [Certainty].
+///
+/// Places in HIR typeck where we want to treat not-yet-defined opaque types as if
+/// they were kind of rigid then use `fn root_goal_may_hold_opaque_types_jank` which
+/// returns `false` if the goal doesn't hold or if `OpaqueTypesJank::ErrorIfRigidSelfTy`
+/// is set (i.e. proving it required relies on some `?hidden_ty: NotInItemBounds` goal).
+///
+/// This is subtly different from actually treating not-yet-defined opaque types as
+/// rigid, e.g. it allows constraining opaque types if they are not the self-type of
+/// a goal. It is good enough for now and only matters for very rare type inference
+/// edge cases. We can improve this later on if necessary.
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "nightly", derive(HashStable_NoContext))]
+pub enum OpaqueTypesJank {
+    AllGood,
+    ErrorIfRigidSelfTy,
+}
+impl OpaqueTypesJank {
+    fn and(self, other: OpaqueTypesJank) -> OpaqueTypesJank {
+        match (self, other) {
+            (OpaqueTypesJank::AllGood, OpaqueTypesJank::AllGood) => OpaqueTypesJank::AllGood,
+            (OpaqueTypesJank::ErrorIfRigidSelfTy, _) | (_, OpaqueTypesJank::ErrorIfRigidSelfTy) => {
+                OpaqueTypesJank::ErrorIfRigidSelfTy
+            }
+        }
+    }
+
+    pub fn or(self, other: OpaqueTypesJank) -> OpaqueTypesJank {
+        match (self, other) {
+            (OpaqueTypesJank::ErrorIfRigidSelfTy, OpaqueTypesJank::ErrorIfRigidSelfTy) => {
+                OpaqueTypesJank::ErrorIfRigidSelfTy
+            }
+            (OpaqueTypesJank::AllGood, _) | (_, OpaqueTypesJank::AllGood) => {
+                OpaqueTypesJank::AllGood
+            }
+        }
+    }
 }
 
 impl Certainty {
-    pub const AMBIGUOUS: Certainty = Certainty::Maybe(MaybeCause::Ambiguity);
+    pub const AMBIGUOUS: Certainty = Certainty::Maybe {
+        cause: MaybeCause::Ambiguity,
+        opaque_types_jank: OpaqueTypesJank::AllGood,
+    };
 
     /// Use this function to merge the certainty of multiple nested subgoals.
     ///
@@ -290,14 +367,23 @@ impl Certainty {
     pub fn and(self, other: Certainty) -> Certainty {
         match (self, other) {
             (Certainty::Yes, Certainty::Yes) => Certainty::Yes,
-            (Certainty::Yes, Certainty::Maybe(_)) => other,
-            (Certainty::Maybe(_), Certainty::Yes) => self,
-            (Certainty::Maybe(a), Certainty::Maybe(b)) => Certainty::Maybe(a.and(b)),
+            (Certainty::Yes, Certainty::Maybe { .. }) => other,
+            (Certainty::Maybe { .. }, Certainty::Yes) => self,
+            (
+                Certainty::Maybe { cause: a_cause, opaque_types_jank: a_jank },
+                Certainty::Maybe { cause: b_cause, opaque_types_jank: b_jank },
+            ) => Certainty::Maybe {
+                cause: a_cause.and(b_cause),
+                opaque_types_jank: a_jank.and(b_jank),
+            },
         }
     }
 
     pub const fn overflow(suggest_increasing_limit: bool) -> Certainty {
-        Certainty::Maybe(MaybeCause::Overflow { suggest_increasing_limit, keep_constraints: false })
+        Certainty::Maybe {
+            cause: MaybeCause::Overflow { suggest_increasing_limit, keep_constraints: false },
+            opaque_types_jank: OpaqueTypesJank::AllGood,
+        }
     }
 }
 

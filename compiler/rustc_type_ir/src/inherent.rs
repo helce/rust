@@ -48,6 +48,8 @@ pub trait Ty<I: Interner<Ty = Self>>:
 
     fn new_anon_bound(interner: I, debruijn: ty::DebruijnIndex, var: ty::BoundVar) -> Self;
 
+    fn new_canonical_bound(interner: I, var: ty::BoundVar) -> Self;
+
     fn new_alias(interner: I, kind: ty::AliasTyKind, alias_ty: ty::AliasTy<I>) -> Self;
 
     fn new_projection_from_args(interner: I, def_id: I::DefId, args: I::GenericArgs) -> Self {
@@ -76,12 +78,7 @@ pub trait Ty<I: Interner<Ty = Self>>:
 
     fn new_foreign(interner: I, def_id: I::ForeignId) -> Self;
 
-    fn new_dynamic(
-        interner: I,
-        preds: I::BoundExistentialPredicates,
-        region: I::Region,
-        kind: ty::DynKind,
-    ) -> Self;
+    fn new_dynamic(interner: I, preds: I::BoundExistentialPredicates, region: I::Region) -> Self;
 
     fn new_coroutine(interner: I, def_id: I::CoroutineId, args: I::GenericArgs) -> Self;
 
@@ -167,7 +164,7 @@ pub trait Ty<I: Interner<Ty = Self>>:
 
     fn is_guaranteed_unsized_raw(self) -> bool {
         match self.kind() {
-            ty::Dynamic(_, _, ty::Dyn) | ty::Slice(_) | ty::Str => true,
+            ty::Dynamic(_, _) | ty::Slice(_) | ty::Str => true,
             ty::Bool
             | ty::Char
             | ty::Int(_)
@@ -235,6 +232,8 @@ pub trait Region<I: Interner<Region = Self>>:
 
     fn new_anon_bound(interner: I, debruijn: ty::DebruijnIndex, var: ty::BoundVar) -> Self;
 
+    fn new_canonical_bound(interner: I, var: ty::BoundVar) -> Self;
+
     fn new_static(interner: I) -> Self;
 
     fn new_placeholder(interner: I, var: I::PlaceholderRegion) -> Self;
@@ -264,6 +263,8 @@ pub trait Const<I: Interner<Const = Self>>:
     fn new_bound(interner: I, debruijn: ty::DebruijnIndex, bound_const: I::BoundConst) -> Self;
 
     fn new_anon_bound(interner: I, debruijn: ty::DebruijnIndex, var: ty::BoundVar) -> Self;
+
+    fn new_canonical_bound(interner: I, var: ty::BoundVar) -> Self;
 
     fn new_placeholder(interner: I, param: I::PlaceholderConst) -> Self;
 

@@ -1,6 +1,5 @@
 // tidy-alphabetical-start
 #![allow(internal_features)]
-#![cfg_attr(bootstrap, feature(round_char_boundary))]
 #![feature(default_field_values)]
 #![feature(iter_intersperse)]
 #![feature(rustc_attrs)]

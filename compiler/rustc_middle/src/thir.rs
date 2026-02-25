@@ -27,9 +27,7 @@ use tracing::instrument;
 
 use crate::middle::region;
 use crate::mir::interpret::AllocId;
-use crate::mir::{
-    self, AssignOp, BackwardIncompatibleDropReason, BinOp, BorrowKind, FakeReadCause, UnOp,
-};
+use crate::mir::{self, AssignOp, BinOp, BorrowKind, FakeReadCause, UnOp};
 use crate::thir::visit::for_each_immediate_subpat;
 use crate::ty::adjustment::PointerCoercion;
 use crate::ty::layout::IntegerExt;
@@ -274,7 +272,7 @@ pub struct TempLifetime {
     pub temp_lifetime: Option<region::Scope>,
     /// If `Some(lt)`, indicates that the lifetime of this temporary will change to `lt` in a future edition.
     /// If `None`, then no changes are expected, or lints are disabled.
-    pub backwards_incompatible: Option<(region::Scope, BackwardIncompatibleDropReason)>,
+    pub backwards_incompatible: Option<region::Scope>,
 }
 
 #[derive(Clone, Debug, HashStable)]
@@ -800,6 +798,8 @@ pub enum PatKind<'tcx> {
         /// (The same binding can occur multiple times in different branches of
         /// an or-pattern, but only one of them will be primary.)
         is_primary: bool,
+        /// Is this binding a shorthand struct pattern, i.e. `Foo { a }`?
+        is_shorthand: bool,
     },
 
     /// `Foo(...)` or `Foo{...}` or `Foo`, where `Foo` is a variant name from an ADT with
@@ -841,7 +841,7 @@ pub enum PatKind<'tcx> {
     ///   exhaustiveness to cover exactly its own value, similar to `&str`, but these values are
     ///   much simpler.
     /// * raw pointers derived from integers, other raw pointers will have already resulted in an
-    //    error.
+    ///   error.
     /// * `String`, if `string_deref_patterns` is enabled.
     Constant {
         value: ty::Value<'tcx>,
@@ -1127,7 +1127,7 @@ mod size_asserts {
     use super::*;
     // tidy-alphabetical-start
     static_assert_size!(Block, 48);
-    static_assert_size!(Expr<'_>, 80);
+    static_assert_size!(Expr<'_>, 72);
     static_assert_size!(ExprKind<'_>, 40);
     static_assert_size!(Pat<'_>, 64);
     static_assert_size!(PatKind<'_>, 48);

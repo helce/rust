@@ -426,6 +426,9 @@ fn virtual_call_violations_for_method<'tcx>(
     if let Some(code) = contains_illegal_impl_trait_in_trait(tcx, method.def_id, sig.output()) {
         errors.push(code);
     }
+    if sig.skip_binder().c_variadic {
+        errors.push(MethodViolationCode::CVariadic);
+    }
 
     // We can't monomorphize things like `fn foo<A>(...)`.
     let own_counts = tcx.generics_of(method.def_id).own_counts();
@@ -827,7 +830,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for EraseEscapingBoundRegions<'tcx> {
     }
 
     fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
-        if let ty::ReBound(debruijn, _) = r.kind()
+        if let ty::ReBound(ty::BoundVarIndexKind::Bound(debruijn), _) = r.kind()
             && debruijn < self.binder
         {
             r

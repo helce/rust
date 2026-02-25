@@ -1,7 +1,7 @@
 use std::ops::ControlFlow;
 
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::path_to_local_id;
+use clippy_utils::res::MaybeResPath;
 use clippy_utils::source::snippet;
 use clippy_utils::visitors::{Descend, Visitable, for_each_expr};
 use rustc_data_structures::fx::FxHashMap;
@@ -180,8 +180,8 @@ impl<'tcx> LateLintPass<'tcx> for Shadow {
 
 fn is_shadow(cx: &LateContext<'_>, owner: LocalDefId, first: ItemLocalId, second: ItemLocalId) -> bool {
     let scope_tree = cx.tcx.region_scope_tree(owner.to_def_id());
-    if let Some(first_scope) = scope_tree.var_scope(first).0
-        && let Some(second_scope) = scope_tree.var_scope(second).0
+    if let Some(first_scope) = scope_tree.var_scope(first)
+        && let Some(second_scope) = scope_tree.var_scope(second)
     {
         return scope_tree.is_subscope_of(second_scope, first_scope);
     }
@@ -202,7 +202,7 @@ pub fn is_local_used_except<'tcx>(
     for_each_expr(cx, visitable, |e| {
         if except.is_some_and(|it| it == e.hir_id) {
             ControlFlow::Continue(Descend::No)
-        } else if path_to_local_id(e, id) {
+        } else if e.res_local_id() == Some(id) {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(Descend::Yes)

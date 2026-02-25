@@ -1,10 +1,10 @@
 //@needs-asm-support
 //@aux-build:proc_macros.rs
-#![allow(unused)]
-#![allow(deref_nullptr)]
-#![allow(clippy::unnecessary_operation)]
-#![allow(dropping_copy_types)]
-#![allow(clippy::assign_op_pattern)]
+#![expect(
+    dropping_copy_types,
+    clippy::unnecessary_operation,
+    clippy::unnecessary_literal_unwrap
+)]
 #![warn(clippy::multiple_unsafe_ops_per_block)]
 
 extern crate proc_macros;
@@ -105,17 +105,25 @@ fn correct3() {
     }
 }
 
-// tests from the issue (https://github.com/rust-lang/rust-clippy/issues/10064)
-
-unsafe fn read_char_bad(ptr: *const u8) -> char {
-    unsafe { char::from_u32_unchecked(*ptr.cast::<u32>()) }
-    //~^ multiple_unsafe_ops_per_block
+fn with_adjustment(f: &unsafe fn()) {
+    unsafe {
+        //~^ multiple_unsafe_ops_per_block
+        f();
+        f();
+    }
 }
 
-// no lint
-unsafe fn read_char_good(ptr: *const u8) -> char {
-    let int_value = unsafe { *ptr.cast::<u32>() };
-    unsafe { core::char::from_u32_unchecked(int_value) }
+fn issue10064() {
+    unsafe fn read_char_bad(ptr: *const u8) -> char {
+        unsafe { char::from_u32_unchecked(*ptr.cast::<u32>()) }
+        //~^ multiple_unsafe_ops_per_block
+    }
+
+    // no lint
+    unsafe fn read_char_good(ptr: *const u8) -> char {
+        let int_value = unsafe { *ptr.cast::<u32>() };
+        unsafe { core::char::from_u32_unchecked(int_value) }
+    }
 }
 
 // no lint
@@ -126,42 +134,182 @@ fn issue10259() {
     });
 }
 
-fn _fn_ptr(x: unsafe fn()) {
-    unsafe {
-        //~^ multiple_unsafe_ops_per_block
-        x();
-        x();
-    }
-}
-
-fn _assoc_const() {
-    trait X {
-        const X: unsafe fn();
-    }
-    fn _f<T: X>() {
+fn issue10367() {
+    fn fn_ptr(x: unsafe fn()) {
         unsafe {
             //~^ multiple_unsafe_ops_per_block
-            T::X();
-            T::X();
+            x();
+            x();
+        }
+    }
+
+    fn assoc_const() {
+        trait X {
+            const X: unsafe fn();
+        }
+        fn _f<T: X>() {
+            unsafe {
+                //~^ multiple_unsafe_ops_per_block
+                T::X();
+                T::X();
+            }
+        }
+    }
+
+    fn field_fn_ptr(x: unsafe fn()) {
+        struct X(unsafe fn());
+        let x = X(x);
+        unsafe {
+            //~^ multiple_unsafe_ops_per_block
+            x.0();
+            x.0();
         }
     }
 }
 
-fn _field_fn_ptr(x: unsafe fn()) {
-    struct X(unsafe fn());
-    let x = X(x);
-    unsafe {
-        //~^ multiple_unsafe_ops_per_block
-        x.0();
-        x.0();
-    }
-}
-
-// await expands to an unsafe block with several operations, but this is fine.: #11312
-async fn await_desugaring_silent() {
+// await expands to an unsafe block with several operations, but this is fine.
+async fn issue11312() {
     async fn helper() {}
 
     helper().await;
+}
+
+async fn issue13879() {
+    async fn foo() {}
+
+    // no lint: nothing unsafe beyond the `await` which we ignore
+    unsafe {
+        foo().await;
+    }
+
+    // no lint: only one unsafe call beyond the `await`
+    unsafe {
+        not_very_safe();
+        foo().await;
+    }
+
+    // lint: two unsafe calls beyond the `await`
+    unsafe {
+        //~^ multiple_unsafe_ops_per_block
+        not_very_safe();
+        STATIC += 1;
+        foo().await;
+    }
+
+    async unsafe fn foo_unchecked() {}
+
+    // no lint: only one unsafe call in the `await`ed expr
+    unsafe {
+        foo_unchecked().await;
+    }
+
+    // lint: one unsafe call in the `await`ed expr, and one outside
+    unsafe {
+        //~^ multiple_unsafe_ops_per_block
+        not_very_safe();
+        foo_unchecked().await;
+    }
+
+    // lint: two unsafe calls in the `await`ed expr
+    unsafe {
+        //~^ multiple_unsafe_ops_per_block
+        Some(foo_unchecked()).unwrap_unchecked().await;
+    }
+}
+
+fn issue16076() {
+    #[derive(Clone, Copy)]
+    union U {
+        i: u32,
+        f: f32,
+    }
+
+    let u = U { i: 0 };
+
+    // Taking a raw pointer to a place is safe since Rust 1.92
+    unsafe {
+        _ = &raw const u.i;
+        _ = &raw const u.i;
+    }
+
+    // Taking a reference to a union field is not safe
+    unsafe {
+        //~^ multiple_unsafe_ops_per_block
+        _ = &u.i;
+        _ = &u.i;
+    }
+
+    // Check that we still check and lint the prefix of the raw pointer to a field access
+    #[expect(clippy::deref_addrof)]
+    unsafe {
+        //~^ multiple_unsafe_ops_per_block
+        _ = &raw const (*&raw const u).i;
+        _ = &raw const (*&raw const u).i;
+    }
+
+    union V {
+        u: U,
+    }
+
+    // Taking a raw pointer to a union field of an union field (etc.) is safe
+    let v = V { u };
+    unsafe {
+        _ = &raw const v.u.i;
+        _ = &raw const v.u.i;
+    }
+
+    // Check that unions in structs work properly as well
+    struct T {
+        u: U,
+    }
+    let t = T { u };
+    unsafe {
+        _ = &raw const t.u.i;
+        _ = &raw const t.u.i;
+    }
+
+    // As well as structs in unions
+    #[derive(Clone, Copy)]
+    struct X {
+        i: i32,
+    }
+    union Z {
+        x: X,
+    }
+    let z = Z { x: X { i: 0 } };
+    unsafe {
+        _ = &raw const z.x.i;
+        _ = &raw const z.x.i;
+    }
+
+    // If a field needs to be adjusted then it is accessed
+    struct S {
+        i: i32,
+    }
+    union W<'a> {
+        s: &'a S,
+    }
+    let s = S { i: 0 };
+    let w = W { s: &s };
+    unsafe {
+        //~^ multiple_unsafe_ops_per_block
+        _ = &raw const w.s.i;
+        _ = &raw const w.s.i;
+    }
+}
+
+fn check_closures() {
+    unsafe fn apply(f: impl Fn()) {
+        todo!()
+    }
+    unsafe fn f(_x: i32) {
+        todo!()
+    }
+
+    unsafe {
+        //~^ multiple_unsafe_ops_per_block
+        apply(|| f(0));
+    }
 }
 
 fn main() {}

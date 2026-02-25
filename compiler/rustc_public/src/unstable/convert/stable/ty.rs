@@ -48,16 +48,6 @@ impl<'tcx> Stable<'tcx> for ty::AliasTerm<'tcx> {
     }
 }
 
-impl<'tcx> Stable<'tcx> for ty::DynKind {
-    type T = crate::ty::DynKind;
-
-    fn stable(&self, _: &mut Tables<'_, BridgeTys>, _: &CompilerCtxt<'_, BridgeTys>) -> Self::T {
-        match self {
-            ty::Dyn => crate::ty::DynKind::Dyn,
-        }
-    }
-}
-
 impl<'tcx> Stable<'tcx> for ty::ExistentialPredicate<'tcx> {
     type T = crate::ty::ExistentialPredicate;
 
@@ -439,16 +429,13 @@ impl<'tcx> Stable<'tcx> for ty::TyKind<'tcx> {
             }
             // FIXME(unsafe_binders):
             ty::UnsafeBinder(_) => todo!(),
-            ty::Dynamic(existential_predicates, region, dyn_kind) => {
-                TyKind::RigidTy(RigidTy::Dynamic(
-                    existential_predicates
-                        .iter()
-                        .map(|existential_predicate| existential_predicate.stable(tables, cx))
-                        .collect(),
-                    region.stable(tables, cx),
-                    dyn_kind.stable(tables, cx),
-                ))
-            }
+            ty::Dynamic(existential_predicates, region) => TyKind::RigidTy(RigidTy::Dynamic(
+                existential_predicates
+                    .iter()
+                    .map(|existential_predicate| existential_predicate.stable(tables, cx))
+                    .collect(),
+                region.stable(tables, cx),
+            )),
             ty::Closure(def_id, generic_args) => TyKind::RigidTy(RigidTy::Closure(
                 tables.closure_def(*def_id),
                 generic_args.stable(tables, cx),
@@ -466,7 +453,10 @@ impl<'tcx> Stable<'tcx> for ty::TyKind<'tcx> {
                 TyKind::Alias(alias_kind.stable(tables, cx), alias_ty.stable(tables, cx))
             }
             ty::Param(param_ty) => TyKind::Param(param_ty.stable(tables, cx)),
-            ty::Bound(debruijn_idx, bound_ty) => {
+            ty::Bound(ty::BoundVarIndexKind::Canonical, _) => {
+                unreachable!()
+            }
+            ty::Bound(ty::BoundVarIndexKind::Bound(debruijn_idx), bound_ty) => {
                 TyKind::Bound(debruijn_idx.as_usize(), bound_ty.stable(tables, cx))
             }
             ty::CoroutineWitness(def_id, args) => TyKind::RigidTy(RigidTy::CoroutineWitness(
@@ -495,6 +485,7 @@ impl<'tcx> Stable<'tcx> for ty::Pattern<'tcx> {
                 end: Some(end.stable(tables, cx)),
                 include_end: true,
             },
+            ty::PatternKind::NotNull => todo!(),
             ty::PatternKind::Or(_) => todo!(),
         }
     }
@@ -920,7 +911,7 @@ impl<'tcx> Stable<'tcx> for ty::RegionKind<'tcx> {
                 index: early_reg.index,
                 name: early_reg.name.to_string(),
             }),
-            ty::ReBound(db_index, bound_reg) => RegionKind::ReBound(
+            ty::ReBound(ty::BoundVarIndexKind::Bound(db_index), bound_reg) => RegionKind::ReBound(
                 db_index.as_u32(),
                 BoundRegion {
                     var: bound_reg.var.as_u32(),

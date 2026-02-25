@@ -25,7 +25,6 @@ use rustc_parse::parser::{
     token_descr,
 };
 use rustc_session::Session;
-use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::lint::builtin::{UNUSED_ATTRIBUTES, UNUSED_DOC_COMMENTS};
 use rustc_session::parse::feature_err;
 use rustc_span::hygiene::SyntaxContext;
@@ -813,11 +812,12 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                         _ => item.to_tokens(),
                     };
                     let attr_item = attr.get_normal_item();
+                    let safety = attr_item.unsafety;
                     if let AttrArgs::Eq { .. } = attr_item.args {
                         self.cx.dcx().emit_err(UnsupportedKeyValue { span });
                     }
                     let inner_tokens = attr_item.args.inner_tokens();
-                    match expander.expand(self.cx, span, inner_tokens, tokens) {
+                    match expander.expand_with_safety(self.cx, safety, span, inner_tokens, tokens) {
                         Ok(tok_result) => {
                             let fragment = self.parse_ast_fragment(
                                 tok_result,
@@ -841,6 +841,9 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                         Err(guar) => return ExpandResult::Ready(fragment_kind.dummy(span, guar)),
                     }
                 } else if let SyntaxExtensionKind::LegacyAttr(expander) = ext {
+                    // `LegacyAttr` is only used for builtin attribute macros, which have their
+                    // safety checked by `check_builtin_meta_item`, so we don't need to check
+                    // `unsafety` here.
                     match validate_attr::parse_meta(&self.cx.sess.psess, &attr) {
                         Ok(meta) => {
                             let item_clone = macro_stats.then(|| item.clone());
@@ -883,6 +886,9 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                         }
                     }
                 } else if let SyntaxExtensionKind::NonMacroAttr = ext {
+                    if let ast::Safety::Unsafe(span) = attr.get_normal_item().unsafety {
+                        self.cx.dcx().span_err(span, "unnecessary `unsafe` on safe attribute");
+                    }
                     // `-Zmacro-stats` ignores these because they don't do any real expansion.
                     self.cx.expanded_inert_attrs.mark(&attr);
                     item.visit_attrs(|attrs| attrs.insert(pos, attr));
@@ -972,7 +978,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                             });
                         }
                     },
-                    SyntaxExtensionKind::LegacyBang(..) => {
+                    SyntaxExtensionKind::Bang(..) => {
                         let msg = "expanded a dummy glob delegation";
                         let guar = self.cx.dcx().span_delayed_bug(span, msg);
                         return ExpandResult::Ready(fragment_kind.dummy(span, guar));
@@ -1044,7 +1050,7 @@ impl<'a, 'b> MacroExpander<'a, 'b> {
                             self.sess,
                             sym::proc_macro_hygiene,
                             item.span,
-                            fluent_generated::expand_non_inline_modules_in_proc_macro_input_are_unstable,
+                            fluent_generated::expand_file_modules_in_proc_macro_input_are_unstable,
                         )
                         .emit();
                     }
@@ -1146,12 +1152,12 @@ pub fn parse_ast_fragment<'a>(
             }
         }
         AstFragmentKind::Ty => AstFragment::Ty(this.parse_ty()?),
-        AstFragmentKind::Pat => AstFragment::Pat(this.parse_pat_allow_top_guard(
+        AstFragmentKind::Pat => AstFragment::Pat(Box::new(this.parse_pat_allow_top_guard(
             None,
             RecoverComma::No,
             RecoverColon::Yes,
             CommaRecoveryMode::LikelyTuple,
-        )?),
+        )?)),
         AstFragmentKind::Crate => AstFragment::Crate(this.parse_crate_mod()?),
         AstFragmentKind::Arms
         | AstFragmentKind::ExprFields
@@ -2183,7 +2189,7 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
                     UNUSED_DOC_COMMENTS,
                     current_span,
                     self.cx.current_expansion.lint_node_id,
-                    BuiltinLintDiag::UnusedDocComment(attr.span),
+                    crate::errors::MacroCallUnusedDocComment { span: attr.span },
                 );
             } else if rustc_attr_parsing::is_builtin_attr(attr)
                 && !AttributeParser::<Early>::is_parsed_attribute(&attr.path())
@@ -2196,7 +2202,7 @@ impl<'a, 'b> InvocationCollector<'a, 'b> {
                         UNUSED_ATTRIBUTES,
                         attr.span,
                         self.cx.current_expansion.lint_node_id,
-                        BuiltinLintDiag::UnusedBuiltinAttribute {
+                        crate::errors::UnusedBuiltinAttribute {
                             attr_name,
                             macro_name: pprust::path_to_string(&call.path),
                             invoc_span: call.path.span,

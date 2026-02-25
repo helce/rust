@@ -5,6 +5,7 @@
 //@ min-gdb-version: 11.2
 //@ min-lldb-version: 1800
 //@ min-cdb-version: 10.0.18317.1001
+//@ ignore-backends: gcc
 
 // === GDB TESTS ===================================================================================
 

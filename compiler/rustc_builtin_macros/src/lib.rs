@@ -11,6 +11,7 @@
 #![feature(box_patterns)]
 #![feature(decl_macro)]
 #![feature(if_let_guard)]
+#![feature(iter_order_by)]
 #![feature(proc_macro_internals)]
 #![feature(proc_macro_quote)]
 #![feature(rustdoc_internals)]
@@ -129,7 +130,6 @@ pub fn register_builtin_macros(resolver: &mut dyn ResolverExpand) {
         Clone: clone::expand_deriving_clone,
         Copy: bounds::expand_deriving_copy,
         ConstParamTy: bounds::expand_deriving_const_param_ty,
-        UnsizedConstParamTy: bounds::expand_deriving_unsized_const_param_ty,
         Debug: debug::expand_deriving_debug,
         Default: default::expand_deriving_default,
         Eq: eq::expand_deriving_eq,

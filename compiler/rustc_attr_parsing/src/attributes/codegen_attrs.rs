@@ -2,7 +2,11 @@ use rustc_hir::attrs::{CoverageAttrKind, OptimizeAttr, SanitizerSet, UsedBy};
 use rustc_session::parse::feature_err;
 
 use super::prelude::*;
-use crate::session_diagnostics::{NakedFunctionIncompatibleAttribute, NullOnExport};
+use crate::session_diagnostics::{
+    NakedFunctionIncompatibleAttribute, NullOnExport, NullOnObjcClass, NullOnObjcSelector,
+    ObjcClassExpectedStringLiteral, ObjcSelectorExpectedStringLiteral,
+};
+use crate::target_checking::Policy::AllowSilent;
 
 pub(crate) struct OptimizeParser;
 
@@ -147,6 +151,70 @@ impl<S: Stage> SingleAttributeParser<S> for ExportNameParser {
             return None;
         }
         Some(AttributeKind::ExportName { name, span: cx.attr_span })
+    }
+}
+
+pub(crate) struct ObjcClassParser;
+
+impl<S: Stage> SingleAttributeParser<S> for ObjcClassParser {
+    const PATH: &[rustc_span::Symbol] = &[sym::rustc_objc_class];
+    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepInnermost;
+    const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
+    const ALLOWED_TARGETS: AllowedTargets =
+        AllowedTargets::AllowList(&[Allow(Target::ForeignStatic)]);
+    const TEMPLATE: AttributeTemplate = template!(NameValueStr: "ClassName");
+
+    fn convert(cx: &mut AcceptContext<'_, '_, S>, args: &ArgParser<'_>) -> Option<AttributeKind> {
+        let Some(nv) = args.name_value() else {
+            cx.expected_name_value(cx.attr_span, None);
+            return None;
+        };
+        let Some(classname) = nv.value_as_str() else {
+            // `#[rustc_objc_class = ...]` is expected to be used as an implementatioin detail
+            // inside a standard library macro, but `cx.expected_string_literal` exposes too much.
+            // Use a custom error message instead.
+            cx.emit_err(ObjcClassExpectedStringLiteral { span: nv.value_span });
+            return None;
+        };
+        if classname.as_str().contains('\0') {
+            // `#[rustc_objc_class = ...]` will be converted to a null-terminated string,
+            // so it may not contain any null characters.
+            cx.emit_err(NullOnObjcClass { span: nv.value_span });
+            return None;
+        }
+        Some(AttributeKind::ObjcClass { classname, span: cx.attr_span })
+    }
+}
+
+pub(crate) struct ObjcSelectorParser;
+
+impl<S: Stage> SingleAttributeParser<S> for ObjcSelectorParser {
+    const PATH: &[rustc_span::Symbol] = &[sym::rustc_objc_selector];
+    const ATTRIBUTE_ORDER: AttributeOrder = AttributeOrder::KeepInnermost;
+    const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
+    const ALLOWED_TARGETS: AllowedTargets =
+        AllowedTargets::AllowList(&[Allow(Target::ForeignStatic)]);
+    const TEMPLATE: AttributeTemplate = template!(NameValueStr: "methodName");
+
+    fn convert(cx: &mut AcceptContext<'_, '_, S>, args: &ArgParser<'_>) -> Option<AttributeKind> {
+        let Some(nv) = args.name_value() else {
+            cx.expected_name_value(cx.attr_span, None);
+            return None;
+        };
+        let Some(methname) = nv.value_as_str() else {
+            // `#[rustc_objc_selector = ...]` is expected to be used as an implementatioin detail
+            // inside a standard library macro, but `cx.expected_string_literal` exposes too much.
+            // Use a custom error message instead.
+            cx.emit_err(ObjcSelectorExpectedStringLiteral { span: nv.value_span });
+            return None;
+        };
+        if methname.as_str().contains('\0') {
+            // `#[rustc_objc_selector = ...]` will be converted to a null-terminated string,
+            // so it may not contain any null characters.
+            cx.emit_err(NullOnObjcSelector { span: nv.value_span });
+            return None;
+        }
+        Some(AttributeKind::ObjcSelector { methname, span: cx.attr_span })
     }
 }
 
@@ -295,6 +363,8 @@ impl<S: Stage> NoArgsAttributeParser<S> for NoMangleParser {
         Allow(Target::Static),
         Allow(Target::Method(MethodKind::Inherent)),
         Allow(Target::Method(MethodKind::TraitImpl)),
+        AllowSilent(Target::Const), // Handled in the `InvalidNoMangleItems` pass
+        Error(Target::Closure),
     ]);
     const CREATE: fn(Span) -> AttributeKind = AttributeKind::NoMangle;
 }
@@ -303,6 +373,7 @@ impl<S: Stage> NoArgsAttributeParser<S> for NoMangleParser {
 pub(crate) struct UsedParser {
     first_compiler: Option<Span>,
     first_linker: Option<Span>,
+    first_default: Option<Span>,
 }
 
 // A custom `AttributeParser` is used rather than a Simple attribute parser because
@@ -315,7 +386,7 @@ impl<S: Stage> AttributeParser<S> for UsedParser {
         template!(Word, List: &["compiler", "linker"]),
         |group: &mut Self, cx, args| {
             let used_by = match args {
-                ArgParser::NoArgs => UsedBy::Linker,
+                ArgParser::NoArgs => UsedBy::Default,
                 ArgParser::List(list) => {
                     let Some(l) = list.single() else {
                         cx.expected_single_argument(list.span);
@@ -356,12 +427,29 @@ impl<S: Stage> AttributeParser<S> for UsedParser {
                 ArgParser::NameValue(_) => return,
             };
 
+            let attr_span = cx.attr_span;
+
+            // `#[used]` is interpreted as `#[used(linker)]` (though depending on target OS the
+            // circumstances are more complicated). While we're checking `used_by`, also report
+            // these cross-`UsedBy` duplicates to warn.
             let target = match used_by {
                 UsedBy::Compiler => &mut group.first_compiler,
-                UsedBy::Linker => &mut group.first_linker,
+                UsedBy::Linker => {
+                    if let Some(prev) = group.first_default {
+                        cx.warn_unused_duplicate(prev, attr_span);
+                        return;
+                    }
+                    &mut group.first_linker
+                }
+                UsedBy::Default => {
+                    if let Some(prev) = group.first_linker {
+                        cx.warn_unused_duplicate(prev, attr_span);
+                        return;
+                    }
+                    &mut group.first_default
+                }
             };
 
-            let attr_span = cx.attr_span;
             if let Some(prev) = *target {
                 cx.warn_unused_duplicate(prev, attr_span);
             } else {
@@ -373,11 +461,13 @@ impl<S: Stage> AttributeParser<S> for UsedParser {
         AllowedTargets::AllowList(&[Allow(Target::Static), Warn(Target::MacroCall)]);
 
     fn finalize(self, _cx: &FinalizeContext<'_, '_, S>) -> Option<AttributeKind> {
-        // Ratcheting behaviour, if both `linker` and `compiler` are specified, use `linker`
-        Some(match (self.first_compiler, self.first_linker) {
-            (_, Some(span)) => AttributeKind::Used { used_by: UsedBy::Linker, span },
-            (Some(span), _) => AttributeKind::Used { used_by: UsedBy::Compiler, span },
-            (None, None) => return None,
+        // If a specific form of `used` is specified, it takes precedence over generic `#[used]`.
+        // If both `linker` and `compiler` are specified, use `linker`.
+        Some(match (self.first_compiler, self.first_linker, self.first_default) {
+            (_, Some(span), _) => AttributeKind::Used { used_by: UsedBy::Linker, span },
+            (Some(span), _, _) => AttributeKind::Used { used_by: UsedBy::Compiler, span },
+            (_, _, Some(span)) => AttributeKind::Used { used_by: UsedBy::Default, span },
+            (None, None, None) => return None,
         })
     }
 }

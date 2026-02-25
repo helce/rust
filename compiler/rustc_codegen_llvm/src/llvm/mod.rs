@@ -11,13 +11,16 @@ use rustc_llvm::RustString;
 
 pub(crate) use self::CallConv::*;
 pub(crate) use self::CodeGenOptSize::*;
-pub(crate) use self::MetadataType::*;
+pub(crate) use self::conversions::*;
 pub(crate) use self::ffi::*;
+pub(crate) use self::metadata_kind::*;
 use crate::common::AsCCharPtr;
 
+mod conversions;
 pub(crate) mod diagnostic;
 pub(crate) mod enzyme_ffi;
 mod ffi;
+mod metadata_kind;
 
 pub(crate) use self::enzyme_ffi::*;
 
@@ -256,6 +259,10 @@ pub(crate) fn set_alignment(llglobal: &Value, align: Align) {
     unsafe {
         ffi::LLVMSetAlignment(llglobal, align.bytes() as c_uint);
     }
+}
+
+pub(crate) fn set_externally_initialized(llglobal: &Value, is_ext_init: bool) {
+    LLVMSetExternallyInitialized(llglobal, is_ext_init.to_llvm_bool());
 }
 
 /// Get the `name`d comdat from `llmod` and assign it to `llglobal`.

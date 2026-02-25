@@ -148,12 +148,6 @@ pub struct Session {
     /// None signifies that this is not tracked.
     pub using_internal_features: &'static AtomicBool,
 
-    /// All commandline args used to invoke the compiler, with @file args fully expanded.
-    /// This will only be used within debug info, e.g. in the pdb file on windows
-    /// This is mainly useful for other tools that reads that debuginfo to figure out
-    /// how to call the compiler with the same arguments.
-    pub expanded_args: Vec<String>,
-
     target_filesearch: FileSearch,
     host_filesearch: FileSearch,
 
@@ -600,6 +594,14 @@ impl Session {
 
     /// Calculates the flavor of LTO to use for this compilation.
     pub fn lto(&self) -> config::Lto {
+        // Autodiff currently requires fat-lto to have access to the llvm-ir of all (indirectly) used functions and types.
+        // fat-lto is the easiest solution to this requirement, but quite expensive.
+        // FIXME(autodiff): Make autodiff also work with embed-bc instead of fat-lto.
+        // Don't apply fat-lto to proc-macro crates as they cannot use fat-lto without -Zdylib-lto
+        if self.opts.autodiff_enabled() && !self.opts.crate_types.contains(&CrateType::ProcMacro) {
+            return config::Lto::Fat;
+        }
+
         // If our target has codegen requirements ignore the command line
         if self.target.requires_lto {
             return config::Lto::Fat;
@@ -751,7 +753,8 @@ impl Session {
         //     ELF x86-64 abi, but it can be disabled for some compilation units.
         //
         // Typically when we're compiling with `-C panic=abort` we don't need
-        // `uwtable` because we can't generate any exceptions!
+        // `uwtable` because we can't generate any exceptions! But note that
+        // some targets require unwind tables to generate backtraces.
         // Unwind tables are needed when compiling with `-C panic=unwind`, but
         // LLVM won't omit unwind tables unless the function is also marked as
         // `nounwind`, so users are allowed to disable `uwtable` emission.
@@ -770,9 +773,11 @@ impl Session {
         // Otherwise, we can defer to the `-C force-unwind-tables=<yes/no>`
         // value, if it is provided, or disable them, if not.
         self.target.requires_uwtable
-            || self.opts.cg.force_unwind_tables.unwrap_or(
-                self.panic_strategy() == PanicStrategy::Unwind || self.target.default_uwtable,
-            )
+            || self
+                .opts
+                .cg
+                .force_unwind_tables
+                .unwrap_or(self.panic_strategy().unwinds() || self.target.default_uwtable)
     }
 
     /// Returns the number of query threads that should be used for this
@@ -1006,7 +1011,6 @@ pub fn build_session(
     cfg_version: &'static str,
     ice_file: Option<PathBuf>,
     using_internal_features: &'static AtomicBool,
-    expanded_args: Vec<String>,
 ) -> Session {
     // FIXME: This is not general enough to make the warning lint completely override
     // normal diagnostic warnings, since the warning lint can also be denied and changed
@@ -1123,7 +1127,6 @@ pub fn build_session(
         unstable_target_features: Default::default(),
         cfg_version,
         using_internal_features,
-        expanded_args,
         target_filesearch,
         host_filesearch,
         invocation_temp,
@@ -1222,7 +1225,7 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
     }
 
     // KCFI requires panic=abort
-    if sess.is_sanitizer_kcfi_enabled() && sess.panic_strategy() != PanicStrategy::Abort {
+    if sess.is_sanitizer_kcfi_enabled() && sess.panic_strategy().unwinds() {
         sess.dcx().emit_err(errors::SanitizerKcfiRequiresPanicAbort);
     }
 

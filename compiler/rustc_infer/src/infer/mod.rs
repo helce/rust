@@ -131,23 +131,6 @@ pub struct InferCtxtInner<'tcx> {
     /// `$0: 'static`. This will get checked later by regionck. (We
     /// can't generally check these things right away because we have
     /// to wait until types are resolved.)
-    ///
-    /// These are stored in a map keyed to the id of the innermost
-    /// enclosing fn body / static initializer expression. This is
-    /// because the location where the obligation was incurred can be
-    /// relevant with respect to which sublifetime assumptions are in
-    /// place. The reason that we store under the fn-id, and not
-    /// something more fine-grained, is so that it is easier for
-    /// regionck to be sure that it has found *all* the region
-    /// obligations (otherwise, it's easy to fail to walk to a
-    /// particular node-id).
-    ///
-    /// Before running `resolve_regions_and_report_errors`, the creator
-    /// of the inference context is expected to invoke
-    /// [`InferCtxt::process_registered_region_obligations`]
-    /// for each body-id in this map, which will process the
-    /// obligations within. This is expected to be done 'late enough'
-    /// that all type inference variables have been bound and so forth.
     region_obligations: Vec<TypeOutlivesConstraint<'tcx>>,
 
     /// The outlives bounds that we assume must hold about placeholders that
@@ -1002,6 +985,60 @@ impl<'tcx> InferCtxt<'tcx> {
     #[instrument(level = "debug", skip(self), ret)]
     pub fn clone_opaque_types(&self) -> Vec<(OpaqueTypeKey<'tcx>, OpaqueHiddenType<'tcx>)> {
         self.inner.borrow_mut().opaque_type_storage.iter_opaque_types().collect()
+    }
+
+    pub fn has_opaques_with_sub_unified_hidden_type(&self, ty_vid: TyVid) -> bool {
+        if !self.next_trait_solver() {
+            return false;
+        }
+
+        let ty_sub_vid = self.sub_unification_table_root_var(ty_vid);
+        let inner = &mut *self.inner.borrow_mut();
+        let mut type_variables = inner.type_variable_storage.with_log(&mut inner.undo_log);
+        inner.opaque_type_storage.iter_opaque_types().any(|(_, hidden_ty)| {
+            if let ty::Infer(ty::TyVar(hidden_vid)) = *hidden_ty.ty.kind() {
+                let opaque_sub_vid = type_variables.sub_unification_table_root_var(hidden_vid);
+                if opaque_sub_vid == ty_sub_vid {
+                    return true;
+                }
+            }
+
+            false
+        })
+    }
+
+    /// Searches for an opaque type key whose hidden type is related to `ty_vid`.
+    ///
+    /// This only checks for a subtype relation, it does not require equality.
+    pub fn opaques_with_sub_unified_hidden_type(&self, ty_vid: TyVid) -> Vec<ty::AliasTy<'tcx>> {
+        // Avoid accidentally allowing more code to compile with the old solver.
+        if !self.next_trait_solver() {
+            return vec![];
+        }
+
+        let ty_sub_vid = self.sub_unification_table_root_var(ty_vid);
+        let inner = &mut *self.inner.borrow_mut();
+        // This is iffy, can't call `type_variables()` as we're already
+        // borrowing the `opaque_type_storage` here.
+        let mut type_variables = inner.type_variable_storage.with_log(&mut inner.undo_log);
+        inner
+            .opaque_type_storage
+            .iter_opaque_types()
+            .filter_map(|(key, hidden_ty)| {
+                if let ty::Infer(ty::TyVar(hidden_vid)) = *hidden_ty.ty.kind() {
+                    let opaque_sub_vid = type_variables.sub_unification_table_root_var(hidden_vid);
+                    if opaque_sub_vid == ty_sub_vid {
+                        return Some(ty::AliasTy::new_from_args(
+                            self.tcx,
+                            key.def_id.into(),
+                            key.args,
+                        ));
+                    }
+                }
+
+                None
+            })
+            .collect()
     }
 
     #[inline(always)]

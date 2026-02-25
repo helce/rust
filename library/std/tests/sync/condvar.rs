@@ -267,3 +267,49 @@ nonpoison_and_poison_unwrap_test!(
         }
     }
 );
+
+// Some platforms internally cast the timeout duration into nanoseconds.
+// If they fail to consider overflow during the conversion (I'm looking
+// at you, macOS), `wait_timeout` will return immediately and indicate a
+// timeout for durations that are slightly longer than u64::MAX nanoseconds.
+// `std` should guard against this by clamping the timeout.
+// See #37440 for context.
+nonpoison_and_poison_unwrap_test!(
+    name: timeout_nanoseconds,
+    test_body: {
+        use locks::Mutex;
+        use locks::Condvar;
+
+        let sent = Mutex::new(false);
+        let cond = Condvar::new();
+
+        thread::scope(|s| {
+            s.spawn(|| {
+                // Sleep so that the other thread has a chance to encounter the
+                // timeout.
+                thread::sleep(Duration::from_secs(2));
+                maybe_unwrap(sent.set(true));
+                cond.notify_all();
+            });
+
+            let mut guard = maybe_unwrap(sent.lock());
+            // Loop until `sent` is set by the thread to guard against spurious
+            // wakeups. If the `wait_timeout` happens just before the signal by
+            // the other thread, such a spurious wakeup might prevent the
+            // miscalculated timeout from occurring, but this is basically just
+            // a smoke test anyway.
+            loop {
+                if *guard {
+                    break;
+                }
+
+                // If there is internal overflow, this call will return almost
+                // immediately, before the other thread has reached the `notify_all`,
+                // and indicate a timeout.
+                let (g, res) = maybe_unwrap(cond.wait_timeout(guard, Duration::from_secs(u64::MAX.div_ceil(1_000_000_000))));
+                assert!(!res.timed_out());
+                guard = g;
+            }
+        })
+    }
+);

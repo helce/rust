@@ -64,8 +64,6 @@ ast_passes_body_in_extern = incorrect `{$kind}` inside `extern` block
 
 ast_passes_bound_in_context = bounds on `type`s in {$ctx} have no effect
 
-ast_passes_c_variadic_associated_function = associated functions cannot have a C variable argument list
-
 ast_passes_c_variadic_bad_extern = `...` is not supported for `extern "{$abi}"` functions
     .label = `extern "{$abi}"` because of this
     .help = only `extern "C"` and `extern "C-unwind"` functions may have a C variable argument list
@@ -216,6 +214,10 @@ ast_passes_match_arm_with_no_body =
     .suggestion = add a body after the pattern
 
 ast_passes_missing_unsafe_on_extern = extern blocks must be unsafe
+    .suggestion = needs `unsafe` before the extern keyword
+
+ast_passes_missing_unsafe_on_extern_lint = extern blocks should be unsafe
+    .suggestion = needs `unsafe` before the extern keyword
 
 ast_passes_module_nonascii = trying to load file for module `{$name}` with non-ascii identifier name
     .help = consider using the `#[path]` attribute to specify filesystem path

@@ -62,7 +62,7 @@
 //@ revisions: e2k
 //@[e2k] compile-flags: --target e2k-unknown-linux-gnu
 //@[e2k] needs-llvm-components: elbrus
-
+//@ ignore-backends: gcc
 #![feature(no_core, rustc_attrs, lang_items)]
 #![feature(unsized_fn_params, transparent_unions)]
 #![no_core]

@@ -42,7 +42,6 @@ use rustc_span::{
     DUMMY_SP, ErrorGuaranteed, ExpnKind, FileName, SourceFileHash, SourceFileHashAlgorithm, Span,
     Symbol, sym,
 };
-use rustc_target::spec::PanicStrategy;
 use rustc_trait_selection::{solve, traits};
 use tracing::{info, instrument};
 
@@ -192,7 +191,7 @@ fn configure_and_expand(
             unsafe {
                 env::set_var(
                     "PATH",
-                    &env::join_paths(
+                    env::join_paths(
                         new_path.iter().filter(|p| env::join_paths(iter::once(p)).is_ok()),
                     )
                     .unwrap(),
@@ -282,7 +281,7 @@ fn configure_and_expand(
         feature_err(sess, sym::export_stable, DUMMY_SP, "`sdylib` crate type is unstable").emit();
     }
 
-    if is_proc_macro_crate && sess.panic_strategy() == PanicStrategy::Abort {
+    if is_proc_macro_crate && !sess.panic_strategy().unwinds() {
         sess.dcx().emit_warn(errors::ProcMacroCratePanicAbort);
     }
 
@@ -446,7 +445,7 @@ fn early_lint_checks(tcx: TyCtxt<'_>, (): ()) {
                 let prev_source = sess.psess.source_map().span_to_prev_source(first_span);
                 let ferris_fix = prev_source
                     .map_or(FerrisFix::SnakeCase, |source| {
-                        let mut source_before_ferris = source.trim_end().split_whitespace().rev();
+                        let mut source_before_ferris = source.split_whitespace().rev();
                         match source_before_ferris.next() {
                             Some("struct" | "trait" | "mod" | "union" | "type" | "enum") => {
                                 FerrisFix::PascalCase
@@ -500,7 +499,7 @@ fn env_var_os<'tcx>(tcx: TyCtxt<'tcx>, key: &'tcx OsStr) -> Option<&'tcx OsStr> 
     // properly change-tracked.
     tcx.sess.psess.env_depinfo.borrow_mut().insert((
         Symbol::intern(&key.to_string_lossy()),
-        value.as_ref().and_then(|value| value.to_str()).map(|value| Symbol::intern(&value)),
+        value.as_ref().and_then(|value| value.to_str()).map(|value| Symbol::intern(value)),
     ));
 
     value_tcx
@@ -824,7 +823,7 @@ pub fn write_dep_info(tcx: TyCtxt<'_>) {
 
     let outputs = tcx.output_filenames(());
     let output_paths =
-        generated_output_paths(tcx, &outputs, sess.io.output_file.is_some(), crate_name);
+        generated_output_paths(tcx, outputs, sess.io.output_file.is_some(), crate_name);
 
     // Ensure the source file isn't accidentally overwritten during compilation.
     if let Some(input_path) = sess.io.input.opt_path() {
@@ -847,7 +846,7 @@ pub fn write_dep_info(tcx: TyCtxt<'_>) {
         }
     }
 
-    write_out_deps(tcx, &outputs, &output_paths);
+    write_out_deps(tcx, outputs, &output_paths);
 
     let only_dep_info = sess.opts.output_types.contains_key(&OutputType::DepInfo)
         && sess.opts.output_types.len() == 1;
@@ -1096,6 +1095,7 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
                 tcx.ensure_ok().check_transmutes(def_id);
             }
             tcx.ensure_ok().has_ffi_unwind_calls(def_id);
+            tcx.ensure_ok().check_liveness(def_id);
 
             // If we need to codegen, ensure that we emit all errors from
             // `mir_drops_elaborated_and_const_checked` now, to avoid discovering
@@ -1123,18 +1123,6 @@ fn run_required_analyses(tcx: TyCtxt<'_>) {
 
     sess.time("layout_testing", || layout_test::test_layout(tcx));
     sess.time("abi_testing", || abi_test::test_abi(tcx));
-
-    // If `-Zvalidate-mir` is set, we also want to compute the final MIR for each item
-    // (either its `mir_for_ctfe` or `optimized_mir`) since that helps uncover any bugs
-    // in MIR optimizations that may only be reachable through codegen, or other codepaths
-    // that requires the optimized/ctfe MIR, coroutine bodies, or evaluating consts.
-    if tcx.sess.opts.unstable_opts.validate_mir {
-        sess.time("ensuring_final_MIR_is_computable", || {
-            tcx.par_hir_body_owners(|def_id| {
-                tcx.instance_mir(ty::InstanceKind::Item(def_id.into()));
-            });
-        });
-    }
 }
 
 /// Runs the type-checking, region checking and other miscellaneous analysis
@@ -1200,6 +1188,20 @@ fn analysis(tcx: TyCtxt<'_>, (): ()) {
         // we will fail to emit overlap diagnostics. Thus we invoke it here unconditionally.
         let _ = tcx.all_diagnostic_items(());
     });
+
+    // If `-Zvalidate-mir` is set, we also want to compute the final MIR for each item
+    // (either its `mir_for_ctfe` or `optimized_mir`) since that helps uncover any bugs
+    // in MIR optimizations that may only be reachable through codegen, or other codepaths
+    // that requires the optimized/ctfe MIR, coroutine bodies, or evaluating consts.
+    // Nevertheless, wait after type checking is finished, as optimizing code that does not
+    // type-check is very prone to ICEs.
+    if tcx.sess.opts.unstable_opts.validate_mir {
+        sess.time("ensuring_final_MIR_is_computable", || {
+            tcx.par_hir_body_owners(|def_id| {
+                tcx.instance_mir(ty::InstanceKind::Item(def_id.into()));
+            });
+        });
+    }
 }
 
 /// Runs the codegen backend, after which the AST and analysis can
@@ -1303,7 +1305,7 @@ pub(crate) fn parse_crate_name(
     let rustc_hir::Attribute::Parsed(AttributeKind::CrateName { name, name_span, .. }) =
         AttributeParser::parse_limited_should_emit(
             sess,
-            &attrs,
+            attrs,
             sym::crate_name,
             DUMMY_SP,
             rustc_ast::node_id::CRATE_NODE_ID,

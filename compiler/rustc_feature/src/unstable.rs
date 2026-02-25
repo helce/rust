@@ -93,6 +93,16 @@ impl Features {
         &self.enabled_features
     }
 
+    /// Returns a iterator of enabled features in stable order.
+    pub fn enabled_features_iter_stable_order(
+        &self,
+    ) -> impl Iterator<Item = (Symbol, Span)> + Clone {
+        self.enabled_lang_features
+            .iter()
+            .map(|feat| (feat.gate_name, feat.attr_sp))
+            .chain(self.enabled_lib_features.iter().map(|feat| (feat.gate_name, feat.attr_sp)))
+    }
+
     /// Is the given feature enabled (via `#[feature(...)]`)?
     pub fn enabled(&self, feature: Symbol) -> bool {
         self.enabled_features.contains(&feature)
@@ -473,12 +483,8 @@ declare_features! (
     (incomplete, deref_patterns, "1.79.0", Some(87121)),
     /// Allows deriving the From trait on single-field structs.
     (unstable, derive_from, "1.91.0", Some(144889)),
-    /// Tells rustdoc to automatically generate `#[doc(cfg(...))]`.
-    (unstable, doc_auto_cfg, "1.58.0", Some(43781)),
     /// Allows `#[doc(cfg(...))]`.
     (unstable, doc_cfg, "1.21.0", Some(43781)),
-    /// Allows `#[doc(cfg_hide(...))]`.
-    (unstable, doc_cfg_hide, "1.57.0", Some(43781)),
     /// Allows `#[doc(masked)]`.
     (unstable, doc_masked, "1.21.0", Some(44027)),
     /// Allows features to allow target_feature to better interact with traits.
@@ -555,7 +561,7 @@ declare_features! (
     /// Allows fused `loop`/`match` for direct intraprocedural jumps.
     (incomplete, loop_match, "1.90.0", Some(132306)),
     /// Allow `macro_rules!` attribute rules
-    (unstable, macro_attr, "1.91.0", Some(83527)),
+    (unstable, macro_attr, "1.91.0", Some(143547)),
     /// Allow `macro_rules!` derive rules
     (unstable, macro_derive, "1.91.0", Some(143549)),
     /// Give access to additional metadata about declarative macro meta-variables.

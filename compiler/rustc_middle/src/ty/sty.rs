@@ -17,12 +17,13 @@ use rustc_span::{DUMMY_SP, Span, Symbol, sym};
 use rustc_type_ir::TyKind::*;
 use rustc_type_ir::solve::SizedTraitKind;
 use rustc_type_ir::walk::TypeWalker;
-use rustc_type_ir::{self as ir, BoundVar, CollectAndApply, DynKind, TypeVisitableExt, elaborate};
+use rustc_type_ir::{self as ir, BoundVar, CollectAndApply, TypeVisitableExt, elaborate};
 use tracing::instrument;
 use ty::util::IntTypeExt;
 
 use super::GenericParamDefKind;
 use crate::infer::canonical::Canonical;
+use crate::traits::ObligationCause;
 use crate::ty::InferTy::*;
 use crate::ty::{
     self, AdtDef, BoundRegionKind, Discr, GenericArg, GenericArgs, GenericArgsRef, List, ParamEnv,
@@ -486,7 +487,23 @@ impl<'tcx> Ty<'tcx> {
         {
             ty
         } else {
-            Ty::new(tcx, Bound(index, bound_ty))
+            Ty::new(tcx, Bound(ty::BoundVarIndexKind::Bound(index), bound_ty))
+        }
+    }
+
+    #[inline]
+    pub fn new_canonical_bound(tcx: TyCtxt<'tcx>, var: BoundVar) -> Ty<'tcx> {
+        // Use a pre-interned one when possible.
+        if let Some(ty) = tcx.types.anon_canonical_bound_tys.get(var.as_usize()).copied() {
+            ty
+        } else {
+            Ty::new(
+                tcx,
+                Bound(
+                    ty::BoundVarIndexKind::Canonical,
+                    ty::BoundTy { var, kind: ty::BoundTyKind::Anon },
+                ),
+            )
         }
     }
 
@@ -734,7 +751,6 @@ impl<'tcx> Ty<'tcx> {
         tcx: TyCtxt<'tcx>,
         obj: &'tcx List<ty::PolyExistentialPredicate<'tcx>>,
         reg: ty::Region<'tcx>,
-        repr: DynKind,
     ) -> Ty<'tcx> {
         if cfg!(debug_assertions) {
             let projection_count = obj
@@ -767,7 +783,7 @@ impl<'tcx> Ty<'tcx> {
                 but it has {projection_count}"
             );
         }
-        Ty::new(tcx, Dynamic(obj, reg, repr))
+        Ty::new(tcx, Dynamic(obj, reg))
     }
 
     #[inline]
@@ -904,6 +920,12 @@ impl<'tcx> Ty<'tcx> {
     }
 
     #[inline]
+    pub fn new_option(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
+        let def_id = tcx.require_lang_item(LangItem::Option, DUMMY_SP);
+        Ty::new_generic_adt(tcx, def_id, ty)
+    }
+
+    #[inline]
     pub fn new_maybe_uninit(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
         let def_id = tcx.require_lang_item(LangItem::MaybeUninit, DUMMY_SP);
         Ty::new_generic_adt(tcx, def_id, ty)
@@ -952,6 +974,10 @@ impl<'tcx> rustc_type_ir::inherent::Ty<TyCtxt<'tcx>> for Ty<'tcx> {
         Ty::new_bound(tcx, debruijn, ty::BoundTy { var, kind: ty::BoundTyKind::Anon })
     }
 
+    fn new_canonical_bound(tcx: TyCtxt<'tcx>, var: ty::BoundVar) -> Self {
+        Ty::new_canonical_bound(tcx, var)
+    }
+
     fn new_alias(
         interner: TyCtxt<'tcx>,
         kind: ty::AliasTyKind,
@@ -980,9 +1006,8 @@ impl<'tcx> rustc_type_ir::inherent::Ty<TyCtxt<'tcx>> for Ty<'tcx> {
         interner: TyCtxt<'tcx>,
         preds: &'tcx List<ty::PolyExistentialPredicate<'tcx>>,
         region: ty::Region<'tcx>,
-        kind: ty::DynKind,
     ) -> Self {
-        Ty::new_dynamic(interner, preds, region, kind)
+        Ty::new_dynamic(interner, preds, region)
     }
 
     fn new_coroutine(
@@ -1356,7 +1381,7 @@ impl<'tcx> Ty<'tcx> {
 
     #[inline]
     pub fn is_trait(self) -> bool {
-        matches!(self.kind(), Dynamic(_, _, ty::Dyn))
+        matches!(self.kind(), Dynamic(_, _))
     }
 
     #[inline]
@@ -1640,7 +1665,7 @@ impl<'tcx> Ty<'tcx> {
         tcx: TyCtxt<'tcx>,
         normalize: impl FnMut(Ty<'tcx>) -> Ty<'tcx>,
     ) -> Result<Ty<'tcx>, Ty<'tcx>> {
-        let tail = tcx.struct_tail_raw(self, normalize, || {});
+        let tail = tcx.struct_tail_raw(self, &ObligationCause::dummy(), normalize, || {});
         match tail.kind() {
             // Sized types
             ty::Infer(ty::IntVar(_) | ty::FloatVar(_))
@@ -1671,7 +1696,7 @@ impl<'tcx> Ty<'tcx> {
 
             ty::Str | ty::Slice(_) => Ok(tcx.types.usize),
 
-            ty::Dynamic(_, _, ty::Dyn) => {
+            ty::Dynamic(_, _) => {
                 let dyn_metadata = tcx.require_lang_item(LangItem::DynMetadata, DUMMY_SP);
                 Ok(tcx.type_of(dyn_metadata).instantiate(tcx, &[tail.into()]))
             }
@@ -1853,7 +1878,7 @@ impl<'tcx> Ty<'tcx> {
             | ty::Never
             | ty::Error(_) => true,
 
-            ty::Str | ty::Slice(_) | ty::Dynamic(_, _, ty::Dyn) => match sizedness {
+            ty::Str | ty::Slice(_) | ty::Dynamic(_, _) => match sizedness {
                 SizedTraitKind::Sized => false,
                 SizedTraitKind::MetaSized => true,
             },

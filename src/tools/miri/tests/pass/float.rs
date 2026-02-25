@@ -8,11 +8,15 @@
 #![allow(internal_features)]
 #![allow(unnecessary_transmutes)]
 
+#[path = "../utils/mod.rs"]
+mod utils;
 use std::any::type_name;
 use std::cmp::min;
 use std::fmt::{Debug, Display, LowerHex};
 use std::hint::black_box;
 use std::{f32, f64};
+
+use utils::check_nondet;
 
 /// Compare the two floats, allowing for $ulp many ULPs of error.
 ///
@@ -281,6 +285,35 @@ fn basic() {
     assert_eq!(34.2f64.abs(), 34.2f64);
     assert_eq!((-1.0f128).abs(), 1.0f128);
     assert_eq!(34.2f128.abs(), 34.2f128);
+
+    assert_eq!(64_f16.sqrt(), 8_f16);
+    assert_eq!(64_f32.sqrt(), 8_f32);
+    assert_eq!(64_f64.sqrt(), 8_f64);
+    assert_eq!(64_f128.sqrt(), 8_f128);
+    assert_eq!(f16::INFINITY.sqrt(), f16::INFINITY);
+    assert_eq!(f32::INFINITY.sqrt(), f32::INFINITY);
+    assert_eq!(f64::INFINITY.sqrt(), f64::INFINITY);
+    assert_eq!(f128::INFINITY.sqrt(), f128::INFINITY);
+    assert_eq!(0.0_f16.sqrt().total_cmp(&0.0), std::cmp::Ordering::Equal);
+    assert_eq!(0.0_f32.sqrt().total_cmp(&0.0), std::cmp::Ordering::Equal);
+    assert_eq!(0.0_f64.sqrt().total_cmp(&0.0), std::cmp::Ordering::Equal);
+    assert_eq!(0.0_f128.sqrt().total_cmp(&0.0), std::cmp::Ordering::Equal);
+    assert_eq!((-0.0_f16).sqrt().total_cmp(&-0.0), std::cmp::Ordering::Equal);
+    assert_eq!((-0.0_f32).sqrt().total_cmp(&-0.0), std::cmp::Ordering::Equal);
+    assert_eq!((-0.0_f64).sqrt().total_cmp(&-0.0), std::cmp::Ordering::Equal);
+    assert_eq!((-0.0_f128).sqrt().total_cmp(&-0.0), std::cmp::Ordering::Equal);
+    assert!((-5.0_f16).sqrt().is_nan());
+    assert!((-5.0_f32).sqrt().is_nan());
+    assert!((-5.0_f64).sqrt().is_nan());
+    assert!((-5.0_f128).sqrt().is_nan());
+    assert!(f16::NEG_INFINITY.sqrt().is_nan());
+    assert!(f32::NEG_INFINITY.sqrt().is_nan());
+    assert!(f64::NEG_INFINITY.sqrt().is_nan());
+    assert!(f128::NEG_INFINITY.sqrt().is_nan());
+    assert!(f16::NAN.sqrt().is_nan());
+    assert!(f32::NAN.sqrt().is_nan());
+    assert!(f64::NAN.sqrt().is_nan());
+    assert!(f128::NAN.sqrt().is_nan());
 }
 
 /// Test casts from floats to ints and back
@@ -1004,28 +1037,13 @@ fn mul_add() {
     assert_eq!(f.to_bits(), f32::to_bits(-0.0));
 }
 
-pub fn libm() {
+fn libm() {
     fn ldexp(a: f64, b: i32) -> f64 {
         extern "C" {
             fn ldexp(x: f64, n: i32) -> f64;
         }
         unsafe { ldexp(a, b) }
     }
-
-    assert_eq!(64_f32.sqrt(), 8_f32);
-    assert_eq!(64_f64.sqrt(), 8_f64);
-    assert_eq!(f32::INFINITY.sqrt(), f32::INFINITY);
-    assert_eq!(f64::INFINITY.sqrt(), f64::INFINITY);
-    assert_eq!(0.0_f32.sqrt().total_cmp(&0.0), std::cmp::Ordering::Equal);
-    assert_eq!(0.0_f64.sqrt().total_cmp(&0.0), std::cmp::Ordering::Equal);
-    assert_eq!((-0.0_f32).sqrt().total_cmp(&-0.0), std::cmp::Ordering::Equal);
-    assert_eq!((-0.0_f64).sqrt().total_cmp(&-0.0), std::cmp::Ordering::Equal);
-    assert!((-5.0_f32).sqrt().is_nan());
-    assert!((-5.0_f64).sqrt().is_nan());
-    assert!(f32::NEG_INFINITY.sqrt().is_nan());
-    assert!(f64::NEG_INFINITY.sqrt().is_nan());
-    assert!(f32::NAN.sqrt().is_nan());
-    assert!(f64::NAN.sqrt().is_nan());
 
     assert_approx_eq!(25f32.powi(-2), 0.0016f32);
     assert_approx_eq!(23.2f64.powi(2), 538.24f64);
@@ -1282,7 +1300,7 @@ fn test_fast() {
     use std::intrinsics::{fadd_fast, fdiv_fast, fmul_fast, frem_fast, fsub_fast};
 
     #[inline(never)]
-    pub fn test_operations_f16(a: f16, b: f16) {
+    fn test_operations_f16(a: f16, b: f16) {
         // make sure they all map to the correct operation
         unsafe {
             assert_approx_eq!(fadd_fast(a, b), a + b);
@@ -1294,7 +1312,7 @@ fn test_fast() {
     }
 
     #[inline(never)]
-    pub fn test_operations_f32(a: f32, b: f32) {
+    fn test_operations_f32(a: f32, b: f32) {
         // make sure they all map to the correct operation
         unsafe {
             assert_approx_eq!(fadd_fast(a, b), a + b);
@@ -1306,7 +1324,7 @@ fn test_fast() {
     }
 
     #[inline(never)]
-    pub fn test_operations_f64(a: f64, b: f64) {
+    fn test_operations_f64(a: f64, b: f64) {
         // make sure they all map to the correct operation
         unsafe {
             assert_approx_eq!(fadd_fast(a, b), a + b);
@@ -1318,7 +1336,7 @@ fn test_fast() {
     }
 
     #[inline(never)]
-    pub fn test_operations_f128(a: f128, b: f128) {
+    fn test_operations_f128(a: f128, b: f128) {
         // make sure they all map to the correct operation
         unsafe {
             assert_approx_eq!(fadd_fast(a, b), a + b);
@@ -1345,7 +1363,7 @@ fn test_algebraic() {
     };
 
     #[inline(never)]
-    pub fn test_operations_f16(a: f16, b: f16) {
+    fn test_operations_f16(a: f16, b: f16) {
         // make sure they all map to the correct operation
         assert_approx_eq!(fadd_algebraic(a, b), a + b);
         assert_approx_eq!(fsub_algebraic(a, b), a - b);
@@ -1355,7 +1373,7 @@ fn test_algebraic() {
     }
 
     #[inline(never)]
-    pub fn test_operations_f32(a: f32, b: f32) {
+    fn test_operations_f32(a: f32, b: f32) {
         // make sure they all map to the correct operation
         assert_approx_eq!(fadd_algebraic(a, b), a + b);
         assert_approx_eq!(fsub_algebraic(a, b), a - b);
@@ -1365,7 +1383,7 @@ fn test_algebraic() {
     }
 
     #[inline(never)]
-    pub fn test_operations_f64(a: f64, b: f64) {
+    fn test_operations_f64(a: f64, b: f64) {
         // make sure they all map to the correct operation
         assert_approx_eq!(fadd_algebraic(a, b), a + b);
         assert_approx_eq!(fsub_algebraic(a, b), a - b);
@@ -1375,7 +1393,7 @@ fn test_algebraic() {
     }
 
     #[inline(never)]
-    pub fn test_operations_f128(a: f128, b: f128) {
+    fn test_operations_f128(a: f128, b: f128) {
         // make sure they all map to the correct operation
         assert_approx_eq!(fadd_algebraic(a, b), a + b);
         assert_approx_eq!(fsub_algebraic(a, b), a - b);
@@ -1400,13 +1418,13 @@ fn test_fmuladd() {
     // FIXME(f16_f128): add when supported
 
     #[inline(never)]
-    pub fn test_operations_f32(a: f32, b: f32, c: f32) {
-        assert_approx_eq!(unsafe { fmuladdf32(a, b, c) }, a * b + c);
+    fn test_operations_f32(a: f32, b: f32, c: f32) {
+        assert_approx_eq!(fmuladdf32(a, b, c), a * b + c);
     }
 
     #[inline(never)]
-    pub fn test_operations_f64(a: f64, b: f64, c: f64) {
-        assert_approx_eq!(unsafe { fmuladdf64(a, b, c) }, a * b + c);
+    fn test_operations_f64(a: f64, b: f64, c: f64) {
+        assert_approx_eq!(fmuladdf64(a, b, c), a * b + c);
     }
 
     test_operations_f32(0.1, 0.2, 0.3);
@@ -1415,29 +1433,14 @@ fn test_fmuladd() {
 
 /// `min` and `max` on equal arguments are non-deterministic.
 fn test_min_max_nondet() {
-    /// Ensure that if we call the closure often enough, we see both `true` and `false.`
-    #[track_caller]
-    fn ensure_both(f: impl Fn() -> bool) {
-        let rounds = 32;
-        let first = f();
-        for _ in 1..rounds {
-            if f() != first {
-                // We saw two different values!
-                return;
-            }
-        }
-        // We saw the same thing N times.
-        panic!("expected non-determinism, got {rounds} times the same result: {first:?}");
-    }
-
-    ensure_both(|| f16::min(0.0, -0.0).is_sign_positive());
-    ensure_both(|| f16::max(0.0, -0.0).is_sign_positive());
-    ensure_both(|| f32::min(0.0, -0.0).is_sign_positive());
-    ensure_both(|| f32::max(0.0, -0.0).is_sign_positive());
-    ensure_both(|| f64::min(0.0, -0.0).is_sign_positive());
-    ensure_both(|| f64::max(0.0, -0.0).is_sign_positive());
-    ensure_both(|| f128::min(0.0, -0.0).is_sign_positive());
-    ensure_both(|| f128::max(0.0, -0.0).is_sign_positive());
+    check_nondet(|| f16::min(0.0, -0.0).is_sign_positive());
+    check_nondet(|| f16::max(0.0, -0.0).is_sign_positive());
+    check_nondet(|| f32::min(0.0, -0.0).is_sign_positive());
+    check_nondet(|| f32::max(0.0, -0.0).is_sign_positive());
+    check_nondet(|| f64::min(0.0, -0.0).is_sign_positive());
+    check_nondet(|| f64::max(0.0, -0.0).is_sign_positive());
+    check_nondet(|| f128::min(0.0, -0.0).is_sign_positive());
+    check_nondet(|| f128::max(0.0, -0.0).is_sign_positive());
 }
 
 fn test_non_determinism() {
@@ -1447,110 +1450,95 @@ fn test_non_determinism() {
     };
     use std::{f32, f64};
 
-    /// Ensure that the operation is non-deterministic
-    #[track_caller]
-    fn ensure_nondet<T: PartialEq + std::fmt::Debug>(f: impl Fn() -> T) {
-        let rounds = 16;
-        let first = f();
-        for _ in 1..rounds {
-            if f() != first {
-                // We saw two different values!
-                return;
-            }
-        }
-        // We saw the same thing N times.
-        panic!("expected non-determinism, got {rounds} times the same result: {first:?}");
-    }
-
     macro_rules! test_operations_f {
         ($a:expr, $b:expr) => {
-            ensure_nondet(|| fadd_algebraic($a, $b));
-            ensure_nondet(|| fsub_algebraic($a, $b));
-            ensure_nondet(|| fmul_algebraic($a, $b));
-            ensure_nondet(|| fdiv_algebraic($a, $b));
-            ensure_nondet(|| frem_algebraic($a, $b));
+            check_nondet(|| fadd_algebraic($a, $b));
+            check_nondet(|| fsub_algebraic($a, $b));
+            check_nondet(|| fmul_algebraic($a, $b));
+            check_nondet(|| fdiv_algebraic($a, $b));
+            check_nondet(|| frem_algebraic($a, $b));
 
             unsafe {
-                ensure_nondet(|| fadd_fast($a, $b));
-                ensure_nondet(|| fsub_fast($a, $b));
-                ensure_nondet(|| fmul_fast($a, $b));
-                ensure_nondet(|| fdiv_fast($a, $b));
-                ensure_nondet(|| frem_fast($a, $b));
+                check_nondet(|| fadd_fast($a, $b));
+                check_nondet(|| fsub_fast($a, $b));
+                check_nondet(|| fmul_fast($a, $b));
+                check_nondet(|| fdiv_fast($a, $b));
+                check_nondet(|| frem_fast($a, $b));
             }
         };
     }
 
-    pub fn test_operations_f16(a: f16, b: f16) {
+    fn test_operations_f16(a: f16, b: f16) {
         test_operations_f!(a, b);
     }
-    pub fn test_operations_f32(a: f32, b: f32) {
+    fn test_operations_f32(a: f32, b: f32) {
         test_operations_f!(a, b);
-        ensure_nondet(|| a.powf(b));
-        ensure_nondet(|| a.powi(2));
-        ensure_nondet(|| a.log(b));
-        ensure_nondet(|| a.exp());
-        ensure_nondet(|| 10f32.exp2());
-        ensure_nondet(|| f32::consts::E.ln());
-        ensure_nondet(|| 10f32.log10());
-        ensure_nondet(|| 8f32.log2());
-        ensure_nondet(|| 1f32.ln_1p());
-        ensure_nondet(|| 27.0f32.cbrt());
-        ensure_nondet(|| 3.0f32.hypot(4.0f32));
-        ensure_nondet(|| 1f32.sin());
-        ensure_nondet(|| 1f32.cos());
+        check_nondet(|| a.powf(b));
+        check_nondet(|| a.powi(2));
+        check_nondet(|| a.log(b));
+        check_nondet(|| a.exp());
+        check_nondet(|| 10f32.exp2());
+        check_nondet(|| f32::consts::E.ln());
+        check_nondet(|| 10f32.log10());
+        check_nondet(|| 8f32.log2());
+        check_nondet(|| 1f32.ln_1p());
+        check_nondet(|| 27.0f32.cbrt());
+        check_nondet(|| 3.0f32.hypot(4.0f32));
+        check_nondet(|| 1f32.sin());
+        check_nondet(|| 1f32.cos());
         // On i686-pc-windows-msvc , these functions are implemented by calling the `f64` version,
         // which means the little rounding errors Miri introduces are discarded by the cast down to
         // `f32`. Just skip the test for them.
         if !cfg!(all(target_os = "windows", target_env = "msvc", target_arch = "x86")) {
-            ensure_nondet(|| 1.0f32.tan());
-            ensure_nondet(|| 1.0f32.asin());
-            ensure_nondet(|| 5.0f32.acos());
-            ensure_nondet(|| 1.0f32.atan());
-            ensure_nondet(|| 1.0f32.atan2(2.0f32));
-            ensure_nondet(|| 1.0f32.sinh());
-            ensure_nondet(|| 1.0f32.cosh());
-            ensure_nondet(|| 1.0f32.tanh());
+            check_nondet(|| 1.0f32.tan());
+            check_nondet(|| 1.0f32.asin());
+            check_nondet(|| 5.0f32.acos());
+            check_nondet(|| 1.0f32.atan());
+            check_nondet(|| 1.0f32.atan2(2.0f32));
+            check_nondet(|| 1.0f32.sinh());
+            check_nondet(|| 1.0f32.cosh());
+            check_nondet(|| 1.0f32.tanh());
         }
-        ensure_nondet(|| 1.0f32.asinh());
-        ensure_nondet(|| 2.0f32.acosh());
-        ensure_nondet(|| 0.5f32.atanh());
-        ensure_nondet(|| 5.0f32.gamma());
-        ensure_nondet(|| 5.0f32.ln_gamma());
-        ensure_nondet(|| 5.0f32.erf());
-        ensure_nondet(|| 5.0f32.erfc());
+        check_nondet(|| 1.0f32.asinh());
+        check_nondet(|| 2.0f32.acosh());
+        check_nondet(|| 0.5f32.atanh());
+        check_nondet(|| 5.0f32.gamma());
+        check_nondet(|| 5.0f32.ln_gamma());
+        check_nondet(|| 5.0f32.erf());
+        check_nondet(|| 5.0f32.erfc());
     }
-    pub fn test_operations_f64(a: f64, b: f64) {
+    fn test_operations_f64(a: f64, b: f64) {
         test_operations_f!(a, b);
-        ensure_nondet(|| a.powf(b));
-        ensure_nondet(|| a.powi(2));
-        ensure_nondet(|| a.log(b));
-        ensure_nondet(|| a.exp());
-        ensure_nondet(|| 50f64.exp2());
-        ensure_nondet(|| 3f64.ln());
-        ensure_nondet(|| f64::consts::E.log10());
-        ensure_nondet(|| f64::consts::E.log2());
-        ensure_nondet(|| 1f64.ln_1p());
-        ensure_nondet(|| 27.0f64.cbrt());
-        ensure_nondet(|| 3.0f64.hypot(4.0f64));
-        ensure_nondet(|| 1f64.sin());
-        ensure_nondet(|| 1f64.cos());
-        ensure_nondet(|| 1.0f64.tan());
-        ensure_nondet(|| 1.0f64.asin());
-        ensure_nondet(|| 5.0f64.acos());
-        ensure_nondet(|| 1.0f64.atan());
-        ensure_nondet(|| 1.0f64.atan2(2.0f64));
-        ensure_nondet(|| 1.0f64.sinh());
-        ensure_nondet(|| 1.0f64.cosh());
-        ensure_nondet(|| 1.0f64.tanh());
-        ensure_nondet(|| 1.0f64.asinh());
-        ensure_nondet(|| 3.0f64.acosh());
-        ensure_nondet(|| 0.5f64.atanh());
-        ensure_nondet(|| 5.0f64.gamma());
-        ensure_nondet(|| 5.0f64.ln_gamma());
-        ensure_nondet(|| 5.0f64.erf());
-        ensure_nondet(|| 5.0f64.erfc());
+        check_nondet(|| a.powf(b));
+        check_nondet(|| a.powi(2));
+        check_nondet(|| a.log(b));
+        check_nondet(|| a.exp());
+        check_nondet(|| 50f64.exp2());
+        check_nondet(|| 3f64.ln());
+        check_nondet(|| f64::consts::E.log10());
+        check_nondet(|| f64::consts::E.log2());
+        check_nondet(|| 1f64.ln_1p());
+        check_nondet(|| 27.0f64.cbrt());
+        check_nondet(|| 3.0f64.hypot(4.0f64));
+        check_nondet(|| 1f64.sin());
+        check_nondet(|| 1f64.cos());
+        check_nondet(|| 1.0f64.tan());
+        check_nondet(|| 1.0f64.asin());
+        check_nondet(|| 5.0f64.acos());
+        check_nondet(|| 1.0f64.atan());
+        check_nondet(|| 1.0f64.atan2(2.0f64));
+        check_nondet(|| 1.0f64.sinh());
+        check_nondet(|| 1.0f64.cosh());
+        check_nondet(|| 1.0f64.tanh());
+        check_nondet(|| 1.0f64.asinh());
+        check_nondet(|| 3.0f64.acosh());
+        check_nondet(|| 0.5f64.atanh());
+        check_nondet(|| 5.0f64.gamma());
+        check_nondet(|| 5.0f64.ln_gamma());
+        check_nondet(|| 5.0f64.erf());
+        check_nondet(|| 5.0f64.erfc());
     }
-    pub fn test_operations_f128(a: f128, b: f128) {
+    fn test_operations_f128(a: f128, b: f128) {
         test_operations_f!(a, b);
     }
 
@@ -1560,15 +1548,15 @@ fn test_non_determinism() {
     test_operations_f128(25., 18.);
 
     // SNaN^0 = (1 | NaN)
-    ensure_nondet(|| f32::powf(SNAN_F32, 0.0).is_nan());
-    ensure_nondet(|| f64::powf(SNAN_F64, 0.0).is_nan());
+    check_nondet(|| f32::powf(SNAN_F32, 0.0).is_nan());
+    check_nondet(|| f64::powf(SNAN_F64, 0.0).is_nan());
 
     // 1^SNaN = (1 | NaN)
-    ensure_nondet(|| f32::powf(1.0, SNAN_F32).is_nan());
-    ensure_nondet(|| f64::powf(1.0, SNAN_F64).is_nan());
+    check_nondet(|| f32::powf(1.0, SNAN_F32).is_nan());
+    check_nondet(|| f64::powf(1.0, SNAN_F64).is_nan());
 
     // same as powf (keep it consistent):
     // x^SNaN = (1 | NaN)
-    ensure_nondet(|| f32::powi(SNAN_F32, 0).is_nan());
-    ensure_nondet(|| f64::powi(SNAN_F64, 0).is_nan());
+    check_nondet(|| f32::powi(SNAN_F32, 0).is_nan());
+    check_nondet(|| f64::powi(SNAN_F64, 0).is_nan());
 }

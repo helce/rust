@@ -236,6 +236,7 @@ symbols! {
         File,
         FileType,
         FmtArgumentsNew,
+        FmtWrite,
         Fn,
         FnMut,
         FnOnce,
@@ -308,6 +309,7 @@ symbols! {
         PathBuf,
         Pending,
         PinCoerceUnsized,
+        PinDerefMutHelper,
         Pointer,
         Poll,
         ProcMacro,
@@ -545,6 +547,7 @@ symbols! {
         attributes,
         audit_that,
         augmented_assignments,
+        auto_cfg,
         auto_traits,
         autodiff,
         autodiff_forward,
@@ -628,7 +631,6 @@ symbols! {
         cfg_emscripten_wasm_eh,
         cfg_eval,
         cfg_fmt_debug,
-        cfg_hide,
         cfg_overflow_checks,
         cfg_panic,
         cfg_relocation_model,
@@ -679,6 +681,7 @@ symbols! {
         cmpxchg16b_target_feature,
         cmse_nonsecure_entry,
         coerce_pointee_validated,
+        coerce_shared,
         coerce_unsized,
         cold,
         cold_path,
@@ -794,6 +797,7 @@ symbols! {
         ctlz,
         ctlz_nonzero,
         ctpop,
+        ctr,
         cttz,
         cttz_nonzero,
         custom_attribute,
@@ -940,6 +944,7 @@ symbols! {
         ermsb_target_feature,
         exact_div,
         except,
+        exception_handling: "exception-handling",
         exchange_malloc,
         exclusive_range_pattern,
         exhaustive_integer_patterns,
@@ -977,10 +982,12 @@ symbols! {
         external_doc,
         f,
         f16,
+        f16_consts_mod,
         f16_epsilon,
         f16_nan,
         f16c_target_feature,
         f32,
+        f32_consts_mod,
         f32_epsilon,
         f32_legacy_const_digits,
         f32_legacy_const_epsilon,
@@ -998,6 +1005,7 @@ symbols! {
         f32_legacy_const_radix,
         f32_nan,
         f64,
+        f64_consts_mod,
         f64_epsilon,
         f64_legacy_const_digits,
         f64_legacy_const_epsilon,
@@ -1015,6 +1023,7 @@ symbols! {
         f64_legacy_const_radix,
         f64_nan,
         f128,
+        f128_consts_mod,
         f128_epsilon,
         f128_nan,
         fabsf16,
@@ -1150,6 +1159,7 @@ symbols! {
         hashset_iter_ty,
         hexagon_target_feature,
         hidden,
+        hide,
         hint,
         homogeneous_aggregate,
         host,
@@ -1197,6 +1207,7 @@ symbols! {
         if_let_rescope,
         if_while_or_patterns,
         ignore,
+        immediate_abort: "immediate-abort",
         impl_header_lifetime_elision,
         impl_lint_pass,
         impl_trait_in_assoc_type,
@@ -1335,6 +1346,7 @@ symbols! {
         loongarch_target_feature,
         loop_break_value,
         loop_match,
+        lr,
         lt,
         m68k_target_feature,
         macro_at_most_once_rep,
@@ -1415,8 +1427,8 @@ symbols! {
         mir_call,
         mir_cast_ptr_to_ptr,
         mir_cast_transmute,
+        mir_cast_unsize,
         mir_checked,
-        mir_copy_for_deref,
         mir_debuginfo,
         mir_deinit,
         mir_discriminant,
@@ -1543,6 +1555,7 @@ symbols! {
         not,
         notable_trait,
         note,
+        null,
         nvptx_target_feature,
         object_safe_for_dispatch,
         of,
@@ -1852,6 +1865,7 @@ symbols! {
         rustc_align_static,
         rustc_allocator,
         rustc_allocator_zeroed,
+        rustc_allocator_zeroed_variant,
         rustc_allow_const_fn_unstable,
         rustc_allow_incoherent_impl,
         rustc_allowed_through_unstable_modules,
@@ -1918,6 +1932,8 @@ symbols! {
         rustc_no_mir_inline,
         rustc_nonnull_optimization_guaranteed,
         rustc_nounwind,
+        rustc_objc_class,
+        rustc_objc_selector,
         rustc_object_lifetime_default,
         rustc_on_unimplemented,
         rustc_outlives,
@@ -1938,6 +1954,7 @@ symbols! {
         rustc_regions,
         rustc_reservation_impl,
         rustc_serialize,
+        rustc_simd_monomorphize_lane_limit,
         rustc_skip_during_method_dispatch,
         rustc_specialization_trait,
         rustc_std_internal_symbol,
@@ -1981,6 +1998,7 @@ symbols! {
         shl_assign,
         shorter_tail_lifetimes,
         should_panic,
+        show,
         shr,
         shr_assign,
         sig_dfl,
@@ -2394,6 +2412,7 @@ symbols! {
         volatile_store,
         vreg,
         vreg_low16,
+        vsreg,
         vsx,
         vtable_align,
         vtable_size,
@@ -2452,9 +2471,10 @@ pub const STDLIB_STABLE_CRATES: &[Symbol] = &[sym::std, sym::core, sym::alloc, s
 
 #[derive(Copy, Clone, Eq, HashStable_Generic, Encodable, Decodable)]
 pub struct Ident {
-    // `name` should never be the empty symbol. If you are considering that,
-    // you are probably conflating "empty identifier with "no identifier" and
-    // you should use `Option<Ident>` instead.
+    /// `name` should never be the empty symbol. If you are considering that,
+    /// you are probably conflating "empty identifier with "no identifier" and
+    /// you should use `Option<Ident>` instead.
+    /// Trying to construct an `Ident` with an empty name will trigger debug assertions.
     pub name: Symbol,
     pub span: Span,
 }
@@ -2497,8 +2517,12 @@ impl Ident {
         Ident::new(self.name, span.with_ctxt(self.span.ctxt()))
     }
 
+    /// Creates a new ident with the same span and name with leading quote removed, if any.
+    /// Calling it on a `'` ident will return an empty ident, which triggers debug assertions.
     pub fn without_first_quote(self) -> Ident {
-        Ident::new(Symbol::intern(self.as_str().trim_start_matches('\'')), self.span)
+        self.as_str()
+            .strip_prefix('\'')
+            .map_or(self, |name| Ident::new(Symbol::intern(name), self.span))
     }
 
     /// "Normalize" ident for use in comparisons using "item hygiene".
@@ -3084,10 +3108,15 @@ impl Ident {
     }
 
     pub fn is_raw_lifetime_guess(self) -> bool {
-        let name_without_apostrophe = self.without_first_quote();
-        name_without_apostrophe.name != self.name
-            && name_without_apostrophe.name.can_be_raw()
-            && name_without_apostrophe.is_reserved_lifetime()
+        // Check that the name isn't just a single quote.
+        // `self.without_first_quote()` would return empty ident, which triggers debug assert.
+        if self.name.as_str() == "'" {
+            return false;
+        }
+        let ident_without_apostrophe = self.without_first_quote();
+        ident_without_apostrophe.name != self.name
+            && ident_without_apostrophe.name.can_be_raw()
+            && ident_without_apostrophe.is_reserved_lifetime()
     }
 
     pub fn guess_print_mode(self) -> IdentPrintMode {

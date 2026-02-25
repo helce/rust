@@ -1,5 +1,5 @@
 use itertools::Itertools as _;
-use rustc_abi::{self as abi, FIRST_VARIANT};
+use rustc_abi::{self as abi, BackendRepr, FIRST_VARIANT};
 use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::layout::{HasTyCtxt, HasTypingEnv, LayoutOf, TyAndLayout};
 use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
@@ -7,9 +7,9 @@ use rustc_middle::{bug, mir, span_bug};
 use rustc_session::config::OptLevel;
 use tracing::{debug, instrument};
 
+use super::FunctionCx;
 use super::operand::{OperandRef, OperandRefBuilder, OperandValue};
 use super::place::{PlaceRef, PlaceValue, codegen_tag_value};
-use super::{FunctionCx, LocalRef};
 use crate::common::{IntPredicate, TypeKind};
 use crate::traits::*;
 use crate::{MemFlags, base};
@@ -25,6 +25,15 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         match *rvalue {
             mir::Rvalue::Use(ref operand) => {
                 let cg_operand = self.codegen_operand(bx, operand);
+                // Crucially, we do *not* use `OperandValue::Ref` for types with
+                // `BackendRepr::Scalar | BackendRepr::ScalarPair`. This ensures we match the MIR
+                // semantics regarding when assignment operators allow overlap of LHS and RHS.
+                if matches!(
+                    cg_operand.layout.backend_repr,
+                    BackendRepr::Scalar(..) | BackendRepr::ScalarPair(..),
+                ) {
+                    debug_assert!(!matches!(cg_operand.val, OperandValue::Ref(..)));
+                }
                 // FIXME: consider not copying constants through stack. (Fixable by codegen'ing
                 // constants into `OperandValue::Ref`; why don’t we do that yet if we don’t?)
                 cg_operand.val.store(bx, dest);
@@ -77,7 +86,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 }
             }
 
-            mir::Rvalue::Cast(mir::CastKind::Transmute, ref operand, _ty) => {
+            mir::Rvalue::Cast(
+                mir::CastKind::Transmute | mir::CastKind::Subtype,
+                ref operand,
+                _ty,
+            ) => {
                 let src = self.codegen_operand(bx, operand);
                 self.codegen_transmute(bx, src, dest);
             }
@@ -477,7 +490,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                                 bug!("Unsupported cast of {operand:?} to {cast:?}");
                             })
                     }
-                    mir::CastKind::Transmute => {
+                    mir::CastKind::Transmute | mir::CastKind::Subtype => {
                         self.codegen_transmute_operand(bx, operand, cast)
                     }
                 };
@@ -491,22 +504,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 self.codegen_place_to_pointer(bx, place, mk_ref)
             }
 
-            mir::Rvalue::CopyForDeref(place) => {
-                self.codegen_operand(bx, &mir::Operand::Copy(place))
-            }
             mir::Rvalue::RawPtr(kind, place) => {
                 let mk_ptr = move |tcx: TyCtxt<'tcx>, ty: Ty<'tcx>| {
                     Ty::new_ptr(tcx, ty, kind.to_mutbl_lossy())
                 };
                 self.codegen_place_to_pointer(bx, place, mk_ptr)
-            }
-
-            mir::Rvalue::Len(place) => {
-                let size = self.evaluate_array_len(bx, place);
-                OperandRef {
-                    val: OperandValue::Immediate(size),
-                    layout: bx.cx().layout_of(bx.tcx().types.usize),
-                }
             }
 
             mir::Rvalue::BinaryOp(op_with_overflow, box (ref lhs, ref rhs))
@@ -616,7 +618,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     }
                     mir::NullOp::AlignOf => {
                         assert!(bx.cx().type_is_sized(ty));
-                        let val = layout.align.abi.bytes();
+                        let val = layout.align.bytes();
                         bx.cx().const_usize(val)
                     }
                     mir::NullOp::OffsetOf(fields) => {
@@ -722,37 +724,15 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     }
                 }
             }
-            mir::Rvalue::ShallowInitBox(ref operand, content_ty) => {
-                let operand = self.codegen_operand(bx, operand);
-                let val = operand.immediate();
-
-                let content_ty = self.monomorphize(content_ty);
-                let box_layout = bx.cx().layout_of(Ty::new_box(bx.tcx(), content_ty));
-
-                OperandRef { val: OperandValue::Immediate(val), layout: box_layout }
-            }
             mir::Rvalue::WrapUnsafeBinder(ref operand, binder_ty) => {
                 let operand = self.codegen_operand(bx, operand);
                 let binder_ty = self.monomorphize(binder_ty);
                 let layout = bx.cx().layout_of(binder_ty);
                 OperandRef { val: operand.val, layout }
             }
+            mir::Rvalue::CopyForDeref(_) => bug!("`CopyForDeref` in codegen"),
+            mir::Rvalue::ShallowInitBox(..) => bug!("`ShallowInitBox` in codegen"),
         }
-    }
-
-    fn evaluate_array_len(&mut self, bx: &mut Bx, place: mir::Place<'tcx>) -> Bx::Value {
-        // ZST are passed as operands and require special handling
-        // because codegen_place() panics if Local is operand.
-        if let Some(index) = place.as_local()
-            && let LocalRef::Operand(op) = self.locals[index]
-            && let ty::Array(_, n) = op.layout.ty.kind()
-        {
-            let n = n.try_to_target_usize(bx.tcx()).expect("expected monomorphic const in codegen");
-            return bx.cx().const_usize(n);
-        }
-        // use common size calculation for non zero-sized types
-        let cg_value = self.codegen_place(bx, place.as_ref());
-        cg_value.len(bx.cx())
     }
 
     /// Codegen an `Rvalue::RawPtr` or `Rvalue::Ref`
@@ -892,36 +872,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 }
             }
             mir::BinOp::Cmp => {
-                use std::cmp::Ordering;
                 assert!(!is_float);
-                if let Some(value) = bx.three_way_compare(lhs_ty, lhs, rhs) {
-                    return value;
-                }
-                let pred = |op| base::bin_op_to_icmp_predicate(op, is_signed);
-                if bx.cx().tcx().sess.opts.optimize == OptLevel::No {
-                    // FIXME: This actually generates tighter assembly, and is a classic trick
-                    // <https://graphics.stanford.edu/~seander/bithacks.html#CopyIntegerSign>
-                    // However, as of 2023-11 it optimizes worse in things like derived
-                    // `PartialOrd`, so only use it in debug for now. Once LLVM can handle it
-                    // better (see <https://github.com/llvm/llvm-project/issues/73417>), it'll
-                    // be worth trying it in optimized builds as well.
-                    let is_gt = bx.icmp(pred(mir::BinOp::Gt), lhs, rhs);
-                    let gtext = bx.zext(is_gt, bx.type_i8());
-                    let is_lt = bx.icmp(pred(mir::BinOp::Lt), lhs, rhs);
-                    let ltext = bx.zext(is_lt, bx.type_i8());
-                    bx.unchecked_ssub(gtext, ltext)
-                } else {
-                    // These operations are those expected by `tests/codegen-llvm/integer-cmp.rs`,
-                    // from <https://github.com/rust-lang/rust/pull/63767>.
-                    let is_lt = bx.icmp(pred(mir::BinOp::Lt), lhs, rhs);
-                    let is_ne = bx.icmp(pred(mir::BinOp::Ne), lhs, rhs);
-                    let ge = bx.select(
-                        is_ne,
-                        bx.cx().const_i8(Ordering::Greater as i8),
-                        bx.cx().const_i8(Ordering::Equal as i8),
-                    );
-                    bx.select(is_lt, bx.cx().const_i8(Ordering::Less as i8), ge)
-                }
+                bx.three_way_compare(lhs_ty, lhs, rhs)
             }
             mir::BinOp::AddWithOverflow
             | mir::BinOp::SubWithOverflow

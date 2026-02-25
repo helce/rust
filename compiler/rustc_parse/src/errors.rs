@@ -2723,7 +2723,9 @@ pub(crate) struct DotDotDotRestPattern {
     #[label]
     pub span: Span,
     #[suggestion(style = "verbose", code = "", applicability = "machine-applicable")]
-    pub suggestion: Span,
+    pub suggestion: Option<Span>,
+    #[note]
+    pub var_args: Option<()>,
 }
 
 #[derive(Diagnostic)]
@@ -3026,6 +3028,14 @@ pub(crate) struct FnPointerCannotBeAsync {
 #[derive(Diagnostic)]
 #[diag(parse_nested_c_variadic_type, code = E0743)]
 pub(crate) struct NestedCVariadicType {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(parse_dotdotdot_rest_type)]
+#[note]
+pub(crate) struct InvalidCVariadicType {
     #[primary_span]
     pub span: Span,
 }
@@ -3339,34 +3349,6 @@ pub(crate) struct KwBadCase<'a> {
     #[suggestion(code = "{kw}", style = "verbose", applicability = "machine-applicable")]
     pub span: Span,
     pub kw: &'a str,
-}
-
-#[derive(Diagnostic)]
-#[diag(parse_cfg_attr_bad_delim)]
-pub(crate) struct CfgAttrBadDelim {
-    #[primary_span]
-    pub span: Span,
-    #[subdiagnostic]
-    pub sugg: MetaBadDelimSugg,
-}
-
-#[derive(Subdiagnostic)]
-#[multipart_suggestion(parse_meta_bad_delim_suggestion, applicability = "machine-applicable")]
-pub(crate) struct MetaBadDelimSugg {
-    #[suggestion_part(code = "(")]
-    pub open: Span,
-    #[suggestion_part(code = ")")]
-    pub close: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(parse_malformed_cfg_attr)]
-#[note]
-pub(crate) struct MalformedCfgAttr {
-    #[primary_span]
-    #[suggestion(style = "verbose", code = "{sugg}")]
-    pub span: Span,
-    pub sugg: &'static str,
 }
 
 #[derive(Diagnostic)]

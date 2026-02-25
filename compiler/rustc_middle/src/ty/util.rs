@@ -24,6 +24,7 @@ use super::TypingEnv;
 use crate::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use crate::mir;
 use crate::query::Providers;
+use crate::traits::ObligationCause;
 use crate::ty::layout::{FloatExt, IntegerExt};
 use crate::ty::{
     self, Asyncness, FallibleTypeFolder, GenericArgKind, GenericArgsRef, Ty, TyCtxt, TypeFoldable,
@@ -216,7 +217,12 @@ impl<'tcx> TyCtxt<'tcx> {
         typing_env: ty::TypingEnv<'tcx>,
     ) -> Ty<'tcx> {
         let tcx = self;
-        tcx.struct_tail_raw(ty, |ty| tcx.normalize_erasing_regions(typing_env, ty), || {})
+        tcx.struct_tail_raw(
+            ty,
+            &ObligationCause::dummy(),
+            |ty| tcx.normalize_erasing_regions(typing_env, ty),
+            || {},
+        )
     }
 
     /// Returns true if a type has metadata.
@@ -248,6 +254,7 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn struct_tail_raw(
         self,
         mut ty: Ty<'tcx>,
+        cause: &ObligationCause<'tcx>,
         mut normalize: impl FnMut(Ty<'tcx>) -> Ty<'tcx>,
         // This is currently used to allow us to walk a ValTree
         // in lockstep with the type in order to get the ValTree branch that
@@ -261,9 +268,11 @@ impl<'tcx> TyCtxt<'tcx> {
                     Limit(0) => Limit(2),
                     limit => limit * 2,
                 };
-                let reported = self
-                    .dcx()
-                    .emit_err(crate::error::RecursionLimitReached { ty, suggested_limit });
+                let reported = self.dcx().emit_err(crate::error::RecursionLimitReached {
+                    span: cause.span,
+                    ty,
+                    suggested_limit,
+                });
                 return Ty::new_error(self, reported);
             }
             match *ty.kind() {
@@ -1371,10 +1380,12 @@ impl<'tcx> Ty<'tcx> {
                     _ => self,
                 };
 
-                // FIXME(#86868): We should be canonicalizing, or else moving this to a method of inference
-                // context, or *something* like that, but for now just avoid passing inference
-                // variables to queries that can't cope with them. Instead, conservatively
-                // return "true" (may change drop order).
+                // FIXME
+                // We should be canonicalizing, or else moving this to a method of inference
+                // context, or *something* like that,
+                // but for now just avoid passing inference variables
+                // to queries that can't cope with them.
+                // Instead, conservatively return "true" (may change drop order).
                 if query_ty.has_infer() {
                     return true;
                 }

@@ -1,6 +1,7 @@
 //@ compile-flags:-g
 //@ min-gdb-version: 11.2
 //@ disable-gdb-pretty-printers
+//@ ignore-backends: gcc
 
 // gdb-command:run
 // gdb-command:whatis unit

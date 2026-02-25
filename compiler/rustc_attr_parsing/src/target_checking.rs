@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use rustc_ast::AttrStyle;
 use rustc_errors::DiagArgValue;
-use rustc_feature::{AttributeType, Features};
+use rustc_feature::Features;
 use rustc_hir::lints::AttributeLintKind;
 use rustc_hir::{MethodKind, Target};
 
@@ -14,6 +14,11 @@ use crate::session_diagnostics::InvalidTarget;
 pub(crate) enum AllowedTargets {
     AllowList(&'static [Policy]),
     AllowListWarnRest(&'static [Policy]),
+    /// Special, and not the same as `AllowList(&[Allow(Target::Crate)])`.
+    /// For crate-level attributes we emit a specific set of lints to warn
+    /// people about accidentally not using them on the crate.
+    /// Only use this for attributes that are *exclusively* valid at the crate level.
+    CrateLevel,
 }
 
 pub(crate) enum AllowedResult {
@@ -26,7 +31,9 @@ impl AllowedTargets {
     pub(crate) fn is_allowed(&self, target: Target) -> AllowedResult {
         match self {
             AllowedTargets::AllowList(list) => {
-                if list.contains(&Policy::Allow(target)) {
+                if list.contains(&Policy::Allow(target))
+                    || list.contains(&Policy::AllowSilent(target))
+                {
                     AllowedResult::Allowed
                 } else if list.contains(&Policy::Warn(target)) {
                     AllowedResult::Warn
@@ -35,7 +42,9 @@ impl AllowedTargets {
                 }
             }
             AllowedTargets::AllowListWarnRest(list) => {
-                if list.contains(&Policy::Allow(target)) {
+                if list.contains(&Policy::Allow(target))
+                    || list.contains(&Policy::AllowSilent(target))
+                {
                     AllowedResult::Allowed
                 } else if list.contains(&Policy::Error(target)) {
                     AllowedResult::Error
@@ -43,6 +52,7 @@ impl AllowedTargets {
                     AllowedResult::Warn
                 }
             }
+            AllowedTargets::CrateLevel => AllowedResult::Allowed,
         }
     }
 
@@ -50,10 +60,12 @@ impl AllowedTargets {
         match self {
             AllowedTargets::AllowList(list) => list,
             AllowedTargets::AllowListWarnRest(list) => list,
+            AllowedTargets::CrateLevel => ALL_TARGETS,
         }
         .iter()
         .filter_map(|target| match target {
             Policy::Allow(target) => Some(*target),
+            Policy::AllowSilent(_) => None, // Not listed in possible targets
             Policy::Warn(_) => None,
             Policy::Error(_) => None,
         })
@@ -61,10 +73,18 @@ impl AllowedTargets {
     }
 }
 
+/// This policy determines what diagnostics should be emitted based on the `Target` of the attribute.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Policy {
+    /// A target that is allowed.
     Allow(Target),
+    /// A target that is allowed and not listed in the possible targets.
+    /// This is useful if the target is checked elsewhere.
+    AllowSilent(Target),
+    /// Emits a FCW on this target.
+    /// This is useful if the target was previously allowed but should not be.
     Warn(Target),
+    /// Emits an error on this target.
     Error(Target),
 }
 
@@ -74,6 +94,8 @@ impl<'sess, S: Stage> AttributeParser<'sess, S> {
         target: Target,
         cx: &mut AcceptContext<'_, 'sess, S>,
     ) {
+        Self::check_type(matches!(allowed_targets, AllowedTargets::CrateLevel), target, cx);
+
         match allowed_targets.is_allowed(target) {
             AllowedResult::Allowed => {}
             AllowedResult::Warn => {
@@ -109,7 +131,7 @@ impl<'sess, S: Stage> AttributeParser<'sess, S> {
     }
 
     pub(crate) fn check_type(
-        attribute_type: AttributeType,
+        crate_level: bool,
         target: Target,
         cx: &mut AcceptContext<'_, 'sess, S>,
     ) {
@@ -119,7 +141,7 @@ impl<'sess, S: Stage> AttributeParser<'sess, S> {
             return;
         }
 
-        if attribute_type != AttributeType::CrateLevel {
+        if !crate_level {
             return;
         }
 
@@ -189,16 +211,20 @@ pub(crate) fn allowed_targets_applied(
     filter_targets(&mut allowed_targets, IMPL_LIKE, "impl blocks", target, &mut added_fake_targets);
     filter_targets(&mut allowed_targets, ADT_LIKE, "data types", target, &mut added_fake_targets);
 
+    let mut target_strings: Vec<_> = added_fake_targets
+        .iter()
+        .copied()
+        .chain(allowed_targets.iter().map(|t| t.plural_name()))
+        .map(|i| i.to_string())
+        .collect();
+
+    // ensure a consistent order
+    target_strings.sort();
+
     // If there is now only 1 target left, show that as the only possible target
-    (
-        added_fake_targets
-            .iter()
-            .copied()
-            .chain(allowed_targets.iter().map(|t| t.plural_name()))
-            .map(|i| i.to_string())
-            .collect(),
-        allowed_targets.len() + added_fake_targets.len() == 1,
-    )
+    let only_target = target_strings.len() == 1;
+
+    (target_strings, only_target)
 }
 
 fn filter_targets(

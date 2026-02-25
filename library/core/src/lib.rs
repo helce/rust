@@ -51,7 +51,7 @@
     test(attr(allow(dead_code, deprecated, unused_variables, unused_mut)))
 )]
 #![doc(rust_logo)]
-#![doc(cfg_hide(
+#![doc(auto_cfg(hide(
     no_fp_fmt_parse,
     target_pointer_width = "16",
     target_pointer_width = "32",
@@ -71,7 +71,7 @@
     target_has_atomic_load_store = "32",
     target_has_atomic_load_store = "64",
     target_has_atomic_load_store = "ptr",
-))]
+)))]
 #![no_core]
 #![rustc_coherence_is_core]
 #![rustc_preserve_ub_checks]
@@ -116,6 +116,7 @@
 #![feature(link_cfg)]
 #![feature(offset_of_enum)]
 #![feature(panic_internals)]
+#![feature(pattern_type_macro)]
 #![feature(ptr_alignment_type)]
 #![feature(ptr_metadata)]
 #![feature(set_ptr_value)]
@@ -149,7 +150,6 @@
 #![feature(deprecated_suggestion)]
 #![feature(derive_const)]
 #![feature(doc_cfg)]
-#![feature(doc_cfg_hide)]
 #![feature(doc_notable_trait)]
 #![feature(extern_types)]
 #![feature(f16)]
@@ -172,6 +172,7 @@
 #![feature(never_type)]
 #![feature(no_core)]
 #![feature(optimize_attribute)]
+#![feature(pattern_types)]
 #![feature(prelude_import)]
 #![feature(reborrow)]
 #![feature(repr_simd)]
@@ -313,6 +314,7 @@ pub mod io;
 pub mod iter;
 pub mod net;
 pub mod option;
+pub mod os;
 pub mod panic;
 pub mod panicking;
 #[unstable(feature = "pattern_type_macro", issue = "123646")]

@@ -114,8 +114,7 @@ impl PartialEq<Symbol> for Path {
 impl PartialEq<&[Symbol]> for Path {
     #[inline]
     fn eq(&self, names: &&[Symbol]) -> bool {
-        self.segments.len() == names.len()
-            && self.segments.iter().zip(names.iter()).all(|(s1, s2)| s1 == s2)
+        self.segments.iter().eq(*names)
     }
 }
 
@@ -870,11 +869,11 @@ pub enum PatKind {
     Struct(Option<Box<QSelf>>, Path, ThinVec<PatField>, PatFieldsRest),
 
     /// A tuple struct/variant pattern (`Variant(x, y, .., z)`).
-    TupleStruct(Option<Box<QSelf>>, Path, ThinVec<Box<Pat>>),
+    TupleStruct(Option<Box<QSelf>>, Path, ThinVec<Pat>),
 
     /// An or-pattern `A | B | C`.
     /// Invariant: `pats.len() >= 2`.
-    Or(ThinVec<Box<Pat>>),
+    Or(ThinVec<Pat>),
 
     /// A possibly qualified path pattern.
     /// Unqualified path patterns `A::B::C` can legally refer to variants, structs, constants
@@ -883,7 +882,7 @@ pub enum PatKind {
     Path(Option<Box<QSelf>>, Path),
 
     /// A tuple pattern (`(a, b)`).
-    Tuple(ThinVec<Box<Pat>>),
+    Tuple(ThinVec<Pat>),
 
     /// A `box` pattern.
     Box(Box<Pat>),
@@ -901,7 +900,7 @@ pub enum PatKind {
     Range(Option<Box<Expr>>, Option<Box<Expr>>, Spanned<RangeEnd>),
 
     /// A slice pattern `[a, b, c]`.
-    Slice(ThinVec<Box<Pat>>),
+    Slice(ThinVec<Pat>),
 
     /// A rest pattern `..`.
     ///
@@ -2580,7 +2579,10 @@ pub enum TyPatKind {
     /// A range pattern (e.g., `1...2`, `1..2`, `1..`, `..2`, `1..=2`, `..=2`).
     Range(Option<Box<AnonConst>>, Option<Box<AnonConst>>, Spanned<RangeEnd>),
 
-    Or(ThinVec<Box<TyPat>>),
+    /// A `!null` pattern for raw pointers.
+    NotNull,
+
+    Or(ThinVec<TyPat>),
 
     /// Placeholder for a pattern that wasn't syntactically well formed in some way.
     Err(ErrorGuaranteed),
@@ -3634,49 +3636,26 @@ pub struct Trait {
     pub items: ThinVec<Box<AssocItem>>,
 }
 
-/// The location of a where clause on a `TyAlias` (`Span`) and whether there was
-/// a `where` keyword (`bool`). This is split out from `WhereClause`, since there
-/// are two locations for where clause on type aliases, but their predicates
-/// are concatenated together.
-///
-/// Take this example:
-/// ```ignore (only-for-syntax-highlight)
-/// trait Foo {
-///   type Assoc<'a, 'b> where Self: 'a, Self: 'b;
-/// }
-/// impl Foo for () {
-///   type Assoc<'a, 'b> where Self: 'a = () where Self: 'b;
-///   //                 ^^^^^^^^^^^^^^ first where clause
-///   //                                     ^^^^^^^^^^^^^^ second where clause
-/// }
-/// ```
-///
-/// If there is no where clause, then this is `false` with `DUMMY_SP`.
-#[derive(Copy, Clone, Encodable, Decodable, Debug, Default, Walkable)]
-pub struct TyAliasWhereClause {
-    pub has_where_token: bool,
-    pub span: Span,
-}
-
-/// The span information for the two where clauses on a `TyAlias`.
-#[derive(Copy, Clone, Encodable, Decodable, Debug, Default, Walkable)]
-pub struct TyAliasWhereClauses {
-    /// Before the equals sign.
-    pub before: TyAliasWhereClause,
-    /// After the equals sign.
-    pub after: TyAliasWhereClause,
-    /// The index in `TyAlias.generics.where_clause.predicates` that would split
-    /// into predicates from the where clause before the equals sign and the ones
-    /// from the where clause after the equals sign.
-    pub split: usize,
-}
-
 #[derive(Clone, Encodable, Decodable, Debug, Walkable)]
 pub struct TyAlias {
     pub defaultness: Defaultness,
     pub ident: Ident,
     pub generics: Generics,
-    pub where_clauses: TyAliasWhereClauses,
+    /// There are two locations for where clause on type aliases. This represents the second
+    /// where clause, before the semicolon. The first where clause is stored inside `generics`.
+    ///
+    /// Take this example:
+    /// ```ignore (only-for-syntax-highlight)
+    /// trait Foo {
+    ///   type Assoc<'a, 'b> where Self: 'a, Self: 'b;
+    /// }
+    /// impl Foo for () {
+    ///   type Assoc<'a, 'b> where Self: 'a = () where Self: 'b;
+    ///   //                 ^^^^^^^^^^^^^^ before where clause
+    ///   //                                     ^^^^^^^^^^^^^^ after where clause
+    /// }
+    /// ```
+    pub after_where_clause: WhereClause,
     #[visitable(extra = BoundKind::Bound)]
     pub bounds: GenericBounds,
     pub ty: Option<Box<Ty>>,

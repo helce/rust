@@ -17,7 +17,7 @@ use crate::ty::{self, CoroutineArgsExt, OpaqueHiddenType, Ty};
 rustc_index::newtype_index! {
     #[derive(HashStable)]
     #[encodable]
-    #[debug_format = "_{}"]
+    #[debug_format = "_s{}"]
     pub struct CoroutineSavedLocal {}
 }
 
@@ -84,11 +84,10 @@ impl Debug for CoroutineLayout<'_> {
     }
 }
 
-/// All the opaque types that are restricted to concrete types
-/// by this function. Unlike the value in `TypeckResults`, this has
-/// unerased regions.
+/// All the opaque types that have had their hidden type fully computed.
+/// Unlike the value in `TypeckResults`, this has unerased regions.
 #[derive(Default, Debug, TyEncodable, TyDecodable, HashStable)]
-pub struct ConcreteOpaqueTypes<'tcx>(pub FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>>);
+pub struct DefinitionSiteHiddenTypes<'tcx>(pub FxIndexMap<LocalDefId, OpaqueHiddenType<'tcx>>);
 
 /// The result of the `mir_const_qualif` query.
 ///

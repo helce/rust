@@ -43,7 +43,7 @@ use crate::errors::{
 };
 use crate::llvm::diagnostic::OptimizationDiagnosticKind::*;
 use crate::llvm::{self, DiagnosticInfo};
-use crate::type_::Type;
+use crate::type_::llvm_type_ptr;
 use crate::{LlvmCodegenBackend, ModuleLlvm, base, common, llvm_util};
 
 pub(crate) fn llvm_err<'a>(dcx: DiagCtxtHandle<'_>, err: LlvmError<'a>) -> ! {
@@ -203,6 +203,9 @@ pub(crate) fn target_machine_factory(
     optlvl: config::OptLevel,
     target_features: &[String],
 ) -> TargetMachineFactoryFn<LlvmCodegenBackend> {
+    // Self-profile timer for creating a _factory_.
+    let _prof_timer = sess.prof.generic_activity("target_machine_factory");
+
     let reloc_model = to_llvm_relocation_model(sess.relocation_model());
 
     let (opt_level, _) = to_llvm_opt_settings(optlvl);
@@ -249,24 +252,6 @@ pub(crate) fn target_machine_factory(
 
     let use_emulated_tls = matches!(sess.tls_model(), TlsModel::Emulated);
 
-    // copy the exe path, followed by path all into one buffer
-    // null terminating them so we can use them as null terminated strings
-    let args_cstr_buff = {
-        let mut args_cstr_buff: Vec<u8> = Vec::new();
-        let exe_path = std::env::current_exe().unwrap_or_default();
-        let exe_path_str = exe_path.into_os_string().into_string().unwrap_or_default();
-
-        args_cstr_buff.extend_from_slice(exe_path_str.as_bytes());
-        args_cstr_buff.push(0);
-
-        for arg in sess.expanded_args.iter() {
-            args_cstr_buff.extend_from_slice(arg.as_bytes());
-            args_cstr_buff.push(0);
-        }
-
-        args_cstr_buff
-    };
-
     let debuginfo_compression = sess.opts.debuginfo_compression.to_string();
     match sess.opts.debuginfo_compression {
         rustc_session::config::DebugInfoCompression::Zlib => {
@@ -288,7 +273,11 @@ pub(crate) fn target_machine_factory(
 
     let use_wasm_eh = wants_wasm_eh(sess);
 
+    let prof = SelfProfilerRef::clone(&sess.prof);
     Arc::new(move |config: TargetMachineFactoryConfig| {
+        // Self-profile timer for invoking a factory to create a target machine.
+        let _prof_timer = prof.generic_activity("target_machine_factory_inner");
+
         let path_to_cstring_helper = |path: Option<PathBuf>| -> CString {
             let path = path.unwrap_or_default();
             let path = path_mapping
@@ -323,7 +312,6 @@ pub(crate) fn target_machine_factory(
             &output_obj_file,
             &debuginfo_compression,
             use_emulated_tls,
-            &args_cstr_buff,
             use_wasm_eh,
         )
     })
@@ -354,7 +342,7 @@ fn write_bitcode_to_file(module: &ModuleCodegen<ModuleLlvm>, path: &Path) {
     }
 }
 
-/// In what context is a dignostic handler being attached to a codegen unit?
+/// In what context is a diagnostic handler being attached to a codegen unit?
 pub(crate) enum CodegenDiagnosticsStage {
     /// Prelink optimization stage.
     Opt,
@@ -574,7 +562,8 @@ pub(crate) unsafe fn llvm_optimize(
     // FIXME(ZuseZ4): In a future update we could figure out how to only optimize individual functions getting
     // differentiated.
 
-    let consider_ad = cfg!(llvm_enzyme) && config.autodiff.contains(&config::AutoDiff::Enable);
+    let consider_ad =
+        cfg!(feature = "llvm_enzyme") && config.autodiff.contains(&config::AutoDiff::Enable);
     let run_enzyme = autodiff_stage == AutodiffStage::DuringAD;
     let print_before_enzyme = config.autodiff.contains(&config::AutoDiff::PrintModBefore);
     let print_after_enzyme = config.autodiff.contains(&config::AutoDiff::PrintModAfter);
@@ -740,7 +729,8 @@ pub(crate) fn optimize(
 
         // If we know that we will later run AD, then we disable vectorization and loop unrolling.
         // Otherwise we pretend AD is already done and run the normal opt pipeline (=PostAD).
-        let consider_ad = cfg!(llvm_enzyme) && config.autodiff.contains(&config::AutoDiff::Enable);
+        let consider_ad =
+            cfg!(feature = "llvm_enzyme") && config.autodiff.contains(&config::AutoDiff::Enable);
         let autodiff_stage = if consider_ad { AutodiffStage::PreAD } else { AutodiffStage::PostAD };
         // The embedded bitcode is used to run LTO/ThinLTO.
         // The bitcode obtained during the `codegen` phase is no longer suitable for performing LTO.
@@ -1154,7 +1144,7 @@ fn create_msvc_imps(
     // underscores added in front).
     let prefix = if cgcx.target_arch == "x86" { "\x01__imp__" } else { "\x01__imp_" };
 
-    let ptr_ty = Type::ptr_llcx(llcx);
+    let ptr_ty = llvm_type_ptr(llcx);
     let globals = base::iter_globals(llmod)
         .filter(|&val| {
             llvm::get_linkage(val) == llvm::Linkage::ExternalLinkage && !llvm::is_declaration(val)

@@ -167,7 +167,7 @@ pub struct TypeckResults<'tcx> {
     /// We also store the type here, so that the compiler can use it as a hint
     /// for figuring out hidden types, even if they are only set in dead code
     /// (which doesn't show up in MIR).
-    pub concrete_opaque_types: FxIndexMap<LocalDefId, ty::OpaqueHiddenType<'tcx>>,
+    pub hidden_types: FxIndexMap<LocalDefId, ty::OpaqueHiddenType<'tcx>>,
 
     /// Tracks the minimum captures required for a closure;
     /// see `MinCaptureInformationMap` for more details.
@@ -250,7 +250,7 @@ impl<'tcx> TypeckResults<'tcx> {
             coercion_casts: Default::default(),
             used_trait_imports: Default::default(),
             tainted_by_errors: None,
-            concrete_opaque_types: Default::default(),
+            hidden_types: Default::default(),
             closure_min_captures: Default::default(),
             closure_fake_reads: Default::default(),
             rvalue_scopes: Default::default(),
@@ -798,8 +798,8 @@ impl<'tcx> IsIdentity for CanonicalUserType<'tcx> {
                     match arg.kind() {
                         GenericArgKind::Type(ty) => match ty.kind() {
                             ty::Bound(debruijn, b) => {
-                                // We only allow a `ty::INNERMOST` index in generic parameters.
-                                assert_eq!(*debruijn, ty::INNERMOST);
+                                // We only allow a `ty::BoundVarIndexKind::Canonical` index in generic parameters.
+                                assert_eq!(*debruijn, ty::BoundVarIndexKind::Canonical);
                                 cvar == b.var
                             }
                             _ => false,
@@ -807,8 +807,8 @@ impl<'tcx> IsIdentity for CanonicalUserType<'tcx> {
 
                         GenericArgKind::Lifetime(r) => match r.kind() {
                             ty::ReBound(debruijn, b) => {
-                                // We only allow a `ty::INNERMOST` index in generic parameters.
-                                assert_eq!(debruijn, ty::INNERMOST);
+                                // We only allow a `ty::BoundVarIndexKind::Canonical` index in generic parameters.
+                                assert_eq!(debruijn, ty::BoundVarIndexKind::Canonical);
                                 cvar == b.var
                             }
                             _ => false,
@@ -816,8 +816,8 @@ impl<'tcx> IsIdentity for CanonicalUserType<'tcx> {
 
                         GenericArgKind::Const(ct) => match ct.kind() {
                             ty::ConstKind::Bound(debruijn, b) => {
-                                // We only allow a `ty::INNERMOST` index in generic parameters.
-                                assert_eq!(debruijn, ty::INNERMOST);
+                                // We only allow a `ty::BoundVarIndexKind::Canonical` index in generic parameters.
+                                assert_eq!(debruijn, ty::BoundVarIndexKind::Canonical);
                                 cvar == b.var
                             }
                             _ => false,
@@ -858,8 +858,10 @@ impl<'tcx> std::fmt::Display for UserTypeKind<'tcx> {
 pub struct Rust2024IncompatiblePatInfo {
     /// Labeled spans for `&`s, `&mut`s, and binding modifiers incompatible with Rust 2024.
     pub primary_labels: Vec<(Span, String)>,
-    /// Whether any binding modifiers occur under a non-`move` default binding mode.
-    pub bad_modifiers: bool,
+    /// Whether any `mut` binding modifiers occur under a non-`move` default binding mode.
+    pub bad_mut_modifiers: bool,
+    /// Whether any `ref`/`ref mut` binding modifiers occur under a non-`move` default binding mode.
+    pub bad_ref_modifiers: bool,
     /// Whether any `&` or `&mut` patterns occur under a non-`move` default binding mode.
     pub bad_ref_pats: bool,
     /// If `true`, we can give a simpler suggestion solely by eliding explicit binding modifiers.
