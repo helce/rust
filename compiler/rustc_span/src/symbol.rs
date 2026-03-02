@@ -922,6 +922,7 @@ symbols! {
         dyn_trait,
         dynamic_no_pic: "dynamic-no-pic",
         e,
+        e2k,
         e2k_target_feature,
         edition_panic,
         effective_target_features,
