@@ -1876,6 +1876,7 @@ crate::target_spec_enum! {
         Avr = "avr",
         Bpf = "bpf",
         CSky = "csky",
+        E2k = "e2k",
         Hexagon = "hexagon",
         LoongArch32 = "loongarch32",
         LoongArch64 = "loongarch64",
@@ -1914,6 +1915,7 @@ impl Arch {
             Self::Avr => sym::avr,
             Self::Bpf => sym::bpf,
             Self::CSky => sym::csky,
+            Self::E2k => sym::e2k,
             Self::Hexagon => sym::hexagon,
             Self::LoongArch32 => sym::loongarch32,
             Self::LoongArch64 => sym::loongarch64,
@@ -1953,7 +1955,7 @@ impl Arch {
             // to needlessly restrict custom target.json configurations.
             Other(_) => true,
 
-            AArch64 | AmdGpu | Arm | Arm64EC | Avr | CSky | Hexagon | LoongArch32 | LoongArch64
+            AArch64 | AmdGpu | Arm | Arm64EC | Avr | CSky | E2k | Hexagon | LoongArch32 | LoongArch64
             | M68k | Mips | Mips32r6 | Mips64 | Mips64r6 | Msp430 | Nvptx64 | PowerPC
             | PowerPC64 | PowerPC64LE | RiscV32 | RiscV64 | S390x | Sparc | Sparc64 | Wasm32
             | Wasm64 | X86 | X86_64 | Xtensa => true,
