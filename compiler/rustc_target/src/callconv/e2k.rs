@@ -37,6 +37,11 @@ where
         return;
     }
 
+    if arg.layout.pass_indirectly_in_non_rustic_abis(cx) {
+        arg.make_indirect();
+        return;
+    }
+
     if is_e2k_aggregate(arg) || arg.layout.size.bits() > 64 {
         arg.cast_to(Uniform::new(
             Reg::i64(), arg.layout.size.align_to(Reg::i64().align(cx))
