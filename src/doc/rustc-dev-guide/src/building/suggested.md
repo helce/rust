@@ -296,7 +296,7 @@ lets you use `cargo fmt`.
 [the section on vscode]: suggested.md#configuring-rust-analyzer-for-rustc
 [the section on rustup]: how-to-build-and-run.md?highlight=rustup#creating-a-rustup-toolchain
 
-## Faster Builds with CI-rustc  
+## Faster Builds with CI-rustc
 
 If you are not working on the compiler, you often don't need to build the compiler tree.
 For example, you can skip building the compiler and only build the `library` tree or the
@@ -389,7 +389,7 @@ times, and having to update each clone individually.
 Fortunately, Git has a better solution called [worktrees]. This lets you create
 multiple "working trees", which all share the same Git database. Moreover,
 because all of the worktrees share the same object database, if you update a
-branch (e.g. master) in any of them, you can use the new commits from any of the
+branch (e.g. `main`) in any of them, you can use the new commits from any of the
 worktrees. One caveat, though, is that submodules do not get shared. They will
 still be cloned multiple times.
 
@@ -403,10 +403,10 @@ command:
 git worktree add ../rust2
 ```
 
-Creating a new worktree for a new branch based on `master` looks like:
+Creating a new worktree for a new branch based on `main` looks like:
 
 ```bash
-git worktree add -b my-feature ../rust2 master
+git worktree add -b my-feature ../rust2 main
 ```
 
 You can then use that rust2 folder as a separate workspace for modifying and
@@ -451,15 +451,15 @@ pkgs.mkShell {
 
 If you use Bash, Zsh, Fish or PowerShell, you can find automatically-generated shell
 completion scripts for `x.py` in
-[`src/etc/completions`](https://github.com/rust-lang/rust/tree/master/src/etc/completions).
+[`src/etc/completions`](https://github.com/rust-lang/rust/tree/HEAD/src/etc/completions).
 
 You can use `source ./src/etc/completions/x.py.<extension>` to load completions
 for your shell of choice, or `& .\src\etc\completions\x.py.ps1` for PowerShell.
 Adding this to your shell's startup script (e.g. `.bashrc`) will automatically
 load this completion.
 
-[`src/etc/rust_analyzer_settings.json`]: https://github.com/rust-lang/rust/blob/master/src/etc/rust_analyzer_settings.json
-[`src/etc/rust_analyzer_eglot.el`]: https://github.com/rust-lang/rust/blob/master/src/etc/rust_analyzer_eglot.el
-[`src/etc/rust_analyzer_helix.toml`]: https://github.com/rust-lang/rust/blob/master/src/etc/rust_analyzer_helix.toml
-[`src/etc/rust_analyzer_zed.json`]: https://github.com/rust-lang/rust/blob/master/src/etc/rust_analyzer_zed.json
-[`src/etc/pre-push.sh`]: https://github.com/rust-lang/rust/blob/master/src/etc/pre-push.sh
+[`src/etc/rust_analyzer_settings.json`]: https://github.com/rust-lang/rust/blob/HEAD/src/etc/rust_analyzer_settings.json
+[`src/etc/rust_analyzer_eglot.el`]: https://github.com/rust-lang/rust/blob/HEAD/src/etc/rust_analyzer_eglot.el
+[`src/etc/rust_analyzer_helix.toml`]: https://github.com/rust-lang/rust/blob/HEAD/src/etc/rust_analyzer_helix.toml
+[`src/etc/rust_analyzer_zed.json`]: https://github.com/rust-lang/rust/blob/HEAD/src/etc/rust_analyzer_zed.json
+[`src/etc/pre-push.sh`]: https://github.com/rust-lang/rust/blob/HEAD/src/etc/pre-push.sh

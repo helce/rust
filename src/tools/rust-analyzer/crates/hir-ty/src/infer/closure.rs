@@ -7,12 +7,12 @@ use std::{iter, mem, ops::ControlFlow};
 use hir_def::{
     TraitId,
     hir::{ClosureKind, ExprId, PatId},
-    lang_item::LangItem,
     type_ref::TypeRefId,
 };
 use rustc_type_ir::{
-    ClosureArgs, ClosureArgsParts, CoroutineArgs, CoroutineArgsParts, Interner, TypeSuperVisitable,
-    TypeVisitable, TypeVisitableExt, TypeVisitor,
+    ClosureArgs, ClosureArgsParts, CoroutineArgs, CoroutineArgsParts, CoroutineClosureArgs,
+    CoroutineClosureArgsParts, Interner, TypeSuperVisitable, TypeVisitable, TypeVisitableExt,
+    TypeVisitor,
     inherent::{BoundExistentialPredicates, GenericArgs as _, IntoKind, SliceLike, Ty as _},
 };
 use tracing::debug;
@@ -22,14 +22,14 @@ use crate::{
     db::{InternedClosure, InternedCoroutine},
     infer::{BreakableKind, Diverges, coerce::CoerceMany},
     next_solver::{
-        AliasTy, Binder, ClauseKind, DbInterner, ErrorGuaranteed, FnSig, GenericArgs, PolyFnSig,
-        PolyProjectionPredicate, Predicate, PredicateKind, SolverDefId, Ty, TyKind,
+        AliasTy, Binder, BoundRegionKind, BoundVarKind, BoundVarKinds, ClauseKind, DbInterner,
+        ErrorGuaranteed, FnSig, GenericArgs, PolyFnSig, PolyProjectionPredicate, Predicate,
+        PredicateKind, SolverDefId, Ty, TyKind,
         abi::Safety,
         infer::{
-            BoundRegionConversionTime, DefineOpaqueTypes, InferOk, InferResult,
+            BoundRegionConversionTime, InferOk, InferResult,
             traits::{ObligationCause, PredicateObligations},
         },
-        util::explicit_item_bounds,
     },
     traits::FnTrait,
 };
@@ -72,6 +72,8 @@ impl<'db> InferenceContext<'_, 'db> {
         let sig_ty = Ty::new_fn_ptr(interner, bound_sig);
 
         let parent_args = GenericArgs::identity_for_item(interner, self.generic_def.into());
+        // FIXME: Make this an infer var and infer it later.
+        let tupled_upvars_ty = self.types.unit;
         let (id, ty, resume_yield_tys) = match closure_kind {
             ClosureKind::Coroutine(_) => {
                 let yield_ty = self.table.next_ty_var();
@@ -80,11 +82,11 @@ impl<'db> InferenceContext<'_, 'db> {
                 // FIXME: Infer the upvars later.
                 let parts = CoroutineArgsParts {
                     parent_args,
-                    kind_ty: Ty::new_unit(interner),
+                    kind_ty: self.types.unit,
                     resume_ty,
                     yield_ty,
                     return_ty: body_ret_ty,
-                    tupled_upvars_ty: Ty::new_unit(interner),
+                    tupled_upvars_ty,
                 };
 
                 let coroutine_id =
@@ -97,9 +99,7 @@ impl<'db> InferenceContext<'_, 'db> {
 
                 (None, coroutine_ty, Some((resume_ty, yield_ty)))
             }
-            // FIXME(next-solver): `ClosureKind::Async` should really be a separate arm that creates a `CoroutineClosure`.
-            // But for now we treat it as a closure.
-            ClosureKind::Closure | ClosureKind::Async => {
+            ClosureKind::Closure => {
                 let closure_id = self.db.intern_closure(InternedClosure(self.owner, tgt_expr));
                 match expected_kind {
                     Some(kind) => {
@@ -117,7 +117,7 @@ impl<'db> InferenceContext<'_, 'db> {
                     }
                     None => {}
                 };
-                // FIXME: Infer the kind and the upvars later when needed.
+                // FIXME: Infer the kind later if needed.
                 let parts = ClosureArgsParts {
                     parent_args,
                     closure_kind_ty: Ty::from_closure_kind(
@@ -125,7 +125,7 @@ impl<'db> InferenceContext<'_, 'db> {
                         expected_kind.unwrap_or(rustc_type_ir::ClosureKind::Fn),
                     ),
                     closure_sig_as_fn_ptr_ty: sig_ty,
-                    tupled_upvars_ty: Ty::new_unit(interner),
+                    tupled_upvars_ty,
                 };
                 let closure_ty = Ty::new_closure(
                     interner,
@@ -135,6 +135,61 @@ impl<'db> InferenceContext<'_, 'db> {
                 self.deferred_closures.entry(closure_id).or_default();
                 self.add_current_closure_dependency(closure_id);
                 (Some(closure_id), closure_ty, None)
+            }
+            ClosureKind::Async => {
+                // async closures always return the type ascribed after the `->` (if present),
+                // and yield `()`.
+                let bound_return_ty = bound_sig.skip_binder().output();
+                let bound_yield_ty = self.types.unit;
+                // rustc uses a special lang item type for the resume ty. I don't believe this can cause us problems.
+                let resume_ty = self.types.unit;
+
+                // FIXME: Infer the kind later if needed.
+                let closure_kind_ty = Ty::from_closure_kind(
+                    interner,
+                    expected_kind.unwrap_or(rustc_type_ir::ClosureKind::Fn),
+                );
+
+                // FIXME: Infer captures later.
+                // `for<'env> fn() -> ()`, for no captures.
+                let coroutine_captures_by_ref_ty = Ty::new_fn_ptr(
+                    interner,
+                    Binder::bind_with_vars(
+                        interner.mk_fn_sig([], self.types.unit, false, Safety::Safe, FnAbi::Rust),
+                        BoundVarKinds::new_from_iter(
+                            interner,
+                            [BoundVarKind::Region(BoundRegionKind::ClosureEnv)],
+                        ),
+                    ),
+                );
+                let closure_args = CoroutineClosureArgs::new(
+                    interner,
+                    CoroutineClosureArgsParts {
+                        parent_args,
+                        closure_kind_ty,
+                        signature_parts_ty: Ty::new_fn_ptr(
+                            interner,
+                            bound_sig.map_bound(|sig| {
+                                interner.mk_fn_sig(
+                                    [
+                                        resume_ty,
+                                        Ty::new_tup_from_iter(interner, sig.inputs().iter()),
+                                    ],
+                                    Ty::new_tup(interner, &[bound_yield_ty, bound_return_ty]),
+                                    sig.c_variadic,
+                                    sig.safety,
+                                    sig.abi,
+                                )
+                            }),
+                        ),
+                        tupled_upvars_ty,
+                        coroutine_captures_by_ref_ty,
+                    },
+                );
+
+                let coroutine_id =
+                    self.db.intern_coroutine(InternedCoroutine(self.owner, tgt_expr)).into();
+                (None, Ty::new_coroutine_closure(interner, coroutine_id, closure_args.args), None)
             }
         };
 
@@ -164,11 +219,12 @@ impl<'db> InferenceContext<'_, 'db> {
     }
 
     fn fn_trait_kind_from_def_id(&self, trait_id: TraitId) -> Option<rustc_type_ir::ClosureKind> {
-        let lang_item = self.db.lang_attr(trait_id.into())?;
-        match lang_item {
-            LangItem::Fn => Some(rustc_type_ir::ClosureKind::Fn),
-            LangItem::FnMut => Some(rustc_type_ir::ClosureKind::FnMut),
-            LangItem::FnOnce => Some(rustc_type_ir::ClosureKind::FnOnce),
+        match trait_id {
+            _ if self.lang_items.Fn == Some(trait_id) => Some(rustc_type_ir::ClosureKind::Fn),
+            _ if self.lang_items.FnMut == Some(trait_id) => Some(rustc_type_ir::ClosureKind::FnMut),
+            _ if self.lang_items.FnOnce == Some(trait_id) => {
+                Some(rustc_type_ir::ClosureKind::FnOnce)
+            }
             _ => None,
         }
     }
@@ -177,11 +233,14 @@ impl<'db> InferenceContext<'_, 'db> {
         &self,
         trait_id: TraitId,
     ) -> Option<rustc_type_ir::ClosureKind> {
-        let lang_item = self.db.lang_attr(trait_id.into())?;
-        match lang_item {
-            LangItem::AsyncFn => Some(rustc_type_ir::ClosureKind::Fn),
-            LangItem::AsyncFnMut => Some(rustc_type_ir::ClosureKind::FnMut),
-            LangItem::AsyncFnOnce => Some(rustc_type_ir::ClosureKind::FnOnce),
+        match trait_id {
+            _ if self.lang_items.AsyncFn == Some(trait_id) => Some(rustc_type_ir::ClosureKind::Fn),
+            _ if self.lang_items.AsyncFnMut == Some(trait_id) => {
+                Some(rustc_type_ir::ClosureKind::FnMut)
+            }
+            _ if self.lang_items.AsyncFnOnce == Some(trait_id) => {
+                Some(rustc_type_ir::ClosureKind::FnOnce)
+            }
             _ => None,
         }
     }
@@ -198,8 +257,10 @@ impl<'db> InferenceContext<'_, 'db> {
                 .deduce_closure_signature_from_predicates(
                     expected_ty,
                     closure_kind,
-                    explicit_item_bounds(self.interner(), def_id)
-                        .iter_instantiated(self.interner(), args)
+                    def_id
+                        .expect_opaque_ty()
+                        .predicates(self.db)
+                        .iter_instantiated_copied(self.interner(), args.as_slice())
                         .map(|clause| clause.as_predicate()),
                 ),
             TyKind::Dynamic(object_type, ..) => {
@@ -306,8 +367,8 @@ impl<'db> InferenceContext<'_, 'db> {
                     _ = self
                         .table
                         .infer_ctxt
-                        .at(&ObligationCause::new(), self.table.trait_env.env)
-                        .eq(DefineOpaqueTypes::Yes, inferred_fnptr_sig, generalized_fnptr_sig)
+                        .at(&ObligationCause::new(), self.table.param_env)
+                        .eq(inferred_fnptr_sig, generalized_fnptr_sig)
                         .map(|infer_ok| self.table.register_infer_ok(infer_ok));
 
                     let resolved_sig =
@@ -375,21 +436,20 @@ impl<'db> InferenceContext<'_, 'db> {
         projection: PolyProjectionPredicate<'db>,
     ) -> Option<PolyFnSig<'db>> {
         let SolverDefId::TypeAliasId(def_id) = projection.item_def_id() else { unreachable!() };
-        let lang_item = self.db.lang_attr(def_id.into());
 
         // For now, we only do signature deduction based off of the `Fn` and `AsyncFn` traits,
         // for closures and async closures, respectively.
         match closure_kind {
-            ClosureKind::Closure if lang_item == Some(LangItem::FnOnceOutput) => {
+            ClosureKind::Closure if Some(def_id) == self.lang_items.FnOnceOutput => {
                 self.extract_sig_from_projection(projection)
             }
-            ClosureKind::Async if lang_item == Some(LangItem::AsyncFnOnceOutput) => {
+            ClosureKind::Async if Some(def_id) == self.lang_items.AsyncFnOnceOutput => {
                 self.extract_sig_from_projection(projection)
             }
             // It's possible we've passed the closure to a (somewhat out-of-fashion)
             // `F: FnOnce() -> Fut, Fut: Future<Output = T>` style bound. Let's still
             // guide inference here, since it's beneficial for the user.
-            ClosureKind::Async if lang_item == Some(LangItem::FnOnceOutput) => {
+            ClosureKind::Async if Some(def_id) == self.lang_items.FnOnceOutput => {
                 self.extract_sig_from_projection_and_future_bound(projection)
             }
             _ => None,
@@ -480,7 +540,7 @@ impl<'db> InferenceContext<'_, 'db> {
                 && let ret_projection = bound.predicate.kind().rebind(ret_projection)
                 && let Some(ret_projection) = ret_projection.no_bound_vars()
                 && let SolverDefId::TypeAliasId(assoc_type) = ret_projection.def_id()
-                && self.db.lang_attr(assoc_type.into()) == Some(LangItem::FutureOutput)
+                && Some(assoc_type) == self.lang_items.FutureOutput
             {
                 return_ty = Some(ret_projection.term.expect_type());
                 break;
@@ -689,21 +749,18 @@ impl<'db> InferenceContext<'_, 'db> {
             {
                 // Check that E' = S'.
                 let cause = ObligationCause::new();
-                let InferOk { value: (), obligations } = table
-                    .infer_ctxt
-                    .at(&cause, table.trait_env.env)
-                    .eq(DefineOpaqueTypes::Yes, expected_ty, supplied_ty)?;
+                let InferOk { value: (), obligations } =
+                    table.infer_ctxt.at(&cause, table.param_env).eq(expected_ty, supplied_ty)?;
                 all_obligations.extend(obligations);
             }
 
             let supplied_output_ty = supplied_sig.output();
             let cause = ObligationCause::new();
             let InferOk { value: (), obligations } =
-                table.infer_ctxt.at(&cause, table.trait_env.env).eq(
-                    DefineOpaqueTypes::Yes,
-                    expected_sigs.liberated_sig.output(),
-                    supplied_output_ty,
-                )?;
+                table
+                    .infer_ctxt
+                    .at(&cause, table.param_env)
+                    .eq(expected_sigs.liberated_sig.output(), supplied_output_ty)?;
             all_obligations.extend(obligations);
 
             let inputs = supplied_sig

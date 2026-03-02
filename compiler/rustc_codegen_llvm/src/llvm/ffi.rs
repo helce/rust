@@ -289,6 +289,9 @@ pub(crate) enum AttributeKind {
     DeadOnUnwind = 43,
     DeadOnReturn = 44,
     CapturesReadOnly = 45,
+    CapturesNone = 46,
+    SanitizeRealtimeNonblocking = 47,
+    SanitizeRealtimeBlocking = 48,
 }
 
 /// LLVMIntPredicate
@@ -481,6 +484,7 @@ pub(crate) struct SanitizerOptions {
     pub sanitize_memory: bool,
     pub sanitize_memory_recover: bool,
     pub sanitize_memory_track_origins: c_int,
+    pub sanitize_realtime: bool,
     pub sanitize_thread: bool,
     pub sanitize_hwaddress: bool,
     pub sanitize_hwaddress_recover: bool,
@@ -675,6 +679,15 @@ pub(crate) enum Opcode {
     CatchPad = 63,
     CleanupPad = 64,
     CatchSwitch = 65,
+}
+
+/// Must match the layout of `LLVMRustCompressionKind`.
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub(crate) enum CompressionKind {
+    None = 0,
+    Zlib = 1,
+    Zstd = 2,
 }
 
 unsafe extern "C" {
@@ -1117,6 +1130,11 @@ unsafe extern "C" {
 
     // Operations on functions
     pub(crate) fn LLVMSetFunctionCallConv(Fn: &Value, CC: c_uint);
+    pub(crate) fn LLVMAddFunction<'a>(
+        Mod: &'a Module,
+        Name: *const c_char,
+        FunctionTy: &'a Type,
+    ) -> &'a Value;
     pub(crate) fn LLVMDeleteFunction(Fn: &Value);
 
     // Operations about llvm intrinsics
@@ -1142,13 +1160,9 @@ unsafe extern "C" {
     ) -> &'a BasicBlock;
 
     // Operations on instructions
-    pub(crate) fn LLVMGetInstructionParent(Inst: &Value) -> &BasicBlock;
-    pub(crate) fn LLVMGetCalledValue(CallInst: &Value) -> Option<&Value>;
     pub(crate) fn LLVMIsAInstruction(Val: &Value) -> Option<&Value>;
     pub(crate) fn LLVMGetFirstBasicBlock(Fn: &Value) -> &BasicBlock;
     pub(crate) fn LLVMGetOperand(Val: &Value, Index: c_uint) -> Option<&Value>;
-    pub(crate) fn LLVMGetNextInstruction(Val: &Value) -> Option<&Value>;
-    pub(crate) fn LLVMInstructionEraseFromParent(Val: &Value);
 
     // Operations on call sites
     pub(crate) fn LLVMSetInstructionCallConv(Instr: &Value, CC: c_uint);
@@ -1698,6 +1712,37 @@ unsafe extern "C" {
         NumBundles: c_uint,
         Name: *const c_char,
     ) -> &'a Value;
+}
+
+#[cfg(feature = "llvm_offload")]
+pub(crate) use self::Offload::*;
+
+#[cfg(feature = "llvm_offload")]
+mod Offload {
+    use super::*;
+    unsafe extern "C" {
+        /// Processes the module and writes it in an offload compatible way into a "host.out" file.
+        pub(crate) fn LLVMRustBundleImages<'a>(M: &'a Module, TM: &'a TargetMachine) -> bool;
+        pub(crate) fn LLVMRustOffloadMapper<'a>(OldFn: &'a Value, NewFn: &'a Value);
+    }
+}
+
+#[cfg(not(feature = "llvm_offload"))]
+pub(crate) use self::Offload_fallback::*;
+
+#[cfg(not(feature = "llvm_offload"))]
+mod Offload_fallback {
+    use super::*;
+    /// Processes the module and writes it in an offload compatible way into a "host.out" file.
+    /// Marked as unsafe to match the real offload wrapper which is unsafe due to FFI.
+    #[allow(unused_unsafe)]
+    pub(crate) unsafe fn LLVMRustBundleImages<'a>(_M: &'a Module, _TM: &'a TargetMachine) -> bool {
+        unimplemented!("This rustc version was not built with LLVM Offload support!");
+    }
+    #[allow(unused_unsafe)]
+    pub(crate) unsafe fn LLVMRustOffloadMapper<'a>(_OldFn: &'a Value, _NewFn: &'a Value) {
+        unimplemented!("This rustc version was not built with LLVM Offload support!");
+    }
 }
 
 // FFI bindings for `DIBuilder` functions in the LLVM-C API.
@@ -2328,12 +2373,13 @@ unsafe extern "C" {
         UseInitArray: bool,
         SplitDwarfFile: *const c_char,
         OutputObjFile: *const c_char,
-        DebugInfoCompression: *const c_char,
+        DebugInfoCompression: CompressionKind,
         UseEmulatedTls: bool,
         UseWasmEH: bool,
     ) -> *mut TargetMachine;
 
     pub(crate) fn LLVMRustAddLibraryInfo<'a>(
+        T: &TargetMachine,
         PM: &PassManager<'a>,
         M: &'a Module,
         DisableSimplifyLibCalls: bool,
@@ -2435,6 +2481,8 @@ unsafe extern "C" {
 
     pub(crate) fn LLVMRustPositionBuilderPastAllocas<'a>(B: &Builder<'a>, Fn: &'a Value);
     pub(crate) fn LLVMRustPositionBuilderAtStart<'a>(B: &Builder<'a>, BB: &'a BasicBlock);
+    pub(crate) fn LLVMRustGetInsertPoint<'a>(B: &Builder<'a>) -> &'a Value;
+    pub(crate) fn LLVMRustRestoreInsertPoint<'a>(B: &Builder<'a>, IP: &'a Value);
 
     pub(crate) fn LLVMRustSetModulePICLevel(M: &Module);
     pub(crate) fn LLVMRustSetModulePIELevel(M: &Module);
@@ -2516,9 +2564,8 @@ unsafe extern "C" {
 
     pub(crate) fn LLVMRustGetElementTypeArgIndex(CallSite: &Value) -> i32;
 
-    pub(crate) fn LLVMRustLLVMHasZlibCompressionForDebugSymbols() -> bool;
-
-    pub(crate) fn LLVMRustLLVMHasZstdCompressionForDebugSymbols() -> bool;
+    pub(crate) safe fn LLVMRustLLVMHasZlibCompression() -> bool;
+    pub(crate) safe fn LLVMRustLLVMHasZstdCompression() -> bool;
 
     pub(crate) fn LLVMRustGetSymbols(
         buf_ptr: *const u8,

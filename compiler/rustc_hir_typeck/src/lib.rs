@@ -7,6 +7,7 @@
 #![feature(iter_intersperse)]
 #![feature(iter_order_by)]
 #![feature(never_type)]
+#![feature(trim_prefix_suffix)]
 // tidy-alphabetical-end
 
 mod _match;
@@ -36,7 +37,6 @@ mod op;
 mod opaque_types;
 mod pat;
 mod place_op;
-mod rvalue_scopes;
 mod typeck_root_ctxt;
 mod upvar;
 mod writeback;
@@ -236,9 +236,6 @@ fn typeck_with_inspect<'tcx>(
     // because they don't constrain other type variables.
     fcx.closure_analyze(body);
     assert!(fcx.deferred_call_resolutions.borrow().is_empty());
-    // Before the coroutine analysis, temporary scopes shall be marked to provide more
-    // precise information on types to be captured.
-    fcx.resolve_rvalue_scopes(def_id.to_def_id());
 
     for (ty, span, code) in fcx.deferred_sized_obligations.borrow_mut().drain(..) {
         let ty = fcx.normalize(span, ty);
@@ -299,11 +296,6 @@ fn infer_type_if_missing<'tcx>(fcx: &FnCtxt<'_, 'tcx>, node: Node<'tcx>) -> Opti
     } else if let Node::AnonConst(_) = node {
         let id = tcx.local_def_id_to_hir_id(def_id);
         match tcx.parent_hir_node(id) {
-            Node::Ty(&hir::Ty { kind: hir::TyKind::Typeof(anon_const), span, .. })
-                if anon_const.hir_id == id =>
-            {
-                Some(fcx.next_ty_var(span))
-            }
             Node::Expr(&hir::Expr { kind: hir::ExprKind::InlineAsm(asm), span, .. })
             | Node::Item(&hir::Item { kind: hir::ItemKind::GlobalAsm { asm, .. }, span, .. }) => {
                 asm.operands.iter().find_map(|(op, _op_sp)| match op {

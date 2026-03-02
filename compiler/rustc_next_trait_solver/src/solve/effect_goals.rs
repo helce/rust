@@ -189,17 +189,43 @@ where
     }
 
     fn consider_auto_trait_candidate(
-        _ecx: &mut EvalCtxt<'_, D>,
+        ecx: &mut EvalCtxt<'_, D>,
         _goal: Goal<I, Self>,
     ) -> Result<Candidate<I>, NoSolution> {
-        unreachable!("auto traits are never const")
+        ecx.cx().delay_bug("auto traits are never const");
+        Err(NoSolution)
     }
 
     fn consider_trait_alias_candidate(
-        _ecx: &mut EvalCtxt<'_, D>,
-        _goal: Goal<I, Self>,
+        ecx: &mut EvalCtxt<'_, D>,
+        goal: Goal<I, Self>,
     ) -> Result<Candidate<I>, NoSolution> {
-        unreachable!("trait aliases are never const")
+        let cx = ecx.cx();
+
+        ecx.probe_builtin_trait_candidate(BuiltinImplSource::Misc).enter(|ecx| {
+            let where_clause_bounds = cx
+                .predicates_of(goal.predicate.def_id().into())
+                .iter_instantiated(cx, goal.predicate.trait_ref.args)
+                .map(|p| goal.with(cx, p));
+
+            let const_conditions = cx
+                .const_conditions(goal.predicate.def_id().into())
+                .iter_instantiated(cx, goal.predicate.trait_ref.args)
+                .map(|bound_trait_ref| {
+                    goal.with(
+                        cx,
+                        bound_trait_ref.to_host_effect_clause(cx, goal.predicate.constness),
+                    )
+                });
+            // While you could think of trait aliases to have a single builtin impl
+            // which uses its implied trait bounds as where-clauses, using
+            // `GoalSource::ImplWhereClause` here would be incorrect, as we also
+            // impl them, which means we're "stepping out of the impl constructor"
+            // again. To handle this, we treat these cycles as ambiguous for now.
+            ecx.add_goals(GoalSource::Misc, where_clause_bounds);
+            ecx.add_goals(GoalSource::Misc, const_conditions);
+            ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+        })
     }
 
     fn consider_builtin_sizedness_candidates(
@@ -211,10 +237,32 @@ where
     }
 
     fn consider_builtin_copy_clone_candidate(
-        _ecx: &mut EvalCtxt<'_, D>,
-        _goal: Goal<I, Self>,
+        ecx: &mut EvalCtxt<'_, D>,
+        goal: Goal<I, Self>,
     ) -> Result<Candidate<I>, NoSolution> {
-        Err(NoSolution)
+        let cx = ecx.cx();
+
+        let self_ty = goal.predicate.self_ty();
+        let constituent_tys =
+            structural_traits::instantiate_constituent_tys_for_copy_clone_trait(ecx, self_ty)?;
+
+        ecx.probe_builtin_trait_candidate(BuiltinImplSource::Misc).enter(|ecx| {
+            ecx.enter_forall(constituent_tys, |ecx, tys| {
+                ecx.add_goals(
+                    GoalSource::ImplWhereBound,
+                    tys.into_iter().map(|ty| {
+                        goal.with(
+                            cx,
+                            ty::ClauseKind::HostEffect(
+                                goal.predicate.with_replaced_self_ty(cx, ty),
+                            ),
+                        )
+                    }),
+                );
+            });
+
+            ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+        })
     }
 
     fn consider_builtin_fn_ptr_trait_candidate(
@@ -399,6 +447,6 @@ where
                 goal.with(ecx.cx(), goal.predicate.trait_ref);
             ecx.compute_trait_goal(trait_goal)
         })?;
-        self.assemble_and_merge_candidates(proven_via, goal, |_ecx| Err(NoSolution))
+        self.assemble_and_merge_candidates(proven_via, goal, |_ecx| None, |_ecx| Err(NoSolution))
     }
 }

@@ -648,9 +648,10 @@ impl Pat {
             PatKind::Path(qself, path) => TyKind::Path(qself.clone(), path.clone()),
             PatKind::MacCall(mac) => TyKind::MacCall(mac.clone()),
             // `&mut? P` can be reinterpreted as `&mut? T` where `T` is `P` reparsed as a type.
-            PatKind::Ref(pat, mutbl) => {
-                pat.to_ty().map(|ty| TyKind::Ref(None, MutTy { ty, mutbl: *mutbl }))?
-            }
+            PatKind::Ref(pat, pinned, mutbl) => pat.to_ty().map(|ty| match pinned {
+                Pinnedness::Not => TyKind::Ref(None, MutTy { ty, mutbl: *mutbl }),
+                Pinnedness::Pinned => TyKind::PinnedRef(None, MutTy { ty, mutbl: *mutbl }),
+            })?,
             // A slice/array pattern `[P]` can be reparsed as `[T]`, an unsized array,
             // when `P` can be reparsed as a type `T`.
             PatKind::Slice(pats) if let [pat] = pats.as_slice() => {
@@ -696,7 +697,7 @@ impl Pat {
             // Trivial wrappers over inner patterns.
             PatKind::Box(s)
             | PatKind::Deref(s)
-            | PatKind::Ref(s, _)
+            | PatKind::Ref(s, _, _)
             | PatKind::Paren(s)
             | PatKind::Guard(s, _) => s.walk(it),
 
@@ -712,6 +713,15 @@ impl Pat {
             | PatKind::MacCall(_)
             | PatKind::Err(_) => {}
         }
+    }
+
+    /// Strip off all reference patterns (`&`, `&mut`) and return the inner pattern.
+    pub fn peel_refs(&self) -> &Pat {
+        let mut current = self;
+        while let PatKind::Ref(inner, _, _) = &current.kind {
+            current = inner;
+        }
+        current
     }
 
     /// Is this a `..` pattern?
@@ -756,7 +766,9 @@ impl Pat {
             PatKind::Missing => unreachable!(),
             PatKind::Wild => Some("_".to_string()),
             PatKind::Ident(BindingMode::NONE, ident, None) => Some(format!("{ident}")),
-            PatKind::Ref(pat, mutbl) => pat.descr().map(|d| format!("&{}{d}", mutbl.prefix_str())),
+            PatKind::Ref(pat, pinned, mutbl) => {
+                pat.descr().map(|d| format!("&{}{d}", pinned.prefix_str(*mutbl)))
+            }
             _ => None,
         }
     }
@@ -789,14 +801,14 @@ pub struct PatField {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[derive(Encodable, Decodable, HashStable_Generic, Walkable)]
 pub enum ByRef {
-    Yes(Mutability),
+    Yes(Pinnedness, Mutability),
     No,
 }
 
 impl ByRef {
     #[must_use]
     pub fn cap_ref_mutability(mut self, mutbl: Mutability) -> Self {
-        if let ByRef::Yes(old_mutbl) = &mut self {
+        if let ByRef::Yes(_, old_mutbl) = &mut self {
             *old_mutbl = cmp::min(*old_mutbl, mutbl);
         }
         self
@@ -814,25 +826,38 @@ pub struct BindingMode(pub ByRef, pub Mutability);
 
 impl BindingMode {
     pub const NONE: Self = Self(ByRef::No, Mutability::Not);
-    pub const REF: Self = Self(ByRef::Yes(Mutability::Not), Mutability::Not);
+    pub const REF: Self = Self(ByRef::Yes(Pinnedness::Not, Mutability::Not), Mutability::Not);
+    pub const REF_PIN: Self =
+        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Not), Mutability::Not);
     pub const MUT: Self = Self(ByRef::No, Mutability::Mut);
-    pub const REF_MUT: Self = Self(ByRef::Yes(Mutability::Mut), Mutability::Not);
-    pub const MUT_REF: Self = Self(ByRef::Yes(Mutability::Not), Mutability::Mut);
-    pub const MUT_REF_MUT: Self = Self(ByRef::Yes(Mutability::Mut), Mutability::Mut);
+    pub const REF_MUT: Self = Self(ByRef::Yes(Pinnedness::Not, Mutability::Mut), Mutability::Not);
+    pub const REF_PIN_MUT: Self =
+        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Mut), Mutability::Not);
+    pub const MUT_REF: Self = Self(ByRef::Yes(Pinnedness::Not, Mutability::Not), Mutability::Mut);
+    pub const MUT_REF_PIN: Self =
+        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Not), Mutability::Mut);
+    pub const MUT_REF_MUT: Self =
+        Self(ByRef::Yes(Pinnedness::Not, Mutability::Mut), Mutability::Mut);
+    pub const MUT_REF_PIN_MUT: Self =
+        Self(ByRef::Yes(Pinnedness::Pinned, Mutability::Mut), Mutability::Mut);
 
     pub fn prefix_str(self) -> &'static str {
         match self {
             Self::NONE => "",
             Self::REF => "ref ",
+            Self::REF_PIN => "ref pin const ",
             Self::MUT => "mut ",
             Self::REF_MUT => "ref mut ",
+            Self::REF_PIN_MUT => "ref pin mut ",
             Self::MUT_REF => "mut ref ",
+            Self::MUT_REF_PIN => "mut ref pin ",
             Self::MUT_REF_MUT => "mut ref mut ",
+            Self::MUT_REF_PIN_MUT => "mut ref pin mut ",
         }
     }
 }
 
-#[derive(Clone, Encodable, Decodable, Debug, Walkable)]
+#[derive(Clone, Copy, Encodable, Decodable, Debug, Walkable)]
 pub enum RangeEnd {
     /// `..=` or `...`
     Included(RangeSyntax),
@@ -840,7 +865,7 @@ pub enum RangeEnd {
     Excluded,
 }
 
-#[derive(Clone, Encodable, Decodable, Debug, Walkable)]
+#[derive(Clone, Copy, Encodable, Decodable, Debug, Walkable)]
 pub enum RangeSyntax {
     /// `...`
     DotDotDot,
@@ -891,7 +916,7 @@ pub enum PatKind {
     Deref(Box<Pat>),
 
     /// A reference pattern (e.g., `&mut (a, b)`).
-    Ref(Box<Pat>, Mutability),
+    Ref(Box<Pat>, Pinnedness, Mutability),
 
     /// A literal, const block or path.
     Expr(Box<Expr>),
@@ -1890,7 +1915,7 @@ pub enum ForLoopKind {
 }
 
 /// Used to differentiate between `async {}` blocks and `gen {}` blocks.
-#[derive(Clone, Encodable, Decodable, Debug, PartialEq, Eq, Walkable)]
+#[derive(Clone, Copy, Encodable, Decodable, Debug, PartialEq, Eq, Walkable)]
 pub enum GenBlockKind {
     Async,
     Gen,
@@ -2488,8 +2513,6 @@ pub enum TyKind {
     ImplTrait(NodeId, #[visitable(extra = BoundKind::Impl)] GenericBounds),
     /// No-op; kept solely so that we can pretty-print faithfully.
     Paren(Box<Ty>),
-    /// Unused for now.
-    Typeof(AnonConst),
     /// This means the type should be inferred instead of it having been
     /// specified. This can appear anywhere in a type.
     Infer,
@@ -3540,8 +3563,9 @@ impl Item {
             ItemKind::Const(i) => Some(&i.generics),
             ItemKind::Fn(i) => Some(&i.generics),
             ItemKind::TyAlias(i) => Some(&i.generics),
-            ItemKind::TraitAlias(_, generics, _)
-            | ItemKind::Enum(_, generics, _)
+            ItemKind::TraitAlias(i) => Some(&i.generics),
+
+            ItemKind::Enum(_, generics, _)
             | ItemKind::Struct(_, generics, _)
             | ItemKind::Union(_, generics, _) => Some(&generics),
             ItemKind::Trait(i) => Some(&i.generics),
@@ -3624,6 +3648,15 @@ impl Default for FnHeader {
 }
 
 #[derive(Clone, Encodable, Decodable, Debug, Walkable)]
+pub struct TraitAlias {
+    pub constness: Const,
+    pub ident: Ident,
+    pub generics: Generics,
+    #[visitable(extra = BoundKind::Bound)]
+    pub bounds: GenericBounds,
+}
+
+#[derive(Clone, Encodable, Decodable, Debug, Walkable)]
 pub struct Trait {
     pub constness: Const,
     pub safety: Safety,
@@ -3664,6 +3697,7 @@ pub struct TyAlias {
 #[derive(Clone, Encodable, Decodable, Debug)]
 pub struct Impl {
     pub generics: Generics,
+    pub constness: Const,
     pub of_trait: Option<Box<TraitImplHeader>>,
     pub self_ty: Box<Ty>,
     pub items: ThinVec<Box<AssocItem>>,
@@ -3673,13 +3707,15 @@ pub struct Impl {
 pub struct TraitImplHeader {
     pub defaultness: Defaultness,
     pub safety: Safety,
-    pub constness: Const,
     pub polarity: ImplPolarity,
     pub trait_ref: TraitRef,
 }
 
 #[derive(Clone, Encodable, Decodable, Debug, Default, Walkable)]
 pub struct FnContract {
+    /// Declarations of variables accessible both in the `requires` and
+    /// `ensures` clauses.
+    pub declarations: ThinVec<Stmt>,
     pub requires: Option<Box<Expr>>,
     pub ensures: Option<Box<Expr>>,
 }
@@ -3733,8 +3769,27 @@ pub struct ConstItem {
     pub ident: Ident,
     pub generics: Generics,
     pub ty: Box<Ty>,
-    pub expr: Option<Box<Expr>>,
+    pub rhs: Option<ConstItemRhs>,
     pub define_opaque: Option<ThinVec<(NodeId, Path)>>,
+}
+
+#[derive(Clone, Encodable, Decodable, Debug, Walkable)]
+pub enum ConstItemRhs {
+    TypeConst(AnonConst),
+    Body(Box<Expr>),
+}
+
+impl ConstItemRhs {
+    pub fn span(&self) -> Span {
+        self.expr().span
+    }
+
+    pub fn expr(&self) -> &Expr {
+        match self {
+            ConstItemRhs::TypeConst(anon_const) => &anon_const.value,
+            ConstItemRhs::Body(expr) => expr,
+        }
+    }
 }
 
 // Adding a new variant? Please update `test_item` in `tests/ui/macros/stringify.rs`.
@@ -3795,7 +3850,7 @@ pub enum ItemKind {
     /// Trait alias.
     ///
     /// E.g., `trait Foo = Bar + Quux;`.
-    TraitAlias(Ident, Generics, GenericBounds),
+    TraitAlias(Box<TraitAlias>),
     /// An implementation.
     ///
     /// E.g., `impl<A> Foo<A> { .. }` or `impl<A> Trait for Foo<A> { .. }`.
@@ -3828,7 +3883,7 @@ impl ItemKind {
             | ItemKind::Struct(ident, ..)
             | ItemKind::Union(ident, ..)
             | ItemKind::Trait(box Trait { ident, .. })
-            | ItemKind::TraitAlias(ident, ..)
+            | ItemKind::TraitAlias(box TraitAlias { ident, .. })
             | ItemKind::MacroDef(ident, _)
             | ItemKind::Delegation(box Delegation { ident, .. }) => Some(ident),
 
@@ -3885,7 +3940,7 @@ impl ItemKind {
             | Self::Struct(_, generics, _)
             | Self::Union(_, generics, _)
             | Self::Trait(box Trait { generics, .. })
-            | Self::TraitAlias(_, generics, _)
+            | Self::TraitAlias(box TraitAlias { generics, .. })
             | Self::Impl(Impl { generics, .. }) => Some(generics),
             _ => None,
         }
@@ -4046,9 +4101,9 @@ mod size_asserts {
     static_assert_size!(GenericArg, 24);
     static_assert_size!(GenericBound, 88);
     static_assert_size!(Generics, 40);
-    static_assert_size!(Impl, 64);
-    static_assert_size!(Item, 144);
-    static_assert_size!(ItemKind, 80);
+    static_assert_size!(Impl, 80);
+    static_assert_size!(Item, 152);
+    static_assert_size!(ItemKind, 88);
     static_assert_size!(LitKind, 24);
     static_assert_size!(Local, 96);
     static_assert_size!(MetaItemLit, 40);
@@ -4059,7 +4114,7 @@ mod size_asserts {
     static_assert_size!(PathSegment, 24);
     static_assert_size!(Stmt, 32);
     static_assert_size!(StmtKind, 16);
-    static_assert_size!(TraitImplHeader, 80);
+    static_assert_size!(TraitImplHeader, 72);
     static_assert_size!(Ty, 64);
     static_assert_size!(TyKind, 40);
     // tidy-alphabetical-end

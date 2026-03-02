@@ -23,6 +23,7 @@ use ide_db::{
 use itertools::Itertools;
 use load_cargo::{ProjectFolders, load_proc_macro};
 use lsp_types::FileSystemWatcher;
+use paths::Utf8Path;
 use proc_macro_api::ProcMacroClient;
 use project_model::{ManifestPath, ProjectWorkspace, ProjectWorkspaceKind, WorkspaceBuildScripts};
 use stdx::{format_to, thread::ThreadIntent};
@@ -73,7 +74,7 @@ impl GlobalState {
             && !self.fetch_workspaces_queue.op_in_progress()
             && !self.fetch_build_data_queue.op_in_progress()
             && !self.fetch_proc_macros_queue.op_in_progress()
-            && !self.discover_workspace_queue.op_in_progress()
+            && self.discover_jobs_active == 0
             && self.vfs_progress_config_version >= self.vfs_config_version
     }
 
@@ -222,6 +223,16 @@ impl GlobalState {
                     message.push_str(err);
                     message.push_str("\n\n");
                 }
+                if let Some(err) = ws.sysroot.metadata_error() {
+                    status.health |= lsp_ext::Health::Warning;
+                    format_to!(
+                        message,
+                        "Failed to read Cargo metadata with dependencies for sysroot of `{}`: ",
+                        ws.manifest_or_root()
+                    );
+                    message.push_str(err);
+                    message.push_str("\n\n");
+                }
                 if let ProjectWorkspaceKind::Cargo { rustc: Err(Some(err)), .. } = &ws.kind {
                     status.health |= lsp_ext::Health::Warning;
                     format_to!(
@@ -286,7 +297,7 @@ impl GlobalState {
                 .collect();
             let cargo_config = self.config.cargo(None);
             let discover_command = self.config.discover_workspace_config().cloned();
-            let is_quiescent = !(self.discover_workspace_queue.op_in_progress()
+            let is_quiescent = !(self.discover_jobs_active > 0
                 || self.vfs_progress_config_version < self.vfs_config_version
                 || !self.vfs_done);
 
@@ -689,7 +700,7 @@ impl GlobalState {
                 };
                 info!("Using proc-macro server at {path}");
 
-                Some(ProcMacroClient::spawn(&path, &env).map_err(|err| {
+                Some(ProcMacroClient::spawn(&path, &env, ws.toolchain.as_ref()).map_err(|err| {
                     tracing::error!(
                         "Failed to run proc-macro server from path {path}, error: {err:?}",
                     );
@@ -866,6 +877,7 @@ impl GlobalState {
                     None,
                     self.config.root_path().clone(),
                     None,
+                    None,
                 )]
             }
             crate::flycheck::InvocationStrategy::PerWorkspace => {
@@ -880,13 +892,17 @@ impl GlobalState {
                                 | ProjectWorkspaceKind::DetachedFile {
                                     cargo: Some((cargo, _, _)),
                                     ..
-                                } => (cargo.workspace_root(), Some(cargo.manifest_path())),
+                                } => (
+                                    cargo.workspace_root(),
+                                    Some(cargo.manifest_path()),
+                                    Some(cargo.target_directory()),
+                                ),
                                 ProjectWorkspaceKind::Json(project) => {
                                     // Enable flychecks for json projects if a custom flycheck command was supplied
                                     // in the workspace configuration.
                                     match config {
                                         FlycheckConfig::CustomCommand { .. } => {
-                                            (project.path(), None)
+                                            (project.path(), None, None)
                                         }
                                         _ => return None,
                                     }
@@ -896,7 +912,7 @@ impl GlobalState {
                             ws.sysroot.root().map(ToOwned::to_owned),
                         ))
                     })
-                    .map(|(id, (root, manifest_path), sysroot_root)| {
+                    .map(|(id, (root, manifest_path, target_dir), sysroot_root)| {
                         FlycheckHandle::spawn(
                             id,
                             next_gen,
@@ -905,6 +921,7 @@ impl GlobalState {
                             sysroot_root,
                             root.to_path_buf(),
                             manifest_path.map(|it| it.to_path_buf()),
+                            target_dir.map(|it| AsRef::<Utf8Path>::as_ref(it).to_path_buf()),
                         )
                     })
                     .collect()

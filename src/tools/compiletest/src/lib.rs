@@ -141,13 +141,13 @@ fn parse_config(args: Vec<String>) -> Config {
         .optopt("", "host", "the host to build for", "HOST")
         .optopt("", "cdb", "path to CDB to use for CDB debuginfo tests", "PATH")
         .optopt("", "gdb", "path to GDB to use for GDB debuginfo tests", "PATH")
+        .optopt("", "lldb", "path to LLDB to use for LLDB debuginfo tests", "PATH")
         .optopt("", "lldb-version", "the version of LLDB used", "VERSION STRING")
         .optopt("", "llvm-version", "the version of LLVM used", "VERSION STRING")
         .optflag("", "system-llvm", "is LLVM the system LLVM")
         .optopt("", "android-cross-path", "Android NDK standalone path", "PATH")
         .optopt("", "adb-path", "path to the android debugger", "PATH")
         .optopt("", "adb-test-dir", "path to tests for the android debugger", "PATH")
-        .optopt("", "lldb-python-dir", "directory containing LLDB's python module", "PATH")
         .reqopt("", "cc", "path to a C compiler", "PATH")
         .reqopt("", "cxx", "path to a C++ compiler", "PATH")
         .reqopt("", "cflags", "flags for the C compiler", "FLAGS")
@@ -217,7 +217,8 @@ fn parse_config(args: Vec<String>) -> Config {
             "override-codegen-backend",
             "the codegen backend to use instead of the default one",
             "CODEGEN BACKEND [NAME | PATH]",
-        );
+        )
+        .optflag("", "bypass-ignore-backends", "ignore `//@ ignore-backends` directives");
 
     let (argv0, args_) = args.split_first().unwrap();
     if args.len() == 1 || args[1] == "-h" || args[1] == "--help" {
@@ -257,11 +258,13 @@ fn parse_config(args: Vec<String>) -> Config {
     let target = opt_str2(matches.opt_str("target"));
     let android_cross_path = opt_path(matches, "android-cross-path");
     // FIXME: `cdb_version` is *derived* from cdb, but it's *not* technically a config!
-    let (cdb, cdb_version) = debuggers::analyze_cdb(matches.opt_str("cdb"), &target);
+    let cdb = debuggers::discover_cdb(matches.opt_str("cdb"), &target);
+    let cdb_version = cdb.as_deref().and_then(debuggers::query_cdb_version);
     // FIXME: `gdb_version` is *derived* from gdb, but it's *not* technically a config!
-    let (gdb, gdb_version) =
-        debuggers::analyze_gdb(matches.opt_str("gdb"), &target, &android_cross_path);
+    let gdb = debuggers::discover_gdb(matches.opt_str("gdb"), &target, &android_cross_path);
+    let gdb_version = gdb.as_deref().and_then(debuggers::query_gdb_version);
     // FIXME: `lldb_version` is *derived* from lldb, but it's *not* technically a config!
+    let lldb = matches.opt_str("lldb").map(Utf8PathBuf::from);
     let lldb_version =
         matches.opt_str("lldb-version").as_deref().and_then(debuggers::extract_lldb_version);
     let color = match matches.opt_str("color").as_deref() {
@@ -372,8 +375,8 @@ fn parse_config(args: Vec<String>) -> Config {
         fail_fast: matches.opt_present("fail-fast")
             || env::var_os("RUSTC_TEST_FAIL_FAST").is_some(),
 
-        compile_lib_path: make_absolute(opt_path(matches, "compile-lib-path")),
-        run_lib_path: make_absolute(opt_path(matches, "run-lib-path")),
+        host_compile_lib_path: make_absolute(opt_path(matches, "compile-lib-path")),
+        target_run_lib_path: make_absolute(opt_path(matches, "run-lib-path")),
         rustc_path: opt_path(matches, "rustc-path"),
         cargo_path: matches.opt_str("cargo-path").map(Utf8PathBuf::from),
         stage0_rustc_path: matches.opt_str("stage0-rustc-path").map(Utf8PathBuf::from),
@@ -381,9 +384,11 @@ fn parse_config(args: Vec<String>) -> Config {
         rustdoc_path: matches.opt_str("rustdoc-path").map(Utf8PathBuf::from),
         coverage_dump_path: matches.opt_str("coverage-dump-path").map(Utf8PathBuf::from),
         python: matches.opt_str("python").unwrap(),
-        jsondocck_path: matches.opt_str("jsondocck-path"),
-        jsondoclint_path: matches.opt_str("jsondoclint-path"),
-        run_clang_based_tests_with: matches.opt_str("run-clang-based-tests-with"),
+        jsondocck_path: matches.opt_str("jsondocck-path").map(Utf8PathBuf::from),
+        jsondoclint_path: matches.opt_str("jsondoclint-path").map(Utf8PathBuf::from),
+        run_clang_based_tests_with: matches
+            .opt_str("run-clang-based-tests-with")
+            .map(Utf8PathBuf::from),
         llvm_filecheck: matches.opt_str("llvm-filecheck").map(Utf8PathBuf::from),
         llvm_bin_dir: matches.opt_str("llvm-bin-dir").map(Utf8PathBuf::from),
 
@@ -433,16 +438,16 @@ fn parse_config(args: Vec<String>) -> Config {
         cdb_version,
         gdb,
         gdb_version,
+        lldb,
         lldb_version,
         llvm_version,
         system_llvm: matches.opt_present("system-llvm"),
         android_cross_path,
-        adb_path: opt_str2(matches.opt_str("adb-path")),
-        adb_test_dir: opt_str2(matches.opt_str("adb-test-dir")),
+        adb_path: Utf8PathBuf::from(opt_str2(matches.opt_str("adb-path"))),
+        adb_test_dir: Utf8PathBuf::from(opt_str2(matches.opt_str("adb-test-dir"))),
         adb_device_status: opt_str2(matches.opt_str("target")).contains("android")
             && "(none)" != opt_str2(matches.opt_str("adb-test-dir"))
             && !opt_str2(matches.opt_str("adb-test-dir")).is_empty(),
-        lldb_python_dir: matches.opt_str("lldb-python-dir"),
         verbose: matches.opt_present("verbose"),
         only_modified: matches.opt_present("only-modified"),
         color,
@@ -463,7 +468,7 @@ fn parse_config(args: Vec<String>) -> Config {
         target_linker: matches.opt_str("target-linker"),
         host_linker: matches.opt_str("host-linker"),
         llvm_components: matches.opt_str("llvm-components").unwrap(),
-        nodejs: matches.opt_str("nodejs"),
+        nodejs: matches.opt_str("nodejs").map(Utf8PathBuf::from),
 
         force_rerun: matches.opt_present("force-rerun"),
 
@@ -471,7 +476,7 @@ fn parse_config(args: Vec<String>) -> Config {
         builtin_cfg_names: OnceLock::new(),
         supported_crate_types: OnceLock::new(),
 
-        nocapture: matches.opt_present("no-capture"),
+        capture: !matches.opt_present("no-capture"),
 
         nightly_branch: matches.opt_str("nightly-branch").unwrap(),
         git_merge_commit_email: matches.opt_str("git-merge-commit-email").unwrap(),
@@ -484,6 +489,7 @@ fn parse_config(args: Vec<String>) -> Config {
 
         default_codegen_backend,
         override_codegen_backend,
+        bypass_ignore_backends: matches.opt_present("bypass-ignore-backends"),
     }
 }
 
@@ -684,7 +690,7 @@ fn common_inputs_stamp(config: &Config) -> Stamp {
 
     stamp.add_dir(&src_root.join("src/etc/natvis"));
 
-    stamp.add_dir(&config.run_lib_path);
+    stamp.add_dir(&config.target_run_lib_path);
 
     if let Some(ref rustdoc_path) = config.rustdoc_path {
         stamp.add_path(&rustdoc_path);
@@ -866,6 +872,12 @@ fn make_test(cx: &TestCollectorCx, collector: &mut TestCollector, testpaths: &Te
     let file_contents =
         fs::read_to_string(&test_path).expect("reading test file for directives should succeed");
     let file_directives = FileDirectives::from_file_contents(&test_path, &file_contents);
+
+    if let Err(message) = directives::do_early_directives_check(cx.config.mode, &file_directives) {
+        // FIXME(Zalathar): Overhaul compiletest error handling so that we
+        // don't have to resort to ad-hoc panics everywhere.
+        panic!("directives check failed:\n{message}");
+    }
     let early_props = EarlyProps::from_file_directives(&cx.config, &file_directives);
 
     // Normally we create one structure per revision, with two exceptions:

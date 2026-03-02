@@ -1,5 +1,7 @@
-use crate::common::{Config, KNOWN_CRATE_TYPES, KNOWN_TARGET_HAS_ATOMIC_WIDTHS, Sanitizer};
-use crate::directives::{DirectiveLine, IgnoreDecision, llvm_has_libzstd};
+use crate::common::{
+    Config, KNOWN_CRATE_TYPES, KNOWN_TARGET_HAS_ATOMIC_WIDTHS, Sanitizer, query_rustc_output,
+};
+use crate::directives::{DirectiveLine, IgnoreDecision};
 
 pub(super) fn handle_needs(
     cache: &CachedNeedsConditions,
@@ -68,6 +70,11 @@ pub(super) fn handle_needs(
             name: "needs-sanitizer-memtag",
             condition: cache.sanitizer_memtag,
             ignore_reason: "ignored on targets without memory tagging sanitizer",
+        },
+        Need {
+            name: "needs-sanitizer-realtime",
+            condition: cache.sanitizer_realtime,
+            ignore_reason: "ignored on targets without realtime sanitizer",
         },
         Need {
             name: "needs-sanitizer-shadow-call-stack",
@@ -320,6 +327,7 @@ pub(super) struct CachedNeedsConditions {
     sanitizer_thread: bool,
     sanitizer_hwaddress: bool,
     sanitizer_memtag: bool,
+    sanitizer_realtime: bool,
     sanitizer_shadow_call_stack: bool,
     sanitizer_safestack: bool,
     xray: bool,
@@ -346,6 +354,7 @@ impl CachedNeedsConditions {
             sanitizer_thread: sanitizers.contains(&Sanitizer::Thread),
             sanitizer_hwaddress: sanitizers.contains(&Sanitizer::Hwaddress),
             sanitizer_memtag: sanitizers.contains(&Sanitizer::Memtag),
+            sanitizer_realtime: sanitizers.contains(&Sanitizer::Realtime),
             sanitizer_shadow_call_stack: sanitizers.contains(&Sanitizer::ShadowCallStack),
             sanitizer_safestack: sanitizers.contains(&Sanitizer::Safestack),
             xray: config.target_cfg().xray,
@@ -360,7 +369,7 @@ impl CachedNeedsConditions {
             //
             // However, `rust-lld` is only located under the lib path, so we look for it there.
             rust_lld: config
-                .compile_lib_path
+                .host_compile_lib_path
                 .parent()
                 .expect("couldn't traverse to the parent of the specified --compile-lib-path")
                 .join("lib")
@@ -370,7 +379,7 @@ impl CachedNeedsConditions {
                 .join(if config.host.contains("windows") { "rust-lld.exe" } else { "rust-lld" })
                 .exists(),
 
-            llvm_zstd: llvm_has_libzstd(&config),
+            llvm_zstd: llvm_has_zstd(&config),
             dlltool: find_dlltool(&config),
             symlinks: has_symlinks(),
         }
@@ -420,4 +429,19 @@ fn has_symlinks() -> bool {
 #[cfg(not(windows))]
 fn has_symlinks() -> bool {
     true
+}
+
+fn llvm_has_zstd(config: &Config) -> bool {
+    // The compiler already knows whether LLVM was built with zstd or not,
+    // so compiletest can just ask the compiler.
+    let output = query_rustc_output(
+        config,
+        &["-Zunstable-options", "--print=backend-has-zstd"],
+        Default::default(),
+    );
+    match output.trim() {
+        "true" => true,
+        "false" => false,
+        _ => panic!("unexpected output from `--print=backend-has-zstd`: {output:?}"),
+    }
 }

@@ -113,10 +113,12 @@ impl Step for Std {
     /// Build stamp of std, if it was indeed built or uplifted.
     type Output = Option<BuildStamp>;
 
-    const DEFAULT: bool = true;
-
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         run.crate_or_deps("sysroot").path("library")
+    }
+
+    fn is_default_step(_builder: &Builder<'_>) -> bool {
+        true
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -448,7 +450,7 @@ fn copy_self_contained_objects(
                 DependencyType::TargetSelfContained,
             );
         }
-    } else if target.is_windows_gnu() {
+    } else if target.is_windows_gnu() || target.is_windows_gnullvm() {
         for obj in ["crt2.o", "dllcrt2.o"].iter() {
             let src = compiler_file(builder, &builder.cc(target), target, CLang::C, obj);
             let dst = libdir_self_contained.join(obj);
@@ -1015,9 +1017,7 @@ impl Rustc {
 
 impl Step for Rustc {
     type Output = BuiltRustc;
-
     const IS_HOST: bool = true;
-    const DEFAULT: bool = false;
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
         let mut crates = run.builder.in_tree_crates("rustc-main", None);
@@ -1030,6 +1030,10 @@ impl Step for Rustc {
             }
         }
         run.crates(crates)
+    }
+
+    fn is_default_step(_builder: &Builder<'_>) -> bool {
+        false
     }
 
     fn make_run(run: RunConfig<'_>) {
@@ -1439,6 +1443,9 @@ fn rustc_llvm_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetSelect
     }
     if builder.config.llvm_enzyme {
         cargo.env("LLVM_ENZYME", "1");
+    }
+    if builder.config.llvm_offload {
+        cargo.env("LLVM_OFFLOAD", "1");
     }
     let llvm::LlvmResult { host_llvm_config, .. } = builder.ensure(llvm::Llvm { target });
     cargo.env("LLVM_CONFIG", &host_llvm_config);

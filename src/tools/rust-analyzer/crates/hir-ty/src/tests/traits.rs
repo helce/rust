@@ -1,4 +1,3 @@
-use cov_mark::check;
 use expect_test::expect;
 
 use crate::tests::infer_with_mismatches;
@@ -85,7 +84,6 @@ async fn test() {
 }
 
 #[test]
-#[ignore = "FIXME(next-solver): fix async closures"]
 fn infer_async_closure() {
     check_types(
         r#"
@@ -93,7 +91,7 @@ fn infer_async_closure() {
 async fn test() {
     let f = async move |x: i32| x + 42;
     f;
-//  ^ impl Fn(i32) -> impl Future<Output = i32>
+//  ^ impl AsyncFn(i32) -> i32
     let a = f(4);
     a;
 //  ^ impl Future<Output = i32>
@@ -102,7 +100,7 @@ async fn test() {
 //  ^ i32
     let f = async move || 42;
     f;
-//  ^ impl Fn() -> impl Future<Output = i32>
+//  ^ impl AsyncFn() -> i32
     let a = f();
     a;
 //  ^ impl Future<Output = i32>
@@ -119,7 +117,7 @@ async fn test() {
     };
     let _: Option<u64> = c().await;
     c;
-//  ^ impl Fn() -> impl Future<Output = Option<u64>>
+//  ^ impl AsyncFn() -> Option<u64>
 }
 "#,
     );
@@ -279,11 +277,11 @@ pub mod collections {
 fn infer_ops_neg() {
     check_types(
         r#"
-//- /main.rs crate:main deps:std
+//- minicore:unary_ops
 struct Bar;
 struct Foo;
 
-impl std::ops::Neg for Bar {
+impl core::ops::Neg for Bar {
     type Output = Foo;
 }
 
@@ -292,15 +290,6 @@ fn test() {
     let b = -a;
     b;
 } //^ Foo
-
-//- /std.rs crate:std
-#[prelude_import] use ops::*;
-mod ops {
-    #[lang = "neg"]
-    pub trait Neg {
-        type Output;
-    }
-}
 "#,
     );
 }
@@ -309,11 +298,11 @@ mod ops {
 fn infer_ops_not() {
     check_types(
         r#"
-//- /main.rs crate:main deps:std
+//- minicore:unary_ops
 struct Bar;
 struct Foo;
 
-impl std::ops::Not for Bar {
+impl core::ops::Not for Bar {
     type Output = Foo;
 }
 
@@ -322,15 +311,6 @@ fn test() {
     let b = !a;
     b;
 } //^ Foo
-
-//- /std.rs crate:std
-#[prelude_import] use ops::*;
-mod ops {
-    #[lang = "not"]
-    pub trait Not {
-        type Output;
-    }
-}
 "#,
     );
 }
@@ -369,7 +349,6 @@ fn test() {
 
 #[test]
 fn trait_default_method_self_bound_implements_trait() {
-    cov_mark::check!(trait_self_implements_self);
     check(
         r#"
 trait Trait {
@@ -1374,11 +1353,11 @@ fn test() {
         expect![[r#"
             49..53 'self': &'? mut Self
             101..105 'self': &'? Self
-            184..195 '{ loop {} }': ({unknown}, {unknown})
+            184..195 '{ loop {} }': (impl Iterator<Item = impl Trait<u32>>, impl Trait<u64>)
             186..193 'loop {}': !
             191..193 '{}': ()
             206..207 't': T
-            268..279 '{ loop {} }': ({unknown}, {unknown})
+            268..279 '{ loop {} }': (impl Iterator<Item = impl Trait<T>>, impl Trait<T>)
             270..277 'loop {}': !
             275..277 '{}': ()
             291..413 '{     ...o(); }': ()
@@ -1420,7 +1399,7 @@ fn foo<const C: u8, T>() -> (impl FnOnce(&str, T), impl Trait<u8>) {
 }
 "#,
         expect![[r#"
-            134..165 '{     ...(C)) }': (impl FnOnce(&'? str, T), Bar<u8>)
+            134..165 '{     ...(C)) }': (impl FnOnce(&'? str, T), impl Trait<u8>)
             140..163 '(|inpu...ar(C))': (impl FnOnce(&'? str, T), Bar<u8>)
             141..154 '|input, t| {}': impl FnOnce(&'? str, T)
             142..147 'input': &'? str
@@ -1442,7 +1421,7 @@ fn return_pos_impl_trait_in_projection() {
 trait Future { type Output; }
 impl Future for () { type Output = i32; }
 type Foo<F> = (<F as Future>::Output, F);
-fn foo<X>() -> Foo<impl Future<Output = ()>> {
+fn foo<X>() -> Foo<impl Future<Output = i32>> {
     (0, ())
 }
 "#,
@@ -2983,13 +2962,13 @@ fn test() {
             140..146 'IsCopy': IsCopy
             140..153 'IsCopy.test()': bool
             159..166 'NotCopy': NotCopy
-            159..173 'NotCopy.test()': {unknown}
+            159..173 'NotCopy.test()': bool
             179..195 '(IsCop...sCopy)': (IsCopy, IsCopy)
             179..202 '(IsCop...test()': bool
             180..186 'IsCopy': IsCopy
             188..194 'IsCopy': IsCopy
             208..225 '(IsCop...tCopy)': (IsCopy, NotCopy)
-            208..232 '(IsCop...test()': {unknown}
+            208..232 '(IsCop...test()': bool
             209..215 'IsCopy': IsCopy
             217..224 'NotCopy': NotCopy
         "#]],
@@ -3082,7 +3061,7 @@ fn test() {
             79..194 '{     ...ized }': ()
             85..88 '1u8': u8
             85..95 '1u8.test()': bool
-            101..116 '(*"foo").test()': {unknown}
+            101..116 '(*"foo").test()': bool
             102..108 '*"foo"': str
             103..108 '"foo"': &'static str
             135..145 '(1u8, 1u8)': (u8, u8)
@@ -3090,7 +3069,7 @@ fn test() {
             136..139 '1u8': u8
             141..144 '1u8': u8
             158..171 '(1u8, *"foo")': (u8, str)
-            158..178 '(1u8, ...test()': {unknown}
+            158..178 '(1u8, ...test()': bool
             159..162 '1u8': u8
             164..170 '*"foo"': str
             165..170 '"foo"': &'static str
@@ -3945,7 +3924,6 @@ fn test() {
 
 #[test]
 fn foreign_trait_with_local_trait_impl() {
-    check!(block_local_impls);
     check(
         r#"
 mod module {
@@ -3956,15 +3934,16 @@ mod module {
 }
 
 fn f() {
+    struct Foo;
     use module::T;
-    impl T for usize {
+    impl T for Foo {
         const C: usize = 0;
         fn f(&self) {}
     }
-    0usize.f();
-  //^^^^^^^^^^ type: ()
-    usize::C;
-  //^^^^^^^^type: usize
+    Foo.f();
+  //^^^^^^^ type: ()
+    Foo::C;
+  //^^^^^^ type: usize
 }
 "#,
     );
@@ -4024,7 +4003,7 @@ fn f<F: Foo>() {
             212..295 '{     ...ZED; }': ()
             218..239 'F::Exp..._SIZED': Yes
             245..266 'F::Imp..._SIZED': Yes
-            272..292 'F::Rel..._SIZED': {unknown}
+            272..292 'F::Rel..._SIZED': Yes
         "#]],
     );
 }
@@ -4155,7 +4134,7 @@ trait Trait {
 }
 
 fn f(t: &dyn Trait<T = (), T = ()>) {}
-   //^&'? {unknown}
+   //^&'? (dyn Trait<T = ()> + 'static)
         "#,
     );
 }
@@ -4275,7 +4254,7 @@ fn f<'a>(v: &dyn Trait<Assoc<i32> = &'a i32>) {
             127..128 'v': &'? (dyn Trait<Assoc<i32> = &'a i32> + 'static)
             164..195 '{     ...f(); }': ()
             170..171 'v': &'? (dyn Trait<Assoc<i32> = &'a i32> + 'static)
-            170..184 'v.get::<i32>()': <dyn Trait<Assoc<i32> = &'a i32> + 'static as Trait>::Assoc<i32>
+            170..184 'v.get::<i32>()': <{unknown} as Trait>::Assoc<i32>
             170..192 'v.get:...eref()': {unknown}
         "#]],
     );
@@ -4930,7 +4909,6 @@ fn main() {
 
 #[test]
 fn async_fn_return_type() {
-    // FIXME(next-solver): Async closures are lowered as closures currently. We should fix that.
     check_infer(
         r#"
 //- minicore: async_fn
@@ -4948,9 +4926,9 @@ fn main() {
             46..53 'loop {}': !
             51..53 '{}': ()
             67..97 '{     ...()); }': ()
-            73..76 'foo': fn foo<impl Fn(), ()>(impl Fn())
+            73..76 'foo': fn foo<impl AsyncFn(), ()>(impl AsyncFn())
             73..94 'foo(as...|| ())': ()
-            77..93 'async ... || ()': impl Fn()
+            77..93 'async ... || ()': impl AsyncFn()
             91..93 '()': ()
         "#]],
     );
@@ -5051,5 +5029,53 @@ fn main() {
             191..198 'loop {}': !
             196..198 '{}': ()
         "#]],
+    );
+}
+
+#[test]
+fn implicit_sized_bound_on_param() {
+    check(
+        r#"
+//- minicore: sized
+struct PBox<T, A>(T, A);
+
+impl<T, A> PBox<T, A> {
+    fn token_with(self) {}
+}
+
+trait MoveMessage {
+    fn token<A>(self, alloc: A)
+    where
+        Self: Sized,
+    {
+        let b = PBox::<Self, A>(self, alloc);
+        b.token_with();
+     // ^^^^^^^^^^^^^^ type: ()
+    }
+}
+    "#,
+    );
+}
+
+#[test]
+fn dyn_trait_supertrait_projections_are_elaborated() {
+    check_types(
+        r#"
+//- minicore: deref, sized, unsize, coerce_unsized, dispatch_from_dyn
+use core::ops::Deref;
+
+struct Base;
+
+impl Base {
+    fn func(&self) -> i32 { 111 }
+}
+
+trait BaseLayerOne: Deref<Target = Base>{}
+
+fn foo(base_layer_two: &dyn BaseLayerOne) {
+    let _r = base_layer_two.func();
+     // ^^ i32
+}
+    "#,
     );
 }

@@ -47,15 +47,16 @@ const DEFAULT_COLUMN_WIDTH: usize = 140;
 /// Describes the way the content of the `rendered` field of the json output is generated
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HumanReadableErrorType {
-    Default,
-    Unicode,
-    AnnotateSnippet,
-    Short,
+    Default { short: bool },
+    AnnotateSnippet { short: bool, unicode: bool },
 }
 
 impl HumanReadableErrorType {
     pub fn short(&self) -> bool {
-        *self == HumanReadableErrorType::Short
+        match self {
+            HumanReadableErrorType::Default { short }
+            | HumanReadableErrorType::AnnotateSnippet { short, .. } => *short,
+        }
     }
 }
 
@@ -531,30 +532,24 @@ impl Emitter for HumanEmitter {
     }
 }
 
-/// An emitter that does nothing when emitting a non-fatal diagnostic.
-/// Fatal diagnostics are forwarded to `fatal_emitter` to avoid silent
-/// failures of rustc, as witnessed e.g. in issue #89358.
-pub struct FatalOnlyEmitter {
-    pub fatal_emitter: Box<dyn Emitter + DynSend>,
-    pub fatal_note: Option<String>,
+/// An emitter that adds a note to each diagnostic.
+pub struct EmitterWithNote {
+    pub emitter: Box<dyn Emitter + DynSend>,
+    pub note: String,
 }
 
-impl Emitter for FatalOnlyEmitter {
+impl Emitter for EmitterWithNote {
     fn source_map(&self) -> Option<&SourceMap> {
         None
     }
 
     fn emit_diagnostic(&mut self, mut diag: DiagInner, registry: &Registry) {
-        if diag.level == Level::Fatal {
-            if let Some(fatal_note) = &self.fatal_note {
-                diag.sub(Level::Note, fatal_note.clone(), MultiSpan::new());
-            }
-            self.fatal_emitter.emit_diagnostic(diag, registry);
-        }
+        diag.sub(Level::Note, self.note.clone(), MultiSpan::new());
+        self.emitter.emit_diagnostic(diag, registry);
     }
 
     fn translator(&self) -> &Translator {
-        self.fatal_emitter.translator()
+        self.emitter.translator()
     }
 }
 
@@ -1523,16 +1518,17 @@ impl HumanEmitter {
                 label_width += 2;
             }
             let mut line = 0;
+            let mut pad = false;
             for (text, style) in msgs.iter() {
                 let text =
                     self.translator.translate_message(text, args).map_err(Report::new).unwrap();
                 // Account for newlines to align output to its label.
-                for text in normalize_whitespace(&text).lines() {
+                for text in normalize_whitespace(&text).split('\n') {
                     buffer.append(
                         line,
                         &format!(
                             "{}{}",
-                            if line == 0 { String::new() } else { " ".repeat(label_width) },
+                            if pad { " ".repeat(label_width) } else { String::new() },
                             text
                         ),
                         match style {
@@ -1541,7 +1537,9 @@ impl HumanEmitter {
                         },
                     );
                     line += 1;
+                    pad = true;
                 }
+                pad = false;
                 // We add lines above, but if the last line has no explicit newline (which would
                 // yield an empty line), then we revert one line up to continue with the next
                 // styled text chunk on the same line as the last one from the prior one. Otherwise
@@ -1700,7 +1698,7 @@ impl HumanEmitter {
             }
             // print out the span location and spacer before we print the annotated source
             // to do this, we need to know if this span will be primary
-            let is_primary = primary_lo.file.name == annotated_file.file.name;
+            let is_primary = primary_lo.file.stable_id == annotated_file.file.stable_id;
             if is_primary {
                 let loc = primary_lo.clone();
                 if !self.short_message {
@@ -2152,6 +2150,7 @@ impl HumanEmitter {
 
             let line_start = sm.lookup_char_pos(parts[0].original_span.lo()).line;
             let mut lines = complete.lines();
+            let lines_len = lines.clone().count();
             if lines.clone().next().is_none() {
                 // Account for a suggestion to completely remove a line(s) with whitespace (#94192).
                 let line_end = sm.lookup_char_pos(parts[0].original_span.hi()).line;
@@ -2192,6 +2191,7 @@ impl HumanEmitter {
                 if highlight_parts.len() == 1
                     && line.trim().starts_with("#[")
                     && line.trim().ends_with(']')
+                    && lines_len == 1
                 {
                     is_item_attribute = true;
                 }
@@ -2316,11 +2316,6 @@ impl HumanEmitter {
                 show_code_change
             {
                 for part in parts {
-                    let snippet = if let Ok(snippet) = sm.span_to_snippet(part.span) {
-                        snippet
-                    } else {
-                        String::new()
-                    };
                     let span_start_pos = sm.lookup_char_pos(part.span.lo()).col_display;
                     let span_end_pos = sm.lookup_char_pos(part.span.hi()).col_display;
 
@@ -2396,7 +2391,7 @@ impl HumanEmitter {
                         // LL - REMOVED <- row_num - 2 - (newlines - first_i - 1)
                         // LL + NEWER
                         //    |         <- row_num
-
+                        let snippet = sm.span_to_snippet(part.span).unwrap_or_default();
                         let newlines = snippet.lines().count();
                         if newlines > 0 && row_num > newlines {
                             // Account for removals where the part being removed spans multiple
@@ -3102,7 +3097,7 @@ impl FileWithAnnotatedLines {
         ) {
             for slot in file_vec.iter_mut() {
                 // Look through each of our files for the one we're adding to
-                if slot.file.name == file.name {
+                if slot.file.stable_id == file.stable_id {
                     // See if we already have a line for it
                     for line_slot in &mut slot.lines {
                         if line_slot.line_index == line_index {
@@ -3549,6 +3544,8 @@ pub fn detect_confusion_type(sm: &SourceMap, suggested: &str, sp: Span) -> Confu
         let mut has_digit_letter_confusable = false;
         let mut has_other_diff = false;
 
+        // Letters whose lowercase version is very similar to the uppercase
+        // version.
         let ascii_confusables = &['c', 'f', 'i', 'k', 'o', 's', 'u', 'v', 'w', 'x', 'y', 'z'];
 
         let digit_letter_confusables = [('0', 'O'), ('1', 'l'), ('5', 'S'), ('8', 'B'), ('9', 'g')];

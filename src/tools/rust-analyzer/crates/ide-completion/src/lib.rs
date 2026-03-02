@@ -1,5 +1,8 @@
 //! `completions` crate provides utilities for generating completions of user input.
 
+// It's useful to refer to code that is private in doc comments.
+#![allow(rustdoc::private_intra_doc_links)]
+
 mod completions;
 mod config;
 mod context;
@@ -187,7 +190,7 @@ pub fn completions(
     position: FilePosition,
     trigger_character: Option<char>,
 ) -> Option<Vec<CompletionItem>> {
-    let (ctx, analysis) = &CompletionContext::new(db, position, config)?;
+    let (ctx, analysis) = &CompletionContext::new(db, position, config, trigger_character)?;
     let mut completions = Completions::default();
 
     // prevent `(` from triggering unwanted completion noise
@@ -241,6 +244,7 @@ pub fn completions(
                 completions::extern_abi::complete_extern_abi(acc, ctx, expanded);
                 completions::format_string::format_string(acc, ctx, original, expanded);
                 completions::env_vars::complete_cargo_env_vars(acc, ctx, original, expanded);
+                completions::ra_fixture::complete_ra_fixture(acc, ctx, original, expanded);
             }
             CompletionAnalysis::UnexpandedAttrTT {
                 colon_prefix,
@@ -273,7 +277,7 @@ pub fn resolve_completion_edits(
     let _p = tracing::info_span!("resolve_completion_edits").entered();
     let sema = hir::Semantics::new(db);
 
-    let editioned_file_id = sema.attach_first_edition(file_id)?;
+    let editioned_file_id = sema.attach_first_edition(file_id);
 
     let original_file = sema.parse(editioned_file_id);
     let original_token =

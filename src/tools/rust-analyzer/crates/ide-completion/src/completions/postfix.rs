@@ -11,10 +11,11 @@ use ide_db::{
     text_edit::TextEdit,
     ty_filter::TryEnum,
 };
+use itertools::Itertools;
 use stdx::never;
 use syntax::{
-    SyntaxKind::{BLOCK_EXPR, EXPR_STMT, FOR_EXPR, IF_EXPR, LOOP_EXPR, STMT_LIST, WHILE_EXPR},
-    T, TextRange, TextSize,
+    SyntaxKind::{EXPR_STMT, STMT_LIST},
+    T, TextRange, TextSize, ToSmolStr,
     ast::{self, AstNode, AstToken},
     match_ast,
 };
@@ -43,7 +44,7 @@ pub(crate) fn complete_postfix(
                 DotAccessKind::Field { receiver_is_ambiguous_float_literal } => {
                     receiver_is_ambiguous_float_literal
                 }
-                DotAccessKind::Method { .. } => false,
+                DotAccessKind::Method => false,
             },
         ),
         _ => return,
@@ -253,18 +254,15 @@ pub(crate) fn complete_postfix(
         }
     }
 
-    let mut block_should_be_wrapped = true;
-    if dot_receiver.syntax().kind() == BLOCK_EXPR {
-        block_should_be_wrapped = false;
-        if let Some(parent) = dot_receiver.syntax().parent()
-            && matches!(parent.kind(), IF_EXPR | WHILE_EXPR | LOOP_EXPR | FOR_EXPR)
-        {
-            block_should_be_wrapped = true;
-        }
+    let block_should_be_wrapped = if let ast::Expr::BlockExpr(block) = dot_receiver {
+        block.modifier().is_some() || !block.is_standalone()
+    } else {
+        true
     };
     {
         let (open_brace, close_brace) =
             if block_should_be_wrapped { ("{ ", " }") } else { ("", "") };
+        // FIXME: Why add parentheses
         let (open_paren, close_paren) = if is_in_cond { ("(", ")") } else { ("", "") };
         let unsafe_completion_string =
             format!("{open_paren}unsafe {open_brace}{receiver_text}{close_brace}{close_paren}");
@@ -363,10 +361,18 @@ fn include_references(initial_element: &ast::Expr) -> (ast::Expr, String) {
         resulting_element.syntax().parent().and_then(ast::RefExpr::cast)
     {
         found_ref_or_deref = true;
-        let exclusive = parent_ref_element.mut_token().is_some();
+        let last_child_or_token = parent_ref_element.syntax().last_child_or_token();
+        prefix.insert_str(
+            0,
+            parent_ref_element
+                .syntax()
+                .children_with_tokens()
+                .filter(|it| Some(it) != last_child_or_token.as_ref())
+                .format("")
+                .to_smolstr()
+                .as_str(),
+        );
         resulting_element = ast::Expr::from(parent_ref_element);
-
-        prefix.insert_str(0, if exclusive { "&mut " } else { "&" });
     }
 
     if !found_ref_or_deref {
@@ -440,7 +446,7 @@ fn add_custom_postfix_completions(
             let body = snippet.postfix_snippet(receiver_text);
             let mut builder =
                 postfix_snippet(trigger, snippet.description.as_deref().unwrap_or_default(), &body);
-            builder.documentation(Documentation::new(format!("```rust\n{body}\n```")));
+            builder.documentation(Documentation::new_owned(format!("```rust\n{body}\n```")));
             for import in imports.into_iter() {
                 builder.add_import(import);
             }
@@ -460,6 +466,8 @@ pub(crate) fn is_in_condition(it: &ast::Expr) -> bool {
                 ast::MatchGuard(guard) => guard.condition()? == *it,
                 ast::BinExpr(bin_expr) => (bin_expr.op_token()?.kind() == T![&&])
                     .then(|| is_in_condition(&bin_expr.into()))?,
+                ast::Expr(expr) => (expr.syntax().text_range().start() == it.syntax().text_range().start())
+                    .then(|| is_in_condition(&expr))?,
                 _ => return None,
             } })
         })
@@ -840,6 +848,20 @@ fn main() {
             &format!("fn main() {{ let x = {kind} {{ if true {{1}} else {{2}} }} }}"),
         );
 
+        if kind == "const" {
+            check_edit(
+                kind,
+                r#"fn main() { unsafe {1}.$0 }"#,
+                &format!("fn main() {{ {kind} {{ unsafe {{1}} }} }}"),
+            );
+        } else {
+            check_edit(
+                kind,
+                r#"fn main() { const {1}.$0 }"#,
+                &format!("fn main() {{ {kind} {{ const {{1}} }} }}"),
+            );
+        }
+
         // completion will not be triggered
         check_edit(
             kind,
@@ -993,6 +1015,20 @@ fn main() {
         );
 
         check_edit_with_config(
+            CompletionConfig { snippets: vec![snippet.clone()], ..TEST_CONFIG },
+            "ok",
+            r#"fn main() { &raw mut 42.$0 }"#,
+            r#"fn main() { Ok(&raw mut 42) }"#,
+        );
+
+        check_edit_with_config(
+            CompletionConfig { snippets: vec![snippet.clone()], ..TEST_CONFIG },
+            "ok",
+            r#"fn main() { &raw const 42.$0 }"#,
+            r#"fn main() { Ok(&raw const 42) }"#,
+        );
+
+        check_edit_with_config(
             CompletionConfig { snippets: vec![snippet], ..TEST_CONFIG },
             "ok",
             r#"
@@ -1015,6 +1051,55 @@ fn main() {
     Ok(&a.a)
 }
             "#,
+        );
+    }
+
+    #[test]
+    fn postfix_custom_snippets_completion_for_reference_expr() {
+        // https://github.com/rust-lang/rust-analyzer/issues/21035
+        let snippet = Snippet::new(
+            &[],
+            &["group".into()],
+            &["(${receiver})".into()],
+            "",
+            &[],
+            crate::SnippetScope::Expr,
+        )
+        .unwrap();
+
+        check_edit_with_config(
+            CompletionConfig { snippets: vec![snippet.clone()], ..TEST_CONFIG },
+            "group",
+            r#"fn main() { &[1, 2, 3].g$0 }"#,
+            r#"fn main() { (&[1, 2, 3]) }"#,
+        );
+
+        check_edit_with_config(
+            CompletionConfig { snippets: vec![snippet.clone()], ..TEST_CONFIG },
+            "group",
+            r#"fn main() { &&foo(a, b, 1+1).$0 }"#,
+            r#"fn main() { (&&foo(a, b, 1+1)) }"#,
+        );
+
+        check_edit_with_config(
+            CompletionConfig { snippets: vec![snippet.clone()], ..TEST_CONFIG },
+            "group",
+            r#"fn main() { &mut Foo { a: 1, b: 2, c: 3 }.$0 }"#,
+            r#"fn main() { (&mut Foo { a: 1, b: 2, c: 3 }) }"#,
+        );
+
+        check_edit_with_config(
+            CompletionConfig { snippets: vec![snippet.clone()], ..TEST_CONFIG },
+            "group",
+            r#"fn main() { &raw mut Foo::new().$0 }"#,
+            r#"fn main() { (&raw mut Foo::new()) }"#,
+        );
+
+        check_edit_with_config(
+            CompletionConfig { snippets: vec![snippet.clone()], ..TEST_CONFIG },
+            "group",
+            r#"fn main() { &raw const Foo::bar::SOME_CONST.$0 }"#,
+            r#"fn main() { (&raw const Foo::bar::SOME_CONST) }"#,
         );
     }
 

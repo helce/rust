@@ -22,7 +22,7 @@ use rustc_target::spec::{
 use crate::config::*;
 use crate::search_paths::SearchPath;
 use crate::utils::NativeLib;
-use crate::{EarlyDiagCtxt, lint};
+use crate::{EarlyDiagCtxt, Session, lint};
 
 macro_rules! insert {
     ($opt_name:ident, $opt_expr:expr, $sub_hashes:expr) => {
@@ -111,12 +111,12 @@ mod target_modifier_consistency_check {
         lparsed & tmod_sanitizers == rparsed & tmod_sanitizers
     }
     pub(super) fn sanitizer_cfi_normalize_integers(
-        opts: &Options,
+        sess: &Session,
         l: &TargetModifier,
         r: Option<&TargetModifier>,
     ) -> bool {
         // For kCFI, the helper flag -Zsanitizer-cfi-normalize-integers should also be a target modifier
-        if opts.unstable_opts.sanitizer.contains(SanitizerSet::KCFI) {
+        if sess.sanitizers().contains(SanitizerSet::KCFI) {
             if let Some(r) = r {
                 return l.extend().tech_value == r.extend().tech_value;
             } else {
@@ -133,7 +133,7 @@ impl TargetModifier {
     }
     // Custom consistency check for target modifiers (or default `l.tech_value == r.tech_value`)
     // When other is None, consistency with default value is checked
-    pub fn consistent(&self, opts: &Options, other: Option<&TargetModifier>) -> bool {
+    pub fn consistent(&self, sess: &Session, other: Option<&TargetModifier>) -> bool {
         assert!(other.is_none() || self.opt == other.unwrap().opt);
         match self.opt {
             OptionsTargetModifiers::UnstableOptions(unstable) => match unstable {
@@ -142,7 +142,7 @@ impl TargetModifier {
                 }
                 UnstableOptionsTargetModifiers::sanitizer_cfi_normalize_integers => {
                     return target_modifier_consistency_check::sanitizer_cfi_normalize_integers(
-                        opts, self, other,
+                        sess, self, other,
                     );
                 }
                 _ => {}
@@ -808,7 +808,7 @@ mod desc {
     pub(crate) const parse_opt_panic_strategy: &str = parse_panic_strategy;
     pub(crate) const parse_oom_strategy: &str = "either `panic` or `abort`";
     pub(crate) const parse_relro_level: &str = "one of: `full`, `partial`, or `off`";
-    pub(crate) const parse_sanitizers: &str = "comma separated list of sanitizers: `address`, `cfi`, `dataflow`, `hwaddress`, `kcfi`, `kernel-address`, `leak`, `memory`, `memtag`, `safestack`, `shadow-call-stack`, or `thread`";
+    pub(crate) const parse_sanitizers: &str = "comma separated list of sanitizers: `address`, `cfi`, `dataflow`, `hwaddress`, `kcfi`, `kernel-address`, `leak`, `memory`, `memtag`, `safestack`, `shadow-call-stack`, `thread`, or 'realtime'";
     pub(crate) const parse_sanitizer_memory_track_origins: &str = "0, 1, or 2";
     pub(crate) const parse_cfguard: &str =
         "either a boolean (`yes`, `no`, `on`, `off`, etc), `checks`, or `nochecks`";
@@ -864,13 +864,14 @@ mod desc {
     pub(crate) const parse_linker_features: &str =
         "a list of enabled (`+` prefix) and disabled (`-` prefix) features: `lld`";
     pub(crate) const parse_polonius: &str = "either no value or `legacy` (the default), or `next`";
+    pub(crate) const parse_annotate_moves: &str =
+        "either a boolean (`yes`, `no`, `on`, `off`, etc.), or a size limit in bytes";
     pub(crate) const parse_stack_protector: &str =
         "one of (`none` (default), `basic`, `strong`, or `all`)";
     pub(crate) const parse_branch_protection: &str = "a `,` separated combination of `bti`, `gcs`, `pac-ret`, (optionally with `pc`, `b-key`, `leaf` if `pac-ret` is set)";
     pub(crate) const parse_proc_macro_execution_strategy: &str =
         "one of supported execution strategies (`same-thread`, or `cross-thread`)";
-    pub(crate) const parse_remap_path_scope: &str =
-        "comma separated list of scopes: `macro`, `diagnostics`, `debuginfo`, `object`, `all`";
+    pub(crate) const parse_remap_path_scope: &str = "comma separated list of scopes: `macro`, `diagnostics`, `debuginfo`, `coverage`, `object`, `all`";
     pub(crate) const parse_inlining_threshold: &str =
         "either a boolean (`yes`, `no`, `on`, `off`, etc), or a non-negative number";
     pub(crate) const parse_llvm_module_flag: &str = "<key>:<type>:<value>:<behavior>. Type must currently be `u32`. Behavior should be one of (`error`, `warning`, `require`, `override`, `append`, `appendunique`, `max`, `min`)";
@@ -948,6 +949,29 @@ pub mod parse {
             }
             _ => false,
         }
+    }
+
+    pub(crate) fn parse_annotate_moves(slot: &mut AnnotateMoves, v: Option<&str>) -> bool {
+        let mut bslot = false;
+        let mut nslot = 0u64;
+
+        *slot = match v {
+            // No value provided: -Z annotate-moves (enable with default limit)
+            None => AnnotateMoves::Enabled(None),
+            // Explicit boolean value provided: -Z annotate-moves=yes/no
+            s @ Some(_) if parse_bool(&mut bslot, s) => {
+                if bslot {
+                    AnnotateMoves::Enabled(None)
+                } else {
+                    AnnotateMoves::Disabled
+                }
+            }
+            // With numeric limit provided: -Z annotate-moves=1234
+            s @ Some(_) if parse_number(&mut nslot, s) => AnnotateMoves::Enabled(Some(nslot)),
+            _ => return false,
+        };
+
+        true
     }
 
     /// Use this for any string option that has a static default.
@@ -1254,6 +1278,7 @@ pub mod parse {
                     "thread" => SanitizerSet::THREAD,
                     "hwaddress" => SanitizerSet::HWADDRESS,
                     "safestack" => SanitizerSet::SAFESTACK,
+                    "realtime" => SanitizerSet::REALTIME,
                     _ => return false,
                 }
             }
@@ -1705,6 +1730,7 @@ pub mod parse {
                     "macro" => RemapPathScopeComponents::MACRO,
                     "diagnostics" => RemapPathScopeComponents::DIAGNOSTICS,
                     "debuginfo" => RemapPathScopeComponents::DEBUGINFO,
+                    "coverage" => RemapPathScopeComponents::COVERAGE,
                     "object" => RemapPathScopeComponents::OBJECT,
                     "all" => RemapPathScopeComponents::all(),
                     _ => return false,
@@ -2093,6 +2119,8 @@ options! {
         "instrument the generated code to support LLVM source-based code coverage reports \
         (note, the compiler build config must include `profiler = true`); \
         implies `-C symbol-mangling-version=v0`"),
+    jump_tables: bool = (true, parse_bool, [TRACKED],
+        "allow jump table and lookup table generation from switch case lowering (default: yes)"),
     link_arg: (/* redirected to link_args */) = ((), parse_string_push, [UNTRACKED],
         "a single extra argument to append to the linker invocation (can be used several times)"),
     link_args: Vec<String> = (Vec::new(), parse_list, [UNTRACKED],
@@ -2196,6 +2224,9 @@ options! {
         "only allow the listed language features to be enabled in code (comma separated)"),
     always_encode_mir: bool = (false, parse_bool, [TRACKED],
         "encode MIR of all functions into the crate metadata (default: no)"),
+    annotate_moves: AnnotateMoves = (AnnotateMoves::Disabled, parse_annotate_moves, [TRACKED],
+        "emit debug info for compiler-generated move and copy operations \
+        to make them visible in profilers. Can be a boolean or a size limit in bytes (default: disabled)"),
     assert_incr_state: Option<String> = (None, parse_opt_string, [UNTRACKED],
         "assert that the incremental cache is in given state: \
          either `loaded` or `not-loaded`."),
@@ -2307,7 +2338,7 @@ options! {
         "emit a section containing stack size metadata (default: no)"),
     emit_thin_lto: bool = (true, parse_bool, [TRACKED],
         "emit the bc module with thin LTO info (default: yes)"),
-    emscripten_wasm_eh: bool = (false, parse_bool, [TRACKED],
+    emscripten_wasm_eh: bool = (true, parse_bool, [TRACKED],
         "Use WebAssembly error handling for wasm32-unknown-emscripten"),
     enforce_type_length_limit: bool = (false, parse_bool, [TRACKED],
         "enforce the type length limit when monomorphizing instances in codegen"),
@@ -2475,8 +2506,6 @@ options! {
         "omit DWARF address ranges that give faster lookups"),
     no_implied_bounds_compat: bool = (false, parse_bool, [TRACKED],
         "disable the compatibility version of the `implied_bounds_ty` query"),
-    no_jump_tables: bool = (false, parse_no_value, [TRACKED],
-        "disable the jump tables and lookup tables that can be generated from a switch case lowering"),
     no_leak_check: bool = (false, parse_no_value, [UNTRACKED],
         "disable the 'leak check' for subtyping; unsound, but useful for tests"),
     no_link: bool = (false, parse_no_value, [TRACKED],
@@ -2575,6 +2604,7 @@ written to standard error output)"),
     retpoline_external_thunk: bool = (false, parse_bool, [TRACKED TARGET_MODIFIER],
         "enables retpoline-external-thunk, retpoline-indirect-branches and retpoline-indirect-calls \
         target features (default: no)"),
+    #[rustc_lint_opt_deny_field_access("use `Session::sanitizers()` instead of this field")]
     sanitizer: SanitizerSet = (SanitizerSet::empty(), parse_sanitizers, [TRACKED TARGET_MODIFIER],
         "use a sanitizer"),
     sanitizer_cfi_canonical_jump_tables: Option<bool> = (Some(true), parse_opt_bool, [TRACKED],

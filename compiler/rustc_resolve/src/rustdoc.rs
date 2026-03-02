@@ -393,17 +393,19 @@ pub fn has_primitive_or_keyword_or_attribute_docs(attrs: &[impl AttributeExt]) -
 }
 
 /// Simplified version of the corresponding function in rustdoc.
-/// If the rustdoc version returns a successful result, this function must return the same result.
-/// Otherwise this function may return anything.
 fn preprocess_link(link: &str) -> Box<str> {
+    // IMPORTANT: To be kept in sync with the corresponding function in rustdoc.
+    // Namely, whenever the rustdoc function returns a successful result for a given input,
+    // this function *MUST* return a link that's equal to `PreprocessingInfo.path_str`!
+
     let link = link.replace('`', "");
     let link = link.split('#').next().unwrap();
     let link = link.trim();
-    let link = link.rsplit('@').next().unwrap();
-    let link = link.strip_suffix("()").unwrap_or(link);
-    let link = link.strip_suffix("{}").unwrap_or(link);
-    let link = link.strip_suffix("[]").unwrap_or(link);
-    let link = if link != "!" { link.strip_suffix('!').unwrap_or(link) } else { link };
+    let link = link.split_once('@').map_or(link, |(_, rhs)| rhs);
+    let link = link.trim_suffix("()");
+    let link = link.trim_suffix("{}");
+    let link = link.trim_suffix("[]");
+    let link = if link != "!" { link.trim_suffix('!') } else { link };
     let link = link.trim();
     strip_generics_from_path(link).unwrap_or_else(|_| link.into())
 }

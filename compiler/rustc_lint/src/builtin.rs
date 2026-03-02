@@ -41,7 +41,7 @@ pub use rustc_session::lint::builtin::*;
 use rustc_session::{declare_lint, declare_lint_pass, impl_lint_pass};
 use rustc_span::edition::Edition;
 use rustc_span::source_map::Spanned;
-use rustc_span::{BytePos, DUMMY_SP, Ident, InnerSpan, Span, Symbol, kw, sym};
+use rustc_span::{DUMMY_SP, Ident, InnerSpan, Span, Symbol, kw, sym};
 use rustc_target::asm::InlineAsmArch;
 use rustc_trait_selection::infer::{InferCtxtExt, TyCtxtInferExt};
 use rustc_trait_selection::traits::misc::type_allowed_to_implement_copy;
@@ -997,18 +997,15 @@ impl<'tcx> LateLintPass<'tcx> for InvalidNoMangleItems {
                     self.check_no_mangle_on_generic_fn(cx, attr_span, it.owner_id.def_id);
                 }
             }
-            hir::ItemKind::Const(..) => {
+            hir::ItemKind::Const(ident, generics, ..) => {
                 if find_attr!(attrs, AttributeKind::NoMangle(..)) {
-                    // account for "pub const" (#45562)
-                    let start = cx
-                        .tcx
-                        .sess
-                        .source_map()
-                        .span_to_snippet(it.span)
-                        .map(|snippet| snippet.find("const").unwrap_or(0))
-                        .unwrap_or(0) as u32;
-                    // `const` is 5 chars
-                    let suggestion = it.span.with_hi(BytePos(it.span.lo().0 + start + 5));
+                    let suggestion =
+                        if generics.params.is_empty() && generics.where_clause_span.is_empty() {
+                            // account for "pub const" (#45562)
+                            Some(it.span.until(ident.span))
+                        } else {
+                            None
+                        };
 
                     // Const items do not refer to a particular location in memory, and therefore
                     // don't have anything to attach a symbol to
@@ -1705,7 +1702,7 @@ impl EarlyLintPass for EllipsisInclusiveRangePatterns {
         }
 
         let (parentheses, endpoints) = match &pat.kind {
-            PatKind::Ref(subpat, _) => (true, matches_ellipsis_pat(subpat)),
+            PatKind::Ref(subpat, _, _) => (true, matches_ellipsis_pat(subpat)),
             _ => (false, matches_ellipsis_pat(pat)),
         };
 
@@ -2697,8 +2694,9 @@ declare_lint! {
     ///
     /// ### Example
     ///
-    /// ```rust,no_run
+    /// ```rust,compile_fail
     /// # #![allow(unused)]
+    /// # #![cfg_attr(bootstrap, deny(deref_nullptr))]
     /// use std::ptr;
     /// unsafe {
     ///     let x = &*ptr::null::<i32>();
@@ -2716,7 +2714,7 @@ declare_lint! {
     ///
     /// [undefined behavior]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html
     pub DEREF_NULLPTR,
-    Warn,
+    Deny,
     "detects when an null pointer is dereferenced"
 }
 
@@ -2726,6 +2724,16 @@ impl<'tcx> LateLintPass<'tcx> for DerefNullPtr {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &hir::Expr<'_>) {
         /// test if expression is a null ptr
         fn is_null_ptr(cx: &LateContext<'_>, expr: &hir::Expr<'_>) -> bool {
+            let pointer_ty = cx.typeck_results().expr_ty(expr);
+            let ty::RawPtr(pointee, _) = pointer_ty.kind() else {
+                return false;
+            };
+            if let Ok(layout) = cx.tcx.layout_of(cx.typing_env().as_query_input(*pointee)) {
+                if layout.layout.size() == rustc_abi::Size::ZERO {
+                    return false;
+                }
+            }
+
             match &expr.kind {
                 hir::ExprKind::Cast(expr, ty) => {
                     if let hir::TyKind::Ptr(_) = ty.kind {
@@ -2875,6 +2883,71 @@ enum AsmLabelKind {
     Binary,
 }
 
+/// Checks if a potential label is actually a Hexagon register span notation.
+///
+/// Hexagon assembly uses register span notation like `r1:0`, `V5:4.w`, `p1:0` etc.
+/// These follow the pattern: `[letter][digit(s)]:[digit(s)][optional_suffix]`
+///
+/// Returns `true` if the string matches a valid Hexagon register span pattern.
+pub fn is_hexagon_register_span(possible_label: &str) -> bool {
+    // Extract the full register span from the context
+    if let Some(colon_idx) = possible_label.find(':') {
+        let after_colon = &possible_label[colon_idx + 1..];
+        is_hexagon_register_span_impl(&possible_label[..colon_idx], after_colon)
+    } else {
+        false
+    }
+}
+
+/// Helper function for use within the lint when we have statement context.
+fn is_hexagon_register_span_context(
+    possible_label: &str,
+    statement: &str,
+    colon_idx: usize,
+) -> bool {
+    // Extract what comes after the colon in the statement
+    let after_colon_start = colon_idx + 1;
+    if after_colon_start >= statement.len() {
+        return false;
+    }
+
+    // Get the part after the colon, up to the next whitespace or special character
+    let after_colon_full = &statement[after_colon_start..];
+    let after_colon = after_colon_full
+        .chars()
+        .take_while(|&c| c.is_ascii_alphanumeric() || c == '.')
+        .collect::<String>();
+
+    is_hexagon_register_span_impl(possible_label, &after_colon)
+}
+
+/// Core implementation for checking hexagon register spans.
+fn is_hexagon_register_span_impl(before_colon: &str, after_colon: &str) -> bool {
+    if before_colon.len() < 1 || after_colon.is_empty() {
+        return false;
+    }
+
+    let mut chars = before_colon.chars();
+    let start = chars.next().unwrap();
+
+    // Must start with a letter (r, V, p, etc.)
+    if !start.is_ascii_alphabetic() {
+        return false;
+    }
+
+    let rest = &before_colon[1..];
+
+    // Check if the part after the first letter is all digits and non-empty
+    if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+
+    // Check if after colon starts with digits (may have suffix like .w, .h)
+    let digits_after = after_colon.chars().take_while(|c| c.is_ascii_digit()).collect::<String>();
+
+    !digits_after.is_empty()
+}
+
 impl<'tcx> LateLintPass<'tcx> for AsmLabels {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx hir::Expr<'tcx>) {
         if let hir::Expr {
@@ -2954,6 +3027,14 @@ impl<'tcx> LateLintPass<'tcx> for AsmLabels {
                         } else if !(start.is_ascii_alphabetic() || matches!(start, '.' | '_')) {
                             // Named labels start with ASCII letters, `.` or `_`.
                             // anything else is not a label
+                            break 'label_loop;
+                        }
+
+                        // Check for Hexagon register span notation (e.g., "r1:0", "V5:4", "V3:2.w")
+                        // This is valid Hexagon assembly syntax, not a label
+                        if matches!(cx.tcx.sess.asm_arch, Some(InlineAsmArch::Hexagon))
+                            && is_hexagon_register_span_context(possible_label, statement, idx)
+                        {
                             break 'label_loop;
                         }
 

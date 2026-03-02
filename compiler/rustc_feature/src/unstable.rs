@@ -383,8 +383,6 @@ declare_features! (
     (unstable, arbitrary_self_types, "1.23.0", Some(44874)),
     /// Allows inherent and trait methods with arbitrary self types that are raw pointers.
     (unstable, arbitrary_self_types_pointers, "1.83.0", Some(44874)),
-    /// Allows #[cfg(...)] on inline assembly templates and operands.
-    (unstable, asm_cfg, "1.89.0", Some(140364)),
     /// Enables experimental inline assembly support for additional architectures.
     (unstable, asm_experimental_arch, "1.58.0", Some(93335)),
     /// Enables experimental register support in inline assembly.
@@ -411,6 +409,9 @@ declare_features! (
     (unstable, avx10_target_feature, "1.88.0", Some(138843)),
     /// Allows using C-variadics.
     (unstable, c_variadic, "1.34.0", Some(44930)),
+    /// Allows defining c-variadic naked functions with any extern ABI that is allowed
+    /// on c-variadic foreign functions.
+    (unstable, c_variadic_naked_functions, "1.93.0", Some(148767)),
     /// Allows the use of `#[cfg(contract_checks)` to check if contract checks are enabled.
     (unstable, cfg_contract_checks, "1.86.0", Some(128044)),
     /// Allows the use of `#[cfg(overflow_checks)` to check if integer overflow behaviour.
@@ -483,6 +484,8 @@ declare_features! (
     (incomplete, deref_patterns, "1.79.0", Some(87121)),
     /// Allows deriving the From trait on single-field structs.
     (unstable, derive_from, "1.91.0", Some(144889)),
+    /// Allows giving non-const impls custom diagnostic messages if attempted to be used as const
+    (unstable, diagnostic_on_const, "1.93.0", Some(143874)),
     /// Allows `#[doc(cfg(...))]`.
     (unstable, doc_cfg, "1.21.0", Some(43781)),
     /// Allows `#[doc(masked)]`.
@@ -499,8 +502,6 @@ declare_features! (
     (incomplete, explicit_tail_calls, "1.72.0", Some(112788)),
     /// Allows using `#[export_stable]` which indicates that an item is exportable.
     (incomplete, export_stable, "1.88.0", Some(139939)),
-    /// Allows using `system` as a calling convention with varargs.
-    (unstable, extern_system_varargs, "1.86.0", Some(136946)),
     /// Allows defining `extern type`s.
     (unstable, extern_types, "1.23.0", Some(43467)),
     /// Allow using 128-bit (quad precision) floating point numbers.
@@ -594,8 +595,6 @@ declare_features! (
     (incomplete, never_patterns, "1.76.0", Some(118155)),
     /// Allows the `!` type. Does not imply 'exhaustive_patterns' (below) any more.
     (unstable, never_type, "1.13.0", Some(35121)),
-    /// Allows diverging expressions to fall back to `!` rather than `()`.
-    (unstable, never_type_fallback, "1.41.0", Some(65992)),
     /// Switch `..` syntax to use the new (`Copy + IntoIterator`) range types.
     (unstable, new_range, "1.86.0", Some(123741)),
     /// Allows `#![no_core]`.

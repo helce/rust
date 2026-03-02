@@ -3,8 +3,6 @@ builtin_macros_alloc_must_statics = allocators must be statics
 
 builtin_macros_asm_attribute_not_supported =
     this attribute is not supported on assembly
-builtin_macros_asm_cfg =
-    the `#[cfg(/* ... */)]` and `#[cfg_attr(/* ... */)]` attributes on assembly are unstable
 
 builtin_macros_asm_clobber_abi = clobber_abi
 builtin_macros_asm_clobber_no_reg = asm with `clobber_abi` must specify explicit registers for outputs
@@ -156,6 +154,7 @@ builtin_macros_duplicate_macro_attribute = duplicated attribute
 
 builtin_macros_env_not_defined = environment variable `{$var}` not defined at compile time
     .cargo = Cargo sets build script variables at run time. Use `std::env::var({$var_expr})` instead
+    .cargo_typo = there is a similar Cargo environment variable: `{$suggested_var}`
     .custom = use `std::env::var({$var_expr})` to read the variable at run time
 
 builtin_macros_env_not_unicode = environment variable `{$var}` is not a valid Unicode string

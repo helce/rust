@@ -1,4 +1,4 @@
-use hir_def::db::DefDatabase;
+use hir_def::{HasModule, db::DefDatabase};
 use hir_expand::EditionedFileId;
 use span::Edition;
 use syntax::{TextRange, TextSize};
@@ -17,7 +17,7 @@ use super::{MirEvalError, interpret_mir};
 
 fn eval_main(db: &TestDB, file_id: EditionedFileId) -> Result<(String, String), MirEvalError<'_>> {
     crate::attach_db(db, || {
-        let interner = DbInterner::new_with(db, None, None);
+        let interner = DbInterner::new_no_crate(db);
         let module_id = db.module_for_file(file_id.file_id(db));
         let def_map = module_id.def_map(db);
         let scope = &def_map[module_id.local_id].scope;
@@ -40,7 +40,10 @@ fn eval_main(db: &TestDB, file_id: EditionedFileId) -> Result<(String, String), 
             .monomorphized_mir_body(
                 func_id.into(),
                 GenericArgs::new_from_iter(interner, []),
-                db.trait_environment(func_id.into()),
+                crate::ParamEnvAndCrate {
+                    param_env: db.trait_environment(func_id.into()),
+                    krate: func_id.krate(db),
+                },
             )
             .map_err(|e| MirEvalError::MirLowerError(func_id, e))?;
 
@@ -544,7 +547,7 @@ fn main() {
 fn for_loop() {
     check_pass(
         r#"
-//- minicore: iterator, add
+//- minicore: iterator, add, builtin_impls
 fn should_not_reach() {
     _ // FIXME: replace this function with panic when that works
 }
@@ -636,16 +639,13 @@ fn main() {
     );
 }
 
-#[ignore = "
-FIXME(next-solver):
-This does not work currently because I replaced homemade selection with selection by the trait solver;
-This will work once we implement `Interner::impl_specializes()` properly.
-"]
 #[test]
 fn specialization_array_clone() {
     check_pass(
         r#"
 //- minicore: copy, derive, slice, index, coerce_unsized, panic
+#![feature(min_specialization)]
+
 impl<T: Clone, const N: usize> Clone for [T; N] {
     #[inline]
     fn clone(&self) -> Self {
@@ -709,7 +709,7 @@ fn main() {
 fn closure_state() {
     check_pass(
         r#"
-//- minicore: fn, add, copy
+//- minicore: fn, add, copy, builtin_impls
 fn should_not_reach() {
     _ // FIXME: replace this function with panic when that works
 }

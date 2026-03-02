@@ -878,11 +878,6 @@ impl<'tcx> Ty<'tcx> {
         Ty::new_imm_ref(tcx, tcx.lifetimes.re_static, tcx.types.str_)
     }
 
-    #[inline]
-    pub fn new_diverging_default(tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
-        if tcx.features().never_type_fallback() { tcx.types.never } else { tcx.types.unit }
-    }
-
     // lang and diagnostic tys
 
     fn new_generic_adt(tcx: TyCtxt<'tcx>, wrapper_def_id: DefId, ty_param: Ty<'tcx>) -> Ty<'tcx> {
@@ -1345,6 +1340,36 @@ impl<'tcx> Ty<'tcx> {
     pub fn boxed_ty(self) -> Option<Ty<'tcx>> {
         match self.kind() {
             Adt(def, args) if def.is_box() => Some(args.type_at(0)),
+            _ => None,
+        }
+    }
+
+    pub fn pinned_ty(self) -> Option<Ty<'tcx>> {
+        match self.kind() {
+            Adt(def, args) if def.is_pin() => Some(args.type_at(0)),
+            _ => None,
+        }
+    }
+
+    pub fn pinned_ref(self) -> Option<(Ty<'tcx>, ty::Mutability)> {
+        if let Adt(def, args) = self.kind()
+            && def.is_pin()
+            && let &ty::Ref(_, ty, mutbl) = args.type_at(0).kind()
+        {
+            return Some((ty, mutbl));
+        }
+        None
+    }
+
+    pub fn maybe_pinned_ref(self) -> Option<(Ty<'tcx>, ty::Pinnedness, ty::Mutability)> {
+        match *self.kind() {
+            Adt(def, args)
+                if def.is_pin()
+                    && let ty::Ref(_, ty, mutbl) = *args.type_at(0).kind() =>
+            {
+                Some((ty, ty::Pinnedness::Pinned, mutbl))
+            }
+            ty::Ref(_, ty, mutbl) => Some((ty, ty::Pinnedness::Not, mutbl)),
             _ => None,
         }
     }

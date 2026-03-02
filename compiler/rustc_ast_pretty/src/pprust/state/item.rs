@@ -1,7 +1,6 @@
 use ast::StaticItem;
 use itertools::{Itertools, Position};
-use rustc_ast as ast;
-use rustc_ast::ModKind;
+use rustc_ast::{self as ast, ModKind, TraitAlias};
 use rustc_span::Ident;
 
 use crate::pp::BoxMarker;
@@ -211,7 +210,7 @@ impl<'a> State<'a> {
                 ident,
                 generics,
                 ty,
-                expr,
+                rhs,
                 define_opaque,
             }) => {
                 self.print_item_const(
@@ -219,7 +218,7 @@ impl<'a> State<'a> {
                     None,
                     generics,
                     ty,
-                    expr.as_deref(),
+                    rhs.as_ref().map(|ct| ct.expr()),
                     &item.vis,
                     ast::Safety::Default,
                     *defaultness,
@@ -306,7 +305,7 @@ impl<'a> State<'a> {
                 let (cb, ib) = self.head(visibility_qualified(&item.vis, "union"));
                 self.print_struct(struct_def, generics, *ident, item.span, true, cb, ib);
             }
-            ast::ItemKind::Impl(ast::Impl { generics, of_trait, self_ty, items }) => {
+            ast::ItemKind::Impl(ast::Impl { generics, of_trait, self_ty, items, constness }) => {
                 let (cb, ib) = self.head("");
                 self.print_visibility(&item.vis);
 
@@ -322,17 +321,12 @@ impl<'a> State<'a> {
                 };
 
                 if let Some(box of_trait) = of_trait {
-                    let ast::TraitImplHeader {
-                        defaultness,
-                        safety,
-                        constness,
-                        polarity,
-                        ref trait_ref,
-                    } = *of_trait;
+                    let ast::TraitImplHeader { defaultness, safety, polarity, ref trait_ref } =
+                        *of_trait;
                     self.print_defaultness(defaultness);
                     self.print_safety(safety);
                     impl_generics(self);
-                    self.print_constness(constness);
+                    self.print_constness(*constness);
                     if let ast::ImplPolarity::Negative(_) = polarity {
                         self.word("!");
                     }
@@ -340,6 +334,7 @@ impl<'a> State<'a> {
                     self.space();
                     self.word_space("for");
                 } else {
+                    self.print_constness(*constness);
                     impl_generics(self);
                 }
 
@@ -386,8 +381,11 @@ impl<'a> State<'a> {
                 let empty = item.attrs.is_empty() && items.is_empty();
                 self.bclose(item.span, empty, cb);
             }
-            ast::ItemKind::TraitAlias(ident, generics, bounds) => {
-                let (cb, ib) = self.head(visibility_qualified(&item.vis, "trait"));
+            ast::ItemKind::TraitAlias(box TraitAlias { constness, ident, generics, bounds }) => {
+                let (cb, ib) = self.head("");
+                self.print_visibility(&item.vis);
+                self.print_constness(*constness);
+                self.word_nbsp("trait");
                 self.print_ident(*ident);
                 self.print_generic_params(&generics.params);
                 self.nbsp();
@@ -564,7 +562,7 @@ impl<'a> State<'a> {
                 ident,
                 generics,
                 ty,
-                expr,
+                rhs,
                 define_opaque,
             }) => {
                 self.print_item_const(
@@ -572,7 +570,7 @@ impl<'a> State<'a> {
                     None,
                     generics,
                     ty,
-                    expr.as_deref(),
+                    rhs.as_ref().map(|ct| ct.expr()),
                     vis,
                     ast::Safety::Default,
                     *defaultness,

@@ -68,7 +68,7 @@ This instructs `git` to perform a "shallow clone", cloning the repository but tr
 the last `N` commits.
 
 Passing `--depth 1` tells `git` to clone the repository but truncate the history to the latest
-commit that is on the `master` branch, which is usually fine for browsing the source code or
+commit that is on the `main` branch, which is usually fine for browsing the source code or
 building the compiler.
 
 ```bash
@@ -172,7 +172,7 @@ You can install it with `cargo install --path src/tools/x`.
 
 To clarify that this is another global installed binary util, which is
 similar to the one declared in section [What is `x.py`](#what-is-xpy), but
-it works as an independent process to execute the `x.py` rather than calling the 
+it works as an independent process to execute the `x.py` rather than calling the
 shell to run the platform related scripts.
 
 ## Create a `bootstrap.toml`
@@ -234,12 +234,6 @@ What this command does is:
 - Build `rustc` using the stage0 compiler and stage0 `std`.
 - Build `library` (the standard libraries) with the stage1 compiler that was just built.
 - Assemble a working stage1 sysroot, containing the stage1 compiler and stage1 standard libraries.
-
-To build `rustc` with the in-tree `std`, use this command instead:
-
-```console
-./x build library --stage 2
-```
 
 This final product (stage1 compiler + libs built using that compiler)
 is what you need to build other Rust programs (unless you use `#![no_std]` or

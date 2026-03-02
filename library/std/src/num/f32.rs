@@ -295,6 +295,11 @@ impl f32 {
     /// It might have a different sequence of rounding operations than `powf`,
     /// so the results are not guaranteed to agree.
     ///
+    /// Note that this function is special in that it can return non-NaN results for NaN inputs. For
+    /// example, `f32::powi(f32::NAN, 0)` returns `1.0`. However, if an input is a *signaling*
+    /// NaN, then the result is non-deterministically either a NaN or the result that the
+    /// corresponding quiet NaN would produce.
+    ///
     /// # Unspecified precision
     ///
     /// The precision of this function is non-deterministic. This means it varies by platform, Rust version, and
@@ -308,6 +313,7 @@ impl f32 {
     /// assert!(abs_difference <= 1e-5);
     ///
     /// assert_eq!(f32::powi(f32::NAN, 0), 1.0);
+    /// assert_eq!(f32::powi(0.0, 0), 1.0);
     /// ```
     #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]
@@ -318,6 +324,11 @@ impl f32 {
     }
 
     /// Raises a number to a floating point power.
+    ///
+    /// Note that this function is special in that it can return non-NaN results for NaN inputs. For
+    /// example, `f32::powf(f32::NAN, 0.0)` returns `1.0`. However, if an input is a *signaling*
+    /// NaN, then the result is non-deterministically either a NaN or the result that the
+    /// corresponding quiet NaN would produce.
     ///
     /// # Unspecified precision
     ///
@@ -333,6 +344,7 @@ impl f32 {
     ///
     /// assert_eq!(f32::powf(1.0, f32::NAN), 1.0);
     /// assert_eq!(f32::powf(f32::NAN, 0.0), 1.0);
+    /// assert_eq!(f32::powf(0.0, 0.0), 1.0);
     /// ```
     #[rustc_allow_incoherent_impl]
     #[must_use = "method returns a new number and does not mutate the original value"]

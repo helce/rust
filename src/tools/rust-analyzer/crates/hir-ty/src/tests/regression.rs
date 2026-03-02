@@ -292,7 +292,7 @@ fn infer_std_crash_5() {
             149..156 'content': &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? {unknown}
             181..188 'content': &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? {unknown}
             191..313 'if ICE...     }': &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? {unknown}
-            194..231 'ICE_RE..._VALUE': bool
+            194..231 'ICE_RE..._VALUE': {unknown}
             194..247 'ICE_RE...&name)': bool
             241..246 '&name': &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? {unknown}
             242..246 'name': &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? &'? {unknown}
@@ -629,7 +629,7 @@ fn issue_4053_diesel_where_clauses() {
             65..69 'self': Self
             267..271 'self': Self
             466..470 'self': SelectStatement<F, S, D, W, O, LOf, {unknown}, {unknown}>
-            488..522 '{     ...     }': <SelectStatement<F, S, D, W, O, LOf, {unknown}, {unknown}> as BoxedDsl<DB>>::Output
+            488..522 '{     ...     }': {unknown}
             498..502 'self': SelectStatement<F, S, D, W, O, LOf, {unknown}, {unknown}>
             498..508 'self.order': O
             498..515 'self.o...into()': dyn QueryFragment<DB> + 'static
@@ -2504,5 +2504,61 @@ fn main() {
     node(Eth);
 }
 "#,
+    );
+}
+
+#[test]
+fn module_inside_block() {
+    check_types(
+        r#"
+fn foo() {
+    mod my_mod {
+        pub type Bool = bool;
+    }
+
+    let _: my_mod::Bool;
+     // ^ bool
+}
+    "#,
+    );
+}
+
+#[test]
+fn issue_9881_super_trait_blanket_impl() {
+    check_types(
+        r#"
+pub trait TryStream: Stream {
+    fn try_poll_next(&self) {}
+}
+
+pub trait Stream {
+    type Item;
+    fn poll_next(&self) {}
+}
+
+trait StreamAlias: Stream<Item = ()> {}
+
+impl<S: Stream<Item = ()>> TryStream for S {}
+
+impl<S: Stream<Item = ()>> StreamAlias for S {}
+
+struct StreamImpl;
+
+impl Stream for StreamImpl {
+    type Item = ();
+}
+
+fn foo() -> impl StreamAlias {
+    StreamImpl
+}
+
+fn main() {
+    let alias = foo();
+    let _: () = alias.try_poll_next();
+     // ^ ()
+    let _: () = alias.poll_next();
+     // ^ ()
+}
+        "#,
     );
 }

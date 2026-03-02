@@ -846,6 +846,10 @@ impl Build {
             features.insert("compiler-builtins-mem");
         }
 
+        if self.config.llvm_enzyme {
+            features.insert("llvm_enzyme");
+        }
+
         features.into_iter().collect::<Vec<_>>().join(" ")
     }
 
@@ -868,6 +872,9 @@ impl Build {
         }
         if self.config.llvm_enzyme {
             features.push("llvm_enzyme");
+        }
+        if self.config.llvm_offload {
+            features.push("llvm_offload");
         }
         // keep in sync with `bootstrap/compile.rs:rustc_cargo_env`
         if self.config.rust_randomize_layout && check("rustc_randomized_layouts") {
@@ -1522,21 +1529,6 @@ impl Build {
         self.config.target_config.get(&target).and_then(|t| t.qemu_rootfs.as_ref()).map(|p| &**p)
     }
 
-    /// Path to the python interpreter to use
-    fn python(&self) -> &Path {
-        if self.config.host_target.ends_with("apple-darwin") {
-            // Force /usr/bin/python3 on macOS for LLDB tests because we're loading the
-            // LLDB plugin's compiled module which only works with the system python
-            // (namely not Homebrew-installed python)
-            Path::new("/usr/bin/python3")
-        } else {
-            self.config
-                .python
-                .as_ref()
-                .expect("python is required for running LLDB or rustdoc tests")
-        }
-    }
-
     /// Temporary directory that extended error information is emitted to.
     fn extended_error_dir(&self) -> PathBuf {
         self.out.join("tmp/extended-error-metadata")
@@ -1611,7 +1603,7 @@ impl Build {
         // If available, we read the beta revision from that file.
         // This only happens when building from a source tarball when Git should not be used.
         let count = extract_beta_rev_from_file(self.src.join("version")).unwrap_or_else(|| {
-            // Figure out how many merge commits happened since we branched off master.
+            // Figure out how many merge commits happened since we branched off main.
             // That's our beta number!
             // (Note that we use a `..` range, not the `...` symmetric difference.)
             helpers::git(Some(&self.src))

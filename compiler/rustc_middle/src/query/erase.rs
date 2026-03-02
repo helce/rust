@@ -160,6 +160,10 @@ impl EraseType for Result<mir::ConstValue, mir::interpret::ErrorHandled> {
     type Result = [u8; size_of::<Result<mir::ConstValue, mir::interpret::ErrorHandled>>()];
 }
 
+impl EraseType for Option<(mir::ConstValue, Ty<'_>)> {
+    type Result = [u8; size_of::<Option<(mir::ConstValue, Ty<'_>)>>()];
+}
+
 impl EraseType for EvalToValTreeResult<'_> {
     type Result = [u8; size_of::<EvalToValTreeResult<'static>>()];
 }
@@ -344,6 +348,7 @@ trivial! {
     rustc_middle::ty::UnusedGenericParams,
     rustc_middle::ty::util::AlwaysRequiresDrop,
     rustc_middle::ty::Visibility<rustc_span::def_id::DefId>,
+    rustc_middle::middle::codegen_fn_attrs::SanitizerFnAttrs,
     rustc_session::config::CrateType,
     rustc_session::config::EntryFnType,
     rustc_session::config::OptLevel,
@@ -361,7 +366,6 @@ trivial! {
     rustc_span::Symbol,
     rustc_span::Ident,
     rustc_target::spec::PanicStrategy,
-    rustc_target::spec::SanitizerSet,
     rustc_type_ir::Variance,
     u32,
     usize,

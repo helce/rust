@@ -125,9 +125,13 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
             ) => {
                 self.check_def_id(def_id);
             }
-            _ if self.in_pat => {}
             Res::PrimTy(..) | Res::SelfCtor(..) | Res::Local(..) => {}
             Res::Def(DefKind::Ctor(CtorOf::Variant, ..), ctor_def_id) => {
+                // Using a variant in patterns should not make the variant live,
+                // since we can just remove the match arm that matches the pattern
+                if self.in_pat {
+                    return;
+                }
                 let variant_id = self.tcx.parent(ctor_def_id);
                 let enum_id = self.tcx.parent(variant_id);
                 self.check_def_id(enum_id);
@@ -136,6 +140,11 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
                 }
             }
             Res::Def(DefKind::Variant, variant_id) => {
+                // Using a variant in patterns should not make the variant live,
+                // since we can just remove the match arm that matches the pattern
+                if self.in_pat {
+                    return;
+                }
                 let enum_id = self.tcx.parent(variant_id);
                 self.check_def_id(enum_id);
                 if !self.ignore_variant_stack.contains(&variant_id) {
@@ -289,31 +298,21 @@ impl<'tcx> MarkSymbolVisitor<'tcx> {
     }
 
     fn handle_offset_of(&mut self, expr: &'tcx hir::Expr<'tcx>) {
-        let data = self.typeck_results().offset_of_data();
-        let &(container, ref indices) =
-            data.get(expr.hir_id).expect("no offset_of_data for offset_of");
+        let indices = self
+            .typeck_results()
+            .offset_of_data()
+            .get(expr.hir_id)
+            .expect("no offset_of_data for offset_of");
 
-        let body_did = self.typeck_results().hir_owner.to_def_id();
-        let typing_env = ty::TypingEnv::non_body_analysis(self.tcx, body_did);
-
-        let mut current_ty = container;
-
-        for &(variant, field) in indices {
+        for &(current_ty, variant, field) in indices {
             match current_ty.kind() {
-                ty::Adt(def, args) => {
+                ty::Adt(def, _) => {
                     let field = &def.variant(variant).fields[field];
-
                     self.insert_def_id(field.did);
-                    let field_ty = field.ty(self.tcx, args);
-
-                    current_ty = self.tcx.normalize_erasing_regions(typing_env, field_ty);
                 }
                 // we don't need to mark tuple fields as live,
                 // but we may need to mark subfields
-                ty::Tuple(tys) => {
-                    current_ty =
-                        self.tcx.normalize_erasing_regions(typing_env, tys[field.as_usize()]);
-                }
+                ty::Tuple(_) => {}
                 _ => span_bug!(expr.span, "named field access on non-ADT"),
             }
         }

@@ -9,7 +9,7 @@ use hir_def::{
     Lookup, StaticId, VariantId,
     expr_store::HygieneId,
     item_tree::FieldsShape,
-    lang_item::LangItem,
+    lang_item::LangItems,
     layout::{TagEncoding, Variants},
     resolver::{HasResolver, TypeNs, ValueNs},
     signatures::{StaticFlags, StructFlags},
@@ -34,7 +34,7 @@ use syntax::{SyntaxNodePtr, TextRange};
 use triomphe::Arc;
 
 use crate::{
-    CallableDefId, ComplexMemoryMap, MemoryMap, TraitEnvironment,
+    CallableDefId, ComplexMemoryMap, InferenceResult, MemoryMap, ParamEnvAndCrate,
     consteval::{self, ConstEvalError, try_const_usize},
     db::{HirDatabase, InternedClosure, InternedClosureId},
     display::{ClosureStyle, DisplayTarget, HirDisplay},
@@ -42,8 +42,8 @@ use crate::{
     layout::{Layout, LayoutError, RustcEnumVariantIdx},
     method_resolution::{is_dyn_method, lookup_impl_const},
     next_solver::{
-        Const, ConstBytes, ConstKind, DbInterner, ErrorGuaranteed, GenericArgs, Region,
-        SolverDefId, Ty, TyKind, TypingMode, UnevaluatedConst, ValueConst,
+        Const, ConstBytes, ConstKind, DbInterner, ErrorGuaranteed, GenericArgs, Region, Ty, TyKind,
+        TypingMode, UnevaluatedConst, ValueConst,
         infer::{DbInternerInferExt, InferCtxt, traits::ObligationCause},
         obligation_ctxt::ObligationCtxt,
     },
@@ -165,7 +165,7 @@ enum MirOrDynIndex<'db> {
 
 pub struct Evaluator<'db> {
     db: &'db dyn HirDatabase,
-    trait_env: Arc<TraitEnvironment<'db>>,
+    param_env: ParamEnvAndCrate<'db>,
     target_data_layout: Arc<TargetDataLayout>,
     stack: Vec<u8>,
     heap: Vec<u8>,
@@ -594,7 +594,7 @@ pub fn interpret_mir<'db>(
     // a zero size, hoping that they are all outside of our current body. Even without a fix for #7434, we can
     // (and probably should) do better here, for example by excluding bindings outside of the target expression.
     assert_placeholder_ty_is_unused: bool,
-    trait_env: Option<Arc<TraitEnvironment<'db>>>,
+    trait_env: Option<ParamEnvAndCrate<'db>>,
 ) -> Result<'db, (Result<'db, Const<'db>>, MirOutput)> {
     let ty = body.locals[return_slot()].ty;
     let mut evaluator = Evaluator::new(db, body.owner, assert_placeholder_ty_is_unused, trait_env)?;
@@ -632,7 +632,7 @@ impl<'db> Evaluator<'db> {
         db: &'db dyn HirDatabase,
         owner: DefWithBodyId,
         assert_placeholder_ty_is_unused: bool,
-        trait_env: Option<Arc<TraitEnvironment<'db>>>,
+        trait_env: Option<ParamEnvAndCrate<'db>>,
     ) -> Result<'db, Evaluator<'db>> {
         let module = owner.module(db);
         let crate_id = module.krate();
@@ -641,8 +641,9 @@ impl<'db> Evaluator<'db> {
             Err(e) => return Err(MirEvalError::TargetDataLayoutNotAvailable(e)),
         };
         let cached_ptr_size = target_data_layout.pointer_size().bytes_usize();
-        let interner = DbInterner::new_with(db, Some(crate_id), module.containing_block());
+        let interner = DbInterner::new_with(db, crate_id);
         let infcx = interner.infer_ctxt().build(TypingMode::PostAnalysis);
+        let lang_items = interner.lang_items();
         Ok(Evaluator {
             target_data_layout,
             stack: vec![0],
@@ -653,7 +654,10 @@ impl<'db> Evaluator<'db> {
             static_locations: Default::default(),
             db,
             random_state: oorandom::Rand64::new(0),
-            trait_env: trait_env.unwrap_or_else(|| db.trait_environment_for_body(owner)),
+            param_env: trait_env.unwrap_or_else(|| ParamEnvAndCrate {
+                param_env: db.trait_environment_for_body(owner),
+                krate: crate_id,
+            }),
             crate_id,
             stdout: vec![],
             stderr: vec![],
@@ -667,13 +671,13 @@ impl<'db> Evaluator<'db> {
             mir_or_dyn_index_cache: RefCell::new(Default::default()),
             unused_locals_store: RefCell::new(Default::default()),
             cached_ptr_size,
-            cached_fn_trait_func: LangItem::Fn
-                .resolve_trait(db, crate_id)
+            cached_fn_trait_func: lang_items
+                .Fn
                 .and_then(|x| x.trait_items(db).method_by_name(&Name::new_symbol_root(sym::call))),
-            cached_fn_mut_trait_func: LangItem::FnMut.resolve_trait(db, crate_id).and_then(|x| {
+            cached_fn_mut_trait_func: lang_items.FnMut.and_then(|x| {
                 x.trait_items(db).method_by_name(&Name::new_symbol_root(sym::call_mut))
             }),
-            cached_fn_once_trait_func: LangItem::FnOnce.resolve_trait(db, crate_id).and_then(|x| {
+            cached_fn_once_trait_func: lang_items.FnOnce.and_then(|x| {
                 x.trait_items(db).method_by_name(&Name::new_symbol_root(sym::call_once))
             }),
             infcx,
@@ -683,6 +687,11 @@ impl<'db> Evaluator<'db> {
     #[inline]
     fn interner(&self) -> DbInterner<'db> {
         self.infcx.interner
+    }
+
+    #[inline]
+    fn lang_items(&self) -> &'db LangItems {
+        self.infcx.interner.lang_items()
     }
 
     fn place_addr(&self, p: &Place<'db>, locals: &Locals<'db>) -> Result<'db, Address> {
@@ -716,7 +725,7 @@ impl<'db> Evaluator<'db> {
             ty,
             |c, subst, f| {
                 let InternedClosure(def, _) = self.db.lookup_intern_closure(c);
-                let infer = self.db.infer(def);
+                let infer = InferenceResult::for_body(self.db, def);
                 let (captures, _) = infer.closure_info(c);
                 let parent_subst = subst.split_closure_args_untupled().parent_args;
                 captures
@@ -858,7 +867,7 @@ impl<'db> Evaluator<'db> {
         }
         let r = self
             .db
-            .layout_of_ty(ty, self.trait_env.clone())
+            .layout_of_ty(ty, self.param_env)
             .map_err(|e| MirEvalError::LayoutError(e, ty))?;
         self.layout_cache.borrow_mut().insert(ty, r.clone());
         Ok(r)
@@ -877,7 +886,8 @@ impl<'db> Evaluator<'db> {
             OperandKind::Copy(p) | OperandKind::Move(p) => self.place_ty(p, locals)?,
             OperandKind::Constant { konst: _, ty } => *ty,
             &OperandKind::Static(s) => {
-                let ty = self.db.infer(s.into())[self.db.body(s.into()).body_expr];
+                let ty =
+                    InferenceResult::for_body(self.db, s.into())[self.db.body(s.into()).body_expr];
                 Ty::new_ref(
                     self.interner(),
                     Region::new_static(self.interner()),
@@ -1696,7 +1706,7 @@ impl<'db> Evaluator<'db> {
         if let TyKind::Adt(adt_ef, subst) = kind
             && let AdtId::StructId(struct_id) = adt_ef.def_id().0
         {
-            let field_types = self.db.field_types_ns(struct_id.into());
+            let field_types = self.db.field_types(struct_id.into());
             if let Some(ty) =
                 field_types.iter().last().map(|it| it.1.instantiate(self.interner(), subst))
             {
@@ -1775,9 +1785,9 @@ impl<'db> Evaluator<'db> {
                     else {
                         not_supported!("unsizing struct without field");
                     };
-                    let target_last_field = self.db.field_types_ns(id.into())[last_field]
+                    let target_last_field = self.db.field_types(id.into())[last_field]
                         .instantiate(self.interner(), target_subst);
-                    let current_last_field = self.db.field_types_ns(id.into())[last_field]
+                    let current_last_field = self.db.field_types(id.into())[last_field]
                         .instantiate(self.interner(), current_subst);
                     return self.unsizing_ptr_from_addr(
                         target_last_field,
@@ -1917,24 +1927,27 @@ impl<'db> Evaluator<'db> {
         let value = match konst.kind() {
             ConstKind::Value(value) => value,
             ConstKind::Unevaluated(UnevaluatedConst { def: const_id, args: subst }) => 'b: {
-                let mut const_id = match const_id {
-                    SolverDefId::ConstId(it) => GeneralConstId::from(it),
-                    SolverDefId::StaticId(it) => it.into(),
-                    _ => unreachable!("unevaluated consts should be consts or statics"),
-                };
+                let mut id = const_id.0;
                 let mut subst = subst;
-                if let hir_def::GeneralConstId::ConstId(c) = const_id {
-                    let (c, s) = lookup_impl_const(&self.infcx, self.trait_env.clone(), c, subst);
-                    const_id = hir_def::GeneralConstId::ConstId(c);
+                if let hir_def::GeneralConstId::ConstId(c) = id {
+                    let (c, s) = lookup_impl_const(&self.infcx, self.param_env.param_env, c, subst);
+                    id = hir_def::GeneralConstId::ConstId(c);
                     subst = s;
                 }
-                result_owner = self
-                    .db
-                    .const_eval(const_id, subst, Some(self.trait_env.clone()))
-                    .map_err(|e| {
-                        let name = const_id.name(self.db);
-                        MirEvalError::ConstEvalError(name, Box::new(e))
-                    })?;
+                result_owner = match id {
+                    GeneralConstId::ConstId(const_id) => {
+                        self.db.const_eval(const_id, subst, Some(self.param_env)).map_err(|e| {
+                            let name = id.name(self.db);
+                            MirEvalError::ConstEvalError(name, Box::new(e))
+                        })?
+                    }
+                    GeneralConstId::StaticId(static_id) => {
+                        self.db.const_eval_static(static_id).map_err(|e| {
+                            let name = id.name(self.db);
+                            MirEvalError::ConstEvalError(name, Box::new(e))
+                        })?
+                    }
+                };
                 if let ConstKind::Value(value) = result_owner.kind() {
                     break 'b value;
                 }
@@ -2268,7 +2281,7 @@ impl<'db> Evaluator<'db> {
                     AdtId::StructId(s) => {
                         let data = s.fields(this.db);
                         let layout = this.layout(ty)?;
-                        let field_types = this.db.field_types_ns(s.into());
+                        let field_types = this.db.field_types(s.into());
                         for (f, _) in data.fields().iter() {
                             let offset = layout
                                 .fields
@@ -2296,7 +2309,7 @@ impl<'db> Evaluator<'db> {
                             e,
                         ) {
                             let data = v.fields(this.db);
-                            let field_types = this.db.field_types_ns(v.into());
+                            let field_types = this.db.field_types(v.into());
                             for (f, _) in data.fields().iter() {
                                 let offset =
                                     l.fields.offset(u32::from(f.into_raw()) as usize).bytes_usize();
@@ -2320,7 +2333,7 @@ impl<'db> Evaluator<'db> {
                     let ty = ocx
                         .structurally_normalize_ty(
                             &ObligationCause::dummy(),
-                            this.trait_env.env,
+                            this.param_env.param_env,
                             ty,
                         )
                         .map_err(|_| MirEvalError::NotSupported("couldn't normalize".to_owned()))?;
@@ -2373,7 +2386,7 @@ impl<'db> Evaluator<'db> {
             }
             TyKind::Adt(id, args) => match id.def_id().0 {
                 AdtId::StructId(s) => {
-                    for (i, (_, ty)) in self.db.field_types_ns(s.into()).iter().enumerate() {
+                    for (i, (_, ty)) in self.db.field_types(s.into()).iter().enumerate() {
                         let offset = layout.fields.offset(i).bytes_usize();
                         let ty = ty.instantiate(self.interner(), args);
                         self.patch_addresses(
@@ -2394,7 +2407,7 @@ impl<'db> Evaluator<'db> {
                         self.read_memory(addr, layout.size.bytes_usize())?,
                         e,
                     ) {
-                        for (i, (_, ty)) in self.db.field_types_ns(ev.into()).iter().enumerate() {
+                        for (i, (_, ty)) in self.db.field_types(ev.into()).iter().enumerate() {
                             let offset = layout.fields.offset(i).bytes_usize();
                             let ty = ty.instantiate(self.interner(), args);
                             self.patch_addresses(
@@ -2499,7 +2512,7 @@ impl<'db> Evaluator<'db> {
     ) -> Result<'db, Option<StackFrame<'db>>> {
         let mir_body = self
             .db
-            .monomorphized_mir_body_for_closure(closure, generic_args, self.trait_env.clone())
+            .monomorphized_mir_body_for_closure(closure, generic_args, self.param_env)
             .map_err(|it| MirEvalError::MirLowerErrorForClosure(closure, it))?;
         let closure_data = if mir_body.locals[mir_body.param_locals[0]].ty.as_reference().is_some()
         {
@@ -2595,16 +2608,19 @@ impl<'db> Evaluator<'db> {
         }
         let (def, generic_args) = pair;
         let r = if let Some(self_ty_idx) =
-            is_dyn_method(self.interner(), self.trait_env.clone(), def, generic_args)
+            is_dyn_method(self.interner(), self.param_env.param_env, def, generic_args)
         {
             MirOrDynIndex::Dyn(self_ty_idx)
         } else {
-            let (imp, generic_args) =
-                self.db.lookup_impl_method(self.trait_env.clone(), def, generic_args);
+            let (imp, generic_args) = self.db.lookup_impl_method(
+                ParamEnvAndCrate { param_env: self.param_env.param_env, krate: self.crate_id },
+                def,
+                generic_args,
+            );
 
             let mir_body = self
                 .db
-                .monomorphized_mir_body(imp.into(), generic_args, self.trait_env.clone())
+                .monomorphized_mir_body(imp.into(), generic_args, self.param_env)
                 .map_err(|e| {
                     MirEvalError::InFunction(
                         Box::new(MirEvalError::MirLowerError(imp, e)),
@@ -2799,7 +2815,8 @@ impl<'db> Evaluator<'db> {
             })?;
             self.allocate_const_in_heap(locals, konst)?
         } else {
-            let ty = self.db.infer(st.into())[self.db.body(st.into()).body_expr];
+            let ty =
+                InferenceResult::for_body(self.db, st.into())[self.db.body(st.into()).body_expr];
             let Some((size, align)) = self.size_align_of(ty, locals)? else {
                 not_supported!("unsized extern static");
             };
@@ -2860,7 +2877,7 @@ impl<'db> Evaluator<'db> {
         span: MirSpan,
     ) -> Result<'db, ()> {
         let Some(drop_fn) = (|| {
-            let drop_trait = LangItem::Drop.resolve_trait(self.db, self.crate_id)?;
+            let drop_trait = self.lang_items().Drop?;
             drop_trait.trait_items(self.db).method_by_name(&Name::new_symbol_root(sym::drop))
         })() else {
             // in some tests we don't have drop trait in minicore, and
@@ -2895,7 +2912,7 @@ impl<'db> Evaluator<'db> {
                         let variant_fields = s.fields(self.db);
                         match variant_fields.shape {
                             FieldsShape::Record | FieldsShape::Tuple => {
-                                let field_types = self.db.field_types_ns(s.into());
+                                let field_types = self.db.field_types(s.into());
                                 for (field, _) in variant_fields.fields().iter() {
                                     let offset = layout
                                         .fields

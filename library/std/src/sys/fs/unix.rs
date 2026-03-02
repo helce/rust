@@ -14,9 +14,10 @@ use libc::c_char;
     target_os = "fuchsia",
     target_os = "hurd",
     target_os = "illumos",
+    target_vendor = "apple",
 ))]
 use libc::dirfd;
-#[cfg(any(target_os = "fuchsia", target_os = "illumos"))]
+#[cfg(any(target_os = "fuchsia", target_os = "illumos", target_vendor = "apple"))]
 use libc::fstatat as fstatat64;
 #[cfg(any(all(target_os = "linux", not(target_env = "musl")), target_os = "hurd"))]
 use libc::fstatat64;
@@ -907,6 +908,7 @@ impl DirEntry {
             target_os = "fuchsia",
             target_os = "hurd",
             target_os = "illumos",
+            target_vendor = "apple",
         ),
         not(miri) // no dirfd on Miri
     ))]
@@ -937,6 +939,7 @@ impl DirEntry {
             target_os = "fuchsia",
             target_os = "hurd",
             target_os = "illumos",
+            target_vendor = "apple",
         )),
         miri
     ))]
@@ -1293,6 +1296,7 @@ impl File {
         target_os = "openbsd",
         target_os = "cygwin",
         target_os = "illumos",
+        target_os = "aix",
         target_vendor = "apple",
     ))]
     pub fn lock(&self) -> io::Result<()> {
@@ -1318,6 +1322,7 @@ impl File {
         target_os = "cygwin",
         target_os = "solaris",
         target_os = "illumos",
+        target_os = "aix",
         target_vendor = "apple",
     )))]
     pub fn lock(&self) -> io::Result<()> {
@@ -1332,6 +1337,7 @@ impl File {
         target_os = "openbsd",
         target_os = "cygwin",
         target_os = "illumos",
+        target_os = "aix",
         target_vendor = "apple",
     ))]
     pub fn lock_shared(&self) -> io::Result<()> {
@@ -1357,6 +1363,7 @@ impl File {
         target_os = "cygwin",
         target_os = "solaris",
         target_os = "illumos",
+        target_os = "aix",
         target_vendor = "apple",
     )))]
     pub fn lock_shared(&self) -> io::Result<()> {
@@ -1371,6 +1378,7 @@ impl File {
         target_os = "openbsd",
         target_os = "cygwin",
         target_os = "illumos",
+        target_os = "aix",
         target_vendor = "apple",
     ))]
     pub fn try_lock(&self) -> Result<(), TryLockError> {
@@ -1412,6 +1420,7 @@ impl File {
         target_os = "cygwin",
         target_os = "solaris",
         target_os = "illumos",
+        target_os = "aix",
         target_vendor = "apple",
     )))]
     pub fn try_lock(&self) -> Result<(), TryLockError> {
@@ -1429,6 +1438,7 @@ impl File {
         target_os = "openbsd",
         target_os = "cygwin",
         target_os = "illumos",
+        target_os = "aix",
         target_vendor = "apple",
     ))]
     pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
@@ -1470,6 +1480,7 @@ impl File {
         target_os = "cygwin",
         target_os = "solaris",
         target_os = "illumos",
+        target_os = "aix",
         target_vendor = "apple",
     )))]
     pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
@@ -1487,6 +1498,7 @@ impl File {
         target_os = "openbsd",
         target_os = "cygwin",
         target_os = "illumos",
+        target_os = "aix",
         target_vendor = "apple",
     ))]
     pub fn unlock(&self) -> io::Result<()> {
@@ -1512,6 +1524,7 @@ impl File {
         target_os = "cygwin",
         target_os = "solaris",
         target_os = "illumos",
+        target_os = "aix",
         target_vendor = "apple",
     )))]
     pub fn unlock(&self) -> io::Result<()> {
@@ -2289,7 +2302,7 @@ mod cfm {
     }
 }
 #[cfg(any(target_os = "linux", target_os = "android"))]
-pub(crate) use cfm::CachedFileMetadata;
+pub(in crate::sys) use cfm::CachedFileMetadata;
 
 #[cfg(not(target_vendor = "apple"))]
 pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {

@@ -12,19 +12,12 @@
 //! This API is still completely unstable and subject to change.
 
 // tidy-alphabetical-start
-#![allow(internal_features)]
 #![allow(rustc::usage_of_ty_tykind)]
-#![doc(
-    html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/",
-    test(attr(allow(unused_variables), deny(warnings)))
-)]
-#![doc(rust_logo)]
-#![feature(rustdoc_internals)]
+#![doc(test(attr(allow(unused_variables), deny(warnings), allow(internal_features))))]
 #![feature(sized_hierarchy)]
 #![feature(trait_alias)]
 // tidy-alphabetical-end
 
-use std::cell::RefCell;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::ops::Index;
@@ -48,12 +41,6 @@ pub mod rustc_internal {}
 
 /// Trait alias for types that can be cached in [`Tables`].
 pub trait Cacheable = Copy + Debug + PartialEq + IndexedVal;
-
-/// A container which is used for TLS.
-pub struct Container<'tcx, B: Bridge> {
-    pub tables: RefCell<Tables<'tcx, B>>,
-    pub cx: RefCell<CompilerCtxt<'tcx, B>>,
-}
 
 pub struct Tables<'tcx, B: Bridge> {
     pub def_ids: IndexMap<DefId, B::DefId>,

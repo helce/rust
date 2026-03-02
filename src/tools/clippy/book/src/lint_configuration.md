@@ -681,6 +681,17 @@ Sets the scope ("crate", "file", or "module") in which duplicate inherent `impl`
 * [`multiple_inherent_impl`](https://rust-lang.github.io/rust-clippy/master/index.html#multiple_inherent_impl)
 
 
+## `large-error-ignored`
+A list of paths to types that should be ignored as overly large `Err`-variants in a
+`Result` returned from a function
+
+**Default Value:** `[]`
+
+---
+**Affected lints:**
+* [`result_large_err`](https://rust-lang.github.io/rust-clippy/master/index.html#result_large_err)
+
+
 ## `large-error-threshold`
 The maximum size of the `Err`-variant in a `Result` returned from a function
 
@@ -859,6 +870,7 @@ The minimum rust version that the project supports. Defaults to the `rust-versio
 * [`io_other_error`](https://rust-lang.github.io/rust-clippy/master/index.html#io_other_error)
 * [`iter_kv_map`](https://rust-lang.github.io/rust-clippy/master/index.html#iter_kv_map)
 * [`legacy_numeric_constants`](https://rust-lang.github.io/rust-clippy/master/index.html#legacy_numeric_constants)
+* [`len_zero`](https://rust-lang.github.io/rust-clippy/master/index.html#len_zero)
 * [`lines_filter_map_ok`](https://rust-lang.github.io/rust-clippy/master/index.html#lines_filter_map_ok)
 * [`manual_abs_diff`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_abs_diff)
 * [`manual_bits`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_bits)

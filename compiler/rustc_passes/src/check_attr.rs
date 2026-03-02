@@ -23,8 +23,8 @@ use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalModDefId;
 use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{
-    self as hir, Attribute, CRATE_HIR_ID, CRATE_OWNER_ID, FnSig, ForeignItem, HirId, Item,
-    ItemKind, MethodKind, PartialConstStability, Safety, Stability, StabilityLevel, Target,
+    self as hir, Attribute, CRATE_HIR_ID, CRATE_OWNER_ID, Constness, FnSig, ForeignItem, HirId,
+    Item, ItemKind, MethodKind, PartialConstStability, Safety, Stability, StabilityLevel, Target,
     TraitItem, find_attr,
 };
 use rustc_macros::LintDiagnostic;
@@ -54,6 +54,13 @@ use crate::{errors, fluent_generated as fluent};
 #[derive(LintDiagnostic)]
 #[diag(passes_diagnostic_diagnostic_on_unimplemented_only_for_traits)]
 struct DiagnosticOnUnimplementedOnlyForTraits;
+
+#[derive(LintDiagnostic)]
+#[diag(passes_diagnostic_diagnostic_on_const_only_for_trait_impls)]
+struct DiagnosticOnConstOnlyForTraitImpls {
+    #[label]
+    item_span: Span,
+}
 
 fn target_from_impl_item<'tcx>(tcx: TyCtxt<'tcx>, impl_item: &hir::ImplItem<'_>) -> Target {
     match impl_item.kind {
@@ -150,9 +157,6 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                 Attribute::Parsed(AttributeKind::ProcMacroDerive { .. }) => {
                     self.check_proc_macro(hir_id, target, ProcMacroKind::Derive)
                 }
-                &Attribute::Parsed(AttributeKind::TypeConst(attr_span)) => {
-                    self.check_type_const(hir_id, attr_span, target)
-                }
                 Attribute::Parsed(
                     AttributeKind::Stability {
                         span: attr_span,
@@ -212,7 +216,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                 &Attribute::Parsed(AttributeKind::CustomMir(dialect, phase, attr_span)) => {
                     self.check_custom_mir(dialect, phase, attr_span)
                 }
-                &Attribute::Parsed(AttributeKind::Sanitize { on_set, off_set, span: attr_span}) => {
+                &Attribute::Parsed(AttributeKind::Sanitize { on_set, off_set, rtsan: _, span: attr_span}) => {
                     self.check_sanitize(attr_span, on_set | off_set, span, target);
                 },
                 Attribute::Parsed(AttributeKind::Link(_, attr_span)) => {
@@ -235,7 +239,6 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                     | AttributeKind::Marker(..)
                     | AttributeKind::SkipDuringMethodDispatch { .. }
                     | AttributeKind::Coinductive(..)
-                    | AttributeKind::ConstTrait(..)
                     | AttributeKind::DenyExplicitImpl(..)
                     | AttributeKind::DoNotImplementViaObject(..)
                     | AttributeKind::SpecializationTrait(..)
@@ -243,6 +246,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                     | AttributeKind::ParenSugar(..)
                     | AttributeKind::AllowIncoherentImpl(..)
                     | AttributeKind::Confusables { .. }
+                    | AttributeKind::TypeConst{..}
                     // `#[doc]` is actually a lot more than just doc comments, so is checked below
                     | AttributeKind::DocComment {..}
                     // handled below this loop and elsewhere
@@ -257,6 +261,7 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                     | AttributeKind::RustcLayoutScalarValidRangeStart(..)
                     | AttributeKind::RustcLayoutScalarValidRangeEnd(..)
                     | AttributeKind::RustcSimdMonomorphizeLaneLimit(..)
+                    | AttributeKind::RustcShouldNotBeCalledOnConstItems(..)
                     | AttributeKind::ExportStable
                     | AttributeKind::FfiConst(..)
                     | AttributeKind::UnstableFeatureBound(..)
@@ -283,7 +288,10 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                     | AttributeKind::ObjcSelector { .. }
                     | AttributeKind::RustcCoherenceIsCore(..)
                     | AttributeKind::DebuggerVisualizer(..)
-                    | AttributeKind::RustcMain,
+                    | AttributeKind::RustcMain
+                    | AttributeKind::RustcPassIndirectlyInNonRusticAbis(..)
+                    | AttributeKind::PinV2(..)
+                    | AttributeKind::WindowsSubsystem(..)
                 ) => { /* do nothing  */ }
                 Attribute::Unparsed(attr_item) => {
                     style = Some(attr_item.style);
@@ -293,6 +301,9 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                         }
                         [sym::diagnostic, sym::on_unimplemented, ..] => {
                             self.check_diagnostic_on_unimplemented(attr.span(), hir_id, target)
+                        }
+                        [sym::diagnostic, sym::on_const, ..] => {
+                            self.check_diagnostic_on_const(attr.span(), hir_id, target, item)
                         }
                         [sym::thread_local, ..] => self.check_thread_local(attr, span, target),
                         [sym::doc, ..] => self.check_doc_attrs(
@@ -354,7 +365,6 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                             // need to be fixed
                             | sym::cfi_encoding // FIXME(cfi_encoding)
                             | sym::instruction_set // broken on stable!!!
-                            | sym::windows_subsystem // broken on stable!!!
                             | sym::patchable_function_entry // FIXME(patchable_function_entry)
                             | sym::deprecated_safe // FIXME(deprecated_safe)
                             // internal
@@ -515,6 +525,32 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                 DiagnosticOnUnimplementedOnlyForTraits,
             );
         }
+    }
+
+    /// Checks if `#[diagnostic::on_const]` is applied to a trait impl
+    fn check_diagnostic_on_const(
+        &self,
+        attr_span: Span,
+        hir_id: HirId,
+        target: Target,
+        item: Option<ItemLike<'_>>,
+    ) {
+        if matches!(target, Target::Impl { of_trait: true }) {
+            match item.unwrap() {
+                ItemLike::Item(it) => match it.expect_impl().constness {
+                    Constness::Const => {}
+                    Constness::NotConst => return,
+                },
+                ItemLike::ForeignItem => {}
+            }
+        }
+        let item_span = self.tcx.hir_span(hir_id);
+        self.tcx.emit_node_span_lint(
+            MISPLACED_DIAGNOSTIC_ATTRIBUTES,
+            hir_id,
+            attr_span,
+            DiagnosticOnConstOnlyForTraitImpls { item_span },
+        );
     }
 
     /// Checks if an `#[inline]` is applied to a function or a closure.
@@ -1123,6 +1159,28 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
         true
     }
 
+    fn check_doc_attr_string_value(&self, meta: &MetaItemInner, hir_id: HirId) {
+        if meta.value_str().is_none() {
+            self.tcx.emit_node_span_lint(
+                INVALID_DOC_ATTRIBUTES,
+                hir_id,
+                meta.span(),
+                errors::DocAttrExpectsString { attr_name: meta.name().unwrap() },
+            );
+        }
+    }
+
+    fn check_doc_attr_no_value(&self, meta: &MetaItemInner, hir_id: HirId) {
+        if !meta.is_word() {
+            self.tcx.emit_node_span_lint(
+                INVALID_DOC_ATTRIBUTES,
+                hir_id,
+                meta.span(),
+                errors::DocAttrExpectsNoValue { attr_name: meta.name().unwrap() },
+            );
+        }
+    }
+
     /// Checks that `doc(test(...))` attribute contains only valid attributes and are at the right place.
     fn check_test_attr(
         &self,
@@ -1293,10 +1351,15 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                             | sym::html_logo_url
                             | sym::html_playground_url
                             | sym::issue_tracker_base_url
-                            | sym::html_root_url
-                            | sym::html_no_source,
+                            | sym::html_root_url,
                         ) => {
                             self.check_attr_crate_level(attr_span, style, meta, hir_id);
+                            self.check_doc_attr_string_value(meta, hir_id);
+                        }
+
+                        Some(sym::html_no_source) => {
+                            self.check_attr_crate_level(attr_span, style, meta, hir_id);
+                            self.check_doc_attr_no_value(meta, hir_id);
                         }
 
                         Some(sym::auto_cfg) => {
@@ -1769,6 +1832,17 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
                 target: target.to_string(),
             });
         }
+        // Error on `#[repr(transparent)]` in combination with
+        // `#[rustc_pass_indirectly_in_non_rustic_abis]`
+        if is_transparent
+            && let Some(&pass_indirectly_span) =
+                find_attr!(attrs, AttributeKind::RustcPassIndirectlyInNonRusticAbis(span) => span)
+        {
+            self.dcx().emit_err(errors::TransparentIncompatible {
+                hint_spans: vec![span, pass_indirectly_span],
+                target: target.to_string(),
+            });
+        }
         if is_explicit_rust && (int_reprs > 0 || is_c || is_simd) {
             let hint_spans = hint_spans.clone().collect();
             self.dcx().emit_err(errors::ReprConflicting { hint_spans });
@@ -2099,23 +2173,6 @@ impl<'tcx> CheckAttrVisitor<'tcx> {
         if !errors.is_empty() {
             infcx.err_ctxt().report_fulfillment_errors(errors);
             self.abort.set(true);
-        }
-    }
-
-    fn check_type_const(&self, hir_id: HirId, attr_span: Span, target: Target) {
-        let tcx = self.tcx;
-        if target == Target::AssocConst
-            && let parent = tcx.parent(hir_id.expect_owner().to_def_id())
-            && self.tcx.def_kind(parent) == DefKind::Trait
-        {
-            return;
-        } else {
-            self.dcx()
-                .struct_span_err(
-                    attr_span,
-                    "`#[type_const]` must only be applied to trait associated constants",
-                )
-                .emit();
         }
     }
 

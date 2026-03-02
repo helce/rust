@@ -1,5 +1,4 @@
-//@ add-core-stubs
-//@ needs-asm-support
+//@ add-minicore
 //@ compile-flags: --target s390x-unknown-linux-gnu
 //@ needs-llvm-components: systemz
 //@ ignore-backends: gcc

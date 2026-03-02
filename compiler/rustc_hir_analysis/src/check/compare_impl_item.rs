@@ -6,9 +6,10 @@ use hir::def_id::{DefId, DefIdMap, LocalDefId};
 use rustc_data_structures::fx::{FxIndexMap, FxIndexSet};
 use rustc_errors::codes::*;
 use rustc_errors::{Applicability, ErrorGuaranteed, MultiSpan, pluralize, struct_span_code_err};
+use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::intravisit::VisitorExt;
-use rustc_hir::{self as hir, AmbigArg, GenericParamKind, ImplItemKind, intravisit};
+use rustc_hir::{self as hir, AmbigArg, GenericParamKind, ImplItemKind, find_attr, intravisit};
 use rustc_infer::infer::{self, BoundRegionConversionTime, InferCtxt, TyCtxtInferExt};
 use rustc_infer::traits::util;
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
@@ -235,7 +236,26 @@ fn compare_method_predicate_entailment<'tcx>(
 
     let normalize_cause = traits::ObligationCause::misc(impl_m_span, impl_m_def_id);
     let param_env = ty::ParamEnv::new(tcx.mk_clauses(&hybrid_preds));
-    let param_env = traits::normalize_param_env_or_error(tcx, param_env, normalize_cause);
+    // FIXME(-Zhigher-ranked-assumptions): The `hybrid_preds`
+    // should be well-formed. However, using them may result in
+    // region errors as we currently don't track placeholder
+    // assumptions.
+    //
+    // To avoid being backwards incompatible with the old solver,
+    // we also eagerly normalize the where-bounds in the new solver
+    // here while ignoring region constraints. This means we can then
+    // use where-bounds whose normalization results in placeholder
+    // errors further down without getting any errors.
+    //
+    // It should be sound to do so as the only region errors here
+    // should be due to missing implied bounds.
+    //
+    // cc trait-system-refactor-initiative/issues/166.
+    let param_env = if tcx.next_trait_solver_globally() {
+        traits::deeply_normalize_param_env_ignoring_regions(tcx, param_env, normalize_cause)
+    } else {
+        traits::normalize_param_env_or_error(tcx, param_env, normalize_cause)
+    };
     debug!(caller_bounds=?param_env.caller_bounds());
 
     let infcx = &tcx.infer_ctxt().build(TypingMode::non_body_analysis());
@@ -1097,14 +1117,14 @@ fn check_region_bounds_on_impl_item<'tcx>(
         .expect("expected impl item to have generics or else we can't compare them")
         .span;
 
-    let mut generics_span = None;
+    let mut generics_span = tcx.def_span(trait_m.def_id);
     let mut bounds_span = vec![];
     let mut where_span = None;
 
     if let Some(trait_node) = tcx.hir_get_if_local(trait_m.def_id)
         && let Some(trait_generics) = trait_node.generics()
     {
-        generics_span = Some(trait_generics.span);
+        generics_span = trait_generics.span;
         // FIXME: we could potentially look at the impl's bounds to not point at bounds that
         // *are* present in the impl.
         for p in trait_generics.predicates {
@@ -1984,10 +2004,44 @@ fn compare_impl_const<'tcx>(
     trait_const_item: ty::AssocItem,
     impl_trait_ref: ty::TraitRef<'tcx>,
 ) -> Result<(), ErrorGuaranteed> {
+    compare_type_const(tcx, impl_const_item, trait_const_item)?;
     compare_number_of_generics(tcx, impl_const_item, trait_const_item, false)?;
     compare_generic_param_kinds(tcx, impl_const_item, trait_const_item, false)?;
     check_region_bounds_on_impl_item(tcx, impl_const_item, trait_const_item, false)?;
     compare_const_predicate_entailment(tcx, impl_const_item, trait_const_item, impl_trait_ref)
+}
+
+fn compare_type_const<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    impl_const_item: ty::AssocItem,
+    trait_const_item: ty::AssocItem,
+) -> Result<(), ErrorGuaranteed> {
+    let impl_is_type_const =
+        find_attr!(tcx.get_all_attrs(impl_const_item.def_id), AttributeKind::TypeConst(_));
+    let trait_type_const_span = find_attr!(
+        tcx.get_all_attrs(trait_const_item.def_id),
+        AttributeKind::TypeConst(sp) => *sp
+    );
+
+    if let Some(trait_type_const_span) = trait_type_const_span
+        && !impl_is_type_const
+    {
+        return Err(tcx
+            .dcx()
+            .struct_span_err(
+                tcx.def_span(impl_const_item.def_id),
+                "implementation of `#[type_const]` const must be marked with `#[type_const]`",
+            )
+            .with_span_note(
+                MultiSpan::from_spans(vec![
+                    tcx.def_span(trait_const_item.def_id),
+                    trait_type_const_span,
+                ]),
+                "trait declaration of const is marked with `#[type_const]`",
+            )
+            .emit());
+    }
+    Ok(())
 }
 
 /// The equivalent of [compare_method_predicate_entailment], but for associated constants

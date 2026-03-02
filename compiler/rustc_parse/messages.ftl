@@ -347,6 +347,7 @@ parse_frontmatter_invalid_opening_preceding_whitespace = invalid preceding white
 parse_frontmatter_length_mismatch = frontmatter close does not match the opening
     .label_opening = the opening here has {$len_opening} dashes...
     .label_close = ...while the close has {$len_close} dashes
+parse_frontmatter_too_many_dashes = too many `-` symbols: frontmatter openings may be delimited by up to 255 `-` symbols, but found {$len_opening}
 parse_frontmatter_unclosed = unclosed frontmatter
     .note = frontmatter opening here was not closed
 
@@ -512,7 +513,7 @@ parse_keyword_lifetime =
     lifetimes cannot use keyword names
 
 parse_kw_bad_case = keyword `{$kw}` is written in the wrong case
-    .suggestion = write it in the correct case
+    .suggestion = write it in {$case}
 
 parse_label_inner_attr_does_not_annotate_this = the inner attribute doesn't annotate this {$item}
 parse_label_unexpected_token = unexpected token
@@ -732,8 +733,6 @@ parse_or_in_let_chain = `||` operators are not supported in let chain conditions
 
 parse_or_pattern_not_allowed_in_fn_parameters = function parameters require top-level or-patterns in parentheses
 parse_or_pattern_not_allowed_in_let_binding = `let` bindings require top-level or-patterns in parentheses
-parse_out_of_range_hex_escape = out of range hex escape
-    .label = must be a character in the range [\x00-\x7f]
 
 parse_outer_attr_explanation = outer attributes, like `#[test]`, annotate the item following them
 
@@ -863,7 +862,6 @@ parse_too_short_hex_escape = numeric character escape is too short
 parse_trailing_vert_not_allowed = a trailing `{$token}` is not allowed in an or-pattern
 
 parse_trait_alias_cannot_be_auto = trait aliases cannot be `auto`
-parse_trait_alias_cannot_be_const = trait aliases cannot be `const`
 parse_trait_alias_cannot_be_unsafe = trait aliases cannot be `unsafe`
 
 parse_trait_impl_modifier_in_inherent_impl = inherent impls cannot be {$modifier_name}
@@ -1004,6 +1002,9 @@ parse_use_if_else = use an `if-else` expression instead
 
 parse_use_let_not_auto = write `let` instead of `auto` to introduce a new variable
 parse_use_let_not_var = write `let` instead of `var` to introduce a new variable
+
+parse_varargs_without_pattern = missing pattern for `...` argument
+    .suggestion = name the argument, or use `_` to continue ignoring it
 
 parse_visibility_not_followed_by_item = visibility `{$vis}` is not followed by an item
     .label = the visibility

@@ -99,6 +99,8 @@ pub(crate) enum ConstMutate {
 pub(crate) struct UnalignedPackedRef {
     #[primary_span]
     pub span: Span,
+    pub ty_descr: &'static str,
+    pub align: u64,
 }
 
 #[derive(Diagnostic)]
@@ -139,6 +141,13 @@ impl AssertLintKind {
             AssertLintKind::UnconditionalPanic => lint::builtin::UNCONDITIONAL_PANIC,
         }
     }
+}
+
+#[derive(LintDiagnostic)]
+#[diag(mir_transform_asm_unwind_call)]
+pub(crate) struct AsmUnwindCall {
+    #[label(mir_transform_asm_unwind_call)]
+    pub span: Span,
 }
 
 #[derive(LintDiagnostic)]

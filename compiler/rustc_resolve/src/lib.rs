@@ -10,24 +10,24 @@
 #![allow(internal_features)]
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::untranslatable_diagnostic)]
-#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![doc(rust_logo)]
 #![feature(arbitrary_self_types)]
 #![feature(assert_matches)]
 #![feature(box_patterns)]
+#![feature(control_flow_into_value)]
 #![feature(decl_macro)]
 #![feature(default_field_values)]
 #![feature(if_let_guard)]
 #![feature(iter_intersperse)]
 #![feature(ptr_as_ref_unchecked)]
 #![feature(rustc_attrs)]
-#![feature(rustdoc_internals)]
+#![feature(trim_prefix_suffix)]
 #![recursion_limit = "256"]
 // tidy-alphabetical-end
 
 use std::cell::Ref;
 use std::collections::BTreeSet;
 use std::fmt::{self};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use diagnostics::{ImportSuggestion, LabelSuggestion, Suggestion};
@@ -73,7 +73,6 @@ use rustc_middle::ty::{
     ResolverGlobalCtxt, TyCtxt, TyCtxtFeed, Visibility,
 };
 use rustc_query_system::ich::StableHashingContext;
-use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::lint::builtin::PRIVATE_MACRO_USE;
 use rustc_span::hygiene::{ExpnId, LocalExpnId, MacroKind, SyntaxContext, Transparency};
 use rustc_span::{DUMMY_SP, Ident, Macros20NormalizedIdent, Span, Symbol, kw, sym};
@@ -99,12 +98,6 @@ pub use macros::registered_tools_ast;
 use crate::ref_mut::{CmCell, CmRefCell};
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
-
-#[derive(Debug)]
-enum Weak {
-    Yes,
-    No,
-}
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum Determinacy {
@@ -241,7 +234,13 @@ struct BindingError {
 #[derive(Debug)]
 enum ResolutionError<'ra> {
     /// Error E0401: can't use type or const parameters from outer item.
-    GenericParamsFromOuterItem(Res, HasGenericParams, DefKind),
+    GenericParamsFromOuterItem {
+        outer_res: Res,
+        has_generic_params: HasGenericParams,
+        def_kind: DefKind,
+        inner_item: Option<(Span, ast::ItemKind)>,
+        current_self_ty: Option<String>,
+    },
     /// Error E0403: the name is already used for a type or const parameter in this generic
     /// parameter list.
     NameAlreadyUsedInParameterList(Ident, Span),
@@ -1791,7 +1790,6 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 .into_items()
                 .map(|(k, f)| (k, f.key()))
                 .collect(),
-            disambiguator: self.disambiguator,
             trait_map: self.trait_map,
             lifetime_elision_allowed: self.lifetime_elision_allowed,
             lint_buffer: Steal::new(self.lint_buffer),
@@ -1914,7 +1912,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 | Scope::BuiltinTypes => {}
                 _ => unreachable!(),
             }
-            None::<()>
+            ControlFlow::<()>::Continue(())
         });
 
         found_traits
@@ -2068,7 +2066,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                         PRIVATE_MACRO_USE,
                         import.root_id,
                         ident.span,
-                        BuiltinLintDiag::MacroIsPrivate(ident),
+                        errors::MacroIsPrivate { ident },
                     );
                 }
             }
@@ -2486,6 +2484,7 @@ enum Stage {
     Late,
 }
 
+/// Invariant: if `Finalize` is used, expansion and import resolution must be complete.
 #[derive(Copy, Clone, Debug)]
 struct Finalize {
     /// Node ID for linting.

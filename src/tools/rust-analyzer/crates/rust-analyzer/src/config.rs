@@ -8,14 +8,14 @@ use std::{env, fmt, iter, ops::Not, sync::OnceLock};
 use cfg::{CfgAtom, CfgDiff};
 use hir::Symbol;
 use ide::{
-    AssistConfig, CallHierarchyConfig, CallableSnippets, CompletionConfig,
-    CompletionFieldsToResolve, DiagnosticsConfig, GenericParameterHints, HighlightConfig,
-    HighlightRelatedConfig, HoverConfig, HoverDocFormat, InlayFieldsToResolve, InlayHintsConfig,
-    JoinLinesConfig, MemoryLayoutHoverConfig, MemoryLayoutHoverRenderKind, Snippet, SnippetScope,
-    SourceRootId,
+    AnnotationConfig, AssistConfig, CallHierarchyConfig, CallableSnippets, CompletionConfig,
+    CompletionFieldsToResolve, DiagnosticsConfig, GenericParameterHints, GotoDefinitionConfig,
+    GotoImplementationConfig, HighlightConfig, HighlightRelatedConfig, HoverConfig, HoverDocFormat,
+    InlayFieldsToResolve, InlayHintsConfig, JoinLinesConfig, MemoryLayoutHoverConfig,
+    MemoryLayoutHoverRenderKind, RenameConfig, Snippet, SnippetScope, SourceRootId,
 };
 use ide_db::{
-    SnippetCap,
+    MiniCore, SnippetCap,
     assists::ExprFillDefaultMode,
     imports::insert_use::{ImportGranularity, InsertUseConfig, PrefixKind},
 };
@@ -23,7 +23,7 @@ use itertools::{Either, Itertools};
 use paths::{Utf8Path, Utf8PathBuf};
 use project_model::{
     CargoConfig, CargoFeatures, ProjectJson, ProjectJsonData, ProjectJsonFromCommand,
-    ProjectManifest, RustLibSource,
+    ProjectManifest, RustLibSource, TargetDirectoryConfig,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use semver::Version;
@@ -97,6 +97,9 @@ config_data! {
         /// the workspace root, and globs are not supported. You may also need to add the folders to
         /// Code's `files.watcherExclude`.
         files_exclude | files_excludeDirs: Vec<Utf8PathBuf> = vec![],
+
+        /// If this is `true`, when "Goto Implementations" and in "Implementations" lens, are triggered on a `struct` or `enum` or `union`, we filter out trait implementations that originate from `derive`s above the type.
+        gotoImplementations_filterAdjacentDerives: bool = false,
 
         /// Highlight related return values while the cursor is on any `match`, `if`, or match arm
         /// arrow (`=>`).
@@ -260,6 +263,9 @@ config_data! {
         /// Show inlay hints for the implied type parameter `Sized` bound.
         inlayHints_implicitSizedBoundHints_enable: bool = false,
 
+        /// Show inlay hints for the implied `dyn` keyword in trait object types.
+        inlayHints_impliedDynTraitHints_enable: bool = true,
+
         /// Show inlay type hints for elided lifetimes in function signatures.
         inlayHints_lifetimeElisionHints_enable: LifetimeElisionDef = LifetimeElisionDef::Never,
 
@@ -377,6 +383,12 @@ config_data! {
 
         /// Internal config, path to proc-macro server executable.
         procMacro_server: Option<Utf8PathBuf> = None,
+
+        /// The path where to save memory profiling output.
+        ///
+        /// **Note:** Memory profiling is not enabled by default in rust-analyzer builds, you need to build
+        /// from source for it.
+        profiling_memoryProfile: Option<Utf8PathBuf> = None,
 
         /// Exclude imports from find-all-references.
         references_excludeImports: bool = false,
@@ -550,7 +562,7 @@ config_data! {
         /// `DiscoverArgument::Path` is used to find and generate a `rust-project.json`, and
         /// therefore, a workspace, whereas `DiscoverArgument::buildfile` is used to to update an
         /// existing workspace. As a reference for implementors, buck2's `rust-project` will likely
-        /// be useful: https://github.com/facebook/buck2/tree/main/integrations/rust-project.
+        /// be useful: <https://github.com/facebook/buck2/tree/main/integrations/rust-project>.
         workspace_discoverConfig: Option<DiscoverWorkspaceConfig> = None,
     }
 }
@@ -1413,6 +1425,7 @@ pub struct LensConfig {
 
     // annotations
     pub location: AnnotationLocation,
+    pub filter_adjacent_derive_implementations: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1453,6 +1466,24 @@ impl LensConfig {
 
     pub fn references(&self) -> bool {
         self.method_refs || self.refs_adt || self.refs_trait || self.enum_variant_refs
+    }
+
+    pub fn into_annotation_config<'a>(
+        self,
+        binary_target: bool,
+        minicore: MiniCore<'a>,
+    ) -> AnnotationConfig<'a> {
+        AnnotationConfig {
+            binary_target,
+            annotate_runnables: self.runnable(),
+            annotate_impls: self.implementations,
+            annotate_references: self.refs_adt,
+            annotate_method_references: self.method_refs,
+            annotate_enum_variant_references: self.enum_variant_refs,
+            location: self.location.into(),
+            minicore,
+            filter_adjacent_derive_implementations: self.filter_adjacent_derive_implementations,
+        }
     }
 }
 
@@ -1688,11 +1719,23 @@ impl Config {
         }
     }
 
-    pub fn call_hierarchy(&self) -> CallHierarchyConfig {
-        CallHierarchyConfig { exclude_tests: self.references_excludeTests().to_owned() }
+    pub fn rename(&self, source_root: Option<SourceRootId>) -> RenameConfig {
+        RenameConfig {
+            prefer_no_std: self.imports_preferNoStd(source_root).to_owned(),
+            prefer_prelude: self.imports_preferPrelude(source_root).to_owned(),
+            prefer_absolute: self.imports_prefixExternPrelude(source_root).to_owned(),
+        }
     }
 
-    pub fn completion(&self, source_root: Option<SourceRootId>) -> CompletionConfig<'_> {
+    pub fn call_hierarchy<'a>(&self, minicore: MiniCore<'a>) -> CallHierarchyConfig<'a> {
+        CallHierarchyConfig { exclude_tests: self.references_excludeTests().to_owned(), minicore }
+    }
+
+    pub fn completion<'a>(
+        &'a self,
+        source_root: Option<SourceRootId>,
+        minicore: MiniCore<'a>,
+    ) -> CompletionConfig<'a> {
         let client_capability_fields = self.completion_resolve_support_properties();
         CompletionConfig {
             enable_postfix_completions: self.completion_postfix_enable(source_root).to_owned(),
@@ -1746,6 +1789,7 @@ impl Config {
                 })
                 .collect(),
             exclude_traits: self.completion_excludeTraits(source_root),
+            minicore,
         }
     }
 
@@ -1820,7 +1864,7 @@ impl Config {
         }
     }
 
-    pub fn hover(&self) -> HoverConfig {
+    pub fn hover<'a>(&self, minicore: MiniCore<'a>) -> HoverConfig<'a> {
         let mem_kind = |kind| match kind {
             MemoryLayoutHoverRenderKindDef::Both => MemoryLayoutHoverRenderKind::Both,
             MemoryLayoutHoverRenderKindDef::Decimal => MemoryLayoutHoverRenderKind::Decimal,
@@ -1853,10 +1897,15 @@ impl Config {
                 None => ide::SubstTyLen::Unlimited,
             },
             show_drop_glue: *self.hover_dropGlue_enable(),
+            minicore,
         }
     }
 
-    pub fn inlay_hints(&self) -> InlayHintsConfig {
+    pub fn goto_definition<'a>(&self, minicore: MiniCore<'a>) -> GotoDefinitionConfig<'a> {
+        GotoDefinitionConfig { minicore }
+    }
+
+    pub fn inlay_hints<'a>(&self, minicore: MiniCore<'a>) -> InlayHintsConfig<'a> {
         let client_capability_fields = self.inlay_hint_resolve_support_properties();
 
         InlayHintsConfig {
@@ -1937,7 +1986,9 @@ impl Config {
                 &client_capability_fields,
             ),
             implicit_drop_hints: self.inlayHints_implicitDrops_enable().to_owned(),
+            implied_dyn_trait_hints: self.inlayHints_impliedDynTraitHints_enable().to_owned(),
             range_exclusive_hints: self.inlayHints_rangeExclusiveHints_enable().to_owned(),
+            minicore,
         }
     }
 
@@ -1975,7 +2026,7 @@ impl Config {
         self.semanticHighlighting_nonStandardTokens().to_owned()
     }
 
-    pub fn highlighting_config(&self) -> HighlightConfig {
+    pub fn highlighting_config<'a>(&self, minicore: MiniCore<'a>) -> HighlightConfig<'a> {
         HighlightConfig {
             strings: self.semanticHighlighting_strings_enable().to_owned(),
             comments: self.semanticHighlighting_comments_enable().to_owned(),
@@ -1990,6 +2041,7 @@ impl Config {
                 .to_owned(),
             inject_doc_comment: self.semanticHighlighting_doc_comment_inject_enable().to_owned(),
             syntactic_name_ref_highlighting: false,
+            minicore,
         }
     }
 
@@ -2128,6 +2180,11 @@ impl Config {
         Some(AbsPathBuf::try_from(path).unwrap_or_else(|path| self.root_path.join(path)))
     }
 
+    pub fn dhat_output_file(&self) -> Option<AbsPathBuf> {
+        let path = self.profiling_memoryProfile().clone()?;
+        Some(AbsPathBuf::try_from(path).unwrap_or_else(|path| self.root_path.join(path)))
+    }
+
     pub fn ignored_proc_macros(
         &self,
         source_root: Option<SourceRootId>,
@@ -2248,7 +2305,7 @@ impl Config {
             run_build_script_command: self.cargo_buildScripts_overrideCommand(source_root).clone(),
             extra_args: self.cargo_extraArgs(source_root).clone(),
             extra_env: self.cargo_extraEnv(source_root).clone(),
-            target_dir: self.target_dir_from_config(source_root),
+            target_dir_config: self.target_dir_from_config(source_root),
             set_test: *self.cfg_setTest(source_root),
             no_deps: *self.cargo_noDeps(source_root),
         }
@@ -2336,7 +2393,7 @@ impl Config {
             extra_args: self.extra_args(source_root).clone(),
             extra_test_bin_args: self.runnables_extraTestBinaryArgs(source_root).clone(),
             extra_env: self.extra_env(source_root).clone(),
-            target_dir: self.target_dir_from_config(source_root),
+            target_dir_config: self.target_dir_from_config(source_root),
             set_test: true,
         }
     }
@@ -2394,7 +2451,7 @@ impl Config {
                     extra_args: self.check_extra_args(source_root),
                     extra_test_bin_args: self.runnables_extraTestBinaryArgs(source_root).clone(),
                     extra_env: self.check_extra_env(source_root),
-                    target_dir: self.target_dir_from_config(source_root),
+                    target_dir_config: self.target_dir_from_config(source_root),
                     set_test: *self.cfg_setTest(source_root),
                 },
                 ansi_color_output: self.color_diagnostic_output(),
@@ -2402,17 +2459,12 @@ impl Config {
         }
     }
 
-    fn target_dir_from_config(&self, source_root: Option<SourceRootId>) -> Option<Utf8PathBuf> {
-        self.cargo_targetDir(source_root).as_ref().and_then(|target_dir| match target_dir {
-            TargetDirectory::UseSubdirectory(true) => {
-                let env_var = env::var("CARGO_TARGET_DIR").ok();
-                let mut path = Utf8PathBuf::from(env_var.as_deref().unwrap_or("target"));
-                path.push("rust-analyzer");
-                Some(path)
-            }
-            TargetDirectory::UseSubdirectory(false) => None,
-            TargetDirectory::Directory(dir) => Some(dir.clone()),
-        })
+    fn target_dir_from_config(&self, source_root: Option<SourceRootId>) -> TargetDirectoryConfig {
+        match &self.cargo_targetDir(source_root) {
+            Some(TargetDirectory::UseSubdirectory(true)) => TargetDirectoryConfig::UseSubdirectory,
+            Some(TargetDirectory::UseSubdirectory(false)) | None => TargetDirectoryConfig::None,
+            Some(TargetDirectory::Directory(dir)) => TargetDirectoryConfig::Directory(dir.clone()),
+        }
     }
 
     pub fn check_on_save(&self, source_root: Option<SourceRootId>) -> bool {
@@ -2466,6 +2518,15 @@ impl Config {
             refs_trait: *self.lens_enable() && *self.lens_references_trait_enable(),
             enum_variant_refs: *self.lens_enable() && *self.lens_references_enumVariant_enable(),
             location: *self.lens_location(),
+            filter_adjacent_derive_implementations: *self
+                .gotoImplementations_filterAdjacentDerives(),
+        }
+    }
+
+    pub fn goto_implementation(&self) -> GotoImplementationConfig {
+        GotoImplementationConfig {
+            filter_adjacent_derive_implementations: *self
+                .gotoImplementations_filterAdjacentDerives(),
         }
     }
 
@@ -3505,23 +3566,13 @@ fn field_props(field: &str, ty: &str, doc: &[&str], default: &str) -> serde_json
         },
         "ImportGranularityDef" => set! {
             "type": "string",
-            "anyOf": [
-                {
-                    "enum": ["crate", "module", "item", "one"],
-                    "enumDescriptions": [
-                        "Merge imports from the same crate into a single use statement. Conversely, imports from different crates are split into separate statements.",
-                        "Merge imports from the same module into a single use statement. Conversely, imports from different modules are split into separate statements.",
-                        "Flatten imports so that each has its own use statement.",
-                        "Merge all imports into a single use statement as long as they have the same visibility and attributes."
-                    ],
-                },
-                {
-                    "enum": ["preserve"],
-                    "enumDescriptions": [
-                        "Deprecated - unless `enforceGranularity` is `true`, the style of the current file is preferred over this setting. Behaves like `item`.",
-                    ],
-                    "deprecated": true,
-                }
+            "enum": ["crate", "module", "item", "one", "preserve"],
+            "enumDescriptions": [
+                "Merge imports from the same crate into a single use statement. Conversely, imports from different crates are split into separate statements.",
+                "Merge imports from the same module into a single use statement. Conversely, imports from different modules are split into separate statements.",
+                "Flatten imports so that each has its own use statement.",
+                "Merge all imports into a single use statement as long as they have the same visibility and attributes.",
+                "Deprecated - unless `enforceGranularity` is `true`, the style of the current file is preferred over this setting. Behaves like `item`."
             ],
         },
         "ImportPrefixDef" => set! {
@@ -3929,7 +3980,7 @@ fn doc_comment_to_string(doc: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{borrow::Cow, fs};
 
     use test_utils::{ensure_file_contents, project_root};
 
@@ -4064,9 +4115,13 @@ mod tests {
 
         (config, _, _) = config.apply_change(change);
         assert_eq!(config.cargo_targetDir(None), &None);
-        assert!(
-            matches!(config.flycheck(None), FlycheckConfig::CargoCommand { options, .. } if options.target_dir.is_none())
-        );
+        assert!(matches!(
+            config.flycheck(None),
+            FlycheckConfig::CargoCommand {
+                options: CargoOptions { target_dir_config: TargetDirectoryConfig::None, .. },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -4082,11 +4137,16 @@ mod tests {
         (config, _, _) = config.apply_change(change);
 
         assert_eq!(config.cargo_targetDir(None), &Some(TargetDirectory::UseSubdirectory(true)));
-        let target =
+        let ws_target_dir =
             Utf8PathBuf::from(std::env::var("CARGO_TARGET_DIR").unwrap_or("target".to_owned()));
-        assert!(
-            matches!(config.flycheck(None), FlycheckConfig::CargoCommand { options, .. } if options.target_dir == Some(target.join("rust-analyzer")))
-        );
+        assert!(matches!(
+            config.flycheck(None),
+            FlycheckConfig::CargoCommand {
+                options: CargoOptions { target_dir_config, .. },
+                ..
+            } if target_dir_config.target_dir(Some(&ws_target_dir)).map(Cow::into_owned)
+                == Some(ws_target_dir.join("rust-analyzer"))
+        ));
     }
 
     #[test]
@@ -4105,8 +4165,13 @@ mod tests {
             config.cargo_targetDir(None),
             &Some(TargetDirectory::Directory(Utf8PathBuf::from("other_folder")))
         );
-        assert!(
-            matches!(config.flycheck(None), FlycheckConfig::CargoCommand { options, .. } if options.target_dir == Some(Utf8PathBuf::from("other_folder")))
-        );
+        assert!(matches!(
+            config.flycheck(None),
+            FlycheckConfig::CargoCommand {
+                options: CargoOptions { target_dir_config, .. },
+                ..
+            } if target_dir_config.target_dir(None).map(Cow::into_owned)
+                == Some(Utf8PathBuf::from("other_folder"))
+        ));
     }
 }

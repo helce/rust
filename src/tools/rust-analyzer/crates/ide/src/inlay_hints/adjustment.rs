@@ -23,7 +23,7 @@ use crate::{
 pub(super) fn hints(
     acc: &mut Vec<InlayHint>,
     FamousDefs(sema, _): &FamousDefs<'_, '_>,
-    config: &InlayHintsConfig,
+    config: &InlayHintsConfig<'_>,
     display_target: DisplayTarget,
     expr: &ast::Expr,
 ) -> Option<()> {
@@ -352,7 +352,7 @@ mod tests {
         check_with_config(
             InlayHintsConfig { adjustment_hints: AdjustmentHints::Always, ..DISABLED_CONFIG },
             r#"
-//- minicore: coerce_unsized, fn, eq, index, dispatch_from_dyn
+//- minicore: coerce_unsized, fn, eq, index, dispatch_from_dyn, builtin_impls
 fn main() {
     let _: u32         = loop {};
                        //^^^^^^^<never-to-any>
@@ -466,9 +466,8 @@ impl core::ops::IndexMut for Struct {}
                 ..DISABLED_CONFIG
             },
             r#"
-//- minicore: coerce_unsized, fn, eq, index, dispatch_from_dyn
+//- minicore: coerce_unsized, fn, eq, index, dispatch_from_dyn, builtin_impls
 fn main() {
-
     Struct.consume();
     Struct.by_ref();
   //^^^^^^.&

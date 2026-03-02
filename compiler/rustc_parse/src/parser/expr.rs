@@ -863,14 +863,15 @@ impl<'a> Parser<'a> {
             assert!(found_raw);
             let mutability = self.parse_const_or_mut().unwrap();
             (ast::BorrowKind::Raw, mutability)
-        } else if let Some((ast::Pinnedness::Pinned, mutbl)) = self.parse_pin_and_mut() {
-            // `pin [ const | mut ]`.
-            // `pin` has been gated in `self.parse_pin_and_mut()` so we don't
-            // need to gate it here.
-            (ast::BorrowKind::Pin, mutbl)
         } else {
-            // `mut?`
-            (ast::BorrowKind::Ref, self.parse_mutability())
+            match self.parse_pin_and_mut() {
+                // `mut?`
+                (ast::Pinnedness::Not, mutbl) => (ast::BorrowKind::Ref, mutbl),
+                // `pin [ const | mut ]`.
+                // `pin` has been gated in `self.parse_pin_and_mut()` so we don't
+                // need to gate it here.
+                (ast::Pinnedness::Pinned, mutbl) => (ast::BorrowKind::Pin, mutbl),
+            }
         }
     }
 
@@ -4034,6 +4035,30 @@ impl<'a> Parser<'a> {
 
     pub(super) fn mk_expr_err(&self, span: Span, guar: ErrorGuaranteed) -> Box<Expr> {
         self.mk_expr(span, ExprKind::Err(guar))
+    }
+
+    pub(crate) fn mk_unit_expr(&self, span: Span) -> Box<Expr> {
+        self.mk_expr(span, ExprKind::Tup(Default::default()))
+    }
+
+    pub(crate) fn mk_closure_expr(&self, span: Span, body: Box<Expr>) -> Box<Expr> {
+        self.mk_expr(
+            span,
+            ast::ExprKind::Closure(Box::new(ast::Closure {
+                binder: rustc_ast::ClosureBinder::NotPresent,
+                constness: rustc_ast::Const::No,
+                movability: rustc_ast::Movability::Movable,
+                capture_clause: rustc_ast::CaptureBy::Ref,
+                coroutine_kind: None,
+                fn_decl: Box::new(rustc_ast::FnDecl {
+                    inputs: Default::default(),
+                    output: rustc_ast::FnRetTy::Default(span),
+                }),
+                fn_arg_span: span,
+                fn_decl_span: span,
+                body,
+            })),
+        )
     }
 
     /// Create expression span ensuring the span of the parent node

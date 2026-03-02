@@ -31,8 +31,8 @@ This feature tracks `asm!` and `global_asm!` support for the following architect
 | NVPTX        | `reg64`        | None\*                             | `l`                  |
 | Hexagon      | `reg`          | `r[0-28]`                          | `r`                  |
 | Hexagon      | `preg`         | `p[0-3]`                           | Only clobbers        |
-| PowerPC      | `reg`          | `r0`, `r[3-12]`, `r[14-28]`        | `r`                  |
-| PowerPC      | `reg_nonzero`  | `r[3-12]`, `r[14-28]`              | `b`                  |
+| PowerPC      | `reg`          | `r0`, `r[3-12]`, `r[14-29]`\*      | `r`                  |
+| PowerPC      | `reg_nonzero`  | `r[3-12]`, `r[14-29]`\*            | `b`                  |
 | PowerPC      | `freg`         | `f[0-31]`                          | `f`                  |
 | PowerPC      | `vreg`         | `v[0-31]`                          | `v`                  |
 | PowerPC      | `vsreg         | `vs[0-63]`                         | `wa`                 |
@@ -40,6 +40,7 @@ This feature tracks `asm!` and `global_asm!` support for the following architect
 | PowerPC      | `ctr`          | `ctr`                              | Only clobbers        |
 | PowerPC      | `lr`           | `lr`                               | Only clobbers        |
 | PowerPC      | `xer`          | `xer`                              | Only clobbers        |
+| PowerPC      | `spe_acc`      | `spe_acc`                          | Only clobbers        |
 | wasm32       | `local`        | None\*                             | `r`                  |
 | BPF          | `reg`          | `r[0-10]`                          | `r`                  |
 | BPF          | `wreg`         | `w[0-10]`                          | `w`                  |
@@ -61,6 +62,10 @@ This feature tracks `asm!` and `global_asm!` support for the following architect
 > - NVPTX doesn't have a fixed register set, so named registers are not supported.
 >
 > - WebAssembly doesn't have registers, so named registers are not supported.
+>
+> - r29 is reserved only on 32 bit PowerPC targets.
+>
+> - spe_acc is only available on PowerPC SPE targets.
 
 # Register class supported types
 
@@ -85,6 +90,7 @@ This feature tracks `asm!` and `global_asm!` support for the following architect
 | PowerPC      | `ctr`                           | N/A            | Only clobbers                           |
 | PowerPC      | `lr`                            | N/A            | Only clobbers                           |
 | PowerPC      | `xer`                           | N/A            | Only clobbers                           |
+| PowerPC      | `spe_acc`                       | N/A            | Only clobbers                           |
 | wasm32       | `local`                         | None           | `i8` `i16` `i32` `i64` `f32` `f64`      |
 | BPF          | `reg`                           | None           | `i8` `i16` `i32` `i64`                  |
 | BPF          | `wreg`                          | `alu32`        | `i8` `i16` `i32`                        |
@@ -148,7 +154,7 @@ This feature tracks `asm!` and `global_asm!` support for the following architect
 | ------------ | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | All          | `sp`, `r14`/`o6` (SPARC)                | The stack pointer must be restored to its original value at the end of an asm code block.                                                                                           |
 | All          | `fr` (Hexagon), `fp` (PowerPC), `$fp` (MIPS), `Y` (AVR), `r4` (MSP430), `a6` (M68k), `r30`/`i6` (SPARC) | The frame pointer cannot be used as an input or output.                                                             |
-| All          | `r19` (Hexagon), `r29` (PowerPC), `r30` (PowerPC) | These are used internally by LLVM as "base pointer" for functions with complex stack frames.                                                                              |
+| All          | `r19` (Hexagon), `r29` (PowerPC 32 bit only), `r30` (PowerPC) | These are used internally by LLVM as "base pointer" for functions with complex stack frames.                                                                              |
 | MIPS         | `$0` or `$zero`                         | This is a constant zero register which can't be modified.                                                                                                                           |
 | MIPS         | `$1` or `$at`                           | Reserved for assembler.                                                                                                                                                             |
 | MIPS         | `$26`/`$k0`, `$27`/`$k1`                | OS-reserved registers.                                                                                                                                                              |

@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::hash::Hash;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock as OnceCell};
@@ -40,6 +41,7 @@ use crate::clean::utils::{is_literal_expr, print_evaluated_const};
 use crate::core::DocContext;
 use crate::formats::cache::Cache;
 use crate::formats::item_type::ItemType;
+use crate::html::format::HrefInfo;
 use crate::html::render::Context;
 use crate::passes::collect_intra_doc_links::UrlFragment;
 
@@ -519,16 +521,24 @@ impl Item {
             .iter()
             .filter_map(|ItemLink { link: s, link_text, page_id: id, fragment }| {
                 debug!(?id);
-                if let Ok((mut href, ..)) = href(*id, cx) {
-                    debug!(?href);
-                    if let Some(ref fragment) = *fragment {
-                        fragment.render(&mut href, cx.tcx())
+                if let Ok(HrefInfo { mut url, .. }) = href(*id, cx) {
+                    debug!(?url);
+                    match fragment {
+                        Some(UrlFragment::Item(def_id)) => {
+                            write!(url, "{}", crate::html::format::fragment(*def_id, cx.tcx()))
+                                .unwrap();
+                        }
+                        Some(UrlFragment::UserWritten(raw)) => {
+                            url.push('#');
+                            url.push_str(raw);
+                        }
+                        None => {}
                     }
                     Some(RenderedLink {
                         original_text: s.clone(),
                         new_text: link_text.clone(),
                         tooltip: link_tooltip(*id, fragment, cx).to_string(),
-                        href,
+                        href: url,
                     })
                 } else {
                     None

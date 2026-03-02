@@ -96,6 +96,10 @@ passes_deprecated_annotation_has_no_effect =
 passes_deprecated_attribute =
     deprecated attribute must be paired with either stable or unstable attribute
 
+passes_diagnostic_diagnostic_on_const_only_for_trait_impls =
+    `#[diagnostic::on_const]` can only be applied to trait impls
+    .label = not a trait impl
+
 passes_diagnostic_diagnostic_on_unimplemented_only_for_traits =
     `#[diagnostic::on_unimplemented]` can only be applied to trait definitions
 
@@ -125,6 +129,14 @@ passes_doc_alias_not_string_literal =
 
 passes_doc_alias_start_end =
     {$attr_str} cannot start or end with ' '
+
+passes_doc_attr_expects_no_value =
+    `doc({$attr_name})` does not accept a value
+    .suggestion = use `doc({$attr_name})`
+
+passes_doc_attr_expects_string =
+    `doc({$attr_name})` expects a string value
+    .suggestion = use `doc({$attr_name} = "...")`
 
 passes_doc_attr_not_crate_level =
     `#![doc({$attr_name} = "...")]` isn't allowed as a crate-level attribute
@@ -219,7 +231,6 @@ passes_doc_test_unknown_passes =
     unknown `doc` attribute `{$path}`
     .note = `doc` attribute `{$path}` no longer functions; see issue #44136 <https://github.com/rust-lang/rust/issues/44136>
     .label = no longer functions
-    .help = you may want to use `doc(document_private_items)`
     .no_op_note = `doc({$path})` is now a no-op
 
 passes_doc_test_unknown_plugins =

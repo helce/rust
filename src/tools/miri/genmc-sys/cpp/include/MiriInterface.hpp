@@ -125,8 +125,11 @@ struct MiriGenmcShim : private GenMCDriver {
     void handle_fence(ThreadId thread_id, MemOrdering ord);
 
     /**** Memory (de)allocation ****/
+
     auto handle_malloc(ThreadId thread_id, uint64_t size, uint64_t alignment) -> uint64_t;
-    auto handle_free(ThreadId thread_id, uint64_t address) -> bool;
+
+    /** Returns null on success, or an error string if an error occurs. */
+    auto handle_free(ThreadId thread_id, uint64_t address) -> std::unique_ptr<std::string>;
 
     /**** Thread management ****/
     void handle_thread_create(ThreadId thread_id, ThreadId parent_id);
@@ -220,7 +223,8 @@ struct MiriGenmcShim : private GenMCDriver {
     auto handle_load_reset_if_none(ThreadId tid, std::optional<SVal> old_val, Ts&&... params)
         -> HandleResult<SVal> {
         const auto pos = inc_pos(tid);
-        const auto ret = GenMCDriver::handleLoad<k>(pos, old_val, std::forward<Ts>(params)...);
+        const auto ret =
+            GenMCDriver::handleLoad<k>(nullptr, pos, old_val, std::forward<Ts>(params)...);
         // If we didn't get a value, we have to reset the index of the current thread.
         if (!std::holds_alternative<SVal>(ret)) {
             dec_pos(tid);
@@ -261,7 +265,7 @@ namespace GenmcScalarExt {
 inline GenmcScalar uninit() {
     return GenmcScalar {
         .value = 0,
-        .extra = 0,
+        .provenance = 0,
         .is_init = false,
     };
 }
@@ -269,19 +273,19 @@ inline GenmcScalar uninit() {
 inline GenmcScalar from_sval(SVal sval) {
     return GenmcScalar {
         .value = sval.get(),
-        .extra = sval.getExtra(),
+        .provenance = sval.getProvenance(),
         .is_init = true,
     };
 }
 
 inline SVal to_sval(GenmcScalar scalar) {
     ERROR_ON(!scalar.is_init, "Cannot convert an uninitialized `GenmcScalar` into an `SVal`\n");
-    return SVal(scalar.value, scalar.extra);
+    return SVal(scalar.value, scalar.provenance);
 }
 
 inline std::optional<SVal> try_to_sval(GenmcScalar scalar) {
     if (scalar.is_init)
-        return { SVal(scalar.value, scalar.extra) };
+        return { SVal(scalar.value, scalar.provenance) };
     return std::nullopt;
 }
 } // namespace GenmcScalarExt

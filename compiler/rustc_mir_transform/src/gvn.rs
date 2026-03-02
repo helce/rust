@@ -248,7 +248,7 @@ enum Value<'a, 'tcx> {
     Discriminant(VnIndex),
 
     // Operations.
-    NullaryOp(NullOp<'tcx>, Ty<'tcx>),
+    NullaryOp(NullOp),
     UnaryOp(UnOp, VnIndex),
     BinaryOp(BinOp, VnIndex, VnIndex),
     Cast {
@@ -570,9 +570,19 @@ impl<'body, 'a, 'tcx> VnState<'body, 'a, 'tcx> {
             _ if ty.is_zst() => ImmTy::uninit(ty).into(),
 
             Opaque(_) => return None,
-            // Do not bother evaluating repeat expressions. This would uselessly consume memory.
-            Repeat(..) => return None,
 
+            // In general, evaluating repeat expressions just consumes a lot of memory.
+            // But in the special case that the element is just Immediate::Uninit, we can evaluate
+            // it without extra memory! If we don't propagate uninit values like this, LLVM can get
+            // very confused: https://github.com/rust-lang/rust/issues/139355
+            Repeat(value, _count) => {
+                let value = self.eval_to_const(value)?;
+                if value.is_immediate_uninit() {
+                    ImmTy::uninit(ty).into()
+                } else {
+                    return None;
+                }
+            }
             Constant { ref value, disambiguator: _ } => {
                 self.ecx.eval_mir_constant(value, DUMMY_SP, None).discard_err()?
             }
@@ -608,8 +618,12 @@ impl<'body, 'a, 'tcx> VnState<'body, 'a, 'tcx> {
             }
             Union(active_field, field) => {
                 let field = self.eval_to_const(field)?;
-                if matches!(ty.backend_repr, BackendRepr::Scalar(..) | BackendRepr::ScalarPair(..))
-                {
+                if field.layout.layout.is_zst() {
+                    ImmTy::from_immediate(Immediate::Uninit, ty).into()
+                } else if matches!(
+                    ty.backend_repr,
+                    BackendRepr::Scalar(..) | BackendRepr::ScalarPair(..)
+                ) {
                     let dest = self.ecx.allocate(ty, MemoryKind::Stack).discard_err()?;
                     let field_dest = self.ecx.project_field(&dest, active_field).discard_err()?;
                     self.ecx.copy_op(field, &field_dest).discard_err()?;
@@ -668,25 +682,7 @@ impl<'body, 'a, 'tcx> VnState<'body, 'a, 'tcx> {
                     self.ecx.discriminant_for_variant(base.layout.ty, variant).discard_err()?;
                 discr_value.into()
             }
-            NullaryOp(null_op, arg_ty) => {
-                let arg_layout = self.ecx.layout_of(arg_ty).ok()?;
-                if let NullOp::SizeOf | NullOp::AlignOf = null_op
-                    && arg_layout.is_unsized()
-                {
-                    return None;
-                }
-                let val = match null_op {
-                    NullOp::SizeOf => arg_layout.size.bytes(),
-                    NullOp::AlignOf => arg_layout.align.bytes(),
-                    NullOp::OffsetOf(fields) => self
-                        .tcx
-                        .offset_of_subfield(self.typing_env(), arg_layout, fields.iter())
-                        .bytes(),
-                    NullOp::UbChecks => return None,
-                    NullOp::ContractChecks => return None,
-                };
-                ImmTy::from_uint(val, ty).into()
-            }
+            NullaryOp(NullOp::RuntimeChecks(_)) => return None,
             UnaryOp(un_op, operand) => {
                 let operand = self.eval_to_const(operand)?;
                 let operand = self.ecx.read_immediate(operand).discard_err()?;
@@ -928,7 +924,7 @@ impl<'body, 'a, 'tcx> VnState<'body, 'a, 'tcx> {
             }
         }
 
-        if projection.is_owned() {
+        if Cow::is_owned(&projection) {
             place.projection = self.tcx.mk_place_elems(&projection);
         }
 
@@ -1039,7 +1035,7 @@ impl<'body, 'a, 'tcx> VnState<'body, 'a, 'tcx> {
                 let op = self.simplify_operand(op, location)?;
                 Value::Repeat(op, amount)
             }
-            Rvalue::NullaryOp(op, ty) => Value::NullaryOp(op, ty),
+            Rvalue::NullaryOp(op) => Value::NullaryOp(op),
             Rvalue::Aggregate(..) => return self.simplify_aggregate(lhs, rvalue, location),
             Rvalue::Ref(_, borrow_kind, ref mut place) => {
                 self.simplify_place_projection(place, location);
@@ -1522,7 +1518,7 @@ impl<'body, 'a, 'tcx> VnState<'body, 'a, 'tcx> {
             return Some(value);
         }
 
-        if let CastKind::PointerCoercion(ReifyFnPointer | ClosureFnPointer(_), _) = kind {
+        if let CastKind::PointerCoercion(ReifyFnPointer(_) | ClosureFnPointer(_), _) = kind {
             // Each reification of a generic fn may get a different pointer.
             // Do not try to merge them.
             return Some(self.new_opaque(to));
@@ -1713,7 +1709,11 @@ fn op_to_prop_const<'tcx>(
 
     // Do not synthetize too large constants. Codegen will just memcpy them, which we'd like to
     // avoid.
-    if !matches!(op.layout.backend_repr, BackendRepr::Scalar(..) | BackendRepr::ScalarPair(..)) {
+    // But we *do* want to synthesize any size constant if it is entirely uninit because that
+    // benefits codegen, which has special handling for them.
+    if !op.is_immediate_uninit()
+        && !matches!(op.layout.backend_repr, BackendRepr::Scalar(..) | BackendRepr::ScalarPair(..))
+    {
         return None;
     }
 

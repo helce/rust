@@ -180,6 +180,7 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
         let mut expected = source.descr_expected();
         let path_str = Segment::names_to_string(path);
         let item_str = path.last().unwrap().ident;
+
         if let Some(res) = res {
             BaseError {
                 msg: format!("expected {}, found {} `{}`", expected, res.descr(), path_str),
@@ -704,7 +705,7 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
             if !enum_candidates.is_empty() {
                 enum_candidates.sort();
 
-                // Contextualize for E0412 "cannot find type", but don't belabor the point
+                // Contextualize for E0425 "cannot find type", but don't belabor the point
                 // (that it's a variant) for E0573 "expected type, found variant".
                 let preamble = if res.is_none() {
                     let others = match enum_candidates.len() {
@@ -821,12 +822,26 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                     args_snippet = snippet;
                 }
 
-                err.span_suggestion(
-                    call_span,
-                    format!("try calling `{ident}` as a method"),
-                    format!("self.{path_str}({args_snippet})"),
-                    Applicability::MachineApplicable,
-                );
+                if let Some(Res::Def(DefKind::Struct, def_id)) = res {
+                    let private_fields = self.has_private_fields(def_id);
+                    let adjust_error_message =
+                        private_fields && self.is_struct_with_fn_ctor(def_id);
+                    if adjust_error_message {
+                        self.update_err_for_private_tuple_struct_fields(err, &source, def_id);
+                    }
+
+                    if private_fields {
+                        err.note("constructor is not visible here due to private fields");
+                    }
+                } else {
+                    err.span_suggestion(
+                        call_span,
+                        format!("try calling `{ident}` as a method"),
+                        format!("self.{path_str}({args_snippet})"),
+                        Applicability::MachineApplicable,
+                    );
+                }
+
                 return (true, suggested_candidates, candidates);
             }
         }
@@ -1118,7 +1133,9 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                         }
                     }
                 }
-            } else if err_code == E0412 {
+
+                self.suggest_ident_hidden_by_hygiene(err, path, span);
+                // cannot find type in this scope
                 if let Some(correct) = Self::likely_rust_type(path) {
                     err.span_suggestion(
                         span,
@@ -1126,6 +1143,42 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                         correct,
                         Applicability::MaybeIncorrect,
                     );
+                }
+            }
+        }
+    }
+
+    fn suggest_ident_hidden_by_hygiene(&self, err: &mut Diag<'_>, path: &[Segment], span: Span) {
+        let [segment] = path else { return };
+
+        let ident = segment.ident;
+        let callsite_span = span.source_callsite();
+        for rib in self.ribs[ValueNS].iter().rev() {
+            for (binding_ident, _) in &rib.bindings {
+                // Case 1: the identifier is defined in the same scope as the macro is called
+                if binding_ident.name == ident.name
+                    && !binding_ident.span.eq_ctxt(span)
+                    && !binding_ident.span.from_expansion()
+                    && binding_ident.span.lo() < callsite_span.lo()
+                {
+                    err.span_help(
+                        binding_ident.span,
+                        "an identifier with the same name exists, but is not accessible due to macro hygiene",
+                    );
+                    return;
+                }
+
+                // Case 2: the identifier is defined in a macro call in the same scope
+                if binding_ident.name == ident.name
+                    && binding_ident.span.from_expansion()
+                    && binding_ident.span.source_callsite().eq_ctxt(callsite_span)
+                    && binding_ident.span.source_callsite().lo() < callsite_span.lo()
+                {
+                    err.span_help(
+                        binding_ident.span,
+                        "an identifier with the same name is defined here, but is not accessible due to macro hygiene",
+                    );
+                    return;
                 }
             }
         }
@@ -1533,26 +1586,31 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                 [ast::PathSegment { args: None, .. }],
                 [ast::GenericBound::Trait(poly_trait_ref)],
             ) = (&type_param_path.segments[..], &bounds[..])
+                && let [ast::PathSegment { ident, args: None, id }] =
+                    &poly_trait_ref.trait_ref.path.segments[..]
                 && poly_trait_ref.modifiers == ast::TraitBoundModifiers::NONE
             {
-                if let [ast::PathSegment { ident, args: None, .. }] =
-                    &poly_trait_ref.trait_ref.path.segments[..]
-                {
-                    if ident.span == span {
-                        let Some(new_where_bound_predicate) =
-                            mk_where_bound_predicate(path, poly_trait_ref, ty)
-                        else {
-                            return false;
-                        };
-                        err.span_suggestion_verbose(
-                            *where_span,
-                            format!("constrain the associated type to `{ident}`"),
-                            where_bound_predicate_to_string(&new_where_bound_predicate),
-                            Applicability::MaybeIncorrect,
-                        );
+                if ident.span == span {
+                    let Some(partial_res) = self.r.partial_res_map.get(&id) else {
+                        return false;
+                    };
+                    if !matches!(partial_res.full_res(), Some(hir::def::Res::Def(..))) {
+                        return false;
                     }
-                    return true;
+
+                    let Some(new_where_bound_predicate) =
+                        mk_where_bound_predicate(path, poly_trait_ref, ty)
+                    else {
+                        return false;
+                    };
+                    err.span_suggestion_verbose(
+                        *where_span,
+                        format!("constrain the associated type to `{ident}`"),
+                        where_bound_predicate_to_string(&new_where_bound_predicate),
+                        Applicability::MaybeIncorrect,
+                    );
                 }
+                return true;
             }
         }
         false
@@ -1608,6 +1666,60 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
             (true, closing_brace)
         } else {
             (false, None)
+        }
+    }
+
+    fn is_struct_with_fn_ctor(&mut self, def_id: DefId) -> bool {
+        def_id
+            .as_local()
+            .and_then(|local_id| self.r.struct_constructors.get(&local_id))
+            .map(|struct_ctor| {
+                matches!(
+                    struct_ctor.0,
+                    def::Res::Def(DefKind::Ctor(CtorOf::Struct, CtorKind::Fn), _)
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn update_err_for_private_tuple_struct_fields(
+        &mut self,
+        err: &mut Diag<'_>,
+        source: &PathSource<'_, '_, '_>,
+        def_id: DefId,
+    ) -> Option<Vec<Span>> {
+        match source {
+            // e.g. `if let Enum::TupleVariant(field1, field2) = _`
+            PathSource::TupleStruct(_, pattern_spans) => {
+                err.primary_message(
+                    "cannot match against a tuple struct which contains private fields",
+                );
+
+                // Use spans of the tuple struct pattern.
+                Some(Vec::from(*pattern_spans))
+            }
+            // e.g. `let _ = Enum::TupleVariant(field1, field2);`
+            PathSource::Expr(Some(Expr {
+                kind: ExprKind::Call(path, args),
+                span: call_span,
+                ..
+            })) => {
+                err.primary_message(
+                    "cannot initialize a tuple struct which contains private fields",
+                );
+                self.suggest_alternative_construction_methods(
+                    def_id,
+                    err,
+                    path.span,
+                    *call_span,
+                    &args[..],
+                );
+
+                self.r
+                    .field_idents(def_id)
+                    .map(|fields| fields.iter().map(|f| f.span).collect::<Vec<_>>())
+            }
+            _ => None,
         }
     }
 
@@ -1942,42 +2054,6 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                     return true;
                 };
 
-                let update_message =
-                    |this: &mut Self, err: &mut Diag<'_>, source: &PathSource<'_, '_, '_>| {
-                        match source {
-                            // e.g. `if let Enum::TupleVariant(field1, field2) = _`
-                            PathSource::TupleStruct(_, pattern_spans) => {
-                                err.primary_message(
-                                "cannot match against a tuple struct which contains private fields",
-                            );
-
-                                // Use spans of the tuple struct pattern.
-                                Some(Vec::from(*pattern_spans))
-                            }
-                            // e.g. `let _ = Enum::TupleVariant(field1, field2);`
-                            PathSource::Expr(Some(Expr {
-                                kind: ExprKind::Call(path, args),
-                                span: call_span,
-                                ..
-                            })) => {
-                                err.primary_message(
-                                "cannot initialize a tuple struct which contains private fields",
-                            );
-                                this.suggest_alternative_construction_methods(
-                                    def_id,
-                                    err,
-                                    path.span,
-                                    *call_span,
-                                    &args[..],
-                                );
-                                // Use spans of the tuple struct definition.
-                                this.r
-                                    .field_idents(def_id)
-                                    .map(|fields| fields.iter().map(|f| f.span).collect::<Vec<_>>())
-                            }
-                            _ => None,
-                        }
-                    };
                 let is_accessible = self.r.is_accessible_from(ctor_vis, self.parent_scope.module);
                 if let Some(use_span) = self.r.inaccessible_ctor_reexport.get(&span)
                     && is_accessible
@@ -2006,13 +2082,14 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                             Applicability::MachineApplicable,
                         );
                     }
-                    update_message(self, err, &source);
+                    self.update_err_for_private_tuple_struct_fields(err, &source, def_id);
                 }
                 if !is_expected(ctor_def) || is_accessible {
                     return true;
                 }
 
-                let field_spans = update_message(self, err, &source);
+                let field_spans =
+                    self.update_err_for_private_tuple_struct_fields(err, &source, def_id);
 
                 if let Some(spans) =
                     field_spans.filter(|spans| spans.len() > 0 && fields.len() == spans.len())
@@ -2595,7 +2672,7 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
             let (span, text) = match path.segments.first() {
                 Some(seg) if let Some(name) = seg.ident.as_str().strip_prefix("let") => {
                     // a special case for #117894
-                    let name = name.strip_prefix('_').unwrap_or(name);
+                    let name = name.trim_prefix('_');
                     (ident_span, format!("let {name}"))
                 }
                 _ => (ident_span.shrink_to_lo(), "let ".to_string()),
@@ -3165,6 +3242,9 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                     {
                         continue;
                     }
+                    if let LifetimeBinderKind::ImplAssocType = kind {
+                        continue;
+                    }
 
                     if !span.can_be_used_for_suggestions()
                         && suggest_note
@@ -3552,8 +3632,7 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                         && (lt.kind == MissingLifetimeKind::Ampersand
                             || lt.kind == MissingLifetimeKind::Underscore)
                     {
-                        let pre = if lt.kind == MissingLifetimeKind::Ampersand
-                            && let Some((kind, _span)) = self.diag_metadata.current_function
+                        let pre = if let Some((kind, _span)) = self.diag_metadata.current_function
                             && let FnKind::Fn(_, _, ast::Fn { sig, .. }) = kind
                             && !sig.decl.inputs.is_empty()
                             && let sugg = sig
@@ -3583,10 +3662,12 @@ impl<'ast, 'ra, 'tcx> LateResolutionVisitor<'_, 'ast, 'ra, 'tcx> {
                             } else {
                                 ("one of the", "s")
                             };
+                            let dotdotdot =
+                                if lt.kind == MissingLifetimeKind::Ampersand { "..." } else { "" };
                             err.multipart_suggestion_verbose(
                                 format!(
                                     "instead, you are more likely to want to change {the} \
-                                     argument{s} to be borrowed...",
+                                     argument{s} to be borrowed{dotdotdot}",
                                 ),
                                 sugg,
                                 Applicability::MaybeIncorrect,

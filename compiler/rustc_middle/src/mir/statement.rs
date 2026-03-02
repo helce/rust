@@ -597,6 +597,18 @@ impl<'tcx> Operand<'tcx> {
         }))
     }
 
+    /// Convenience helper to make a constant that refers to the given `DefId` and args. Since this
+    /// is used to synthesize MIR, assumes `user_ty` is None.
+    pub fn unevaluated_constant(
+        tcx: TyCtxt<'tcx>,
+        def_id: DefId,
+        args: &[GenericArg<'tcx>],
+        span: Span,
+    ) -> Self {
+        let const_ = Const::from_unevaluated(tcx, def_id).instantiate(tcx, args);
+        Operand::Constant(Box::new(ConstOperand { span, user_ty: None, const_ }))
+    }
+
     pub fn is_move(&self) -> bool {
         matches!(self, Operand::Move(..))
     }
@@ -744,7 +756,7 @@ impl<'tcx> Rvalue<'tcx> {
                 _,
             )
             | Rvalue::BinaryOp(_, _)
-            | Rvalue::NullaryOp(_, _)
+            | Rvalue::NullaryOp(_)
             | Rvalue::UnaryOp(_, _)
             | Rvalue::Discriminant(_)
             | Rvalue::Aggregate(_, _)
@@ -782,11 +794,7 @@ impl<'tcx> Rvalue<'tcx> {
                 op.ty(tcx, arg_ty)
             }
             Rvalue::Discriminant(ref place) => place.ty(local_decls, tcx).ty.discriminant_ty(tcx),
-            Rvalue::NullaryOp(NullOp::SizeOf | NullOp::AlignOf | NullOp::OffsetOf(..), _) => {
-                tcx.types.usize
-            }
-            Rvalue::NullaryOp(NullOp::ContractChecks, _)
-            | Rvalue::NullaryOp(NullOp::UbChecks, _) => tcx.types.bool,
+            Rvalue::NullaryOp(NullOp::RuntimeChecks(_)) => tcx.types.bool,
             Rvalue::Aggregate(ref ak, ref ops) => match **ak {
                 AggregateKind::Array(ty) => Ty::new_array(tcx, ty, ops.len() as u64),
                 AggregateKind::Tuple => {
@@ -850,11 +858,10 @@ impl BorrowKind {
     }
 }
 
-impl<'tcx> NullOp<'tcx> {
-    pub fn ty(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
+impl NullOp {
+    pub fn ty<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
         match self {
-            NullOp::SizeOf | NullOp::AlignOf | NullOp::OffsetOf(_) => tcx.types.usize,
-            NullOp::UbChecks | NullOp::ContractChecks => tcx.types.bool,
+            NullOp::RuntimeChecks(_) => tcx.types.bool,
         }
     }
 }

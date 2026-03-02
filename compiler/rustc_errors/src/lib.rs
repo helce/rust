@@ -7,8 +7,6 @@
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::direct_use_of_rustc_type_ir)]
 #![allow(rustc::untranslatable_diagnostic)]
-#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![doc(rust_logo)]
 #![feature(array_windows)]
 #![feature(assert_matches)]
 #![feature(associated_type_defaults)]
@@ -18,7 +16,6 @@
 #![feature(negative_impls)]
 #![feature(never_type)]
 #![feature(rustc_attrs)]
-#![feature(rustdoc_internals)]
 #![feature(try_blocks)]
 #![feature(yeet_expr)]
 // tidy-alphabetical-end
@@ -351,7 +348,7 @@ impl CodeSuggestion {
             hi_opt: Option<&Loc>,
         ) -> usize {
             let mut line_count = 0;
-            // Convert CharPos to Usize, as CharPose is character offset
+            // Convert `CharPos` to `usize`, as `CharPos` is character offset
             // Extract low index and high index
             let (lo, hi_opt) = (lo.col.to_usize(), hi_opt.map(|hi| hi.col.to_usize()));
             if let Some(line) = line_opt {
@@ -1208,6 +1205,10 @@ impl<'a> DiagCtxtHandle<'a> {
         std::mem::take(&mut self.inner.borrow_mut().fulfilled_expectations)
     }
 
+    /// Trigger an ICE if there are any delayed bugs and no hard errors.
+    ///
+    /// This will panic if there are any stashed diagnostics. You can call
+    /// `emit_stashed_diagnostics` to emit those before calling `flush_delayed`.
     pub fn flush_delayed(&self) {
         self.inner.borrow_mut().flush_delayed();
     }
@@ -1365,7 +1366,7 @@ impl<'a> DiagCtxtHandle<'a> {
         self.create_err(err).emit()
     }
 
-    /// Ensures that an error is printed. See `Level::DelayedBug`.
+    /// Ensures that an error is printed. See [`Level::DelayedBug`].
     //
     // No `#[rustc_lint_diagnostics]` and no `impl Into<DiagMessage>` because bug messages aren't
     // user-facing.
@@ -2046,22 +2047,6 @@ pub fn elided_lifetime_in_path_suggestion(
     });
 
     ElidedLifetimeInPathSubdiag { expected, indicate }
-}
-
-pub fn report_ambiguity_error<'a, G: EmissionGuarantee>(
-    diag: &mut Diag<'a, G>,
-    ambiguity: rustc_lint_defs::AmbiguityErrorDiag,
-) {
-    diag.span_label(ambiguity.label_span, ambiguity.label_msg);
-    diag.note(ambiguity.note_msg);
-    diag.span_note(ambiguity.b1_span, ambiguity.b1_note_msg);
-    for help_msg in ambiguity.b1_help_msgs {
-        diag.help(help_msg);
-    }
-    diag.span_note(ambiguity.b2_span, ambiguity.b2_note_msg);
-    for help_msg in ambiguity.b2_help_msgs {
-        diag.help(help_msg);
-    }
 }
 
 /// Grammatical tool for displaying messages to end users in a nice form.

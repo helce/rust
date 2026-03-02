@@ -240,6 +240,7 @@ provide! { tcx, def_id, other, cdata,
     thir_abstract_const => { table }
     optimized_mir => { table }
     mir_for_ctfe => { table }
+    trivial_const => { table }
     closure_saved_names_of_captured_variables => { table }
     mir_coroutine_witnesses => { table }
     promoted_mir => { table }
@@ -402,6 +403,7 @@ provide! { tcx, def_id, other, cdata,
         tcx.arena.alloc_from_iter(cdata.get_doc_link_traits_in_scope(def_id.index))
     }
     anon_const_kind => { table }
+    const_of_item => { table }
 }
 
 pub(in crate::rmeta) fn provide(providers: &mut Providers) {

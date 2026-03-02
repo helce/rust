@@ -6,6 +6,9 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/Lint.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
+#if LLVM_VERSION_GE(22, 0)
+#include "llvm/Analysis/RuntimeLibcallInfo.h"
+#endif
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/Bitcode/BitcodeWriterPass.h"
 #include "llvm/CodeGen/CommandFlags.h"
@@ -38,6 +41,7 @@
 #include "llvm/Transforms/Instrumentation/HWAddressSanitizer.h"
 #include "llvm/Transforms/Instrumentation/InstrProfiling.h"
 #include "llvm/Transforms/Instrumentation/MemorySanitizer.h"
+#include "llvm/Transforms/Instrumentation/RealtimeSanitizer.h"
 #include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
 #include "llvm/Transforms/Scalar/AnnotationRemarks.h"
 #include "llvm/Transforms/Utils/CanonicalizeAliases.h"
@@ -224,6 +228,31 @@ static FloatABI::ABIType fromRust(LLVMRustFloatABI RustFloatAbi) {
   report_fatal_error("Bad FloatABI.");
 }
 
+// Must match the layout of `rustc_codegen_llvm::llvm::ffi::CompressionKind`.
+enum class LLVMRustCompressionKind {
+  None = 0,
+  Zlib = 1,
+  Zstd = 2,
+};
+
+static llvm::DebugCompressionType fromRust(LLVMRustCompressionKind Kind) {
+  switch (Kind) {
+  case LLVMRustCompressionKind::None:
+    return llvm::DebugCompressionType::None;
+  case LLVMRustCompressionKind::Zlib:
+    if (!llvm::compression::zlib::isAvailable()) {
+      report_fatal_error("LLVMRustCompressionKind::Zlib not available");
+    }
+    return llvm::DebugCompressionType::Zlib;
+  case LLVMRustCompressionKind::Zstd:
+    if (!llvm::compression::zstd::isAvailable()) {
+      report_fatal_error("LLVMRustCompressionKind::Zstd not available");
+    }
+    return llvm::DebugCompressionType::Zstd;
+  }
+  report_fatal_error("bad LLVMRustCompressionKind");
+}
+
 extern "C" void LLVMRustPrintTargetCPUs(LLVMTargetMachineRef TM,
                                         RustStringRef OutStr) {
   ArrayRef<SubtargetSubTypeKV> CPUTable =
@@ -271,7 +300,8 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
     bool TrapUnreachable, bool Singlethread, bool VerboseAsm,
     bool EmitStackSizeSection, bool RelaxELFRelocations, bool UseInitArray,
     const char *SplitDwarfFile, const char *OutputObjFile,
-    const char *DebugInfoCompression, bool UseEmulatedTls, bool UseWasmEH) {
+    LLVMRustCompressionKind DebugInfoCompression, bool UseEmulatedTls,
+    bool UseWasmEH) {
 
   auto OptLevel = fromRust(RustOptLevel);
   auto RM = fromRust(RustReloc);
@@ -307,16 +337,10 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
   if (OutputObjFile) {
     Options.ObjectFilenameForDebug = OutputObjFile;
   }
-  if (!strcmp("zlib", DebugInfoCompression) &&
-      llvm::compression::zlib::isAvailable()) {
-    Options.MCOptions.CompressDebugSections = DebugCompressionType::Zlib;
-  } else if (!strcmp("zstd", DebugInfoCompression) &&
-             llvm::compression::zstd::isAvailable()) {
-    Options.MCOptions.CompressDebugSections = DebugCompressionType::Zstd;
-  } else if (!strcmp("none", DebugInfoCompression)) {
-    Options.MCOptions.CompressDebugSections = DebugCompressionType::None;
-  }
-
+  // To avoid fatal errors, make sure the Rust-side code only passes a
+  // compression kind that is known to be supported by this build of LLVM, via
+  // `LLVMRustLLVMHasZlibCompression` and `LLVMRustLLVMHasZstdCompression`.
+  Options.MCOptions.CompressDebugSections = fromRust(DebugInfoCompression);
   Options.MCOptions.X86RelaxRelocations = RelaxELFRelocations;
   Options.UseInitArray = UseInitArray;
   Options.EmulatedTLS = UseEmulatedTls;
@@ -358,13 +382,20 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
 
 // Unfortunately, the LLVM C API doesn't provide a way to create the
 // TargetLibraryInfo pass, so we use this method to do so.
-extern "C" void LLVMRustAddLibraryInfo(LLVMPassManagerRef PMR, LLVMModuleRef M,
+extern "C" void LLVMRustAddLibraryInfo(LLVMTargetMachineRef T,
+                                       LLVMPassManagerRef PMR, LLVMModuleRef M,
                                        bool DisableSimplifyLibCalls) {
   auto TargetTriple = Triple(unwrap(M)->getTargetTriple());
+  TargetOptions *Options = &unwrap(T)->Options;
   auto TLII = TargetLibraryInfoImpl(TargetTriple);
   if (DisableSimplifyLibCalls)
     TLII.disableAllFunctions();
   unwrap(PMR)->add(new TargetLibraryInfoWrapperPass(TLII));
+#if LLVM_VERSION_GE(22, 0)
+  unwrap(PMR)->add(new RuntimeLibraryInfoWrapper(
+      TargetTriple, Options->ExceptionModel, Options->FloatABIType,
+      Options->EABIVersion, Options->MCOptions.ABIName, Options->VecLib));
+#endif
 }
 
 extern "C" void LLVMRustSetLLVMOptions(int Argc, char **Argv) {
@@ -511,6 +542,7 @@ struct LLVMRustSanitizerOptions {
   bool SanitizeMemory;
   bool SanitizeMemoryRecover;
   int SanitizeMemoryTrackOrigins;
+  bool SanitizerRealtime;
   bool SanitizeThread;
   bool SanitizeHWAddress;
   bool SanitizeHWAddressRecover;
@@ -765,6 +797,13 @@ extern "C" LLVMRustResult LLVMRustOptimize(
                 /*DisableOptimization=*/false);
             MPM.addPass(HWAddressSanitizerPass(opts));
           });
+    }
+    if (SanitizerOptions->SanitizerRealtime) {
+      OptimizerLastEPCallbacks.push_back([](ModulePassManager &MPM,
+                                            OptimizationLevel Level,
+                                            ThinOrFullLTOPhase phase) {
+        MPM.addPass(RealtimeSanitizerPass());
+      });
     }
   }
 

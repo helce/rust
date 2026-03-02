@@ -15,7 +15,7 @@ use rustc_next_trait_solver::solve::{GoalEvaluation, SolverDelegateEvalExt as _}
 use tracing::{instrument, trace};
 
 use crate::solve::delegate::SolverDelegate;
-use crate::solve::inspect::{self, ProofTreeInferCtxtExt, ProofTreeVisitor};
+use crate::solve::inspect::{self, InferCtxtProofTreeExt, ProofTreeVisitor};
 use crate::solve::{Certainty, deeply_normalize_for_diagnostics};
 use crate::traits::{FulfillmentError, FulfillmentErrorCode, wf};
 
@@ -177,7 +177,11 @@ fn find_best_leaf_obligation<'tcx>(
                 )
                 .break_value()
                 .ok_or(())
+                // walk around the fact that the cause in `Obligation` is ignored by folders so that
+                // we can properly fudge the infer vars in cause code.
+                .map(|o| (o.cause.clone(), o))
         })
+        .map(|(cause, o)| PredicateObligation { cause, ..o })
         .unwrap_or(obligation);
     deeply_normalize_for_diagnostics(infcx, obligation.param_env, obligation)
 }

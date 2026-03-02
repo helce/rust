@@ -4,7 +4,7 @@ use rustc_hir::attrs::*;
 use rustc_session::Session;
 use rustc_session::parse::feature_err;
 use rustc_span::kw;
-use rustc_target::spec::BinaryFormat;
+use rustc_target::spec::{Arch, BinaryFormat};
 
 use super::prelude::*;
 use super::util::parse_single_integer;
@@ -71,8 +71,7 @@ impl<S: Stage> CombineAttributeParser<S> for LinkParser {
             // Specifically `#[link = "dl"]` is accepted with a FCW
             // For more information, see https://github.com/rust-lang/rust/pull/143193
             ArgParser::NameValue(nv) if nv.value_as_str().is_some_and(|v| v == sym::dl) => {
-                let suggestions = <Self as CombineAttributeParser<S>>::TEMPLATE
-                    .suggestions(cx.attr_style, "link");
+                let suggestions = cx.suggestions();
                 let span = cx.attr_span;
                 cx.emit_lint(AttributeLintKind::IllFormedAttributeInput { suggestions }, span);
                 return None;
@@ -397,7 +396,7 @@ impl LinkParser {
             )
             .emit();
         }
-        *cfg = parse_cfg_entry(cx, link_cfg);
+        *cfg = parse_cfg_entry(cx, link_cfg).ok();
         true
     }
 
@@ -439,7 +438,7 @@ impl LinkParser {
             cx.expected_name_value(item.span(), Some(sym::import_name_type));
             return true;
         };
-        if cx.sess().target.arch != "x86" {
+        if cx.sess().target.arch != Arch::X86 {
             cx.emit_err(ImportNameTypeX86 { span: item.span() });
             return true;
         }

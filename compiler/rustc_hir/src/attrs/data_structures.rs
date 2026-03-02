@@ -194,6 +194,18 @@ pub enum CfgEntry {
     Version(Option<RustcVersion>, Span),
 }
 
+impl CfgEntry {
+    pub fn span(&self) -> Span {
+        let (CfgEntry::All(_, span)
+        | CfgEntry::Any(_, span)
+        | CfgEntry::Not(_, span)
+        | CfgEntry::Bool(_, span)
+        | CfgEntry::NameValue { span, .. }
+        | CfgEntry::Version(_, span)) = self;
+        *span
+    }
+}
+
 /// Possible values for the `#[linkage]` attribute, allowing to specify the
 /// linkage type for a `MonoItem`.
 ///
@@ -382,6 +394,32 @@ pub struct DebugVisualizer {
     pub path: Symbol,
 }
 
+#[derive(Clone, Copy, Debug, Decodable, Encodable, Eq, PartialEq)]
+#[derive(HashStable_Generic, PrintAttribute)]
+#[derive_const(Default)]
+pub enum RtsanSetting {
+    Nonblocking,
+    Blocking,
+    #[default]
+    Caller,
+}
+
+#[derive(Eq, PartialEq, Debug, Copy, Clone)]
+#[derive(Encodable, Decodable, HashStable_Generic, PrintAttribute)]
+pub enum WindowsSubsystemKind {
+    Console,
+    Windows,
+}
+
+impl WindowsSubsystemKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WindowsSubsystemKind::Console => "console",
+            WindowsSubsystemKind::Windows => "windows",
+        }
+    }
+}
+
 /// Represents parsed *built-in* inert attributes.
 ///
 /// ## Overview
@@ -488,9 +526,6 @@ pub enum AttributeKind {
 
     /// Represents `#[rustc_const_stable_indirect]`.
     ConstStabilityIndirect,
-
-    /// Represents `#[const_trait]`.
-    ConstTrait(Span),
 
     /// Represents `#[coroutine]`.
     Coroutine(Span),
@@ -637,6 +672,9 @@ pub enum AttributeKind {
     /// Represents `#[pattern_complexity_limit]`
     PatternComplexityLimit { attr_span: Span, limit_span: Span, limit: Limit },
 
+    /// Represents `#[pin_v2]`
+    PinV2(Span),
+
     /// Represents `#[pointee]`
     Pointee(Span),
 
@@ -676,6 +714,12 @@ pub enum AttributeKind {
     /// Represents `#[rustc_object_lifetime_default]`.
     RustcObjectLifetimeDefault,
 
+    /// Represents `#[rustc_pass_indirectly_in_non_rustic_abis]`
+    RustcPassIndirectlyInNonRusticAbis(Span),
+
+    /// Represents `#[rustc_should_not_be_called_on_const_items]`
+    RustcShouldNotBeCalledOnConstItems(Span),
+
     /// Represents `#[rustc_simd_monomorphize_lane_limit = "N"]`.
     RustcSimdMonomorphizeLaneLimit(Limit),
 
@@ -683,7 +727,13 @@ pub enum AttributeKind {
     ///
     /// the on set and off set are distjoint since there's a third option: unset.
     /// a node may not set the sanitizer setting in which case it inherits from parents.
-    Sanitize { on_set: SanitizerSet, off_set: SanitizerSet, span: Span },
+    /// rtsan is unset if None
+    Sanitize {
+        on_set: SanitizerSet,
+        off_set: SanitizerSet,
+        rtsan: Option<RtsanSetting>,
+        span: Span,
+    },
 
     /// Represents `#[should_panic]`
     ShouldPanic { reason: Option<Symbol>, span: Span },
@@ -725,5 +775,8 @@ pub enum AttributeKind {
 
     /// Represents `#[used]`
     Used { used_by: UsedBy, span: Span },
+
+    /// Represents `#[windows_subsystem]`.
+    WindowsSubsystem(WindowsSubsystemKind, Span),
     // tidy-alphabetical-end
 }

@@ -265,18 +265,11 @@ use crate::vec::{self, Vec};
 /// You can look at these with the [`as_ptr`], [`len`], and [`capacity`]
 /// methods:
 ///
-// FIXME Update this when vec_into_raw_parts is stabilized
 /// ```
-/// use std::mem;
-///
 /// let story = String::from("Once upon a time...");
 ///
-/// // Prevent automatically dropping the String's data
-/// let mut story = mem::ManuallyDrop::new(story);
-///
-/// let ptr = story.as_mut_ptr();
-/// let len = story.len();
-/// let capacity = story.capacity();
+/// // Deconstruct the String into parts.
+/// let (ptr, len, capacity) = story.into_raw_parts();
 ///
 /// // story has nineteen bytes
 /// assert_eq!(19, len);
@@ -460,6 +453,10 @@ impl String {
     /// is identical to the [`new`] method.
     ///
     /// [`new`]: String::new
+    ///
+    /// # Panics
+    ///
+    /// Panics if the capacity exceeds `isize::MAX` _bytes_.
     ///
     /// # Examples
     ///
@@ -932,7 +929,6 @@ impl String {
     /// # Examples
     ///
     /// ```
-    /// #![feature(vec_into_raw_parts)]
     /// let s = String::from("hello");
     ///
     /// let (ptr, len, cap) = s.into_raw_parts();
@@ -941,7 +937,7 @@ impl String {
     /// assert_eq!(rebuilt, "hello");
     /// ```
     #[must_use = "losing the pointer will leak memory"]
-    #[unstable(feature = "vec_into_raw_parts", reason = "new API", issue = "65816")]
+    #[stable(feature = "vec_into_raw_parts", since = "1.93.0")]
     pub fn into_raw_parts(self) -> (*mut u8, usize, usize) {
         self.vec.into_raw_parts()
     }
@@ -970,19 +966,12 @@ impl String {
     ///
     /// # Examples
     ///
-    // FIXME Update this when vec_into_raw_parts is stabilized
     /// ```
-    /// use std::mem;
-    ///
     /// unsafe {
     ///     let s = String::from("hello");
     ///
-    ///     // Prevent automatically dropping the String's data
-    ///     let mut s = mem::ManuallyDrop::new(s);
-    ///
-    ///     let ptr = s.as_mut_ptr();
-    ///     let len = s.len();
-    ///     let capacity = s.capacity();
+    ///     // Deconstruct the String into parts.
+    ///     let (ptr, len, capacity) = s.into_raw_parts();
     ///
     ///     let s = String::from_raw_parts(ptr, len, capacity);
     ///
@@ -1094,6 +1083,10 @@ impl String {
 
     /// Appends a given string slice onto the end of this `String`.
     ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity exceeds `isize::MAX` _bytes_.
+    ///
     /// # Examples
     ///
     /// ```
@@ -1116,8 +1109,9 @@ impl String {
     ///
     /// # Panics
     ///
-    /// Panics if the range has `start_bound > end_bound`, or, if the range is
-    /// bounded on either end and does not lie on a [`char`] boundary.
+    /// Panics if the range has `start_bound > end_bound`, if the range is
+    /// bounded on either end and does not lie on a [`char`] boundary, or if the
+    /// new capacity exceeds `isize::MAX` bytes.
     ///
     /// # Examples
     ///
@@ -1173,7 +1167,7 @@ impl String {
     ///
     /// # Panics
     ///
-    /// Panics if the new capacity overflows [`usize`].
+    /// Panics if the new capacity exceeds `isize::MAX` _bytes_.
     ///
     /// # Examples
     ///
@@ -1223,7 +1217,7 @@ impl String {
     ///
     /// # Panics
     ///
-    /// Panics if the new capacity overflows [`usize`].
+    /// Panics if the new capacity exceeds `isize::MAX` _bytes_.
     ///
     /// # Examples
     ///
@@ -1386,6 +1380,10 @@ impl String {
     }
 
     /// Appends the given [`char`] to the end of this `String`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity exceeds `isize::MAX` _bytes_.
     ///
     /// # Examples
     ///

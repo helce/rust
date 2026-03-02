@@ -635,6 +635,13 @@ Default: `"client"`
 Controls file watching implementation.
 
 
+## rust-analyzer.gotoImplementations.filterAdjacentDerives {#gotoImplementations.filterAdjacentDerives}
+
+Default: `false`
+
+If this is `true`, when "Goto Implementations" and in "Implementations" lens, are triggered on a `struct` or `enum` or `union`, we filter out trait implementations that originate from `derive`s above the type.
+
+
 ## rust-analyzer.highlightRelated.branchExitPoints.enable {#highlightRelated.branchExitPoints.enable}
 
 Default: `true`
@@ -1026,6 +1033,13 @@ Default: `false`
 Show inlay hints for the implied type parameter `Sized` bound.
 
 
+## rust-analyzer.inlayHints.impliedDynTraitHints.enable {#inlayHints.impliedDynTraitHints.enable}
+
+Default: `true`
+
+Show inlay hints for the implied `dyn` keyword in trait object types.
+
+
 ## rust-analyzer.inlayHints.lifetimeElisionHints.enable {#inlayHints.lifetimeElisionHints.enable}
 
 Default: `"never"`
@@ -1287,6 +1301,16 @@ This config takes a map of crate names with the exported proc-macro names to ign
 Default: `null`
 
 Internal config, path to proc-macro server executable.
+
+
+## rust-analyzer.profiling.memoryProfile {#profiling.memoryProfile}
+
+Default: `null`
+
+The path where to save memory profiling output.
+
+**Note:** Memory profiling is not enabled by default in rust-analyzer builds, you need to build
+from source for it.
 
 
 ## rust-analyzer.references.excludeImports {#references.excludeImports}
@@ -1606,7 +1630,7 @@ Similarly, the JSON representation of `DiscoverArgument::Buildfile` is:
 `DiscoverArgument::Path` is used to find and generate a `rust-project.json`, and
 therefore, a workspace, whereas `DiscoverArgument::buildfile` is used to to update an
 existing workspace. As a reference for implementors, buck2's `rust-project` will likely
-be useful: https://github.com/facebook/buck2/tree/main/integrations/rust-project.
+be useful: <https://github.com/facebook/buck2/tree/main/integrations/rust-project>.
 
 
 ## rust-analyzer.workspace.symbol.search.excludeImports {#workspace.symbol.search.excludeImports}

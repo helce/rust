@@ -503,8 +503,8 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 }
                 if let hir::Node::Expr(parent_expr) = parent
                     && let hir::ExprKind::Call(call_expr, _) = parent_expr.kind
-                    && let hir::ExprKind::Path(hir::QPath::LangItem(LangItem::IntoIterIntoIter, _)) =
-                        call_expr.kind
+                    && let hir::ExprKind::Path(qpath) = call_expr.kind
+                    && tcx.qpath_is_lang_item(qpath, LangItem::IntoIterIntoIter)
                 {
                     // Do not suggest `.clone()` in a `for` loop, we already suggest borrowing.
                 } else if let UseSpans::FnSelfUse { kind: CallKind::Normal { .. }, .. } = move_spans
@@ -2312,6 +2312,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         let typeck_results = tcx.typeck(self.mir_def_id());
 
         struct ExprFinder<'hir> {
+            tcx: TyCtxt<'hir>,
             issue_span: Span,
             expr_span: Span,
             body_expr: Option<&'hir hir::Expr<'hir>>,
@@ -2336,9 +2337,10 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                 // };
                 // corresponding to the desugaring of a for loop `for <pat> in <head> { <body> }`.
                 if let hir::ExprKind::Call(path, [arg]) = ex.kind
-                    && let hir::ExprKind::Path(hir::QPath::LangItem(LangItem::IntoIterIntoIter, _)) =
-                        path.kind
+                    && let hir::ExprKind::Path(qpath) = path.kind
+                    && self.tcx.qpath_is_lang_item(qpath, LangItem::IntoIterIntoIter)
                     && arg.span.contains(self.issue_span)
+                    && ex.span.desugaring_kind() == Some(DesugaringKind::ForLoop)
                 {
                     // Find `IntoIterator::into_iter(<head>)`
                     self.head = Some(arg);
@@ -2355,10 +2357,10 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                         ..
                     }) = stmt.kind
                     && let hir::ExprKind::Call(path, _args) = call.kind
-                    && let hir::ExprKind::Path(hir::QPath::LangItem(LangItem::IteratorNext, _)) =
-                        path.kind
-                    && let hir::PatKind::Struct(path, [field, ..], _) = bind.pat.kind
-                    && let hir::QPath::LangItem(LangItem::OptionSome, pat_span) = path
+                    && let hir::ExprKind::Path(qpath) = path.kind
+                    && self.tcx.qpath_is_lang_item(qpath, LangItem::IteratorNext)
+                    && let hir::PatKind::Struct(qpath, [field, ..], _) = bind.pat.kind
+                    && self.tcx.qpath_is_lang_item(qpath, LangItem::OptionSome)
                     && call.span.contains(self.issue_span)
                 {
                     // Find `<pat>` and the span for the whole `for` loop.
@@ -2370,7 +2372,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
                         self.loop_bind = Some(ident);
                     }
                     self.head_span = Some(*head_span);
-                    self.pat_span = Some(pat_span);
+                    self.pat_span = Some(bind.pat.span);
                     self.loop_span = Some(stmt.span);
                 }
 
@@ -2385,6 +2387,7 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             }
         }
         let mut finder = ExprFinder {
+            tcx,
             expr_span: span,
             issue_span,
             loop_bind: None,
@@ -3084,6 +3087,39 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             });
 
             explanation.add_explanation_to_diagnostic(&self, &mut err, "", Some(borrow_span), None);
+
+            // Detect buffer reuse pattern
+            if let BorrowExplanation::UsedLater(_dropped_local, _, _, _) = explanation {
+                // Check all locals at the borrow location to find Vec<&T> types
+                for (local, local_decl) in self.body.local_decls.iter_enumerated() {
+                    if let ty::Adt(adt_def, args) = local_decl.ty.kind()
+                        && self.infcx.tcx.is_diagnostic_item(sym::Vec, adt_def.did())
+                        && args.len() > 0
+                    {
+                        let vec_inner_ty = args.type_at(0);
+                        // Check if Vec contains references
+                        if vec_inner_ty.is_ref() {
+                            let local_place = local.into();
+                            if let Some(local_name) = self.describe_place(local_place) {
+                                err.span_label(
+                                    local_decl.source_info.span,
+                                    format!("variable `{local_name}` declared here"),
+                                );
+                                err.note(
+                                    format!(
+                                        "`{local_name}` is a collection that stores borrowed references, \
+                                         but {name} does not live long enough to be stored in it"
+                                    )
+                                );
+                                err.help(
+                                    "buffer reuse with borrowed references requires unsafe code or restructuring"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         err
@@ -3904,13 +3940,30 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
         if let Some(decl) = local_decl
             && decl.can_be_made_mutable()
         {
+            let is_for_loop = matches!(
+                            decl.local_info(),
+                            LocalInfo::User(BindingForm::Var(VarBindingForm {
+                                opt_match_place: Some((_, match_span)),
+                                ..
+                            })) if matches!(match_span.desugaring_kind(), Some(DesugaringKind::ForLoop))
+            );
+            let message = if is_for_loop
+                && let Ok(binding_name) =
+                    self.infcx.tcx.sess.source_map().span_to_snippet(decl.source_info.span)
+            {
+                format!("(mut {}) ", binding_name)
+            } else {
+                "mut ".to_string()
+            };
             err.span_suggestion_verbose(
                 decl.source_info.span.shrink_to_lo(),
                 "consider making this binding mutable",
-                "mut ".to_string(),
+                message,
                 Applicability::MachineApplicable,
             );
+
             if !from_arg
+                && !is_for_loop
                 && matches!(
                     decl.local_info(),
                     LocalInfo::User(BindingForm::Var(VarBindingForm {

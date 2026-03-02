@@ -353,8 +353,16 @@ pub fn write_mir_pretty<'tcx>(
             // are shared between mir_for_ctfe and optimized_mir
             writer.write_mir_fn(tcx.mir_for_ctfe(def_id), w)?;
         } else {
-            let instance_mir = tcx.instance_mir(ty::InstanceKind::Item(def_id));
-            render_body(w, instance_mir)?;
+            if let Some((val, ty)) = tcx.trivial_const(def_id) {
+                ty::print::with_forced_impl_filename_line! {
+                    // see notes on #41697 elsewhere
+                    write!(w, "const {}", tcx.def_path_str(def_id))?
+                }
+                writeln!(w, ": {} = const {};", ty, Const::Val(val, ty))?;
+            } else {
+                let instance_mir = tcx.instance_mir(ty::InstanceKind::Item(def_id));
+                render_body(w, instance_mir)?;
+            }
         }
     }
     Ok(())
@@ -1089,16 +1097,15 @@ impl<'tcx> Debug for Rvalue<'tcx> {
             BinaryOp(ref op, box (ref a, ref b)) => write!(fmt, "{op:?}({a:?}, {b:?})"),
             UnaryOp(ref op, ref a) => write!(fmt, "{op:?}({a:?})"),
             Discriminant(ref place) => write!(fmt, "discriminant({place:?})"),
-            NullaryOp(ref op, ref t) => {
-                let t = with_no_trimmed_paths!(format!("{}", t));
-                match op {
-                    NullOp::SizeOf => write!(fmt, "SizeOf({t})"),
-                    NullOp::AlignOf => write!(fmt, "AlignOf({t})"),
-                    NullOp::OffsetOf(fields) => write!(fmt, "OffsetOf({t}, {fields:?})"),
-                    NullOp::UbChecks => write!(fmt, "UbChecks()"),
-                    NullOp::ContractChecks => write!(fmt, "ContractChecks()"),
+            NullaryOp(ref op) => match op {
+                NullOp::RuntimeChecks(RuntimeChecks::UbChecks) => write!(fmt, "UbChecks()"),
+                NullOp::RuntimeChecks(RuntimeChecks::ContractChecks) => {
+                    write!(fmt, "ContractChecks()")
                 }
-            }
+                NullOp::RuntimeChecks(RuntimeChecks::OverflowChecks) => {
+                    write!(fmt, "OverflowChecks()")
+                }
+            },
             ThreadLocalRef(did) => ty::tls::with(|tcx| {
                 let muta = tcx.static_mutability(did).unwrap().prefix_str();
                 write!(fmt, "&/*tls*/ {}{}", muta, tcx.def_path_str(did))
@@ -1780,7 +1787,7 @@ pub fn write_allocation_bytes<'tcx, Prov: Provenance, Extra, Bytes: AllocBytes>(
                 ascii.push('╼');
                 i += ptr_size;
             }
-        } else if let Some((prov, idx)) = alloc.provenance().get_byte(i, &tcx) {
+        } else if let Some(frag) = alloc.provenance().get_byte(i, &tcx) {
             // Memory with provenance must be defined
             assert!(
                 alloc.init_mask().is_range_initialized(alloc_range(i, Size::from_bytes(1))).is_ok()
@@ -1790,7 +1797,8 @@ pub fn write_allocation_bytes<'tcx, Prov: Provenance, Extra, Bytes: AllocBytes>(
             // Format is similar to "oversized" above.
             let j = i.bytes_usize();
             let c = alloc.inspect_with_uninit_and_ptr_outside_interpreter(j..j + 1)[0];
-            write!(w, "╾{c:02x}{prov:#?} (ptr fragment {idx})╼")?;
+            // FIXME: Find a way to print `frag.offset` that does not look terrible...
+            write!(w, "╾{c:02x}{prov:#?} (ptr fragment {idx})╼", prov = frag.prov, idx = frag.idx)?;
             i += Size::from_bytes(1);
         } else if alloc
             .init_mask()
@@ -1858,6 +1866,13 @@ fn pretty_print_const_value_tcx<'tcx>(
 
     if tcx.sess.verbose_internals() {
         fmt.write_str(&format!("ConstValue({ct:?}: {ty})"))?;
+        return Ok(());
+    }
+
+    // Printing [MaybeUninit<u8>::uninit(); N] or any other aggregate where all fields are uninit
+    // becomes very verbose. This special case makes the dump terse and clear.
+    if ct.all_bytes_uninit(tcx) {
+        fmt.write_str("<uninit>")?;
         return Ok(());
     }
 

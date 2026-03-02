@@ -660,7 +660,7 @@ impl<'a> Parser<'a> {
 
                     // Sub-patterns
                     // FIXME: this doesn't work with recursive subpats (`&mut &mut <err>`)
-                    PatKind::Box(subpat) | PatKind::Ref(subpat, _)
+                    PatKind::Box(subpat) | PatKind::Ref(subpat, _, _)
                         if matches!(subpat.kind, PatKind::Err(_) | PatKind::Expr(_)) =>
                     {
                         self.maybe_add_suggestions_then_emit(subpat.span, p.span, false)
@@ -776,9 +776,12 @@ impl<'a> Parser<'a> {
                 self.bump();
                 self.dcx().emit_err(SwitchRefBoxOrder { span });
             }
-            // Parse ref ident @ pat / ref mut ident @ pat
-            let mutbl = self.parse_mutability();
-            self.parse_pat_ident(BindingMode(ByRef::Yes(mutbl), Mutability::Not), syntax_loc)?
+            // Parse ref ident @ pat / ref mut ident @ pat / ref pin const|mut ident @ pat
+            let (pinned, mutbl) = self.parse_pin_and_mut();
+            self.parse_pat_ident(
+                BindingMode(ByRef::Yes(pinned, mutbl), Mutability::Not),
+                syntax_loc,
+            )?
         } else if self.eat_keyword(exp!(Box)) {
             self.parse_pat_box()?
         } else if self.check_inline_const(0) {
@@ -977,7 +980,7 @@ impl<'a> Parser<'a> {
         });
     }
 
-    /// Parse `&pat` / `&mut pat`.
+    /// Parse `&pat` / `&mut pat` / `&pin const pat` / `&pin mut pat`.
     fn parse_pat_deref(&mut self, expected: Option<Expected>) -> PResult<'a, PatKind> {
         self.expect_and()?;
         if let Some((lifetime, _)) = self.token.lifetime() {
@@ -990,9 +993,9 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let mutbl = self.parse_mutability();
+        let (pinned, mutbl) = self.parse_pin_and_mut();
         let subpat = self.parse_pat_with_range_pat(false, expected, None)?;
-        Ok(PatKind::Ref(Box::new(subpat), mutbl))
+        Ok(PatKind::Ref(Box::new(subpat), pinned, mutbl))
     }
 
     /// Parse a tuple or parenthesis pattern.
@@ -1093,7 +1096,7 @@ impl<'a> Parser<'a> {
             self.ban_mut_general_pat(mut_span, &pat, changed_any_binding);
         }
 
-        if matches!(pat.kind, PatKind::Ident(BindingMode(ByRef::Yes(_), Mutability::Mut), ..)) {
+        if matches!(pat.kind, PatKind::Ident(BindingMode(ByRef::Yes(..), Mutability::Mut), ..)) {
             self.psess.gated_spans.gate(sym::mut_ref, pat.span);
         }
         Ok(pat.kind)

@@ -1,8 +1,7 @@
 ((rustic-mode
   .((eglot-workspace-configuration
      . (:rust-analyzer
-        ( :check ( :invocationLocation "root"
-                                       :invocationStrategy "once"
+        ( :check ( :invocationStrategy "once"
                                        :overrideCommand ["python3"
                                                          "x.py"
                                                          "check"
@@ -28,7 +27,7 @@
                                                                     "--build-dir"
                                                                     "build-rust-analyzer"
                                                                     "--json-output"
-                                                                    "--compile-time-deps"])]
+                                                                    "--compile-time-deps"])
                                         :sysrootSrc "./library"
                                         :extraEnv (:RUSTC_BOOTSTRAP "1"))
                  :rustc ( :source "./Cargo.toml" )))))))

@@ -7,10 +7,11 @@ use std::{env, thread};
 
 use rustc_ast as ast;
 use rustc_attr_parsing::{ShouldEmit, validate_attr};
-use rustc_codegen_ssa::back::archive::ArArchiveBuilderBuilder;
+use rustc_codegen_ssa::back::archive::{ArArchiveBuilderBuilder, ArchiveBuilderBuilder};
 use rustc_codegen_ssa::back::link::link_binary;
+use rustc_codegen_ssa::target_features::cfg_target_feature;
 use rustc_codegen_ssa::traits::CodegenBackend;
-use rustc_codegen_ssa::{CodegenResults, CrateInfo};
+use rustc_codegen_ssa::{CodegenResults, CrateInfo, TargetConfig};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::jobserver::Proxy;
 use rustc_data_structures::sync;
@@ -251,7 +252,7 @@ pub(crate) fn run_in_thread_pool_with_globals<
                                 let query_map = rustc_span::set_session_globals_then(unsafe { &*(session_globals as *const SessionGlobals) }, || {
                                     // Ensure there was no errors collecting all active jobs.
                                     // We need the complete map to ensure we find a cycle to break.
-                                    QueryCtxt::new(tcx).collect_active_jobs().expect("failed to collect active queries in deadlock handler")
+                                    QueryCtxt::new(tcx).collect_active_jobs(false).expect("failed to collect active queries in deadlock handler")
                                 });
                                 break_query_cycles(query_map, &registry);
                             })
@@ -287,7 +288,15 @@ pub(crate) fn run_in_thread_pool_with_globals<
                         pool.install(|| f(current_gcx.into_inner(), proxy))
                     },
                 )
-                .unwrap()
+                .unwrap_or_else(|err| {
+                    let mut diag = thread_builder_diag.early_struct_fatal(format!(
+                        "failed to spawn compiler thread pool: could not create {threads} threads ({err})",
+                    ));
+                    diag.help(
+                        "try lowering `-Z threads` or checking the operating system's resource limits",
+                    );
+                    diag.emit();
+                })
         })
     })
 }
@@ -330,7 +339,7 @@ pub fn get_codegen_backend(
             filename if filename.contains('.') => {
                 load_backend_from_dylib(early_dcx, filename.as_ref())
             }
-            "dummy" => || Box::new(DummyCodegenBackend),
+            "dummy" => || Box::new(DummyCodegenBackend { target_config_override: None }),
             #[cfg(feature = "llvm")]
             "llvm" => rustc_codegen_llvm::LlvmCodegenBackend::new,
             backend_name => get_codegen_sysroot(early_dcx, sysroot, backend_name),
@@ -343,7 +352,9 @@ pub fn get_codegen_backend(
     unsafe { load() }
 }
 
-struct DummyCodegenBackend;
+pub struct DummyCodegenBackend {
+    pub target_config_override: Option<Box<dyn Fn(&Session) -> TargetConfig>>,
+}
 
 impl CodegenBackend for DummyCodegenBackend {
     fn locale_resource(&self) -> &'static str {
@@ -352,6 +363,42 @@ impl CodegenBackend for DummyCodegenBackend {
 
     fn name(&self) -> &'static str {
         "dummy"
+    }
+
+    fn target_config(&self, sess: &Session) -> TargetConfig {
+        if let Some(target_config_override) = &self.target_config_override {
+            return target_config_override(sess);
+        }
+
+        let abi_required_features = sess.target.abi_required_features();
+        let (target_features, unstable_target_features) = cfg_target_feature::<0>(
+            sess,
+            |_feature| Default::default(),
+            |feature| {
+                // This is a standin for the list of features a backend is expected to enable.
+                // It would be better to parse target.features instead and handle implied features,
+                // but target.features doesn't contain features that are enabled by default for an
+                // architecture or target cpu.
+                abi_required_features.required.contains(&feature)
+            },
+        );
+
+        TargetConfig {
+            target_features,
+            unstable_target_features,
+            has_reliable_f16: true,
+            has_reliable_f16_math: true,
+            has_reliable_f128: true,
+            has_reliable_f128_math: true,
+        }
+    }
+
+    fn supported_crate_types(&self, _sess: &Session) -> Vec<CrateType> {
+        // This includes bin despite failing on the link step to ensure that you
+        // can still get the frontend handling for binaries. For all library
+        // like crate types cargo will fallback to rlib unless you specifically
+        // say that only a different crate type must be used.
+        vec![CrateType::Rlib, CrateType::Executable]
     }
 
     fn codegen_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Box<dyn Any> {
@@ -380,23 +427,50 @@ impl CodegenBackend for DummyCodegenBackend {
     ) {
         // JUSTIFICATION: TyCtxt no longer available here
         #[allow(rustc::bad_opt_access)]
-        if sess.opts.crate_types.iter().any(|&crate_type| crate_type != CrateType::Rlib) {
+        if let Some(&crate_type) = codegen_results
+            .crate_info
+            .crate_types
+            .iter()
+            .find(|&&crate_type| crate_type != CrateType::Rlib)
+            && outputs.outputs.should_link()
+        {
             #[allow(rustc::untranslatable_diagnostic)]
             #[allow(rustc::diagnostic_outside_of_impl)]
             sess.dcx().fatal(format!(
-                "crate type {} not supported by the dummy codegen backend",
-                sess.opts.crate_types[0],
+                "crate type {crate_type} not supported by the dummy codegen backend"
             ));
         }
 
         link_binary(
             sess,
-            &ArArchiveBuilderBuilder,
+            &DummyArchiveBuilderBuilder,
             codegen_results,
             metadata,
             outputs,
             self.name(),
         );
+    }
+}
+
+struct DummyArchiveBuilderBuilder;
+
+impl ArchiveBuilderBuilder for DummyArchiveBuilderBuilder {
+    fn new_archive_builder<'a>(
+        &self,
+        sess: &'a Session,
+    ) -> Box<dyn rustc_codegen_ssa::back::archive::ArchiveBuilder + 'a> {
+        ArArchiveBuilderBuilder.new_archive_builder(sess)
+    }
+
+    fn create_dll_import_lib(
+        &self,
+        sess: &Session,
+        _lib_name: &str,
+        _items: Vec<rustc_codegen_ssa::back::archive::ImportLibraryItem>,
+        output_path: &Path,
+    ) {
+        // Build an empty static library to avoid calling an external dlltool on mingw
+        ArArchiveBuilderBuilder.new_archive_builder(sess).build(output_path);
     }
 }
 

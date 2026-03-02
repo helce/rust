@@ -33,7 +33,6 @@
 
 //@ check-pass
 
-#![feature(test)]
 #![warn(unused_attributes, unknown_lints)]
 //~^ NOTE the lint level is defined here
 //~| NOTE the lint level is defined here
@@ -248,38 +247,6 @@ mod macro_export {
     //~| WARN previously accepted
     //~| HELP can only be applied to
     //~| HELP remove the attribute
-}
-
-// At time of unit test authorship, if compiling without `--test` then
-// non-crate-level #[test] attributes seem to be ignored.
-
-#[test]
-mod test { mod inner { #![test] }
-
-    fn f() { }
-
-    struct S;
-
-    type T = S;
-
-    impl S { }
-}
-
-// At time of unit test authorship, if compiling without `--test` then
-// non-crate-level #[bench] attributes seem to be ignored.
-
-#[bench]
-mod bench {
-    mod inner { #![bench] }
-
-    #[bench]
-    struct S;
-
-    #[bench]
-    type T = S;
-
-    #[bench]
-    impl S { }
 }
 
 #[path = "3800"]
@@ -814,26 +781,26 @@ mod must_use {
 
 #[windows_subsystem = "windows"]
 //~^ WARN crate-level attribute should be an inner attribute
-//~| HELP add a `!`
 mod windows_subsystem {
+    //~^ NOTE This attribute does not have an `!`, which means it is applied to this module
     mod inner { #![windows_subsystem="windows"] }
-    //~^ WARN crate-level attribute should be in the root module
+    //~^ WARN the `#![windows_subsystem]` attribute can only be used at the crate root
 
     #[windows_subsystem = "windows"] fn f() { }
     //~^ WARN crate-level attribute should be an inner attribute
-    //~| HELP add a `!`
+    //~| NOTE This attribute does not have an `!`, which means it is applied to this function
 
     #[windows_subsystem = "windows"] struct S;
     //~^ WARN crate-level attribute should be an inner attribute
-    //~| HELP add a `!`
+    //~| NOTE This attribute does not have an `!`, which means it is applied to this struct
 
     #[windows_subsystem = "windows"] type T = S;
     //~^ WARN crate-level attribute should be an inner attribute
-    //~| HELP add a `!`
+    //~| NOTE This attribute does not have an `!`, which means it is applied to this type alias
 
     #[windows_subsystem = "windows"] impl S { }
     //~^ WARN crate-level attribute should be an inner attribute
-    //~| HELP add a `!`
+    //~| NOTE This attribute does not have an `!`, which means it is applied to this implementation block
 }
 
 // BROKEN USES OF CRATE-LEVEL BUILT-IN ATTRIBUTES

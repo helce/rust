@@ -12,7 +12,7 @@ use hir_def::{
         Pat, PatId, RecordFieldPat, RecordLitField,
     },
     item_tree::FieldsShape,
-    lang_item::{LangItem, LangItemTarget, lang_item},
+    lang_item::LangItems,
     resolver::{HasResolver, ResolveValueResult, Resolver, ValueNs},
 };
 use hir_expand::name::Name;
@@ -25,7 +25,7 @@ use syntax::TextRange;
 use triomphe::Arc;
 
 use crate::{
-    Adjust, Adjustment, AutoBorrow, CallableDefId, TraitEnvironment,
+    Adjust, Adjustment, AutoBorrow, CallableDefId, ParamEnvAndCrate,
     consteval::ConstEvalError,
     db::{HirDatabase, InternedClosure, InternedClosureId},
     display::{DisplayTarget, HirDisplay, hir_display_with_store},
@@ -33,6 +33,7 @@ use crate::{
     infer::{CaptureKind, CapturedItem, TypeMismatch, cast::CastTy},
     inhabitedness::is_ty_uninhabited_from,
     layout::LayoutError,
+    method_resolution::CandidateId,
     mir::{
         AggregateKind, Arena, BasicBlock, BasicBlockId, BinOp, BorrowKind, CastKind, Either, Expr,
         FieldId, GenericArgs, Idx, InferenceResult, Local, LocalId, MemoryMap, MirBody, MirSpan,
@@ -41,9 +42,8 @@ use crate::{
         TupleFieldId, Ty, UnOp, VariantId, return_slot,
     },
     next_solver::{
-        Const, DbInterner, ParamConst, Region, TyKind, TypingMode, UnevaluatedConst,
+        Const, DbInterner, ParamConst, ParamEnv, Region, TyKind, TypingMode, UnevaluatedConst,
         infer::{DbInternerInferExt, InferCtxt},
-        mapping::NextSolverToChalk,
     },
     traits::FnTrait,
 };
@@ -81,7 +81,7 @@ struct MirLowerCtx<'a, 'db> {
     infer: &'a InferenceResult<'db>,
     resolver: Resolver<'db>,
     drop_scopes: Vec<DropScope<'db>>,
-    env: Arc<TraitEnvironment<'db>>,
+    env: ParamEnv<'db>,
     infcx: InferCtxt<'db>,
 }
 
@@ -110,7 +110,7 @@ pub enum MirLowerError<'db> {
     Loop,
     /// Something that should never happen and is definitely a bug, but we don't want to panic if it happened
     ImplementationError(String),
-    LangItemNotFound(LangItem),
+    LangItemNotFound,
     MutatingRvalue,
     UnresolvedLabel,
     UnresolvedUpvar(Place<'db>),
@@ -232,7 +232,7 @@ impl MirLowerError<'_> {
             | MirLowerError::BreakWithoutLoop
             | MirLowerError::Loop
             | MirLowerError::ImplementationError(_)
-            | MirLowerError::LangItemNotFound(_)
+            | MirLowerError::LangItemNotFound
             | MirLowerError::MutatingRvalue
             | MirLowerError::UnresolvedLabel
             | MirLowerError::UnresolvedUpvar(_) => writeln!(f, "{self:?}")?,
@@ -302,7 +302,8 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         };
         let resolver = owner.resolver(db);
         let env = db.trait_environment_for_body(owner);
-        let interner = DbInterner::new_with(db, Some(env.krate), env.block);
+        let interner = DbInterner::new_with(db, resolver.krate());
+        // FIXME(next-solver): Is `non_body_analysis()` correct here? Don't we want to reveal opaque types defined by this body?
         let infcx = interner.infer_ctxt().build(TypingMode::non_body_analysis());
 
         MirLowerCtx {
@@ -324,6 +325,11 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
     #[inline]
     fn interner(&self) -> DbInterner<'db> {
         self.infcx.interner
+    }
+
+    #[inline]
+    fn lang_items(&self) -> &'db LangItems {
+        self.infcx.interner.lang_items()
     }
 
     fn temp(
@@ -388,15 +394,15 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                     );
                     Ok(Some(current))
                 }
-                Adjust::Borrow(AutoBorrow::Ref(_, m) | AutoBorrow::RawPtr(m)) => {
-                    let Some((p, current)) =
-                        self.lower_expr_as_place_with_adjust(current, expr_id, true, rest)?
-                    else {
-                        return Ok(None);
-                    };
-                    let bk = BorrowKind::from_rustc(*m);
-                    self.push_assignment(current, place, Rvalue::Ref(bk, p), expr_id.into());
-                    Ok(Some(current))
+                Adjust::Borrow(AutoBorrow::Ref(m)) => self.lower_expr_to_place_with_borrow_adjust(
+                    expr_id,
+                    place,
+                    current,
+                    rest,
+                    (*m).into(),
+                ),
+                Adjust::Borrow(AutoBorrow::RawPtr(m)) => {
+                    self.lower_expr_to_place_with_borrow_adjust(expr_id, place, current, rest, *m)
                 }
                 Adjust::Pointer(cast) => {
                     let Some((p, current)) =
@@ -419,6 +425,24 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             },
             None => self.lower_expr_to_place_without_adjust(expr_id, place, current),
         }
+    }
+
+    fn lower_expr_to_place_with_borrow_adjust(
+        &mut self,
+        expr_id: ExprId,
+        place: Place<'db>,
+        current: BasicBlockId<'db>,
+        rest: &[Adjustment<'db>],
+        m: Mutability,
+    ) -> Result<'db, Option<BasicBlockId<'db>>> {
+        let Some((p, current)) =
+            self.lower_expr_as_place_with_adjust(current, expr_id, true, rest)?
+        else {
+            return Ok(None);
+        };
+        let bk = BorrowKind::from_rustc(m);
+        self.push_assignment(current, place, Rvalue::Ref(bk, p), expr_id.into());
+        Ok(Some(current))
     }
 
     fn lower_expr_to_place(
@@ -460,17 +484,13 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 let pr =
                     if let Some((assoc, subst)) = self.infer.assoc_resolutions_for_expr(expr_id) {
                         match assoc {
-                            hir_def::AssocItemId::ConstId(c) => {
+                            CandidateId::ConstId(c) => {
                                 self.lower_const(c.into(), current, place, subst, expr_id.into())?;
                                 return Ok(Some(current));
                             }
-                            hir_def::AssocItemId::FunctionId(_) => {
+                            CandidateId::FunctionId(_) => {
                                 // FnDefs are zero sized, no action is needed.
                                 return Ok(Some(current));
-                            }
-                            hir_def::AssocItemId::TypeAliasId(_) => {
-                                // FIXME: If it is unreachable, use proper error instead of `not_supported`.
-                                not_supported!("associated functions and types")
                             }
                         }
                     } else if let Some(variant) = self.infer.variant_resolution_for_expr(expr_id) {
@@ -1442,7 +1462,11 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
     }
 
     fn lower_literal_to_operand(&mut self, ty: Ty<'db>, l: &Literal) -> Result<'db, Operand<'db>> {
-        let size = || self.db.layout_of_ty(ty, self.env.clone()).map(|it| it.size.bytes_usize());
+        let size = || {
+            self.db
+                .layout_of_ty(ty, ParamEnvAndCrate { param_env: self.env, krate: self.krate() })
+                .map(|it| it.size.bytes_usize())
+        };
         const USIZE_SIZE: usize = size_of::<usize>();
         let bytes: Box<[_]> = match l {
             hir_def::hir::Literal::String(b) => {
@@ -1517,10 +1541,20 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 UnevaluatedConst { def: const_id.into(), args: subst },
             )
         } else {
-            let name = const_id.name(self.db);
-            self.db
-                .const_eval(const_id, subst, None)
-                .map_err(|e| MirLowerError::ConstEvalError(name.into(), Box::new(e)))?
+            match const_id {
+                id @ GeneralConstId::ConstId(const_id) => {
+                    self.db.const_eval(const_id, subst, None).map_err(|e| {
+                        let name = id.name(self.db);
+                        MirLowerError::ConstEvalError(name.into(), Box::new(e))
+                    })?
+                }
+                GeneralConstId::StaticId(static_id) => {
+                    self.db.const_eval_static(static_id).map_err(|e| {
+                        let name = const_id.name(self.db);
+                        MirLowerError::ConstEvalError(name.into(), Box::new(e))
+                    })?
+                }
+            }
         };
         let ty = self
             .db
@@ -1766,10 +1800,10 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
 
     fn is_uninhabited(&self, expr_id: ExprId) -> bool {
         is_ty_uninhabited_from(
-            self.db,
-            &self.infer[expr_id].to_chalk(self.interner()),
+            &self.infcx,
+            self.infer[expr_id],
             self.owner.module(self.db),
-            self.env.clone(),
+            self.env,
         )
     }
 
@@ -1789,11 +1823,6 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         self.drop_scopes.last_mut().unwrap().locals.push(l);
         self.push_statement(current, StatementKind::StorageLive(l).with_span(span));
         Ok(())
-    }
-
-    fn resolve_lang_item(&self, item: LangItem) -> Result<'db, LangItemTarget> {
-        let crate_id = self.owner.module(self.db).krate();
-        lang_item(self.db, crate_id, item).ok_or(MirLowerError::LangItemNotFound(item))
     }
 
     fn lower_block_to_place(
@@ -2045,7 +2074,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         span: MirSpan,
     ) {
         for &l in scope.locals.iter().rev() {
-            if !self.infcx.type_is_copy_modulo_regions(self.env.env, self.result.locals[l].ty) {
+            if !self.infcx.type_is_copy_modulo_regions(self.env, self.result.locals[l].ty) {
                 let prev = std::mem::replace(current, self.new_basic_block());
                 self.set_terminator(
                     prev,
@@ -2086,7 +2115,7 @@ pub fn mir_body_for_closure_query<'db>(
 ) -> Result<'db, Arc<MirBody<'db>>> {
     let InternedClosure(owner, expr) = db.lookup_intern_closure(closure);
     let body = db.body(owner);
-    let infer = db.infer(owner);
+    let infer = InferenceResult::for_body(db, owner);
     let Expr::Closure { args, body: root, .. } = &body[expr] else {
         implementation_error!("closure expression is not closure");
     };
@@ -2094,7 +2123,7 @@ pub fn mir_body_for_closure_query<'db>(
         implementation_error!("closure expression is not closure");
     };
     let (captures, kind) = infer.closure_info(closure);
-    let mut ctx = MirLowerCtx::new(db, owner, &body, &infer);
+    let mut ctx = MirLowerCtx::new(db, owner, &body, infer);
     // 0 is return local
     ctx.result.locals.alloc(Local { ty: infer[*root] });
     let closure_local = ctx.result.locals.alloc(Local {
@@ -2224,8 +2253,8 @@ pub fn mir_body_query<'db>(
     };
     let _p = tracing::info_span!("mir_body_query", ?detail).entered();
     let body = db.body(def);
-    let infer = db.infer(def);
-    let mut result = lower_to_mir(db, def, &body, &infer, body.body_expr)?;
+    let infer = InferenceResult::for_body(db, def);
+    let mut result = lower_to_mir(db, def, &body, infer, body.body_expr)?;
     result.shrink_to_fit();
     Ok(Arc::new(result))
 }

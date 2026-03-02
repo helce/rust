@@ -2,7 +2,7 @@
 
 mod errors;
 
-use std::{marker::PhantomData, mem, ops::ControlFlow, vec::ExtractIf};
+use std::ops::ControlFlow;
 
 use rustc_hash::FxHashSet;
 use rustc_next_trait_solver::{
@@ -46,6 +46,7 @@ pub struct FulfillmentCtxt<'db> {
     /// outside of this snapshot leads to subtle bugs if the snapshot
     /// gets rolled back. Because of this we explicitly check that we only
     /// use the context in exactly this snapshot.
+    #[expect(unused)]
     usable_in_snapshot: usize,
 }
 
@@ -69,10 +70,6 @@ impl<'db> ObligationStorage<'db> {
         self.pending.push((obligation, stalled_on));
     }
 
-    fn has_pending_obligations(&self) -> bool {
-        !self.pending.is_empty() || !self.overflowed.is_empty()
-    }
-
     fn clone_pending(&self) -> PredicateObligations<'db> {
         let mut obligations: PredicateObligations<'db> =
             self.pending.iter().map(|(o, _)| o.clone()).collect();
@@ -80,14 +77,12 @@ impl<'db> ObligationStorage<'db> {
         obligations
     }
 
-    fn drain_pending(
-        &mut self,
-        cond: impl Fn(&PredicateObligation<'db>) -> bool,
-    ) -> PendingObligations<'db> {
-        let (not_stalled, pending) =
-            mem::take(&mut self.pending).into_iter().partition(|(o, _)| cond(o));
-        self.pending = pending;
-        not_stalled
+    fn drain_pending<'this, 'cond>(
+        &'this mut self,
+        cond: impl 'cond + Fn(&PredicateObligation<'db>) -> bool,
+    ) -> impl Iterator<Item = (PredicateObligation<'db>, Option<GoalStalledOn<DbInterner<'db>>>)>
+    {
+        self.pending.extract_if(.., move |(o, _)| cond(o))
     }
 
     fn on_fulfillment_overflow(&mut self, infcx: &InferCtxt<'db>) {
@@ -125,10 +120,10 @@ impl<'db> FulfillmentCtxt<'db> {
 }
 
 impl<'db> FulfillmentCtxt<'db> {
-    #[tracing::instrument(level = "trace", skip(self, infcx))]
+    #[tracing::instrument(level = "trace", skip(self, _infcx))]
     pub(crate) fn register_predicate_obligation(
         &mut self,
-        infcx: &InferCtxt<'db>,
+        _infcx: &InferCtxt<'db>,
         obligation: PredicateObligation<'db>,
     ) {
         // FIXME: See the comment in `try_evaluate_obligations()`.
@@ -138,7 +133,7 @@ impl<'db> FulfillmentCtxt<'db> {
 
     pub(crate) fn register_predicate_obligations(
         &mut self,
-        infcx: &InferCtxt<'db>,
+        _infcx: &InferCtxt<'db>,
         obligations: impl IntoIterator<Item = PredicateObligation<'db>>,
     ) {
         // FIXME: See the comment in `try_evaluate_obligations()`.
@@ -148,7 +143,7 @@ impl<'db> FulfillmentCtxt<'db> {
 
     pub(crate) fn collect_remaining_errors(
         &mut self,
-        infcx: &InferCtxt<'db>,
+        _infcx: &InferCtxt<'db>,
     ) -> Vec<NextSolverError<'db>> {
         self.obligations
             .pending
@@ -168,9 +163,11 @@ impl<'db> FulfillmentCtxt<'db> {
         // to not put the obligations queue in `InferenceTable`'s snapshots.
         // assert_eq!(self.usable_in_snapshot, infcx.num_open_snapshots());
         let mut errors = Vec::new();
+        let mut obligations = Vec::new();
         loop {
             let mut any_changed = false;
-            for (mut obligation, stalled_on) in self.obligations.drain_pending(|_| true) {
+            obligations.extend(self.obligations.drain_pending(|_| true));
+            for (mut obligation, stalled_on) in obligations.drain(..) {
                 if obligation.recursion_depth >= infcx.interner.recursion_limit() {
                     self.obligations.on_fulfillment_overflow(infcx);
                     // Only return true errors that we have accumulated while processing.
@@ -235,10 +232,6 @@ impl<'db> FulfillmentCtxt<'db> {
         self.collect_remaining_errors(infcx)
     }
 
-    fn has_pending_obligations(&self) -> bool {
-        self.obligations.has_pending_obligations()
-    }
-
     pub(crate) fn pending_obligations(&self) -> PredicateObligations<'db> {
         self.obligations.clone_pending()
     }
@@ -276,7 +269,6 @@ impl<'db> FulfillmentCtxt<'db> {
                         .is_break()
                 })
             })
-            .into_iter()
             .map(|(o, _)| o)
             .collect()
     }
