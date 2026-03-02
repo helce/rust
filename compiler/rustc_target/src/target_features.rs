@@ -973,6 +973,7 @@ impl Target {
             Arch::M68k => M68K_FEATURES,
             Arch::AmdGpu
             | Arch::Avr
+            | Arch::E2k
             | Arch::Msp430
             | Arch::PowerPC64LE
             | Arch::SpirV
