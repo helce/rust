@@ -272,7 +272,7 @@ impl InlineAsmArch {
             Arch::Wasm32 => Some(Self::Wasm32),
             Arch::Wasm64 => Some(Self::Wasm64),
             Arch::Bpf => Some(Self::Bpf),
-            Arch::E2k => Ok(Self::E2k),
+            Arch::E2k => Some(Self::E2k),
             Arch::Avr => Some(Self::Avr),
             Arch::Msp430 => Some(Self::Msp430),
             Arch::M68k => Some(Self::M68k),
