@@ -1,4 +1,4 @@
-use crate::spec::{base, Cc, LinkerFlavor, Lld, Target, TargetMetadata, TargetOptions};
+use crate::spec::{Arch, Cc, LinkerFlavor, Lld, Target, TargetMetadata, TargetOptions, base};
 
 pub fn target() -> Target {
     Target {
@@ -11,7 +11,7 @@ pub fn target() -> Target {
         },
         pointer_width: 64,
         data_layout: "e-m:e-p:64:64-i64:64-f64:64-f80:128:128-n32:64-S128".into(),
-        arch: "e2k".into(),
+        arch: Arch::E2k,
         options: TargetOptions {
             max_atomic_width: Some(64),
             mcount: "_mcount".into(),
