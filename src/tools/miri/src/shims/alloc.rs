@@ -40,6 +40,7 @@ pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
             Arch::X86_64
             | Arch::AArch64
             | Arch::Arm64EC
+            | Arch::E2k
             | Arch::LoongArch64
             | Arch::Mips64
             | Arch::Mips64r6
