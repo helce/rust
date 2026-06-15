@@ -1,6 +1,6 @@
 use crate::spec::{Arch, Cc, LinkerFlavor, Lld, Target, TargetMetadata, TargetOptions, base};
 
-pub fn target() -> Target {
+pub(crate) fn target() -> Target {
     Target {
         llvm_target: "e2k-unknown-linux-gnu".into(),
         metadata: TargetMetadata {
