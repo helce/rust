@@ -6,7 +6,7 @@ pub fn target() -> Target {
         metadata: TargetMetadata {
             description: Some("64-bit Linux (kernel 5.10+, glibc 2.35+)".into()),
             tier: Some(2),
-            host_tools: Some(false),
+            host_tools: Some(true),
             std: Some(true),
         },
         pointer_width: 64,
