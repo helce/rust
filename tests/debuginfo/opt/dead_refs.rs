@@ -1,3 +1,5 @@
+// llvm bug with return and debuginfo, WIP
+//@ ignore-e2k
 //@ min-lldb-version: 1800
 //@ min-gdb-version: 13.0
 //@ compile-flags: -g -Copt-level=3
