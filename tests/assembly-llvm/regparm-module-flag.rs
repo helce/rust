@@ -30,8 +30,8 @@ pub unsafe extern "C" fn entrypoint(len: usize, ptr: *mut c_void, val: i32) -> *
     // REGPARM1: calll memset
 
     // REGPARM2-LABEL: entrypoint
-    // REGPARM2: movl 16(%esp), %edx
     // REGPARM2: movl %e{{.*}}, (%esp)
+    // REGPARM2: movl 16(%esp), %edx
     // REGPARM2: movl %e{{.*}}, %eax
     // REGPARM2: calll memset
 
@@ -56,8 +56,8 @@ pub unsafe extern "C" fn non_builtin_entrypoint(
     // REGPARM1: calll non_builtin_memset
 
     // REGPARM2-LABEL: non_builtin_entrypoint
-    // REGPARM2: movl 16(%esp), %edx
     // REGPARM2: movl %e{{.*}}, (%esp)
+    // REGPARM2: movl 16(%esp), %edx
     // REGPARM2: movl %e{{.*}}, %eax
     // REGPARM2: calll non_builtin_memset
 
