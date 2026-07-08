@@ -883,6 +883,17 @@ static M68K_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     // tidy-alphabetical-end
 ];
 
+static E2K_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
+    // tidy-alphabetical-start
+    ("elbrus-v3", Stable, &[]),
+    ("elbrus-v4", Stable, &["elbrus-v3"]),
+    ("elbrus-v5", Stable, &["elbrus-v4"]),
+    ("elbrus-v6", Stable, &["elbrus-v5"]),
+    ("elbrus-v7", Stable, &["elbrus-v7m"]),
+    ("elbrus-v7m", Stable, &["elbrus-v6"]),
+    // tidy-alphabetical-end
+];
+
 /// When rustdoc is running, provide a list of all known features so that all their respective
 /// primitives may be documented.
 ///
@@ -904,6 +915,7 @@ pub fn all_rust_features() -> impl Iterator<Item = (&'static str, Stability)> {
         .chain(IBMZ_FEATURES)
         .chain(SPARC_FEATURES)
         .chain(M68K_FEATURES)
+        .chain(E2K_FEATURES)
         .cloned()
         .map(|(f, s, _)| (f, s))
 }
@@ -971,9 +983,9 @@ impl Target {
             Arch::S390x => IBMZ_FEATURES,
             Arch::Sparc | Arch::Sparc64 => SPARC_FEATURES,
             Arch::M68k => M68K_FEATURES,
+            Arch::E2k => E2K_FEATURES,
             Arch::AmdGpu
             | Arch::Avr
-            | Arch::E2k
             | Arch::Msp430
             | Arch::PowerPC64LE
             | Arch::SpirV

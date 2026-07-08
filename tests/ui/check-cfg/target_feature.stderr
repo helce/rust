@@ -83,6 +83,12 @@ LL |     cfg!(target_feature = "_UNEXPECTED_VALUE");
 `e2`
 `ecv`
 `edsp`
+`elbrus-v3`
+`elbrus-v4`
+`elbrus-v5`
+`elbrus-v6`
+`elbrus-v7`
+`elbrus-v7m`
 `elrw`
 `enhanced-sort`
 `ermsb`

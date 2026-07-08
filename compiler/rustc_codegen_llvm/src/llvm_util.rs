@@ -253,6 +253,16 @@ pub(crate) fn to_llvm_features<'a>(sess: &Session, s: &'a str) -> Option<LLVMFea
             s => Some(LLVMFeature::new(s)),
         },
 
+        Arch::E2k => match s {
+            "elbrus-v3" => Some(LLVMFeature::new("ElbrusV3")),
+            "elbrus-v4" => Some(LLVMFeature::new("ElbrusV4")),
+            "elbrus-v5" => Some(LLVMFeature::new("ElbrusV5")),
+            "elbrus-v6" => Some(LLVMFeature::new("ElbrusV6")),
+            "elbrus-v7" => Some(LLVMFeature::new("ElbrusV7")),
+            "elbrus-v7m" => Some(LLVMFeature::new("ElbrusV7Maket")),
+            s => Some(LLVMFeature::new(s)),
+        },
+
         // Filter out features that are not supported by the current LLVM version
         Arch::LoongArch32 | Arch::LoongArch64 => match s {
             "32s" if major < 21 => None,
