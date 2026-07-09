@@ -1,7 +1,7 @@
 // tidy-alphabetical-start
 #![allow(internal_features)]
 #![allow(rustc::diagnostic_outside_of_impl)]
-#![feature(array_windows)]
+#![cfg_attr(bootstrap, feature(array_windows))]
 #![feature(associated_type_defaults)]
 #![feature(if_let_guard)]
 #![feature(macro_metavar_expr)]
@@ -28,5 +28,9 @@ pub mod module;
 // FIXME(Nilstrieb) Translate proc_macro diagnostics
 #[allow(rustc::untranslatable_diagnostic)]
 pub mod proc_macro;
+
+pub fn provide(providers: &mut rustc_middle::query::Providers) {
+    providers.derive_macro_expansion = proc_macro::provide_derive_macro_expansion;
+}
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

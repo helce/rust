@@ -8,7 +8,7 @@ use crate::fs::{self, Metadata, OpenOptions};
 use crate::io::BorrowedCursor;
 use crate::path::Path;
 use crate::sealed::Sealed;
-use crate::sys_common::{AsInner, AsInnerMut, IntoInner};
+use crate::sys::{AsInner, AsInnerMut, IntoInner};
 use crate::time::SystemTime;
 use crate::{io, sys};
 
@@ -138,6 +138,8 @@ impl FileExt for fs::File {
 }
 
 /// Windows-specific extensions to [`fs::OpenOptions`].
+// WARNING: This trait is not sealed. DON'T add any new methods!
+// Add them to OpenOptionsExt2 instead.
 #[stable(feature = "open_options_ext", since = "1.10.0")]
 pub trait OpenOptionsExt {
     /// Overrides the `dwDesiredAccess` argument to the call to [`CreateFile`]
@@ -331,6 +333,37 @@ impl OpenOptionsExt for OpenOptions {
 
     fn security_qos_flags(&mut self, flags: u32) -> &mut OpenOptions {
         self.as_inner_mut().security_qos_flags(flags);
+        self
+    }
+}
+
+#[unstable(feature = "windows_freeze_file_times", issue = "149715")]
+pub trait OpenOptionsExt2: Sealed {
+    /// If set to `true`, prevent the "last access time" of the file from being changed.
+    ///
+    /// Default to `false`.
+    #[unstable(feature = "windows_freeze_file_times", issue = "149715")]
+    fn freeze_last_access_time(&mut self, freeze: bool) -> &mut Self;
+
+    /// If set to `true`, prevent the "last write time" of the file from being changed.
+    ///
+    /// Default to `false`.
+    #[unstable(feature = "windows_freeze_file_times", issue = "149715")]
+    fn freeze_last_write_time(&mut self, freeze: bool) -> &mut Self;
+}
+
+#[unstable(feature = "sealed", issue = "none")]
+impl Sealed for OpenOptions {}
+
+#[unstable(feature = "windows_freeze_file_times", issue = "149715")]
+impl OpenOptionsExt2 for OpenOptions {
+    fn freeze_last_access_time(&mut self, freeze: bool) -> &mut Self {
+        self.as_inner_mut().freeze_last_access_time(freeze);
+        self
+    }
+
+    fn freeze_last_write_time(&mut self, freeze: bool) -> &mut Self {
+        self.as_inner_mut().freeze_last_write_time(freeze);
         self
     }
 }

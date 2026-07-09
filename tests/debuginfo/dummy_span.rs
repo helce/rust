@@ -1,6 +1,8 @@
 //@ min-lldb-version: 310
 
-//@ compile-flags:-g -Zunsound-mir-opts
+//@ compile-flags:-g
+// FIXME: Investigate why test fails without SimplifyComparisonIntegral pass.
+//@ compile-flags: -Zmir-enable-passes=+SimplifyComparisonIntegral
 //@ ignore-backends: gcc
 
 // === GDB TESTS ===================================================================================

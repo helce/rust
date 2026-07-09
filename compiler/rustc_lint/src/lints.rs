@@ -1138,10 +1138,10 @@ pub(crate) struct IgnoredUnlessCrateSpecified<'a> {
 // dangling.rs
 #[derive(LintDiagnostic)]
 #[diag(lint_dangling_pointers_from_temporaries)]
-#[note]
 #[help(lint_help_bind)]
-#[help(lint_help_returned)]
-#[help(lint_help_visit)]
+#[note(lint_note_safe)]
+#[note(lint_note_return)]
+#[note(lint_note_more_info)]
 // FIXME: put #[primary_span] on `ptr_span` once it does not cause conflicts
 pub(crate) struct DanglingPointersFromTemporaries<'tcx> {
     pub callee: Ident,
@@ -1154,7 +1154,8 @@ pub(crate) struct DanglingPointersFromTemporaries<'tcx> {
 
 #[derive(LintDiagnostic)]
 #[diag(lint_dangling_pointers_from_locals)]
-#[note]
+#[note(lint_note_safe)]
+#[note(lint_note_more_info)]
 pub(crate) struct DanglingPointersFromLocals<'tcx> {
     pub ret_ty: Ty<'tcx>,
     #[label(lint_ret_ty)]
@@ -2009,6 +2010,19 @@ impl<'a> LintDiagnostic<'a, ()> for ImproperCTypes<'_> {
 }
 
 #[derive(LintDiagnostic)]
+#[diag(lint_improper_gpu_kernel_arg)]
+#[help]
+pub(crate) struct ImproperGpuKernelArg<'a> {
+    pub ty: Ty<'a>,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_missing_gpu_kernel_export_name)]
+#[help]
+#[note]
+pub(crate) struct MissingGpuKernelExportName;
+
+#[derive(LintDiagnostic)]
 #[diag(lint_variant_size_differences)]
 pub(crate) struct VariantSizeDifferencesDiag {
     pub largest: u64,
@@ -2400,6 +2414,17 @@ pub(crate) mod unexpected_cfg_name {
             with_similar_values: Vec<FoundWithSimilarValue>,
             #[subdiagnostic]
             expected_names: Option<ExpectedNames>,
+        },
+        #[suggestion(
+            lint_unexpected_cfg_boolean,
+            applicability = "machine-applicable",
+            style = "verbose",
+            code = "{literal}"
+        )]
+        BooleanLiteral {
+            #[primary_span]
+            span: Span,
+            literal: bool,
         },
     }
 
@@ -3126,3 +3151,188 @@ impl Subdiagnostic for MismatchedLifetimeSyntaxesSuggestion {
         }
     }
 }
+
+#[derive(LintDiagnostic)]
+#[diag(lint_empty_attribute)]
+#[note]
+pub(crate) struct EmptyAttributeList {
+    #[suggestion(code = "", applicability = "machine-applicable")]
+    pub attr_span: Span,
+    pub attr_path: String,
+    pub valid_without_list: bool,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_invalid_target)]
+#[warning]
+#[help]
+pub(crate) struct InvalidTargetLint {
+    pub name: String,
+    pub target: &'static str,
+    pub applied: DiagArgValue,
+    pub only: &'static str,
+    #[suggestion(code = "", applicability = "machine-applicable", style = "tool-only")]
+    pub attr_span: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_invalid_style)]
+pub(crate) struct InvalidAttrStyle {
+    pub name: String,
+    pub is_used_as_inner: bool,
+    #[note]
+    pub target_span: Option<Span>,
+    pub target: &'static str,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_unused_duplicate)]
+pub(crate) struct UnusedDuplicate {
+    #[suggestion(code = "", applicability = "machine-applicable")]
+    pub this: Span,
+    #[note]
+    pub other: Span,
+    #[warning]
+    pub warning: bool,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_malformed_doc)]
+#[warning]
+pub(crate) struct MalformedDoc;
+
+#[derive(LintDiagnostic)]
+#[diag(lint_expected_no_args)]
+#[warning]
+pub(crate) struct ExpectedNoArgs;
+
+#[derive(LintDiagnostic)]
+#[diag(lint_expected_name_value)]
+#[warning]
+pub(crate) struct ExpectedNameValue;
+
+#[derive(LintDiagnostic)]
+#[diag(lint_unsafe_attr_outside_unsafe)]
+pub(crate) struct UnsafeAttrOutsideUnsafeLint {
+    #[label]
+    pub span: Span,
+    #[subdiagnostic]
+    pub suggestion: Option<UnsafeAttrOutsideUnsafeSuggestion>,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(
+    lint_unsafe_attr_outside_unsafe_suggestion,
+    applicability = "machine-applicable"
+)]
+pub(crate) struct UnsafeAttrOutsideUnsafeSuggestion {
+    #[suggestion_part(code = "unsafe(")]
+    pub left: Span,
+    #[suggestion_part(code = ")")]
+    pub right: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_unused_visibilities)]
+#[note]
+pub(crate) struct UnusedVisibility {
+    #[suggestion(style = "short", code = "", applicability = "machine-applicable")]
+    pub span: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_alias_duplicated)]
+pub(crate) struct DocAliasDuplicated {
+    #[label]
+    pub first_defn: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_auto_cfg_expects_hide_or_show)]
+pub(crate) struct DocAutoCfgExpectsHideOrShow;
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_auto_cfg_hide_show_unexpected_item)]
+pub(crate) struct DocAutoCfgHideShowUnexpectedItem {
+    pub attr_name: Symbol,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_auto_cfg_hide_show_expects_list)]
+pub(crate) struct DocAutoCfgHideShowExpectsList {
+    pub attr_name: Symbol,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_invalid)]
+pub(crate) struct DocInvalid;
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_unknown_include)]
+pub(crate) struct DocUnknownInclude {
+    pub inner: &'static str,
+    pub value: Symbol,
+    #[suggestion(code = "#{inner}[doc = include_str!(\"{value}\")]")]
+    pub sugg: (Span, Applicability),
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_unknown_spotlight)]
+#[note]
+#[note(lint_no_op_note)]
+pub(crate) struct DocUnknownSpotlight {
+    #[suggestion(style = "short", applicability = "machine-applicable", code = "notable_trait")]
+    pub sugg_span: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_unknown_passes)]
+#[note]
+#[note(lint_no_op_note)]
+pub(crate) struct DocUnknownPasses {
+    pub name: Symbol,
+    #[label]
+    pub note_span: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_unknown_plugins)]
+#[note]
+#[note(lint_no_op_note)]
+pub(crate) struct DocUnknownPlugins {
+    #[label]
+    pub label_span: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_unknown_any)]
+pub(crate) struct DocUnknownAny {
+    pub name: Symbol,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_auto_cfg_wrong_literal)]
+pub(crate) struct DocAutoCfgWrongLiteral;
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_test_takes_list)]
+pub(crate) struct DocTestTakesList;
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_test_unknown)]
+pub(crate) struct DocTestUnknown {
+    pub name: Symbol,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_doc_test_literal)]
+pub(crate) struct DocTestLiteral;
+
+#[derive(LintDiagnostic)]
+#[diag(lint_attr_crate_level)]
+#[note]
+pub(crate) struct AttrCrateLevelOnly;
+
+#[derive(LintDiagnostic)]
+#[diag(lint_incorrect_do_not_recommend_args)]
+pub(crate) struct DoNotRecommendDoesNotExpectArgs;

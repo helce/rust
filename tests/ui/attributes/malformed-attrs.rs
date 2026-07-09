@@ -1,5 +1,6 @@
 // This file contains a bunch of malformed attributes.
 // We enable a bunch of features to not get feature-gate errs in this test.
+#![deny(invalid_doc_attributes)]
 #![feature(rustc_attrs)]
 #![feature(rustc_allow_const_fn_unstable)]
 #![feature(allow_internal_unstable)]
@@ -39,8 +40,7 @@
 #[deprecated = 5]
 //~^ ERROR malformed
 #[doc]
-//~^ ERROR valid forms for the attribute are
-//~| WARN this was previously accepted by the compiler
+//~^ ERROR
 #[rustc_macro_transparency]
 //~^ ERROR malformed
 //~| ERROR attribute cannot be used on
@@ -59,7 +59,7 @@
 #[cold = 1]
 //~^ ERROR malformed
 #[must_use()]
-//~^ ERROR valid forms for the attribute are
+//~^ ERROR malformed
 #[no_mangle = 1]
 //~^ ERROR malformed
 #[unsafe(naked())]
@@ -75,8 +75,7 @@
 //~^ ERROR malformed
 //~| WARN crate-level attribute should be an inner attribute
 #[doc]
-//~^ ERROR valid forms for the attribute are
-//~| WARN this was previously accepted by the compiler
+//~^ ERROR
 #[target_feature]
 //~^ ERROR malformed
 #[export_stable = 1]
@@ -137,7 +136,7 @@ pub fn test3() {}
 //~^ ERROR malformed
 #[must_not_suspend()]
 //~^ ERROR malformed
-#[cfi_encoding]
+#[cfi_encoding = ""]
 //~^ ERROR malformed
 struct Test;
 
@@ -214,12 +213,12 @@ static mut TLS: u8 = 42;
 #[no_link()]
 //~^ ERROR malformed
 #[macro_use = 1]
-//~^ ERROR valid forms for the attribute are `#[macro_use(name1, name2, ...)]` and `#[macro_use]`
+//~^ ERROR malformed
 extern crate wloop;
 //~^ ERROR can't find crate for `wloop` [E0463]
 
 #[macro_export = 18]
-//~^ ERROR valid forms for the attribute are
+//~^ ERROR malformed
 #[allow_internal_unsafe = 1]
 //~^ ERROR malformed
 //~| ERROR allow_internal_unsafe side-steps the unsafe_code lint

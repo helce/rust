@@ -274,6 +274,7 @@
 #![feature(cfg_sanitizer_cfi)]
 #![feature(cfg_target_thread_local)]
 #![feature(cfi_encoding)]
+#![feature(const_default)]
 #![feature(const_trait_impl)]
 #![feature(core_float_math)]
 #![feature(decl_macro)]
@@ -323,7 +324,6 @@
 #![feature(char_internals)]
 #![feature(clone_to_uninit)]
 #![feature(const_convert)]
-#![feature(const_mul_add)]
 #![feature(core_intrinsics)]
 #![feature(core_io_borrowed_buf)]
 #![feature(drop_guard)]
@@ -344,7 +344,6 @@
 #![feature(hint_must_use)]
 #![feature(int_from_ascii)]
 #![feature(ip)]
-#![feature(lazy_get)]
 #![feature(maybe_uninit_array_assume_init)]
 #![feature(panic_can_unwind)]
 #![feature(panic_internals)]
@@ -682,9 +681,7 @@ pub mod arch {
 #[stable(feature = "simd_x86", since = "1.27.0")]
 pub use std_detect::is_x86_feature_detected;
 
-// Platform-abstraction modules
 mod sys;
-mod sys_common;
 
 pub mod alloc;
 

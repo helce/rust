@@ -21,7 +21,7 @@
 
 // tidy-alphabetical-start
 #![allow(internal_features)]
-#![feature(array_windows)]
+#![cfg_attr(bootstrap, feature(array_windows))]
 #![feature(assert_matches)]
 #![feature(box_patterns)]
 #![feature(if_let_guard)]
@@ -46,6 +46,7 @@ mod expect;
 mod for_loops_over_fallibles;
 mod foreign_modules;
 mod function_cast_as_integer;
+mod gpukernel_abi;
 mod if_let_rescope;
 mod impl_trait_overcaptures;
 mod interior_mutable_consts;
@@ -92,6 +93,7 @@ use drop_forget_useless::*;
 use enum_intrinsics_non_enums::EnumIntrinsicsNonEnums;
 use for_loops_over_fallibles::*;
 use function_cast_as_integer::*;
+use gpukernel_abi::*;
 use if_let_rescope::IfLetRescope;
 use impl_trait_overcaptures::ImplTraitOvercaptures;
 use interior_mutable_consts::*;
@@ -129,7 +131,7 @@ use unused::*;
 #[rustfmt::skip]
 pub use builtin::{MissingDoc, SoftLints};
 pub use context::{CheckLintNameResult, EarlyContext, LateContext, LintContext, LintStore};
-pub use early::diagnostics::decorate_builtin_lint;
+pub use early::diagnostics::{decorate_attribute_lint, decorate_builtin_lint};
 pub use early::{EarlyCheckNode, check_ast_node};
 pub use late::{check_crate, late_lint_mod, unerased_lint_store};
 pub use levels::LintLevelsBuilder;
@@ -196,6 +198,7 @@ late_lint_methods!(
             DerefIntoDynSupertrait: DerefIntoDynSupertrait,
             DropForgetUseless: DropForgetUseless,
             ImproperCTypesLint: ImproperCTypesLint,
+            ImproperGpuKernelLint: ImproperGpuKernelLint,
             InvalidFromUtf8: InvalidFromUtf8,
             VariantSizeDifferences: VariantSizeDifferences,
             PathStatements: PathStatements,
@@ -291,6 +294,7 @@ fn register_builtins(store: &mut LintStore) {
         "unused",
         UNUSED_IMPORTS,
         UNUSED_VARIABLES,
+        UNUSED_VISIBILITIES,
         UNUSED_ASSIGNMENTS,
         DEAD_CODE,
         UNUSED_MUT,

@@ -986,7 +986,7 @@ impl<'a, 'tcx> AssignmentResult<'a, 'tcx> {
             // warn twice, for the unused local and for the unused assignment. Therefore, we remove
             // from the list of assignments the ones that happen at the definition site.
             statements.retain(|source_info, _| {
-                source_info.span.find_ancestor_inside(binding.pat_span).is_none()
+                !binding.introductions.iter().any(|intro| intro.span == source_info.span)
             });
 
             // Extra assignments that we recognize thanks to the initialization span. We need to
@@ -1238,9 +1238,12 @@ struct TransferFunction<'a, 'tcx> {
 impl<'tcx> Visitor<'tcx> for TransferFunction<'_, 'tcx> {
     fn visit_statement(&mut self, statement: &Statement<'tcx>, location: Location) {
         match statement.kind {
-            // `ForLet(None)` fake read erroneously marks the just-assigned local as live.
-            // This defeats the purpose of the analysis for `let` bindings.
-            StatementKind::FakeRead(box (FakeReadCause::ForLet(None), _)) => return,
+            // `ForLet(None)` and `ForGuardBinding` fake reads erroneously mark the just-assigned
+            // locals as live. This defeats the purpose of the analysis for such bindings.
+            StatementKind::FakeRead(box (
+                FakeReadCause::ForLet(None) | FakeReadCause::ForGuardBinding,
+                _,
+            )) => return,
             // Handle self-assignment by restricting the read/write they do.
             StatementKind::Assign(box (ref dest, ref rvalue))
                 if self.self_assignment.contains(&location) =>
@@ -1283,6 +1286,7 @@ impl<'tcx> Visitor<'tcx> for TransferFunction<'_, 'tcx> {
             TerminatorKind::Return
             | TerminatorKind::Yield { .. }
             | TerminatorKind::Goto { target: START_BLOCK } // Inserted for the `FnMut` case.
+            | TerminatorKind::Call { target: None, .. } // unwinding could be caught
                 if self.capture_kind != CaptureKind::None =>
             {
                 // All indirect captures have an effect on the environment, so we mark them as live.

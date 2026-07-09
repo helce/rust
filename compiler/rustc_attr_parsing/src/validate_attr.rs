@@ -11,6 +11,7 @@ use rustc_ast::{
 use rustc_errors::{Applicability, FatalError, PResult};
 use rustc_feature::{AttributeTemplate, BUILTIN_ATTRIBUTE_MAP, BuiltinAttribute};
 use rustc_hir::AttrPath;
+use rustc_hir::lints::AttributeLintKind;
 use rustc_parse::parse_in;
 use rustc_session::errors::report_lit_error;
 use rustc_session::lint::BuiltinLintDiag;
@@ -26,7 +27,7 @@ pub fn check_attr(psess: &ParseSess, attr: &Attribute) {
         return;
     }
 
-    let builtin_attr_info = attr.ident().and_then(|ident| BUILTIN_ATTRIBUTE_MAP.get(&ident.name));
+    let builtin_attr_info = attr.name().and_then(|name| BUILTIN_ATTRIBUTE_MAP.get(&name));
 
     // Check input tokens for built-in and key-value attributes.
     match builtin_attr_info {
@@ -47,7 +48,7 @@ pub fn check_attr(psess: &ParseSess, attr: &Attribute) {
         }
         _ => {
             let attr_item = attr.get_normal_item();
-            if let AttrArgs::Eq { .. } = attr_item.args {
+            if let AttrArgs::Eq { .. } = attr_item.args.unparsed_ref().unwrap() {
                 // All key-value attributes are restricted to meta-item syntax.
                 match parse_meta(psess, attr) {
                     Ok(_) => {}
@@ -66,7 +67,7 @@ pub fn parse_meta<'a>(psess: &'a ParseSess, attr: &Attribute) -> PResult<'a, Met
         unsafety: item.unsafety,
         span: attr.span,
         path: item.path.clone(),
-        kind: match &item.args {
+        kind: match &item.args.unparsed_ref().unwrap() {
             AttrArgs::Empty => MetaItemKind::Word,
             AttrArgs::Delimited(DelimArgs { dspan, delim, tokens }) => {
                 check_meta_bad_delim(psess, *dspan, *delim);
@@ -197,15 +198,20 @@ fn emit_malformed_attribute(
             suggestions.push(format!("#{inner}[{name} = \"{descr}\"]"));
         }
     }
+    // If there are too many suggestions, better remove all of them as it's just noise at this
+    // point.
+    if suggestions.len() > 3 {
+        suggestions.clear();
+    }
     if should_warn(name) {
         psess.buffer_lint(
             ILL_FORMED_ATTRIBUTE_INPUT,
             span,
             ast::CRATE_NODE_ID,
-            BuiltinLintDiag::IllFormedAttributeInput {
+            BuiltinLintDiag::AttributeLint(AttributeLintKind::IllFormedAttributeInput {
                 suggestions: suggestions.clone(),
                 docs: template.docs,
-            },
+            }),
         );
     } else {
         suggestions.sort();

@@ -21,7 +21,7 @@ use rustc_hir::def_id::DefId;
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{ExprKind, HirId, QPath, find_attr, is_range_literal};
 use rustc_hir_analysis::NoVariantNamed;
-use rustc_hir_analysis::hir_ty_lowering::{FeedConstTy, HirTyLowerer as _};
+use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer as _;
 use rustc_infer::infer::{self, DefineOpaqueTypes, InferOk, RegionVariableOrigin};
 use rustc_infer::traits::query::NoSolution;
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, AllowTwoPhase};
@@ -40,7 +40,7 @@ use tracing::{debug, instrument, trace};
 use {rustc_ast as ast, rustc_hir as hir};
 
 use crate::Expectation::{self, ExpectCastableToType, ExpectHasType, NoExpectation};
-use crate::coercion::{CoerceMany, DynamicCoerceMany};
+use crate::coercion::CoerceMany;
 use crate::errors::{
     AddressOfTemporaryTaken, BaseExpressionDoubleDot, BaseExpressionDoubleDotAddExpr,
     BaseExpressionDoubleDotRemove, CantDereference, FieldMultiplySpecifiedInInitializer,
@@ -1227,7 +1227,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // (`only_has_type`); otherwise, we just go with a
         // fresh type variable.
         let coerce_to_ty = expected.coercion_target_type(self, sp);
-        let mut coerce: DynamicCoerceMany<'_> = CoerceMany::new(coerce_to_ty);
+        let mut coerce = CoerceMany::with_capacity(coerce_to_ty, 2);
 
         coerce.coerce(self, &self.misc(sp), then_expr, then_ty);
 
@@ -1681,7 +1681,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 .to_option(self)
                 .and_then(|uty| self.try_structurally_resolve_type(expr.span, uty).builtin_index())
                 .unwrap_or_else(|| self.next_ty_var(expr.span));
-            let mut coerce = CoerceMany::with_coercion_sites(coerce_to, args);
+            let mut coerce = CoerceMany::with_capacity(coerce_to, args.len());
 
             for e in args {
                 let e_ty = self.check_expr_with_hint(e, coerce_to);
@@ -1705,7 +1705,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             return;
         };
         if let hir::TyKind::Array(_, ct) = ty.peel_refs().kind {
-            let span = ct.span();
+            let span = ct.span;
             self.dcx().try_steal_modify_and_emit_err(
                 span,
                 StashKey::UnderscoreForArrayLengths,
@@ -1746,10 +1746,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expr: &'tcx hir::Expr<'tcx>,
     ) -> Ty<'tcx> {
         let tcx = self.tcx;
-        let count_span = count.span();
+        let count_span = count.span;
         let count = self.try_structurally_resolve_const(
             count_span,
-            self.normalize(count_span, self.lower_const_arg(count, FeedConstTy::No)),
+            self.normalize(count_span, self.lower_const_arg(count, tcx.types.usize)),
         );
 
         if let Some(count) = count.try_to_target_usize(tcx) {
@@ -2191,7 +2191,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
             };
             self.typeck_results.borrow_mut().fru_field_types_mut().insert(expr.hir_id, fru_tys);
-        } else if adt_kind != AdtKind::Union && !remaining_fields.is_empty() {
+        } else if adt_kind != AdtKind::Union
+            && !remaining_fields.is_empty()
+            //~ non_exhaustive already reported, which will only happen for extern modules
+            && !variant.field_list_has_applicable_non_exhaustive()
+        {
             debug!(?remaining_fields);
             let private_fields: Vec<&ty::FieldDef> = variant
                 .fields
@@ -3174,6 +3178,40 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         if let Some(within_macro_span) = span.within_macro(expr.span, self.tcx.sess.source_map()) {
             err.span_label(within_macro_span, "due to this macro variable");
+        }
+
+        // Check if there is an associated function with the same name.
+        if let Some(def_id) = base_ty.peel_refs().ty_adt_def().map(|d| d.did()) {
+            for impl_def_id in self.tcx.inherent_impls(def_id) {
+                for item in self.tcx.associated_items(impl_def_id).in_definition_order() {
+                    if let ExprKind::Field(base_expr, _) = expr.kind
+                        && item.name() == field.name
+                        && matches!(item.kind, ty::AssocKind::Fn { has_self: false, .. })
+                    {
+                        err.span_label(field.span, "this is an associated function, not a method");
+                        err.note("found the following associated function; to be used as method, it must have a `self` parameter");
+                        let impl_ty = self.tcx.type_of(impl_def_id).instantiate_identity();
+                        err.span_note(
+                            self.tcx.def_span(item.def_id),
+                            format!("the candidate is defined in an impl for the type `{impl_ty}`"),
+                        );
+
+                        let ty_str = match base_ty.peel_refs().kind() {
+                            ty::Adt(def, args) => self.tcx.def_path_str_with_args(def.did(), args),
+                            _ => base_ty.peel_refs().to_string(),
+                        };
+                        err.multipart_suggestion(
+                            "use associated function syntax instead",
+                            vec![
+                                (base_expr.span, ty_str),
+                                (base_expr.span.between(field.span), "::".to_string()),
+                            ],
+                            Applicability::MaybeIncorrect,
+                        );
+                        return err;
+                    }
+                }
+            }
         }
 
         // try to add a suggestion in case the field is a nested field of a field of the Adt

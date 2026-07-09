@@ -16,7 +16,7 @@ mod traits;
 use base_db::{Crate, SourceDatabase};
 use expect_test::Expect;
 use hir_def::{
-    AssocItemId, DefWithBodyId, HasModule, LocalModuleId, Lookup, ModuleDefId, SyntheticSyntax,
+    AssocItemId, DefWithBodyId, HasModule, Lookup, ModuleDefId, ModuleId, SyntheticSyntax,
     db::DefDatabase,
     expr_store::{Body, BodySourceMap},
     hir::{ExprId, Pat, PatId},
@@ -114,7 +114,7 @@ fn check_impl(
                 None => continue,
             };
             let def_map = module.def_map(&db);
-            visit_module(&db, def_map, module.local_id, &mut |it| {
+            visit_module(&db, def_map, module, &mut |it| {
                 let def = match it {
                     ModuleDefId::FunctionId(it) => it.into(),
                     ModuleDefId::EnumVariantId(it) => it.into(),
@@ -122,7 +122,7 @@ fn check_impl(
                     ModuleDefId::StaticId(it) => it.into(),
                     _ => return,
                 };
-                defs.push((def, module.krate()))
+                defs.push((def, module.krate(&db)))
             });
         }
         defs.sort_by_key(|(def, _)| match def {
@@ -149,9 +149,10 @@ fn check_impl(
             let (body, body_source_map) = db.body_with_source_map(def);
             let inference_result = InferenceResult::for_body(&db, def);
 
-            for (pat, mut ty) in inference_result.type_of_pat.iter() {
+            for (pat, ty) in inference_result.type_of_pat.iter() {
+                let mut ty = ty.as_ref();
                 if let Pat::Bind { id, .. } = body[pat] {
-                    ty = &inference_result.type_of_binding[id];
+                    ty = inference_result.type_of_binding[id].as_ref();
                 }
                 let node = match pat_node(&body_source_map, pat, &db) {
                     Some(value) => value,
@@ -169,6 +170,7 @@ fn check_impl(
             }
 
             for (expr, ty) in inference_result.type_of_expr.iter() {
+                let ty = ty.as_ref();
                 let node = match expr_node(&body_source_map, expr, &db) {
                     Some(value) => value,
                     None => continue,
@@ -209,8 +211,8 @@ fn check_impl(
                 let range = node.as_ref().original_file_range_rooted(&db);
                 let actual = format!(
                     "expected {}, got {}",
-                    mismatch.expected.display_test(&db, display_target),
-                    mismatch.actual.display_test(&db, display_target)
+                    mismatch.expected.as_ref().display_test(&db, display_target),
+                    mismatch.actual.as_ref().display_test(&db, display_target)
                 );
                 match mismatches.remove(&range) {
                     Some(annotation) => assert_eq!(actual, annotation),
@@ -318,20 +320,20 @@ fn infer_with_mismatches(content: &str, include_mismatches: bool) -> String {
     crate::attach_db(&db, || {
         let mut buf = String::new();
 
-        let mut infer_def = |inference_result: &InferenceResult<'_>,
+        let mut infer_def = |inference_result: &InferenceResult,
                              body: Arc<Body>,
                              body_source_map: Arc<BodySourceMap>,
                              krate: Crate| {
             let display_target = DisplayTarget::from_crate(&db, krate);
-            let mut types: Vec<(InFile<SyntaxNode>, &Ty<'_>)> = Vec::new();
-            let mut mismatches: Vec<(InFile<SyntaxNode>, &TypeMismatch<'_>)> = Vec::new();
+            let mut types: Vec<(InFile<SyntaxNode>, Ty<'_>)> = Vec::new();
+            let mut mismatches: Vec<(InFile<SyntaxNode>, &TypeMismatch)> = Vec::new();
 
             if let Some(self_param) = body.self_param {
                 let ty = &inference_result.type_of_binding[self_param];
                 if let Some(syntax_ptr) = body_source_map.self_param_syntax() {
                     let root = db.parse_or_expand(syntax_ptr.file_id);
                     let node = syntax_ptr.map(|ptr| ptr.to_node(&root).syntax().clone());
-                    types.push((node, ty));
+                    types.push((node, ty.as_ref()));
                 }
             }
 
@@ -346,7 +348,7 @@ fn infer_with_mismatches(content: &str, include_mismatches: bool) -> String {
                     }
                     Err(SyntheticSyntax) => continue,
                 };
-                types.push((node.clone(), ty));
+                types.push((node.clone(), ty.as_ref()));
                 if let Some(mismatch) = inference_result.type_mismatch_for_pat(pat) {
                     mismatches.push((node, mismatch));
                 }
@@ -360,7 +362,7 @@ fn infer_with_mismatches(content: &str, include_mismatches: bool) -> String {
                     }
                     Err(SyntheticSyntax) => continue,
                 };
-                types.push((node.clone(), ty));
+                types.push((node.clone(), ty.as_ref()));
                 if let Some(mismatch) = inference_result.type_mismatch_for_expr(expr) {
                     mismatches.push((node, mismatch));
                 }
@@ -401,8 +403,8 @@ fn infer_with_mismatches(content: &str, include_mismatches: bool) -> String {
                         "{}{:?}: expected {}, got {}\n",
                         macro_prefix,
                         range,
-                        mismatch.expected.display_test(&db, display_target),
-                        mismatch.actual.display_test(&db, display_target),
+                        mismatch.expected.as_ref().display_test(&db, display_target),
+                        mismatch.actual.as_ref().display_test(&db, display_target),
                     );
                 }
             }
@@ -412,7 +414,7 @@ fn infer_with_mismatches(content: &str, include_mismatches: bool) -> String {
         let def_map = module.def_map(&db);
 
         let mut defs: Vec<(DefWithBodyId, Crate)> = Vec::new();
-        visit_module(&db, def_map, module.local_id, &mut |it| {
+        visit_module(&db, def_map, module, &mut |it| {
             let def = match it {
                 ModuleDefId::FunctionId(it) => it.into(),
                 ModuleDefId::EnumVariantId(it) => it.into(),
@@ -420,7 +422,7 @@ fn infer_with_mismatches(content: &str, include_mismatches: bool) -> String {
                 ModuleDefId::StaticId(it) => it.into(),
                 _ => return,
             };
-            defs.push((def, module.krate()))
+            defs.push((def, module.krate(&db)))
         });
         defs.sort_by_key(|(def, _)| match def {
             DefWithBodyId::FunctionId(it) => {
@@ -454,7 +456,7 @@ fn infer_with_mismatches(content: &str, include_mismatches: bool) -> String {
 pub(crate) fn visit_module(
     db: &TestDB,
     crate_def_map: &DefMap,
-    module_id: LocalModuleId,
+    module_id: ModuleId,
     cb: &mut dyn FnMut(ModuleDefId),
 ) {
     visit_scope(db, crate_def_map, &crate_def_map[module_id].scope, cb);
@@ -517,7 +519,7 @@ pub(crate) fn visit_module(
                         }
                     }
                 }
-                ModuleDefId::ModuleId(it) => visit_module(db, crate_def_map, it.local_id, cb),
+                ModuleDefId::ModuleId(it) => visit_module(db, crate_def_map, it, cb),
                 _ => (),
             }
         }
@@ -593,7 +595,7 @@ fn salsa_bug() {
     crate::attach_db(&db, || {
         let module = db.module_for_file(pos.file_id.file_id(&db));
         let crate_def_map = module.def_map(&db);
-        visit_module(&db, crate_def_map, module.local_id, &mut |def| {
+        visit_module(&db, crate_def_map, module, &mut |def| {
             InferenceResult::for_body(
                 &db,
                 match def {
@@ -637,7 +639,7 @@ fn salsa_bug() {
     crate::attach_db(&db, || {
         let module = db.module_for_file(pos.file_id.file_id(&db));
         let crate_def_map = module.def_map(&db);
-        visit_module(&db, crate_def_map, module.local_id, &mut |def| {
+        visit_module(&db, crate_def_map, module, &mut |def| {
             InferenceResult::for_body(
                 &db,
                 match def {

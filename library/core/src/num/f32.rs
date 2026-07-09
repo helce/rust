@@ -292,12 +292,12 @@ pub mod consts {
     pub const TAU: f32 = 6.28318530717958647692528676655900577_f32;
 
     /// The golden ratio (φ)
-    #[unstable(feature = "more_float_constants", issue = "146939")]
-    pub const PHI: f32 = 1.618033988749894848204586834365638118_f32;
+    #[stable(feature = "euler_gamma_golden_ratio", since = "1.94.0")]
+    pub const GOLDEN_RATIO: f32 = 1.618033988749894848204586834365638118_f32;
 
     /// The Euler-Mascheroni constant (γ)
-    #[unstable(feature = "more_float_constants", issue = "146939")]
-    pub const EGAMMA: f32 = 0.577215664901532860606512090082402431_f32;
+    #[stable(feature = "euler_gamma_golden_ratio", since = "1.94.0")]
+    pub const EULER_GAMMA: f32 = 0.577215664901532860606512090082402431_f32;
 
     /// π/2
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -897,14 +897,15 @@ impl f32 {
 
     /// Returns the maximum of the two numbers, ignoring NaN.
     ///
-    /// If exactly one of the arguments is NaN, then the other argument is returned. If both
-    /// arguments are NaN, the return value is NaN, with the bit pattern picked using the usual
-    /// [rules for arithmetic operations](f32#nan-bit-patterns). If the inputs compare equal (such
-    /// as for the case of `+0.0` and `-0.0`), either input may be returned non-deterministically.
+    /// If exactly one of the arguments is NaN (quiet or signaling), then the other argument is
+    /// returned. If both arguments are NaN, the return value is NaN, with the bit pattern picked
+    /// using the usual [rules for arithmetic operations](f32#nan-bit-patterns). If the inputs
+    /// compare equal (such as for the case of `+0.0` and `-0.0`), either input may be returned
+    /// non-deterministically.
     ///
-    /// This follows the IEEE 754-2008 semantics for `maxNum`, except for handling of signaling NaNs;
-    /// this function handles all NaNs the same way and avoids `maxNum`'s problems with associativity.
-    /// This also matches the behavior of libm’s `fmax`.
+    /// The handling of NaNs follows the IEEE 754-2019 semantics for `maximumNumber`, treating all
+    /// NaNs the same way to ensure the operation is associative. The handling of signed zeros
+    /// follows the IEEE 754-2008 semantics for `maxNum`.
     ///
     /// ```
     /// let x = 1.0f32;
@@ -923,14 +924,15 @@ impl f32 {
 
     /// Returns the minimum of the two numbers, ignoring NaN.
     ///
-    /// If exactly one of the arguments is NaN, then the other argument is returned. If both
-    /// arguments are NaN, the return value is NaN, with the bit pattern picked using the usual
-    /// [rules for arithmetic operations](f32#nan-bit-patterns). If the inputs compare equal (such
-    /// as for the case of `+0.0` and `-0.0`), either input may be returned non-deterministically.
+    /// If exactly one of the arguments is NaN (quiet or signaling), then the other argument is
+    /// returned. If both arguments are NaN, the return value is NaN, with the bit pattern picked
+    /// using the usual [rules for arithmetic operations](f32#nan-bit-patterns). If the inputs
+    /// compare equal (such as for the case of `+0.0` and `-0.0`), either input may be returned
+    /// non-deterministically.
     ///
-    /// This follows the IEEE 754-2008 semantics for `minNum`, except for handling of signaling NaNs;
-    /// this function handles all NaNs the same way and avoids `minNum`'s problems with associativity.
-    /// This also matches the behavior of libm’s `fmin`.
+    /// The handling of NaNs follows the IEEE 754-2019 semantics for `minimumNumber`, treating all
+    /// NaNs the same way to ensure the operation is associative. The handling of signed zeros
+    /// follows the IEEE 754-2008 semantics for `minNum`.
     ///
     /// ```
     /// let x = 1.0f32;
@@ -1843,7 +1845,6 @@ pub mod math {
     #[doc(alias = "fmaf", alias = "fusedMultiplyAdd")]
     #[must_use = "method returns a new number and does not mutate the original value"]
     #[unstable(feature = "core_float_math", issue = "137578")]
-    #[rustc_const_unstable(feature = "const_mul_add", issue = "146724")]
     pub const fn mul_add(x: f32, y: f32, z: f32) -> f32 {
         intrinsics::fmaf32(x, y, z)
     }

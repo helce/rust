@@ -14,6 +14,7 @@ use rustc_data_structures::stable_hasher::{
 use rustc_data_structures::sync::Lock;
 use rustc_macros::{Decodable, Encodable, HashStable_Generic, symbols};
 
+use crate::edit_distance::find_best_match_for_name;
 use crate::{DUMMY_SP, Edition, Span, with_session_globals};
 
 #[cfg(test)]
@@ -161,6 +162,7 @@ symbols! {
         Arc,
         ArcWeak,
         Argument,
+        Array,
         ArrayIntoIter,
         AsMut,
         AsRef,
@@ -188,6 +190,7 @@ symbols! {
         BTreeMap,
         BTreeSet,
         BinaryHeap,
+        Bool,
         Borrow,
         BorrowMut,
         Break,
@@ -200,6 +203,7 @@ symbols! {
         Capture,
         Cell,
         Center,
+        Char,
         Child,
         Cleanup,
         Clone,
@@ -236,6 +240,7 @@ symbols! {
         Error,
         File,
         FileType,
+        Float,
         FmtArgumentsNew,
         FmtWrite,
         Fn,
@@ -261,6 +266,7 @@ symbols! {
         IndexOutput,
         Input,
         Instant,
+        Int,
         Into,
         IntoFuture,
         IntoIterator,
@@ -301,6 +307,7 @@ symbols! {
         Ordering,
         OsStr,
         OsString,
+        Other,
         Output,
         Param,
         ParamSet,
@@ -336,6 +343,7 @@ symbols! {
         RefCell,
         RefCellRef,
         RefCellRefMut,
+        Reference,
         Relaxed,
         Release,
         Result,
@@ -359,6 +367,7 @@ symbols! {
         Some,
         SpanCtxt,
         Stdin,
+        Str,
         String,
         StructuralPartialEq,
         SubdiagMessage,
@@ -379,6 +388,7 @@ symbols! {
         TryCapturePrintable,
         TryFrom,
         TryInto,
+        Tuple,
         Ty,
         TyCtxt,
         TyKind,
@@ -453,6 +463,7 @@ symbols! {
         alu32,
         always,
         amdgpu,
+        amdgpu_dispatch_ptr,
         analysis,
         and,
         and_then,
@@ -471,6 +482,8 @@ symbols! {
         arith_offset,
         arm,
         arm64ec,
+        arm_a32: "arm::a32",
+        arm_t32: "arm::t32",
         arm_target_feature,
         array,
         as_dash_needed: "as-needed",
@@ -571,11 +584,13 @@ symbols! {
         begin_panic,
         bench,
         bevy_ecs,
+        bikeshed,
         bikeshed_guaranteed_no_drop,
         bin,
         binaryheap_iter,
         bind_by_move_pattern_guards,
         bindings_after_at,
+        bit_width,
         bitand,
         bitand_assign,
         bitor,
@@ -929,6 +944,12 @@ symbols! {
         effects,
         eh_catch_typeinfo,
         eh_personality,
+        eii,
+        eii_declaration,
+        eii_impl,
+        eii_internals,
+        eii_shared_macro,
+        element_ty,
         emit,
         emit_enum,
         emit_enum_variant,
@@ -988,6 +1009,7 @@ symbols! {
         extern_crate_item_prelude,
         extern_crate_self,
         extern_in_paths,
+        extern_item_impls,
         extern_prelude,
         extern_system_varargs,
         extern_types,
@@ -1502,6 +1524,7 @@ symbols! {
         must_use,
         mut_preserve_binding_mode_2024,
         mut_ref,
+        mutable,
         naked,
         naked_asm,
         naked_functions,
@@ -1712,7 +1735,6 @@ symbols! {
         postfix_match,
         powerpc,
         powerpc64,
-        powerpc64le,
         powerpc_target_feature,
         powf16,
         powf32,
@@ -1780,6 +1802,8 @@ symbols! {
         ptr_slice_from_raw_parts_mut,
         ptr_swap,
         ptr_swap_nonoverlapping,
+        ptr_without_provenance,
+        ptr_without_provenance_mut,
         ptr_write,
         ptr_write_bytes,
         ptr_write_unaligned,
@@ -1938,6 +1962,7 @@ symbols! {
         rustc_dump_user_args,
         rustc_dump_vtable,
         rustc_effective_visibility,
+        rustc_eii_foreign_item,
         rustc_evaluate_where_clauses,
         rustc_expected_cgu_reuse,
         rustc_force_inline,
@@ -1991,6 +2016,7 @@ symbols! {
         rustc_reallocator,
         rustc_regions,
         rustc_reservation_impl,
+        rustc_scalable_vector,
         rustc_serialize,
         rustc_should_not_be_called_on_const_items,
         rustc_simd_monomorphize_lane_limit,
@@ -2029,7 +2055,6 @@ symbols! {
         self_in_typedefs,
         self_struct_ctor,
         semiopaque,
-        semitransparent,
         sha2,
         sha3,
         sha512_sm_x86,
@@ -2044,6 +2069,7 @@ symbols! {
         shr_assign,
         sig_dfl,
         sig_ign,
+        signed,
         simd,
         simd_add,
         simd_and,
@@ -2285,6 +2311,7 @@ symbols! {
         truncf64,
         truncf128,
         try_blocks,
+        try_blocks_heterogeneous,
         try_capture,
         try_from,
         try_from_fn,
@@ -2306,6 +2333,7 @@ symbols! {
         type_const,
         type_id,
         type_id_eq,
+        type_info,
         type_ir,
         type_ir_infer_ctxt_like,
         type_ir_inherent,
@@ -2313,6 +2341,7 @@ symbols! {
         type_length_limit,
         type_macros,
         type_name,
+        type_of,
         type_privacy_lints,
         typed_swap_nonoverlapping,
         u8,
@@ -2385,6 +2414,7 @@ symbols! {
         unsafe_block_in_unsafe_fn,
         unsafe_cell,
         unsafe_cell_raw_get,
+        unsafe_eii,
         unsafe_extern_blocks,
         unsafe_fields,
         unsafe_no_drop_flag,
@@ -2464,6 +2494,7 @@ symbols! {
         vsreg,
         vsx,
         vtable_align,
+        vtable_for,
         vtable_size,
         warn,
         wasip2,
@@ -2844,6 +2875,27 @@ impl Symbol {
     pub fn to_ident_string(self) -> String {
         // Avoid creating an empty identifier, because that asserts in debug builds.
         if self == sym::empty { String::new() } else { Ident::with_dummy_span(self).to_string() }
+    }
+
+    /// Checks if `self` is similar to any symbol in `candidates`.
+    ///
+    /// The returned boolean represents whether the candidate is the same symbol with a different
+    /// casing.
+    ///
+    /// All the candidates are assumed to be lowercase.
+    pub fn find_similar(
+        self,
+        candidates: &[Symbol],
+    ) -> Option<(Symbol, /* is incorrect case */ bool)> {
+        let lowercase = self.as_str().to_lowercase();
+        let lowercase_sym = Symbol::intern(&lowercase);
+        if candidates.contains(&lowercase_sym) {
+            Some((lowercase_sym, true))
+        } else if let Some(similar_sym) = find_best_match_for_name(candidates, self, None) {
+            Some((similar_sym, false))
+        } else {
+            None
+        }
     }
 }
 

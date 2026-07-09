@@ -13,7 +13,7 @@ use syntax::{AstNode, algo, ast};
 use triomphe::Arc;
 
 use crate::{
-    LocalModuleId, Lookup, ModuleDefId, ModuleId,
+    Lookup, ModuleDefId, ModuleId,
     db::DefDatabase,
     nameres::{DefMap, ModuleSource, block_def_map, crate_def_map},
     src::HasSource,
@@ -49,6 +49,12 @@ impl Default for TestDB {
         this.set_expand_proc_attr_macros_with_durability(true, Durability::HIGH);
         // This needs to be here otherwise `CrateGraphBuilder` panics.
         this.set_all_crates(Arc::new(Box::new([])));
+        _ = base_db::LibraryRoots::builder(Default::default())
+            .durability(Durability::MEDIUM)
+            .new(&this);
+        _ = base_db::LocalRoots::builder(Default::default())
+            .durability(Durability::MEDIUM)
+            .new(&this);
         CrateGraphBuilder::default().set_in_db(&mut this);
         this
     }
@@ -154,7 +160,7 @@ impl TestDB {
             let crate_def_map = crate_def_map(self, krate);
             for (local_id, data) in crate_def_map.modules() {
                 if data.origin.file_id().map(|file_id| file_id.file_id(self)) == Some(file_id) {
-                    return crate_def_map.module_id(local_id);
+                    return local_id;
                 }
             }
         }
@@ -168,7 +174,7 @@ impl TestDB {
 
         def_map = match self.block_at_position(def_map, position) {
             Some(it) => it,
-            None => return def_map.module_id(module),
+            None => return module,
         };
         loop {
             let new_map = self.block_at_position(def_map, position);
@@ -178,16 +184,16 @@ impl TestDB {
                 }
                 _ => {
                     // FIXME: handle `mod` inside block expression
-                    return def_map.module_id(DefMap::ROOT);
+                    return def_map.root;
                 }
             }
         }
     }
 
     /// Finds the smallest/innermost module in `def_map` containing `position`.
-    fn mod_at_position(&self, def_map: &DefMap, position: FilePosition) -> LocalModuleId {
+    fn mod_at_position(&self, def_map: &DefMap, position: FilePosition) -> ModuleId {
         let mut size = None;
-        let mut res = DefMap::ROOT;
+        let mut res = def_map.root;
         for (module, data) in def_map.modules() {
             let src = data.definition_source(self);
             // We're not comparing the `base_db::EditionedFileId`, but rather the VFS `FileId`, because

@@ -185,6 +185,9 @@ impl UnionSignature {
 bitflags! {
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
     pub struct EnumFlags: u8 {
+        /// Indicates whether this enum has `#[repr]`.
+        const HAS_REPR = 1 << 0;
+        /// Indicates whether the enum has a `#[rustc_has_incoherent_inherent_impls]` attribute.
         const RUSTC_HAS_INCOHERENT_INHERENT_IMPLS  = 1 << 1;
     }
 }
@@ -204,6 +207,9 @@ impl EnumSignature {
         let mut flags = EnumFlags::empty();
         if attrs.contains(AttrFlags::RUSTC_HAS_INCOHERENT_INHERENT_IMPLS) {
             flags |= EnumFlags::RUSTC_HAS_INCOHERENT_INHERENT_IMPLS;
+        }
+        if attrs.contains(AttrFlags::HAS_REPR) {
+            flags |= EnumFlags::HAS_REPR;
         }
 
         let InFile { file_id, value: source } = loc.source(db);
@@ -232,6 +238,11 @@ impl EnumSignature {
             Some(ReprOptions { int: Some(builtin), .. }) => builtin,
             _ => IntegerType::Pointer(true),
         }
+    }
+
+    #[inline]
+    pub fn repr(&self, db: &dyn DefDatabase, id: EnumId) -> Option<ReprOptions> {
+        if self.flags.contains(EnumFlags::HAS_REPR) { AttrFlags::repr(db, id.into()) } else { None }
     }
 }
 bitflags::bitflags! {
@@ -860,7 +871,7 @@ fn lower_fields<Field: ast::HasAttrs + ast::HasVisibility>(
     mut field_name: impl FnMut(usize, &Field) -> Name,
     override_visibility: Option<Option<ast::Visibility>>,
 ) -> Option<(Arena<FieldData>, ExpressionStore, ExpressionStoreSourceMap)> {
-    let cfg_options = module.krate.cfg_options(db);
+    let cfg_options = module.krate(db).cfg_options(db);
     let mut col = ExprCollector::new(db, module, fields.file_id);
     let override_visibility = override_visibility.map(|vis| {
         LazyCell::new(|| {
@@ -938,7 +949,7 @@ impl EnumVariants {
         let ast_id_map = db.ast_id_map(source.file_id);
 
         let mut diagnostics = ThinVec::new();
-        let cfg_options = loc.container.krate.cfg_options(db);
+        let cfg_options = loc.container.krate(db).cfg_options(db);
         let mut index = 0;
         let Some(variants) = source.value.variant_list() else {
             return (EnumVariants { variants: Box::default() }, None);

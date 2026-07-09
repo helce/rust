@@ -45,7 +45,7 @@ fn eval_goal(
         .find_map(|file_id| {
             let module_id = db.module_for_file(file_id.file_id(&db));
             let def_map = module_id.def_map(&db);
-            let scope = &def_map[module_id.local_id].scope;
+            let scope = &def_map[module_id].scope;
             let adt_or_type_alias_id = scope.declarations().find_map(|x| match x {
                 hir_def::ModuleDefId::AdtId(x) => {
                     let name = match x {
@@ -98,7 +98,7 @@ fn eval_goal(
             Either::Left(it) => it.krate(&db),
             Either::Right(it) => it.krate(&db),
         };
-        db.layout_of_ty(goal_ty, ParamEnvAndCrate { param_env, krate })
+        db.layout_of_ty(goal_ty.store(), ParamEnvAndCrate { param_env, krate }.store())
     })
 }
 
@@ -118,7 +118,7 @@ fn eval_expr(
     crate::attach_db(&db, || {
         let module_id = db.module_for_file(file_id.file_id(&db));
         let def_map = module_id.def_map(&db);
-        let scope = &def_map[module_id.local_id].scope;
+        let scope = &def_map[module_id].scope;
         let function_id = scope
             .declarations()
             .find_map(|x| match x {
@@ -140,10 +140,10 @@ fn eval_expr(
             .unwrap()
             .0;
         let infer = InferenceResult::for_body(&db, function_id.into());
-        let goal_ty = infer.type_of_binding[b];
+        let goal_ty = infer.type_of_binding[b].clone();
         let param_env = db.trait_environment(function_id.into());
         let krate = function_id.krate(&db);
-        db.layout_of_ty(goal_ty, ParamEnvAndCrate { param_env, krate })
+        db.layout_of_ty(goal_ty, ParamEnvAndCrate { param_env, krate }.store())
     })
 }
 

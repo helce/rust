@@ -21,9 +21,12 @@ use rustc_type_ir::{
 use crate::{
     db::HirDatabase,
     next_solver::{
-        Canonical, DbInterner, GenericArgs, Goal, ParamEnv, Predicate, SolverContext, Span, Ty,
-        TyKind,
-        infer::{DbInternerInferExt, InferCtxt, traits::ObligationCause},
+        Canonical, DbInterner, GenericArgs, Goal, ParamEnv, Predicate, SolverContext, Span,
+        StoredClauses, Ty, TyKind,
+        infer::{
+            DbInternerInferExt, InferCtxt,
+            traits::{Obligation, ObligationCause},
+        },
         obligation_ctxt::ObligationCtxt,
     },
 };
@@ -33,6 +36,31 @@ use crate::{
 pub struct ParamEnvAndCrate<'db> {
     pub param_env: ParamEnv<'db>,
     pub krate: Crate,
+}
+
+impl<'db> ParamEnvAndCrate<'db> {
+    #[inline]
+    pub fn store(self) -> StoredParamEnvAndCrate {
+        StoredParamEnvAndCrate { param_env: self.param_env.clauses.store(), krate: self.krate }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StoredParamEnvAndCrate {
+    param_env: StoredClauses,
+    pub krate: Crate,
+}
+
+impl StoredParamEnvAndCrate {
+    #[inline]
+    pub fn param_env(&self) -> ParamEnv<'_> {
+        ParamEnv { clauses: self.param_env.as_ref() }
+    }
+
+    #[inline]
+    pub fn as_ref(&self) -> ParamEnvAndCrate<'_> {
+        ParamEnvAndCrate { param_env: self.param_env(), krate: self.krate }
+    }
 }
 
 /// This should be used in `hir` only.
@@ -82,6 +110,16 @@ pub fn next_trait_solve_canonical_in_ctxt<'db>(
 
         let res = context.evaluate_root_goal(goal, Span::dummy(), None);
 
+        let obligation = Obligation {
+            cause: ObligationCause::dummy(),
+            param_env: goal.param_env,
+            recursion_depth: 0,
+            predicate: goal.predicate,
+        };
+        infer_ctxt.inspect_evaluated_obligation(&obligation, &res, || {
+            Some(context.evaluate_root_goal_for_proof_tree(goal, Span::dummy()).1)
+        });
+
         let res = res.map(|r| (r.has_changed, r.certainty));
 
         tracing::debug!("solve_nextsolver({:?}) => {:?}", goal, res);
@@ -104,6 +142,16 @@ pub fn next_trait_solve_in_ctxt<'db, 'a>(
     let context = <&SolverContext<'db>>::from(infer_ctxt);
 
     let res = context.evaluate_root_goal(goal, Span::dummy(), None);
+
+    let obligation = Obligation {
+        cause: ObligationCause::dummy(),
+        param_env: goal.param_env,
+        recursion_depth: 0,
+        predicate: goal.predicate,
+    };
+    infer_ctxt.inspect_evaluated_obligation(&obligation, &res, || {
+        Some(context.evaluate_root_goal_for_proof_tree(goal, Span::dummy()).1)
+    });
 
     let res = res.map(|r| (r.has_changed, r.certainty));
 
@@ -207,10 +255,10 @@ pub fn is_inherent_impl_coherent(db: &dyn HirDatabase, def_map: &DefMap, impl_id
         | TyKind::Uint(_)
         | TyKind::Float(_) => def_map.is_rustc_coherence_is_core(),
 
-        TyKind::Adt(adt_def, _) => adt_def.def_id().0.module(db).krate() == def_map.krate(),
+        TyKind::Adt(adt_def, _) => adt_def.def_id().0.module(db).krate(db) == def_map.krate(),
         TyKind::Dynamic(it, _) => it
             .principal_def_id()
-            .is_some_and(|trait_id| trait_id.0.module(db).krate() == def_map.krate()),
+            .is_some_and(|trait_id| trait_id.0.module(db).krate(db) == def_map.krate()),
 
         _ => true,
     };
@@ -283,12 +331,12 @@ pub fn check_orphan_rules<'db>(db: &'db dyn HirDatabase, impl_: ImplId) -> bool 
         return true;
     };
 
-    let local_crate = impl_.lookup(db).container.krate();
+    let local_crate = impl_.lookup(db).container.krate(db);
     let is_local = |tgt_crate| tgt_crate == local_crate;
 
     let trait_ref = impl_trait.instantiate_identity();
     let trait_id = trait_ref.def_id.0;
-    if is_local(trait_id.module(db).krate()) {
+    if is_local(trait_id.module(db).krate(db)) {
         // trait to be implemented is local
         return true;
     }
@@ -322,10 +370,10 @@ pub fn check_orphan_rules<'db>(db: &'db dyn HirDatabase, impl_: ImplId) -> bool 
     // FIXME: param coverage
     //   - No uncovered type parameters `P1..=Pn` may appear in `T0..Ti`` (excluding `Ti`)
     let is_not_orphan = trait_ref.args.types().any(|ty| match unwrap_fundamental(ty).kind() {
-        TyKind::Adt(adt_def, _) => is_local(adt_def.def_id().0.module(db).krate()),
+        TyKind::Adt(adt_def, _) => is_local(adt_def.def_id().0.module(db).krate(db)),
         TyKind::Error(_) => true,
         TyKind::Dynamic(it, _) => {
-            it.principal_def_id().is_some_and(|trait_id| is_local(trait_id.0.module(db).krate()))
+            it.principal_def_id().is_some_and(|trait_id| is_local(trait_id.0.module(db).krate(db)))
         }
         _ => false,
     });

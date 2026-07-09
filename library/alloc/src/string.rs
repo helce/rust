@@ -47,11 +47,11 @@ use core::iter::FusedIterator;
 #[cfg(not(no_global_oom_handling))]
 use core::iter::from_fn;
 #[cfg(not(no_global_oom_handling))]
+use core::num::Saturating;
+#[cfg(not(no_global_oom_handling))]
 use core::ops::Add;
 #[cfg(not(no_global_oom_handling))]
 use core::ops::AddAssign;
-#[cfg(not(no_global_oom_handling))]
-use core::ops::Bound::{Excluded, Included, Unbounded};
 use core::ops::{self, Range, RangeBounds};
 use core::str::pattern::{Pattern, Utf8Pattern};
 use core::{fmt, hash, ptr, slice};
@@ -619,16 +619,14 @@ impl String {
     pub fn from_utf8_lossy(v: &[u8]) -> Cow<'_, str> {
         let mut iter = v.utf8_chunks();
 
-        let first_valid = if let Some(chunk) = iter.next() {
-            let valid = chunk.valid();
-            if chunk.invalid().is_empty() {
-                debug_assert_eq!(valid.len(), v.len());
-                return Cow::Borrowed(valid);
-            }
-            valid
-        } else {
+        let Some(chunk) = iter.next() else {
             return Cow::Borrowed("");
         };
+        let first_valid = chunk.valid();
+        if chunk.invalid().is_empty() {
+            debug_assert_eq!(first_valid.len(), v.len());
+            return Cow::Borrowed(first_valid);
+        }
 
         const REPLACEMENT: &str = "\u{FFFD}";
 
@@ -720,11 +718,10 @@ impl String {
         // FIXME: the function can be simplified again when #48994 is closed.
         let mut ret = String::with_capacity(v.len());
         for c in char::decode_utf16(v.iter().cloned()) {
-            if let Ok(c) = c {
-                ret.push(c);
-            } else {
+            let Ok(c) = c else {
                 return Err(FromUtf16Error(()));
-            }
+            };
+            ret.push(c);
         }
         Ok(ret)
     }
@@ -1103,6 +1100,23 @@ impl String {
     #[rustc_diagnostic_item = "string_push_str"]
     pub fn push_str(&mut self, string: &str) {
         self.vec.extend_from_slice(string.as_bytes())
+    }
+
+    #[cfg(not(no_global_oom_handling))]
+    #[inline]
+    fn push_str_slice(&mut self, slice: &[&str]) {
+        // use saturating arithmetic to ensure that in the case of an overflow, reserve() throws OOM
+        let additional: Saturating<usize> = slice.iter().map(|x| Saturating(x.len())).sum();
+        self.reserve(additional.0);
+        let (ptr, len, cap) = core::mem::take(self).into_raw_parts();
+        unsafe {
+            let mut dst = ptr.add(len);
+            for new in slice {
+                core::ptr::copy_nonoverlapping(new.as_ptr(), dst, new.len());
+                dst = dst.add(new.len());
+            }
+            *self = String::from_raw_parts(ptr, len + additional.0, cap);
+        }
     }
 
     /// Copies elements from `src` range to the end of the string.
@@ -1549,7 +1563,7 @@ impl String {
     /// assert_eq!("bna", s);
     /// ```
     #[cfg(not(no_global_oom_handling))]
-    #[unstable(feature = "string_remove_matches", reason = "new API", issue = "72826")]
+    #[unstable(feature = "string_remove_matches", issue = "72826")]
     pub fn remove_matches<P: Pattern>(&mut self, pat: P) {
         use core::str::pattern::Searcher;
 
@@ -2062,30 +2076,19 @@ impl String {
     where
         R: RangeBounds<usize>,
     {
-        // Memory safety
-        //
-        // Replace_range does not have the memory safety issues of a vector Splice.
-        // of the vector version. The data is just plain bytes.
+        // We avoid #81138 (nondeterministic RangeBounds impls) because we only use `range` once, here.
+        let checked_range = slice::range(range, ..self.len());
 
-        // WARNING: Inlining this variable would be unsound (#81138)
-        let start = range.start_bound();
-        match start {
-            Included(&n) => assert!(self.is_char_boundary(n)),
-            Excluded(&n) => assert!(self.is_char_boundary(n + 1)),
-            Unbounded => {}
-        };
-        // WARNING: Inlining this variable would be unsound (#81138)
-        let end = range.end_bound();
-        match end {
-            Included(&n) => assert!(self.is_char_boundary(n + 1)),
-            Excluded(&n) => assert!(self.is_char_boundary(n)),
-            Unbounded => {}
-        };
+        assert!(
+            self.is_char_boundary(checked_range.start),
+            "start of range should be a character boundary"
+        );
+        assert!(
+            self.is_char_boundary(checked_range.end),
+            "end of range should be a character boundary"
+        );
 
-        // Using `range` again would be unsound (#81138)
-        // We assume the bounds reported by `range` remain the same, but
-        // an adversarial implementation could change between calls
-        unsafe { self.as_mut_vec() }.splice((start, end), replace_with.bytes());
+        unsafe { self.as_mut_vec() }.splice(checked_range, replace_with.bytes());
     }
 
     /// Replaces the leftmost occurrence of a pattern with another string, in-place.
@@ -2502,12 +2505,38 @@ impl<'a> Extend<&'a char> for String {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a> Extend<&'a str> for String {
     fn extend<I: IntoIterator<Item = &'a str>>(&mut self, iter: I) {
-        iter.into_iter().for_each(move |s| self.push_str(s));
+        <I as SpecExtendStr>::spec_extend_into(iter, self)
     }
 
     #[inline]
     fn extend_one(&mut self, s: &'a str) {
         self.push_str(s);
+    }
+}
+
+#[cfg(not(no_global_oom_handling))]
+trait SpecExtendStr {
+    fn spec_extend_into(self, s: &mut String);
+}
+
+#[cfg(not(no_global_oom_handling))]
+impl<'a, T: IntoIterator<Item = &'a str>> SpecExtendStr for T {
+    default fn spec_extend_into(self, target: &mut String) {
+        self.into_iter().for_each(move |s| target.push_str(s));
+    }
+}
+
+#[cfg(not(no_global_oom_handling))]
+impl SpecExtendStr for [&str] {
+    fn spec_extend_into(self, target: &mut String) {
+        target.push_str_slice(&self);
+    }
+}
+
+#[cfg(not(no_global_oom_handling))]
+impl<const N: usize> SpecExtendStr for [&str; N] {
+    fn spec_extend_into(self, target: &mut String) {
+        target.push_str_slice(&self[..]);
     }
 }
 

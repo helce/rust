@@ -92,6 +92,11 @@ pub(super) fn handle_needs(
             ignore_reason: "ignored when LLVM Enzyme is disabled or LLVM is not the default codegen backend",
         },
         Need {
+            name: "needs-offload",
+            condition: config.has_offload && config.default_codegen_backend.is_llvm(),
+            ignore_reason: "ignored when LLVM Offload is disabled or LLVM is not the default codegen backend",
+        },
+        Need {
             name: "needs-run-enabled",
             condition: config.run_enabled(),
             ignore_reason: "ignored when running the resulting test binaries is disabled",
@@ -180,6 +185,11 @@ pub(super) fn handle_needs(
             name: "needs-std-debug-assertions",
             condition: config.with_std_debug_assertions,
             ignore_reason: "ignored if std wasn't built with debug assertions",
+        },
+        Need {
+            name: "needs-std-remap-debuginfo",
+            condition: config.with_std_remap_debuginfo,
+            ignore_reason: "ignored if std wasn't built with remapping of debuginfo",
         },
         Need {
             name: "needs-target-std",
@@ -432,6 +442,10 @@ fn has_symlinks() -> bool {
 }
 
 fn llvm_has_zstd(config: &Config) -> bool {
+    // FIXME(#149764): This actually queries the compiler's _default_ backend,
+    // which is usually LLVM, but can be another backend depending on the value
+    // of `rust.codegen-backends` in bootstrap.toml.
+
     // The compiler already knows whether LLVM was built with zstd or not,
     // so compiletest can just ask the compiler.
     let output = query_rustc_output(

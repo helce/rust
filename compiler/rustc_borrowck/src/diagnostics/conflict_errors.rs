@@ -561,11 +561,8 @@ impl<'infcx, 'tcx> MirBorrowckCtxt<'_, 'infcx, 'tcx> {
             VarDebugInfoContents::Place(ref p) => p == place,
             _ => false,
         });
-        let arg_name = if let Some(var_info) = var_info {
-            var_info.name
-        } else {
-            return;
-        };
+        let Some(var_info) = var_info else { return };
+        let arg_name = var_info.name;
         struct MatchArgFinder {
             expr_span: Span,
             match_arg_span: Option<Span>,
@@ -4521,7 +4518,9 @@ struct BreakFinder {
 impl<'hir> Visitor<'hir> for BreakFinder {
     fn visit_expr(&mut self, ex: &'hir hir::Expr<'hir>) {
         match ex.kind {
-            hir::ExprKind::Break(destination, _) => {
+            hir::ExprKind::Break(destination, _)
+                if !ex.span.is_desugaring(DesugaringKind::ForLoop) =>
+            {
                 self.found_breaks.push((destination, ex.span));
             }
             hir::ExprKind::Continue(destination) => {

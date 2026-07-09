@@ -30,7 +30,7 @@ use rustc_data_structures::sync::{
     self, DynSend, DynSync, FreezeReadGuard, Lock, RwLock, WorkerLocal,
 };
 use rustc_errors::{
-    Applicability, Diag, DiagCtxtHandle, ErrorGuaranteed, LintDiagnostic, LintEmitter, MultiSpan,
+    Applicability, Diag, DiagCtxtHandle, ErrorGuaranteed, LintDiagnostic, MultiSpan,
 };
 use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{CtorKind, CtorOf, DefKind};
@@ -148,7 +148,7 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
     type BoundTy = ty::BoundTy;
     type Symbol = Symbol;
 
-    type PlaceholderTy = ty::PlaceholderType;
+    type PlaceholderTy = ty::PlaceholderType<'tcx>;
     type ErrorGuaranteed = ErrorGuaranteed;
     type BoundExistentialPredicates = &'tcx List<PolyExistentialPredicate<'tcx>>;
 
@@ -158,19 +158,20 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
     type Safety = hir::Safety;
     type Abi = ExternAbi;
     type Const = ty::Const<'tcx>;
-    type PlaceholderConst = ty::PlaceholderConst;
+    type PlaceholderConst = ty::PlaceholderConst<'tcx>;
 
     type ParamConst = ty::ParamConst;
     type BoundConst = ty::BoundConst;
     type ValueConst = ty::Value<'tcx>;
     type ExprConst = ty::Expr<'tcx>;
     type ValTree = ty::ValTree<'tcx>;
+    type ScalarInt = ty::ScalarInt;
 
     type Region = Region<'tcx>;
     type EarlyParamRegion = ty::EarlyParamRegion;
     type LateParamRegion = ty::LateParamRegion;
     type BoundRegion = ty::BoundRegion;
-    type PlaceholderRegion = ty::PlaceholderRegion;
+    type PlaceholderRegion = ty::PlaceholderRegion<'tcx>;
 
     type RegionAssumptions = &'tcx ty::List<ty::ArgOutlivesPredicate<'tcx>>;
 
@@ -906,10 +907,6 @@ impl<'tcx> rustc_type_ir::inherent::Features<TyCtxt<'tcx>> for &'tcx rustc_featu
         self.coroutine_clone()
     }
 
-    fn associated_const_equality(self) -> bool {
-        self.associated_const_equality()
-    }
-
     fn feature_bound_holds_in_crate(self, symbol: Symbol) -> bool {
         // We don't consider feature bounds to hold in the crate when `staged_api` feature is
         // enabled, even if it is enabled through `#[feature]`.
@@ -954,7 +951,7 @@ pub struct CtxtInterners<'tcx> {
     fields: InternedSet<'tcx, List<FieldIdx>>,
     local_def_ids: InternedSet<'tcx, List<LocalDefId>>,
     captures: InternedSet<'tcx, List<&'tcx ty::CapturedPlace<'tcx>>>,
-    valtree: InternedSet<'tcx, ty::ValTreeKind<'tcx>>,
+    valtree: InternedSet<'tcx, ty::ValTreeKind<TyCtxt<'tcx>>>,
     patterns: InternedSet<'tcx, List<ty::Pattern<'tcx>>>,
     outlives: InternedSet<'tcx, List<ty::ArgOutlivesPredicate<'tcx>>>,
 }
@@ -1534,20 +1531,6 @@ pub struct TyCtxt<'tcx> {
     gcx: &'tcx GlobalCtxt<'tcx>,
 }
 
-impl<'tcx> LintEmitter for TyCtxt<'tcx> {
-    type Id = HirId;
-
-    fn emit_node_span_lint(
-        self,
-        lint: &'static Lint,
-        hir_id: HirId,
-        span: impl Into<MultiSpan>,
-        decorator: impl for<'a> LintDiagnostic<'a, ()>,
-    ) {
-        self.emit_node_span_lint(lint, hir_id, span, decorator);
-    }
-}
-
 // Explicitly implement `DynSync` and `DynSend` for `TyCtxt` to short circuit trait resolution. Its
 // field are asserted to implement these traits below, so this is trivially safe, and it greatly
 // speeds-up compilation of this crate and its dependents.
@@ -1906,6 +1889,12 @@ impl<'tcx> TyCtxt<'tcx> {
 
     pub fn is_async_drop_in_place_coroutine(self, def_id: DefId) -> bool {
         self.is_lang_item(self.parent(def_id), LangItem::AsyncDropInPlace)
+    }
+
+    /// Check if the given `def_id` is a const with the `#[type_const]` attribute.
+    pub fn is_type_const(self, def_id: DefId) -> bool {
+        matches!(self.def_kind(def_id), DefKind::Const | DefKind::AssocConst)
+            && find_attr!(self.get_all_attrs(def_id), AttributeKind::TypeConst(_))
     }
 
     /// Returns the movability of the coroutine of `def_id`, or panics
@@ -2286,6 +2275,12 @@ impl<'tcx> TyCtxt<'tcx> {
 
     #[inline]
     pub fn local_crate_exports_generics(self) -> bool {
+        // compiler-builtins has some special treatment in codegen, which can result in confusing
+        // behavior if another crate ends up calling into its monomorphizations.
+        // https://github.com/rust-lang/rust/issues/150173
+        if self.is_compiler_builtins(LOCAL_CRATE) {
+            return false;
+        }
         self.crate_types().iter().any(|crate_type| {
             match crate_type {
                 CrateType::Executable
@@ -2668,7 +2663,7 @@ struct InternedInSet<'tcx, T: ?Sized + PointeeSized>(&'tcx T);
 
 impl<'tcx, T: 'tcx + ?Sized + PointeeSized> Clone for InternedInSet<'tcx, T> {
     fn clone(&self) -> Self {
-        InternedInSet(self.0)
+        *self
     }
 }
 
@@ -2791,7 +2786,7 @@ macro_rules! direct_interners {
 // crate only, and have a corresponding `mk_` function.
 direct_interners! {
     region: pub(crate) intern_region(RegionKind<'tcx>): Region -> Region<'tcx>,
-    valtree: pub(crate) intern_valtree(ValTreeKind<'tcx>): ValTree -> ValTree<'tcx>,
+    valtree: pub(crate) intern_valtree(ValTreeKind<TyCtxt<'tcx>>): ValTree -> ValTree<'tcx>,
     pat: pub mk_pat(PatternKind<'tcx>): Pattern -> Pattern<'tcx>,
     const_allocation: pub mk_const_alloc(Allocation): ConstAllocation -> ConstAllocation<'tcx>,
     layout: pub mk_layout(LayoutData<FieldIdx, VariantIdx>): Layout -> Layout<'tcx>,
@@ -3545,7 +3540,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
     /// Whether this is a trait implementation that has `#[diagnostic::do_not_recommend]`
     pub fn do_not_recommend_impl(self, def_id: DefId) -> bool {
-        self.get_diagnostic_attr(def_id, sym::do_not_recommend).is_some()
+        find_attr!(self.get_all_attrs(def_id), AttributeKind::DoNotRecommend { .. })
     }
 
     pub fn is_trivial_const<P>(self, def_id: P) -> bool

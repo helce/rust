@@ -5,6 +5,7 @@
     target_os = "redox",
     target_os = "hurd",
     target_os = "aix",
+    target_os = "wasi",
 )))]
 use crate::ffi::CStr;
 use crate::mem::{self, DropGuard, ManuallyDrop};
@@ -13,10 +14,9 @@ use crate::num::NonZero;
 use crate::sys::weak::dlsym;
 #[cfg(any(target_os = "solaris", target_os = "illumos", target_os = "nto",))]
 use crate::sys::weak::weak;
-use crate::sys::{os, stack_overflow};
 use crate::thread::ThreadInit;
 use crate::time::Duration;
-use crate::{cmp, io, ptr};
+use crate::{cmp, io, ptr, sys};
 #[cfg(not(any(
     target_os = "l4re",
     target_os = "vxworks",
@@ -44,6 +44,18 @@ impl Thread {
     // unsafe: see thread::Builder::spawn_unchecked for safety requirements
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub unsafe fn new(stack: usize, init: Box<ThreadInit>) -> io::Result<Thread> {
+        // FIXME: remove this block once wasi-sdk is updated with the fix from
+        // https://github.com/WebAssembly/wasi-libc/pull/716
+        // WASI does not support threading via pthreads. While wasi-libc provides
+        // pthread stubs, pthread_create returns EAGAIN, which causes confusing
+        // errors. We return UNSUPPORTED_PLATFORM directly instead.
+
+        // NOTE: exempt `wasm32-wasip1-threads` from this check as `emnapi` has a working pthread
+        // implementation. See <https://github.com/rust-lang/rust/issues/153475>.
+        if cfg!(all(target_os = "wasi", not(all(target_env = "p1", target_feature = "atomics")))) {
+            return Err(io::Error::UNSUPPORTED_PLATFORM);
+        }
+
         let data = init;
         let mut attr: mem::MaybeUninit<libc::pthread_attr_t> = mem::MaybeUninit::uninit();
         assert_eq!(libc::pthread_attr_init(attr.as_mut_ptr()), 0);
@@ -76,7 +88,7 @@ impl Thread {
                     // multiple of the system page size. Because it's definitely
                     // >= PTHREAD_STACK_MIN, it must be an alignment issue.
                     // Round up to the nearest page and try again.
-                    let page_size = os::page_size();
+                    let page_size = sys::os::page_size();
                     let stack_size =
                         (stack_size + page_size - 1) & (-(page_size as isize - 1) as usize - 1);
 
@@ -113,7 +125,7 @@ impl Thread {
 
                 // Now that the thread information is set, set up our stack
                 // overflow handler.
-                let _handler = stack_overflow::Handler::new();
+                let _handler = sys::stack_overflow::Handler::new();
 
                 rust_start();
             }
@@ -127,6 +139,7 @@ impl Thread {
         assert!(ret == 0, "failed to join thread: {}", io::Error::from_raw_os_error(ret));
     }
 
+    #[cfg(not(target_os = "wasi"))]
     pub fn id(&self) -> libc::pthread_t {
         self.id
     }
@@ -518,7 +531,7 @@ pub fn set_name(name: &CStr) {
     debug_assert_eq!(res, libc::OK);
 }
 
-#[cfg(not(target_os = "espidf"))]
+#[cfg(not(any(target_os = "espidf", target_os = "wasi")))]
 pub fn sleep(dur: Duration) {
     let mut secs = dur.as_secs();
     let mut nsecs = dur.subsec_nanos() as _;
@@ -534,7 +547,7 @@ pub fn sleep(dur: Duration) {
             secs -= ts.tv_sec as u64;
             let ts_ptr = &raw mut ts;
             if libc::nanosleep(ts_ptr, ts_ptr) == -1 {
-                assert_eq!(os::errno(), libc::EINTR);
+                assert_eq!(sys::io::errno(), libc::EINTR);
                 secs += ts.tv_sec as u64;
                 nsecs = ts.tv_nsec;
             } else {
@@ -544,7 +557,13 @@ pub fn sleep(dur: Duration) {
     }
 }
 
-#[cfg(target_os = "espidf")]
+#[cfg(any(
+    target_os = "espidf",
+    // wasi-libc prior to WebAssembly/wasi-libc#696 has a broken implementation
+    // of `nanosleep`, used above by most platforms, so use `usleep` until
+    // that fix propagates throughout the ecosystem.
+    target_os = "wasi",
+))]
 pub fn sleep(dur: Duration) {
     // ESP-IDF does not have `nanosleep`, so we use `usleep` instead.
     // As per the documentation of `usleep`, it is expected to support
@@ -588,6 +607,7 @@ pub fn sleep(dur: Duration) {
     target_os = "hurd",
     target_os = "fuchsia",
     target_os = "vxworks",
+    target_os = "wasi",
 ))]
 pub fn sleep_until(deadline: crate::time::Instant) {
     use crate::time::Instant;

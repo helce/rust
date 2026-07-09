@@ -123,15 +123,15 @@ struct Foo {
 }
 
 #[attr1]
+#[derive(Bar)]
+#[attr2] struct S;
+#[attr1]
 #[my_cool_derive()] struct Foo {
     v1: i32, #[attr3]v2: fn(#[attr4]param2: u32), v3: Foo< {
         456
     }
     >,
-}
-#[attr1]
-#[derive(Bar)]
-#[attr2] struct S;"#]],
+}"#]],
     );
 }
 
@@ -339,5 +339,24 @@ use proc_macros::{identity, helper_should_be_ignored, HelperShouldBeIgnoredDeriv
 struct Foo;
 
 #[helper_should_be_ignored] struct Foo;"#]],
+    );
+}
+
+#[test]
+fn attribute_macro_stripping_with_cfg() {
+    check(
+        r#"
+//- proc_macros: generate_suffixed_type
+#[cfg(all())]
+#[proc_macros::generate_suffixed_type]
+struct S;
+"#,
+        expect![[r#"
+#[cfg(all())]
+#[proc_macros::generate_suffixed_type]
+struct S;
+
+struct S;
+struct SSuffix;"#]],
     );
 }
