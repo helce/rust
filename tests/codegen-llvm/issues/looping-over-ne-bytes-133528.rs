@@ -1,5 +1,4 @@
 //@ compile-flags: -Copt-level=3
-//@ ignore-e2k bug 9887
 #![crate_type = "lib"]
 
 /// Ensure the function is properly optimized
