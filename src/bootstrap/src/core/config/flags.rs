@@ -501,6 +501,9 @@ Arguments:
         /// Always include version in subdir name
         #[arg(long)]
         versioned_dirs: bool,
+        /// Use source from config
+        #[arg(long)]
+        respect_source: bool,
     },
     /// Perform profiling and benchmarking of the compiler using `rustc-perf`.
     Perf(PerfArgs),
@@ -654,6 +657,13 @@ impl Subcommand {
     pub fn vendor_versioned_dirs(&self) -> bool {
         match *self {
             Subcommand::Vendor { versioned_dirs, .. } => versioned_dirs,
+            _ => false,
+        }
+    }
+
+    pub fn vendor_respect_source(&self) -> bool {
+        match *self {
+            Subcommand::Vendor { respect_source, .. } => respect_source,
             _ => false,
         }
     }

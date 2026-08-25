@@ -1371,6 +1371,7 @@ fn prepare_source_tarball<'a>(
             versioned_dirs: true,
             root_dir: plain_dst_src.into(),
             output_dir: None,
+            respect_source: true,
         });
     }
 

@@ -49,6 +49,8 @@ pub(crate) struct Vendor {
     pub(crate) root_dir: PathBuf,
     /// The target directory for storing vendored dependencies if different from root_dir.
     pub(crate) output_dir: Option<PathBuf>,
+    /// Allow using mirror of crates.io specified in [source]
+    pub(crate) respect_source: bool,
 }
 
 impl Step for Vendor {
@@ -69,6 +71,7 @@ impl Step for Vendor {
             versioned_dirs: run.builder.config.cmd.vendor_versioned_dirs(),
             root_dir: run.builder.src.clone(),
             output_dir: None,
+            respect_source: run.builder.config.cmd.vendor_respect_source(),
         });
     }
 
@@ -84,6 +87,10 @@ impl Step for Vendor {
 
         if self.versioned_dirs {
             cmd.arg("--versioned-dirs");
+        }
+
+        if self.respect_source {
+            cmd.arg("--respect-source-config");
         }
 
         let to_vendor = default_paths_to_vendor(builder);

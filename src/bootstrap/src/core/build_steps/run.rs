@@ -272,6 +272,7 @@ impl Step for GenerateCopyright {
                 versioned_dirs: true,
                 root_dir: builder.src.clone(),
                 output_dir: Some(cache_dir.clone()),
+                respect_source: true,
             });
             cache_dir.join(VENDOR_DIR)
         };
