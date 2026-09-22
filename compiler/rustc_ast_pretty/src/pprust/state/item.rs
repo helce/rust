@@ -51,7 +51,7 @@ impl<'a> State<'a> {
                 expr.as_deref(),
                 vis,
                 *safety,
-                ast::Defaultness::Final,
+                ast::Defaultness::Implicit,
                 define_opaque.as_deref(),
             ),
             ast::ForeignItemKind::TyAlias(box ast::TyAlias {
@@ -201,16 +201,27 @@ impl<'a> State<'a> {
                     body.as_deref(),
                     &item.vis,
                     ast::Safety::Default,
-                    ast::Defaultness::Final,
+                    ast::Defaultness::Implicit,
                     define_opaque.as_deref(),
                 );
+            }
+            ast::ItemKind::ConstBlock(ast::ConstBlockItem { id: _, span: _, block }) => {
+                let ib = self.ibox(INDENT_UNIT);
+                self.word("const");
+                self.nbsp();
+                {
+                    let cb = self.cbox(0);
+                    let ib = self.ibox(0);
+                    self.print_block_with_attrs(block, &[], cb, ib);
+                }
+                self.end(ib);
             }
             ast::ItemKind::Const(box ast::ConstItem {
                 defaultness,
                 ident,
                 generics,
                 ty,
-                rhs,
+                rhs_kind,
                 define_opaque,
             }) => {
                 self.print_item_const(
@@ -218,7 +229,7 @@ impl<'a> State<'a> {
                     None,
                     generics,
                     ty,
-                    rhs.as_ref().map(|ct| ct.expr()),
+                    rhs_kind.expr(),
                     &item.vis,
                     ast::Safety::Default,
                     *defaultness,
@@ -562,7 +573,7 @@ impl<'a> State<'a> {
                 ident,
                 generics,
                 ty,
-                rhs,
+                rhs_kind,
                 define_opaque,
             }) => {
                 self.print_item_const(
@@ -570,7 +581,7 @@ impl<'a> State<'a> {
                     None,
                     generics,
                     ty,
-                    rhs.as_ref().map(|ct| ct.expr()),
+                    rhs_kind.expr(),
                     vis,
                     ast::Safety::Default,
                     *defaultness,

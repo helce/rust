@@ -251,19 +251,16 @@ where
             // impl_item_refs may be empty if drop fn is not implemented in 'impl AsyncDrop for ...'
             // (#140974).
             // Such code will report error, so just generate sync drop here and return
-            let Some(drop_fn_def_id) = tcx
-                .associated_item_def_ids(drop_trait)
-                .first()
-                .and_then(|def_id| {
+            let Some(drop_fn_def_id) =
+                tcx.associated_item_def_ids(drop_trait).first().and_then(|&def_id| {
                     if tcx.def_kind(def_id) == DefKind::AssocFn
-                        && tcx.check_args_compatible(*def_id, trait_args)
+                        && tcx.check_args_compatible(def_id, trait_args)
                     {
                         Some(def_id)
                     } else {
                         None
                     }
                 })
-                .copied()
             else {
                 tcx.dcx().span_delayed_bug(
                     self.elaborator.body().span,
@@ -326,12 +323,23 @@ where
             const_: Const::zero_sized(pin_obj_new_unchecked_fn),
         }));
 
+        // Create an intermediate block that does StorageDead(fut) then jumps to succ.
+        // This is necessary because `succ` may differ from `self.succ` (e.g. when
+        // build_async_drop is called from drop_loop, `succ` is the loop header).
+        // Placing StorageDead directly at `self.succ` would miss the loop-back edge,
+        // causing StorageLive(fut) to fire again without a preceding StorageDead.
+        let succ_with_dead = self.new_block_with_statements(
+            unwind,
+            vec![Statement::new(self.source_info, StatementKind::StorageDead(fut.local))],
+            TerminatorKind::Goto { target: succ },
+        );
+
         // #3:drop_term_bb
         let drop_term_bb = self.new_block(
             unwind,
             TerminatorKind::Drop {
                 place,
-                target: succ,
+                target: succ_with_dead,
                 unwind: unwind.into_action(),
                 replace: false,
                 drop: dropline,
@@ -380,12 +388,6 @@ where
                 call_source: CallSource::Misc,
                 fn_span: self.source_info.span,
             },
-        );
-
-        // StorageDead(fut) in self.succ block (at the begin)
-        self.elaborator.patch().add_statement(
-            Location { block: self.succ, statement_index: 0 },
-            StatementKind::StorageDead(fut.local),
         );
         // StorageDead(fut) in unwind block (at the begin)
         if let Unwind::To(block) = unwind {

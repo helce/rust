@@ -43,21 +43,37 @@ pub enum ConstEvalErrKind {
 impl MachineStopType for ConstEvalErrKind {
     fn diagnostic_message(&self) -> DiagMessage {
         use ConstEvalErrKind::*;
+        use rustc_errors::msg;
 
-        use crate::fluent_generated::*;
         match self {
-            ConstAccessesMutGlobal => const_eval_const_accesses_mut_global,
-            ModifiedGlobal => const_eval_modified_global,
-            Panic { .. } => const_eval_panic,
-            RecursiveStatic => const_eval_recursive_static,
-            AssertFailure(x) => x.diagnostic_message(),
-            WriteThroughImmutablePointer => const_eval_write_through_immutable_pointer,
-            ConstMakeGlobalPtrAlreadyMadeGlobal { .. } => {
-                const_eval_const_make_global_ptr_already_made_global
+            ConstAccessesMutGlobal => "constant accesses mutable global memory".into(),
+            ModifiedGlobal => {
+                "modifying a static's initial value from another static's initializer".into()
             }
-            ConstMakeGlobalPtrIsNonHeap(_) => const_eval_const_make_global_ptr_is_non_heap,
-            ConstMakeGlobalWithDanglingPtr(_) => const_eval_const_make_global_with_dangling_ptr,
-            ConstMakeGlobalWithOffset(_) => const_eval_const_make_global_with_offset,
+            Panic { .. } => msg!("evaluation panicked: {$msg}"),
+            RecursiveStatic => {
+                "encountered static that tried to access itself during initialization".into()
+            }
+            AssertFailure(x) => x.diagnostic_message(),
+            WriteThroughImmutablePointer => {
+                msg!(
+                    "writing through a pointer that was derived from a shared (immutable) reference"
+                )
+            }
+            ConstMakeGlobalPtrAlreadyMadeGlobal { .. } => {
+                msg!("attempting to call `const_make_global` twice on the same allocation {$alloc}")
+            }
+            ConstMakeGlobalPtrIsNonHeap(_) => {
+                msg!(
+                    "pointer passed to `const_make_global` does not point to a heap allocation: {$ptr}"
+                )
+            }
+            ConstMakeGlobalWithDanglingPtr(_) => {
+                msg!("pointer passed to `const_make_global` is dangling: {$ptr}")
+            }
+            ConstMakeGlobalWithOffset(_) => {
+                msg!("making {$ptr} global which does not point to the beginning of an object")
+            }
         }
     }
     fn add_args(self: Box<Self>, adder: &mut dyn FnMut(DiagArgName, DiagArgValue)) {
@@ -94,7 +110,7 @@ pub fn get_span_and_frames<'tcx>(
     tcx: TyCtxtAt<'tcx>,
     stack: &[Frame<'tcx, impl Provenance, impl Sized>],
 ) -> (Span, Vec<errors::FrameNote>) {
-    let mut stacktrace = Frame::generate_stacktrace_from_stack(stack);
+    let mut stacktrace = Frame::generate_stacktrace_from_stack(stack, *tcx);
     // Filter out `requires_caller_location` frames.
     stacktrace.retain(|frame| !frame.instance.def.requires_caller_location(*tcx));
     let span = stacktrace.last().map(|f| f.span).unwrap_or(tcx.span);
@@ -236,7 +252,7 @@ pub(super) fn lint<'tcx, L>(
     lint: &'static rustc_session::lint::Lint,
     decorator: impl FnOnce(Vec<errors::FrameNote>) -> L,
 ) where
-    L: for<'a> rustc_errors::LintDiagnostic<'a, ()>,
+    L: for<'a> rustc_errors::Diagnostic<'a, ()>,
 {
     let (span, frames) = get_span_and_frames(tcx, &machine.stack);
 

@@ -543,6 +543,9 @@ pub fn std_cargo(
         // `MACOSX_DEPLOYMENT_TARGET`, `IPHONEOS_DEPLOYMENT_TARGET`, etc.
         let mut cmd = builder.rustc_cmd(cargo.compiler());
         cmd.arg("--target").arg(target.rustc_target_arg());
+        // FIXME(#152709): -Zunstable-options is to handle JSON targets.
+        // Remove when JSON targets are stabilized.
+        cmd.arg("-Zunstable-options").env("RUSTC_BOOTSTRAP", "1");
         cmd.arg("--print=deployment-target");
         let output = cmd.run_capture_stdout(builder).stdout();
 
@@ -626,12 +629,6 @@ pub fn std_cargo(
         CompilerBuiltins::BuildRustOnly => "",
     };
 
-    // `libtest` uses this to know whether or not to support
-    // `-Zunstable-options`.
-    if !builder.unstable_features() {
-        cargo.env("CFG_DISABLE_UNSTABLE_FEATURES", "1");
-    }
-
     for krate in crates {
         cargo.args(["-p", krate]);
     }
@@ -680,13 +677,6 @@ pub fn std_cargo(
         }
     }
 
-    // By default, rustc uses `-Cembed-bitcode=yes`, and Cargo overrides that
-    // with `-Cembed-bitcode=no` for non-LTO builds. However, libstd must be
-    // built with bitcode so that the produced rlibs can be used for both LTO
-    // builds (which use bitcode) and non-LTO builds (which use object code).
-    // So we override the override here!
-    cargo.rustflag("-Cembed-bitcode=yes");
-
     if builder.config.rust_lto == RustcLto::Off {
         cargo.rustflag("-Clto=off");
     }
@@ -700,11 +690,6 @@ pub fn std_cargo(
     if target.contains("riscv") {
         cargo.rustflag("-Cforce-unwind-tables=yes");
     }
-
-    // Enable frame pointers by default for the library. Note that they are still controlled by a
-    // separate setting for the compiler.
-    cargo.rustflag("-Zunstable-options");
-    cargo.rustflag("-Cforce-frame-pointers=non-leaf");
 
     let html_root =
         format!("-Zcrate-attr=doc(html_root_url=\"{}/\")", builder.doc_rust_lang_org_channel(),);
@@ -1399,6 +1384,9 @@ pub fn rustc_cargo_env(builder: &Builder<'_>, cargo: &mut Cargo, target: TargetS
             }
         }
     }
+
+    // The host this new compiler will *run* on.
+    cargo.env("CFG_COMPILER_HOST_TRIPLE", target.triple);
 
     if builder.config.rust_verify_llvm_ir {
         cargo.env("RUSTC_VERIFY_LLVM_IR", "1");
@@ -2296,23 +2284,13 @@ impl Step for Assemble {
             builder.compiler(target_compiler.stage - 1, builder.config.host_target);
 
         // Build enzyme
-        if builder.config.llvm_enzyme && !builder.config.dry_run() {
+        if builder.config.llvm_enzyme {
             debug!("`llvm_enzyme` requested");
-            let enzyme_install = builder.ensure(llvm::Enzyme { target: build_compiler.host });
-            if let Some(llvm_config) = builder.llvm_config(builder.config.host_target) {
-                let llvm_version_major = llvm::get_llvm_version_major(builder, &llvm_config);
-                let lib_ext = std::env::consts::DLL_EXTENSION;
-                let libenzyme = format!("libEnzyme-{llvm_version_major}");
-                let src_lib =
-                    enzyme_install.join("build/Enzyme").join(&libenzyme).with_extension(lib_ext);
-                let libdir = builder.sysroot_target_libdir(build_compiler, build_compiler.host);
-                let target_libdir =
-                    builder.sysroot_target_libdir(target_compiler, target_compiler.host);
-                let dst_lib = libdir.join(&libenzyme).with_extension(lib_ext);
-                let target_dst_lib = target_libdir.join(&libenzyme).with_extension(lib_ext);
-                builder.copy_link(&src_lib, &dst_lib, FileType::NativeLibrary);
-                builder.copy_link(&src_lib, &target_dst_lib, FileType::NativeLibrary);
-            }
+            let enzyme = builder.ensure(llvm::Enzyme { target: build_compiler.host });
+            let target_libdir =
+                builder.sysroot_target_libdir(target_compiler, target_compiler.host);
+            let target_dst_lib = target_libdir.join(enzyme.enzyme_filename());
+            builder.copy_link(&enzyme.enzyme_path(), &target_dst_lib, FileType::NativeLibrary);
         }
 
         if builder.config.llvm_offload && !builder.config.dry_run() {

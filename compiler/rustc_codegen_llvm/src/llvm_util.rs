@@ -297,12 +297,12 @@ pub(crate) fn to_llvm_features<'a>(sess: &Session, s: &'a str) -> Option<LLVMFea
                 "cmpxchg16b" => Some(LLVMFeature::new("cx16")),
                 "lahfsahf" => Some(LLVMFeature::new("sahf")),
                 // Enable the evex512 target feature if an avx512 target feature is enabled.
-                s if s.starts_with("avx512") => Some(LLVMFeature::with_dependencies(
+                s if s.starts_with("avx512") && major < 22 => Some(LLVMFeature::with_dependencies(
                     s,
                     smallvec![TargetFeatureFoldStrength::EnableOnly("evex512")],
                 )),
-                "avx10.1" => Some(LLVMFeature::new("avx10.1-512")),
-                "avx10.2" => Some(LLVMFeature::new("avx10.2-512")),
+                "avx10.1" if major < 22 => Some(LLVMFeature::new("avx10.1-512")),
+                "avx10.2" if major < 22 => Some(LLVMFeature::new("avx10.2-512")),
                 "apxf" => Some(LLVMFeature::with_dependencies(
                     "egpr",
                     smallvec![
@@ -714,7 +714,9 @@ pub(crate) fn global_llvm_features(sess: &Session, only_base_features: bool) -> 
 
                 features_string
             };
-            features.extend(features_string.split(',').map(String::from));
+            if !features_string.is_empty() {
+                features.extend(features_string.split(',').map(String::from));
+            }
         }
         Some(_) | None => {}
     };

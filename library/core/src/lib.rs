@@ -87,6 +87,7 @@
 #![allow(incomplete_features)]
 #![warn(multiple_supertrait_upcastable)]
 #![allow(internal_features)]
+#![allow(unused_features)]
 #![deny(ffi_unwind_calls)]
 #![warn(unreachable_pub)]
 // Do not check link redundancy on bootstrapping phase
@@ -95,12 +96,8 @@
 //
 // Library features:
 // tidy-alphabetical-start
-#![feature(array_ptr_get)]
 #![feature(asm_experimental_arch)]
-#![feature(bigint_helper_methods)]
-#![feature(bstr)]
 #![feature(bstr_internals)]
-#![feature(cfg_select)]
 #![feature(cfg_target_has_reliable_f16_f128)]
 #![feature(const_carrying_mul_add)]
 #![feature(const_cmp)]
@@ -111,24 +108,11 @@
 #![feature(coverage_attribute)]
 #![feature(disjoint_bitor)]
 #![feature(internal_impls_macro)]
-#![feature(ip)]
-#![feature(is_ascii_octdigit)]
 #![feature(link_cfg)]
 #![feature(offset_of_enum)]
 #![feature(panic_internals)]
 #![feature(pattern_type_macro)]
-#![feature(ptr_alignment_type)]
-#![feature(ptr_metadata)]
-#![feature(set_ptr_value)]
-#![feature(slice_ptr_get)]
-#![feature(str_internals)]
-#![feature(str_split_inclusive_remainder)]
-#![feature(str_split_remainder)]
-#![feature(type_info)]
 #![feature(ub_checks)]
-#![feature(unsafe_pinned)]
-#![feature(utf16_extra)]
-#![feature(variant_count)]
 // tidy-alphabetical-end
 //
 // Language features:
@@ -156,7 +140,6 @@
 #![feature(freeze_impls)]
 #![feature(fundamental)]
 #![feature(funnel_shifts)]
-#![feature(if_let_guard)]
 #![feature(intra_doc_pointers)]
 #![feature(intrinsics)]
 #![feature(lang_items)]
@@ -173,18 +156,18 @@
 #![feature(optimize_attribute)]
 #![feature(pattern_types)]
 #![feature(prelude_import)]
-#![feature(reborrow)]
 #![feature(repr_simd)]
-#![feature(rustc_allow_const_fn_unstable)]
 #![feature(rustc_attrs)]
 #![feature(rustdoc_internals)]
 #![feature(simd_ffi)]
 #![feature(staged_api)]
 #![feature(stmt_expr_attributes)]
 #![feature(strict_provenance_lints)]
+#![feature(target_feature_inline_always)]
 #![feature(trait_alias)]
 #![feature(transparent_unions)]
 #![feature(try_blocks)]
+#![feature(uint_carryless_mul)]
 #![feature(unboxed_closures)]
 #![feature(unsized_fn_params)]
 #![feature(with_negative_coherence)]
@@ -223,11 +206,7 @@ use prelude::rust_2024::*;
 mod macros;
 
 #[unstable(feature = "assert_matches", issue = "82775")]
-/// Unstable module containing the unstable `assert_matches` macro.
-pub mod assert_matches {
-    #[unstable(feature = "assert_matches", issue = "82775")]
-    pub use crate::macros::{assert_matches, debug_assert_matches};
-}
+pub use crate::macros::{assert_matches, debug_assert_matches};
 
 #[unstable(feature = "derive_from", issue = "144889")]
 /// Unstable module containing the unstable `From` derive macro.
@@ -247,7 +226,7 @@ pub mod autodiff {
 #[unstable(feature = "contracts", issue = "128044")]
 pub mod contracts;
 
-#[unstable(feature = "cfg_select", issue = "115585")]
+#[stable(feature = "cfg_select", since = "1.95.0")]
 pub use crate::macros::cfg_select;
 
 #[macro_use]
@@ -325,7 +304,7 @@ pub mod pat;
 pub mod pin;
 #[unstable(feature = "random", issue = "130703")]
 pub mod random;
-#[unstable(feature = "new_range_api", issue = "125687")]
+#[stable(feature = "new_range_inclusive_api", since = "1.95.0")]
 pub mod range;
 pub mod result;
 pub mod sync;

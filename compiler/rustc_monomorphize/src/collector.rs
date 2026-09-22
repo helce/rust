@@ -1002,11 +1002,12 @@ fn visit_instance_use<'tcx>(
             if tcx.should_codegen_locally(panic_instance) {
                 output.push(create_fn_mono_item(tcx, panic_instance, source));
             }
-        } else if !intrinsic.must_be_overridden {
+        } else if !intrinsic.must_be_overridden
+            && !tcx.sess.replaced_intrinsics.contains(&intrinsic.name)
+        {
             // Codegen the fallback body of intrinsics with fallback bodies.
-            // We explicitly skip this otherwise to ensure we get a linker error
-            // if anyone tries to call this intrinsic and the codegen backend did not
-            // override the implementation.
+            // We have to skip this otherwise as there's no body to codegen.
+            // We also skip intrinsics the backend handles, to reduce monomorphizations.
             let instance = ty::Instance::new_raw(instance.def_id(), instance.args);
             if tcx.should_codegen_locally(instance) {
                 output.push(create_fn_mono_item(tcx, instance, source));
@@ -1084,7 +1085,9 @@ fn should_codegen_locally<'tcx>(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> 
         return false;
     }
 
-    if !tcx.is_mir_available(def_id) {
+    // See comment in should_encode_mir in rustc_metadata for why we don't report
+    // an error for constructors.
+    if !tcx.is_mir_available(def_id) && !matches!(tcx.def_kind(def_id), DefKind::Ctor(..)) {
         tcx.dcx().emit_fatal(NoOptimizedMir {
             span: tcx.def_span(def_id),
             crate_name: tcx.crate_name(def_id.krate),
@@ -1563,11 +1566,22 @@ impl<'v> RootCollector<'_, 'v> {
                 // If we're collecting items eagerly, then recurse into all constants.
                 // Otherwise the value is only collected when explicitly mentioned in other items.
                 if self.strategy == MonoItemCollectionStrategy::Eager {
-                    if !self.tcx.generics_of(id.owner_id).own_requires_monomorphization()
-                        && let Ok(val) = self.tcx.const_eval_poly(id.owner_id.to_def_id())
-                    {
-                        collect_const_value(self.tcx, val, self.output);
+                    let def_id = id.owner_id.to_def_id();
+                    // Type Consts don't have bodies to evaluate
+                    // nor do they make sense as a static.
+                    if self.tcx.is_type_const(def_id) {
+                        // FIXME(mgca): Is this actually what we want? We may want to
+                        // normalize to a ValTree then convert to a const allocation and
+                        // collect that?
+                        return;
                     }
+                    if self.tcx.generics_of(id.owner_id).own_requires_monomorphization() {
+                        return;
+                    }
+                    let Ok(val) = self.tcx.const_eval_poly(def_id) else {
+                        return;
+                    };
+                    collect_const_value(self.tcx, val, self.output);
                 }
             }
             DefKind::Impl { of_trait: true } => {

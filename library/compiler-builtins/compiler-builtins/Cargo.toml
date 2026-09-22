@@ -31,7 +31,7 @@ doc = false
 core = { path = "../../core", optional = true }
 
 [build-dependencies]
-cc = { optional = true, version = "1.2" }
+cc = { version = "1.2", optional = true }
 
 [features]
 default = ["compiler-builtins"]
@@ -44,10 +44,6 @@ c = ["dep:cc"]
 # specific version, use the generic version. This is meant to enable testing
 # the generic versions on all platforms.
 no-asm = []
-
-# Workaround for codegen backends which haven't yet implemented `f16` and
-# `f128` support. Disabled any intrinsics which use those types.
-no-f16-f128 = []
 
 # Flag this library as the unstable compiler-builtins lib
 compiler-builtins = []

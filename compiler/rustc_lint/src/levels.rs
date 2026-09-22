@@ -2,7 +2,7 @@ use rustc_ast::attr::AttributeExt;
 use rustc_ast_pretty::pprust;
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
 use rustc_data_structures::unord::UnordSet;
-use rustc_errors::{Diag, LintDiagnostic, MultiSpan};
+use rustc_errors::{Diag, Diagnostic, MultiSpan, msg};
 use rustc_feature::{Features, GateIssue};
 use rustc_hir::HirId;
 use rustc_hir::intravisit::{self, Visitor};
@@ -10,8 +10,8 @@ use rustc_index::IndexVec;
 use rustc_middle::bug;
 use rustc_middle::hir::nested_filter;
 use rustc_middle::lint::{
-    LevelAndSource, LintExpectation, LintLevelSource, ShallowLintLevelMap, lint_level,
-    reveal_actual_level,
+    LevelAndSource, LintExpectation, LintLevelSource, ShallowLintLevelMap, diag_lint_level,
+    lint_level, reveal_actual_level,
 };
 use rustc_middle::query::Providers;
 use rustc_middle::ty::{RegisteredTools, TyCtxt};
@@ -31,7 +31,6 @@ use crate::errors::{
     CheckNameUnknownTool, MalformedAttribute, MalformedAttributeSub, OverruledAttribute,
     OverruledAttributeSub, RequestedLevel, UnknownToolInScopedLint, UnsupportedGroup,
 };
-use crate::fluent_generated as fluent;
 use crate::late::unerased_lint_store;
 use crate::lints::{
     DeprecatedLintName, DeprecatedLintNameFromCommandLine, IgnoredUnlessCrateSpecified,
@@ -581,7 +580,9 @@ impl<'s, P: LintLevelsProvider> LintLevelsBuilder<'s, P> {
                 LintLevelSource::Node { span, reason, .. } => {
                     OverruledAttributeSub::NodeSource { span, reason }
                 }
-                LintLevelSource::CommandLine(_, _) => OverruledAttributeSub::CommandLineSource,
+                LintLevelSource::CommandLine(name, _) => {
+                    OverruledAttributeSub::CommandLineSource { id: name }
+                }
             };
             if !fcw_warning {
                 self.sess.dcx().emit_err(OverruledAttribute {
@@ -821,8 +822,11 @@ impl<'s, P: LintLevelsProvider> LintLevelsBuilder<'s, P> {
                                 RenamedLintSuggestion::WithSpan { suggestion: sp, replace };
                             let name =
                                 tool_ident.map(|tool| format!("{tool}::{name}")).unwrap_or(name);
-                            let lint = RenamedLint { name: name.as_str(), replace, suggestion };
-                            self.emit_span_lint(RENAMED_AND_REMOVED_LINTS, sp.into(), lint);
+                            self.emit_span_lint(
+                                RENAMED_AND_REMOVED_LINTS,
+                                sp.into(),
+                                RenamedLint { name: name.as_str(), replace, suggestion },
+                            );
                         }
 
                         // If this lint was renamed, apply the new lint instead of ignoring the
@@ -843,8 +847,11 @@ impl<'s, P: LintLevelsProvider> LintLevelsBuilder<'s, P> {
                         if self.lint_added_lints {
                             let name =
                                 tool_ident.map(|tool| format!("{tool}::{name}")).unwrap_or(name);
-                            let lint = RemovedLint { name: name.as_str(), reason };
-                            self.emit_span_lint(RENAMED_AND_REMOVED_LINTS, sp.into(), lint);
+                            self.emit_span_lint(
+                                RENAMED_AND_REMOVED_LINTS,
+                                sp.into(),
+                                RemovedLint { name: name.as_str(), reason },
+                            );
                         }
                         continue;
                     }
@@ -860,8 +867,11 @@ impl<'s, P: LintLevelsProvider> LintLevelsBuilder<'s, P> {
                                     from_rustc,
                                 }
                             });
-                            let lint = UnknownLint { name, suggestion };
-                            self.emit_span_lint(UNKNOWN_LINTS, sp.into(), lint);
+                            self.emit_span_lint(
+                                UNKNOWN_LINTS,
+                                sp.into(),
+                                UnknownLint { name, suggestion },
+                            );
                         }
                         continue;
                     }
@@ -941,12 +951,10 @@ impl<'s, P: LintLevelsProvider> LintLevelsBuilder<'s, P> {
         if self.lint_added_lints {
             let lint = builtin::UNKNOWN_LINTS;
             let level = self.lint_level(builtin::UNKNOWN_LINTS);
-            // FIXME: make this translatable
-            #[allow(rustc::diagnostic_outside_of_impl)]
             lint_level(self.sess, lint, level, Some(span.into()), |lint| {
-                lint.primary_message(fluent::lint_unknown_gated_lint);
+                lint.primary_message(msg!("unknown lint: `{$name}`"));
                 lint.arg("name", lint_id.lint.name_lower());
-                lint.note(fluent::lint_note);
+                lint.note(msg!("the `{$name}` lint is unstable"));
                 rustc_session::parse::add_feature_diagnostics_for_issue(
                     lint,
                     &self.sess,
@@ -968,9 +976,6 @@ impl<'s, P: LintLevelsProvider> LintLevelsBuilder<'s, P> {
 
     /// Used to emit a lint-related diagnostic based on the current state of
     /// this lint context.
-    ///
-    /// [`lint_level`]: rustc_middle::lint::lint_level#decorate-signature
-    #[rustc_lint_diagnostics]
     #[track_caller]
     pub(crate) fn opt_span_lint(
         &self,
@@ -982,25 +987,34 @@ impl<'s, P: LintLevelsProvider> LintLevelsBuilder<'s, P> {
         lint_level(self.sess, lint, level, span, decorate)
     }
 
+    /// Used to emit a lint-related diagnostic based on the current state of
+    /// this lint context.
+    #[track_caller]
+    pub(crate) fn opt_span_diag_lint(
+        &self,
+        lint: &'static Lint,
+        span: Option<MultiSpan>,
+        decorator: impl for<'a> Diagnostic<'a, ()>,
+    ) {
+        let level = self.lint_level(lint);
+        diag_lint_level(self.sess, lint, level, span, decorator)
+    }
+
     #[track_caller]
     pub fn emit_span_lint(
         &self,
         lint: &'static Lint,
         span: MultiSpan,
-        decorate: impl for<'a> LintDiagnostic<'a, ()>,
+        decorator: impl for<'a> Diagnostic<'a, ()>,
     ) {
         let level = self.lint_level(lint);
-        lint_level(self.sess, lint, level, Some(span), |lint| {
-            decorate.decorate_lint(lint);
-        });
+        diag_lint_level(self.sess, lint, level, Some(span), decorator);
     }
 
     #[track_caller]
-    pub fn emit_lint(&self, lint: &'static Lint, decorate: impl for<'a> LintDiagnostic<'a, ()>) {
+    pub fn emit_lint(&self, lint: &'static Lint, decorator: impl for<'a> Diagnostic<'a, ()>) {
         let level = self.lint_level(lint);
-        lint_level(self.sess, lint, level, None, |lint| {
-            decorate.decorate_lint(lint);
-        });
+        diag_lint_level(self.sess, lint, level, None, decorator);
     }
 }
 

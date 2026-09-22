@@ -6,7 +6,6 @@
 
 use std::iter;
 
-use rustc_hir::attrs::AttributeKind;
 use rustc_hir::{self as hir, LangItem, find_attr};
 use rustc_middle::bug;
 use rustc_middle::ty::{
@@ -138,10 +137,7 @@ impl<'tcx> TypeFolder<TyCtxt<'tcx>> for TransformTy<'tcx> {
                 {
                     // Don't transform repr(transparent) types with an user-defined CFI encoding to
                     // preserve the user-defined CFI encoding.
-                    if find_attr!(
-                        self.tcx.get_all_attrs(adt_def.did()),
-                        AttributeKind::CfiEncoding { .. }
-                    ) {
+                    if find_attr!(self.tcx, adt_def.did(), CfiEncoding { .. }) {
                         return t;
                     }
                     let variant = adt_def.non_enum_variant();
@@ -243,24 +239,24 @@ fn trait_object_ty<'tcx>(tcx: TyCtxt<'tcx>, poly_trait_ref: ty::PolyTraitRef<'tc
         .flat_map(|super_poly_trait_ref| {
             tcx.associated_items(super_poly_trait_ref.def_id())
                 .in_definition_order()
-                .filter(|item| item.is_type())
+                .filter(|item| item.is_type() || item.is_type_const(tcx))
                 .filter(|item| !tcx.generics_require_sized_self(item.def_id))
-                .map(move |assoc_ty| {
+                .map(move |assoc_item| {
                     super_poly_trait_ref.map_bound(|super_trait_ref| {
-                        let alias_ty =
-                            ty::AliasTy::new_from_args(tcx, assoc_ty.def_id, super_trait_ref.args);
-                        let resolved = tcx.normalize_erasing_regions(
-                            ty::TypingEnv::fully_monomorphized(),
-                            alias_ty.to_ty(tcx),
+                        let projection_term = ty::AliasTerm::new_from_args(
+                            tcx,
+                            assoc_item.def_id,
+                            super_trait_ref.args,
                         );
-                        debug!("Resolved {:?} -> {resolved}", alias_ty.to_ty(tcx));
+                        let term = tcx.normalize_erasing_regions(
+                            ty::TypingEnv::fully_monomorphized(),
+                            projection_term.to_term(tcx),
+                        );
+                        debug!("Projection {:?} -> {term}", projection_term.to_term(tcx),);
                         ty::ExistentialPredicate::Projection(
                             ty::ExistentialProjection::erase_self_ty(
                                 tcx,
-                                ty::ProjectionPredicate {
-                                    projection_term: alias_ty.into(),
-                                    term: resolved.into(),
-                                },
+                                ty::ProjectionPredicate { projection_term, term },
                             ),
                         )
                     })

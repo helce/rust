@@ -748,6 +748,10 @@ pub enum BuiltinLintDiag {
     },
     UnusedVisibility(Span),
     AttributeLint(AttributeLintKind),
+    UnreachableCfg {
+        span: Span,
+        wildcard_span: Option<Span>,
+    },
 }
 
 #[derive(Debug, HashStable_Generic)]
@@ -796,6 +800,7 @@ pub enum AttributeLintKind {
         attr_name: Symbol,
     },
     DocInvalid,
+    AmbiguousDeriveHelpers,
     DocUnknownInclude {
         span: Span,
         inner: &'static str,
@@ -822,9 +827,40 @@ pub enum AttributeLintKind {
     DocTestLiteral,
     AttrCrateLevelOnly,
     DoNotRecommendDoesNotExpectArgs,
+    CrateTypeUnknown {
+        span: Span,
+        suggested: Option<Symbol>,
+    },
     MalformedDoc,
     ExpectedNoArgs,
     ExpectedNameValue,
+    MalformedOnUnimplementedAttr {
+        span: Span,
+    },
+    MalformedOnConstAttr {
+        span: Span,
+    },
+    MalformedDiagnosticFormat {
+        warning: FormatWarning,
+    },
+    DiagnosticWrappedParserError {
+        description: String,
+        label: String,
+        span: Span,
+    },
+    IgnoredDiagnosticOption {
+        option_name: Symbol,
+        first_span: Span,
+        later_span: Span,
+    },
+    MissingOptionsForOnUnimplemented,
+    MissingOptionsForOnConst,
+}
+
+#[derive(Debug, Clone, HashStable_Generic)]
+pub enum FormatWarning {
+    PositionalArgument { span: Span, help: String },
+    InvalidSpecifier { name: String, span: Span },
 }
 
 pub type RegisteredTools = FxIndexSet<Ident>;

@@ -9,6 +9,7 @@ use crate::alloc::Layout;
 use crate::clone::TrivialClone;
 use crate::marker::{Destruct, DiscriminantKind};
 use crate::panic::const_assert;
+use crate::ptr::Alignment;
 use crate::{clone, cmp, fmt, hash, intrinsics, ptr};
 
 mod manually_drop;
@@ -1257,6 +1258,13 @@ pub trait SizedTypeProperties: Sized {
     #[lang = "mem_align_const"]
     const ALIGN: usize = intrinsics::align_of::<Self>();
 
+    #[doc(hidden)]
+    #[unstable(feature = "ptr_alignment_type", issue = "102070")]
+    const ALIGNMENT: Alignment = {
+        // This can't panic since type alignment is always a power of two.
+        Alignment::new(Self::ALIGN).unwrap()
+    };
+
     /// `true` if this type requires no storage.
     /// `false` if its [size](size_of) is greater than zero.
     ///
@@ -1480,12 +1488,13 @@ pub macro offset_of($Container:ty, $($fields:expr)+ $(,)?) {
 ///
 /// [inhabited]: https://doc.rust-lang.org/reference/glossary.html#inhabited
 #[unstable(feature = "mem_conjure_zst", issue = "95383")]
+#[rustc_const_unstable(feature = "mem_conjure_zst", issue = "95383")]
 pub const unsafe fn conjure_zst<T>() -> T {
     const_assert!(
         size_of::<T>() == 0,
-        "mem::conjure_zst invoked on a nonzero-sized type",
-        "mem::conjure_zst invoked on type {t}, which is not zero-sized",
-        t: &str = stringify!(T)
+        "mem::conjure_zst invoked on a non-zero-sized type",
+        "mem::conjure_zst invoked on type {name}, which is not zero-sized",
+        name: &str = crate::any::type_name::<T>()
     );
 
     // SAFETY: because the caller must guarantee that it's inhabited and zero-sized,

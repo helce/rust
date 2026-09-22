@@ -7,6 +7,6 @@ fn main() {
     //~^ WARN denote infinite loops with
 
     [(); { for _ in 0usize.. {}; 0}];
-    //~^ ERROR cannot use `for`
-    //~| ERROR cannot use `for`
+    //~^ ERROR cannot use `for` loop on `std::ops::RangeFrom<usize>` in constants
+    //~| ERROR cannot use `for` loop on `std::ops::RangeFrom<usize>` in constants
 }

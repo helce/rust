@@ -1822,7 +1822,7 @@ impl File {
             _ => {
                 #[cfg(all(target_os = "linux", target_env = "gnu", target_pointer_width = "32", not(target_arch = "riscv32")))]
                 {
-                    use crate::sys::{time::__timespec64, weak::weak};
+                    use crate::sys::pal::{time::__timespec64, weak::weak};
 
                     // Added in glibc 2.34
                     weak!(
@@ -2132,9 +2132,6 @@ pub fn link(original: &CStr, link: &CStr) -> io::Result<()> {
             // Android has `linkat` on newer versions, but we happen to know
             // `link` always has the correct behavior, so it's here as well.
             target_os = "android",
-            // wasi-sdk-29-and-prior have a buggy `linkat` so use `link` instead
-            // until wasi-sdk is updated (see WebAssembly/wasi-libc#690)
-            target_os = "wasi",
             // Other misc platforms
             target_os = "horizon",
             target_os = "vita",
@@ -2258,7 +2255,7 @@ fn set_times_impl(p: &CStr, times: FileTimes, follow_symlinks: bool) -> io::Resu
             let flags = if follow_symlinks { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
             #[cfg(all(target_os = "linux", target_env = "gnu", target_pointer_width = "32", not(target_arch = "riscv32")))]
             {
-                use crate::sys::{time::__timespec64, weak::weak};
+                use crate::sys::pal::{time::__timespec64, weak::weak};
 
                 // Added in glibc 2.34
                 weak!(

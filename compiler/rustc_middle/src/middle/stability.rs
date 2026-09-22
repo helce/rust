@@ -4,7 +4,7 @@
 use std::num::NonZero;
 
 use rustc_ast::NodeId;
-use rustc_errors::{Applicability, Diag, EmissionGuarantee, LintBuffer};
+use rustc_errors::{Applicability, Diag, EmissionGuarantee, LintBuffer, LintDiagnostic, msg};
 use rustc_feature::GateIssue;
 use rustc_hir::attrs::{DeprecatedSince, Deprecation};
 use rustc_hir::def_id::{DefId, LocalDefId};
@@ -103,7 +103,7 @@ fn deprecation_lint(is_in_effect: bool) -> &'static Lint {
 
 #[derive(Subdiagnostic)]
 #[suggestion(
-    middle_deprecated_suggestion,
+    "replace the use of the deprecated {$kind}",
     code = "{suggestion}",
     style = "verbose",
     applicability = "machine-applicable"
@@ -119,20 +119,46 @@ pub struct DeprecationSuggestion {
 pub struct Deprecated {
     pub sub: Option<DeprecationSuggestion>,
 
-    // FIXME: make this translatable
     pub kind: String,
     pub path: String,
     pub note: Option<Symbol>,
     pub since_kind: DeprecatedSinceKind,
 }
 
-impl<'a, G: EmissionGuarantee> rustc_errors::LintDiagnostic<'a, G> for Deprecated {
+impl<'a, G: EmissionGuarantee> rustc_errors::Diagnostic<'a, G> for Deprecated {
+    fn into_diag(
+        self,
+        dcx: rustc_errors::DiagCtxtHandle<'a>,
+        level: rustc_errors::Level,
+    ) -> Diag<'a, G> {
+        let mut diag = Diag::new(dcx, level, "");
+        self.decorate_lint(&mut diag);
+        diag
+    }
+}
+
+impl<'a, G: EmissionGuarantee> LintDiagnostic<'a, G> for Deprecated {
     fn decorate_lint<'b>(self, diag: &'b mut Diag<'a, G>) {
         diag.primary_message(match &self.since_kind {
-            DeprecatedSinceKind::InEffect => crate::fluent_generated::middle_deprecated,
-            DeprecatedSinceKind::InFuture => crate::fluent_generated::middle_deprecated_in_future,
+            DeprecatedSinceKind::InEffect => msg!(
+                "use of deprecated {$kind} `{$path}`{$has_note ->
+                    [true] : {$note}
+                    *[other] {\"\"}
+                }"
+            ),
+            DeprecatedSinceKind::InFuture => msg!(
+                "use of {$kind} `{$path}` that will be deprecated in a future Rust version{$has_note ->
+                    [true] : {$note}
+                    *[other] {\"\"}
+                }"
+            ),
             DeprecatedSinceKind::InVersion(_) => {
-                crate::fluent_generated::middle_deprecated_in_version
+                msg!(
+                    "use of {$kind} `{$path}` that will be deprecated in future version {$version}{$has_note ->
+                        [true] : {$note}
+                        *[other] {\"\"}
+                    }"
+                )
             }
         });
         diag.arg("kind", self.kind);

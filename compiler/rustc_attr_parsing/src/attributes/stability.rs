@@ -9,7 +9,7 @@ use rustc_hir::{
 
 use super::prelude::*;
 use super::util::parse_version;
-use crate::session_diagnostics::{self};
+use crate::session_diagnostics;
 
 macro_rules! reject_outside_std {
     ($cx: ident) => {
@@ -173,19 +173,19 @@ impl<S: Stage> AttributeParser<S> for BodyStabilityParser {
     fn finalize(self, _cx: &FinalizeContext<'_, '_, S>) -> Option<AttributeKind> {
         let (stability, span) = self.stability?;
 
-        Some(AttributeKind::BodyStability { stability, span })
+        Some(AttributeKind::RustcBodyStability { stability, span })
     }
 }
 
-pub(crate) struct ConstStabilityIndirectParser;
-impl<S: Stage> NoArgsAttributeParser<S> for ConstStabilityIndirectParser {
+pub(crate) struct RustcConstStableIndirectParser;
+impl<S: Stage> NoArgsAttributeParser<S> for RustcConstStableIndirectParser {
     const PATH: &[Symbol] = &[sym::rustc_const_stable_indirect];
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Ignore;
     const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[
         Allow(Target::Fn),
         Allow(Target::Method(MethodKind::Inherent)),
     ]);
-    const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::ConstStabilityIndirect;
+    const CREATE: fn(Span) -> AttributeKind = |_| AttributeKind::RustcConstStableIndirect;
 }
 
 #[derive(Default)]
@@ -244,7 +244,20 @@ impl<S: Stage> AttributeParser<S> for ConstStabilityParser {
             this.promotable = true;
         }),
     ];
-    const ALLOWED_TARGETS: AllowedTargets = ALLOWED_TARGETS;
+    const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[
+        Allow(Target::Fn),
+        Allow(Target::Method(MethodKind::Inherent)),
+        Allow(Target::Method(MethodKind::TraitImpl)),
+        Allow(Target::Method(MethodKind::Trait { body: true })),
+        Allow(Target::Impl { of_trait: false }),
+        Allow(Target::Impl { of_trait: true }),
+        Allow(Target::Use), // FIXME I don't think this does anything?
+        Allow(Target::Const),
+        Allow(Target::AssocConst),
+        Allow(Target::Trait),
+        Allow(Target::Static),
+        Allow(Target::Crate),
+    ]);
 
     fn finalize(mut self, cx: &FinalizeContext<'_, '_, S>) -> Option<AttributeKind> {
         if self.promotable {
@@ -258,7 +271,7 @@ impl<S: Stage> AttributeParser<S> for ConstStabilityParser {
 
         let (stability, span) = self.stability?;
 
-        Some(AttributeKind::ConstStability { stability, span })
+        Some(AttributeKind::RustcConstStability { stability, span })
     }
 }
 

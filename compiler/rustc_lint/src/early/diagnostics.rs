@@ -4,7 +4,7 @@ use rustc_ast::util::unicode::TEXT_FLOW_CONTROL_CHARS;
 use rustc_errors::{
     Applicability, Diag, DiagArgValue, LintDiagnostic, elided_lifetime_in_path_suggestion,
 };
-use rustc_hir::lints::AttributeLintKind;
+use rustc_hir::lints::{AttributeLintKind, FormatWarning};
 use rustc_middle::middle::stability;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::Session;
@@ -293,6 +293,14 @@ pub fn decorate_builtin_lint(
             }
             .decorate_lint(diag);
         }
+        BuiltinLintDiag::UnreachableCfg { span, wildcard_span } => match wildcard_span {
+            Some(wildcard_span) => {
+                lints::UnreachableCfgSelectPredicateWildcard { span, wildcard_span }
+                    .decorate_lint(diag)
+            }
+            None => lints::UnreachableCfgSelectPredicate { span }.decorate_lint(diag),
+        },
+
         BuiltinLintDiag::UnusedCrateDependency { extern_crate, local_crate } => {
             lints::UnusedCrateDependency { extern_crate, local_crate }.decorate_lint(diag)
         }
@@ -375,6 +383,10 @@ pub fn decorate_attribute_lint(
             lints::DocAutoCfgExpectsHideOrShow.decorate_lint(diag)
         }
 
+        &AttributeLintKind::AmbiguousDeriveHelpers => {
+            lints::AmbiguousDeriveHelpers.decorate_lint(diag)
+        }
+
         &AttributeLintKind::DocAutoCfgHideShowUnexpectedItem { attr_name } => {
             lints::DocAutoCfgHideShowUnexpectedItem { attr_name }.decorate_lint(diag)
         }
@@ -424,10 +436,42 @@ pub fn decorate_attribute_lint(
             lints::DoNotRecommendDoesNotExpectArgs.decorate_lint(diag)
         }
 
+        &AttributeLintKind::CrateTypeUnknown { span, suggested } => lints::UnknownCrateTypes {
+            sugg: suggested.map(|s| lints::UnknownCrateTypesSuggestion { span, snippet: s }),
+        }
+        .decorate_lint(diag),
+
         &AttributeLintKind::MalformedDoc => lints::MalformedDoc.decorate_lint(diag),
 
         &AttributeLintKind::ExpectedNoArgs => lints::ExpectedNoArgs.decorate_lint(diag),
 
         &AttributeLintKind::ExpectedNameValue => lints::ExpectedNameValue.decorate_lint(diag),
+        &AttributeLintKind::MalformedOnUnimplementedAttr { span } => {
+            lints::MalformedOnUnimplementedAttrLint { span }.decorate_lint(diag)
+        }
+        &AttributeLintKind::MalformedOnConstAttr { span } => {
+            lints::MalformedOnConstAttrLint { span }.decorate_lint(diag)
+        }
+        AttributeLintKind::MalformedDiagnosticFormat { warning } => match warning {
+            FormatWarning::PositionalArgument { .. } => {
+                lints::DisallowedPositionalArgument.decorate_lint(diag)
+            }
+            FormatWarning::InvalidSpecifier { .. } => {
+                lints::InvalidFormatSpecifier.decorate_lint(diag)
+            }
+        },
+        AttributeLintKind::DiagnosticWrappedParserError { description, label, span } => {
+            lints::WrappedParserError { description, label, span: *span }.decorate_lint(diag)
+        }
+        &AttributeLintKind::IgnoredDiagnosticOption { option_name, first_span, later_span } => {
+            lints::IgnoredDiagnosticOption { option_name, first_span, later_span }
+                .decorate_lint(diag)
+        }
+        &AttributeLintKind::MissingOptionsForOnUnimplemented => {
+            lints::MissingOptionsForOnUnimplementedAttr.decorate_lint(diag)
+        }
+        &AttributeLintKind::MissingOptionsForOnConst => {
+            lints::MissingOptionsForOnConstAttr.decorate_lint(diag)
+        }
     }
 }

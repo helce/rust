@@ -468,12 +468,12 @@ impl<'p, 'tcx: 'p> RustcPatCtxt<'p, 'tcx> {
                 fields = vec![];
                 arity = 0;
             }
-            PatKind::Deref { subpattern } => {
+            PatKind::Deref { pin, subpattern } => {
                 fields = vec![self.lower_pat(subpattern).at_index(0)];
                 arity = 1;
-                ctor = match ty.pinned_ref() {
-                    None if ty.is_ref() => Ref,
-                    Some((inner_ty, _)) => {
+                ctor = match (pin, ty.maybe_pinned_ref()) {
+                    (ty::Pinnedness::Not, Some((_, ty::Pinnedness::Not, _, _))) => Ref,
+                    (ty::Pinnedness::Pinned, Some((inner_ty, ty::Pinnedness::Pinned, _, _))) => {
                         self.internal_state.has_lowered_deref_pat.set(true);
                         DerefPattern(RevealedTy(inner_ty))
                     }

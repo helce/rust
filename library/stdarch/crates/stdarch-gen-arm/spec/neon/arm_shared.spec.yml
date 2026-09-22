@@ -2603,8 +2603,8 @@ intrinsics:
     return_type: "{neon_type[1]}"
     attr:
       - *neon-v7
-      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vld1]]}]]
-      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld1]]}]]
+      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vld]]}]]
+      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld]]}]]
       - *neon-not-arm-stable
       - *neon-cfg-arm-unstable
     safety:
@@ -2617,13 +2617,12 @@ intrinsics:
       - ["*const f32", float32x2x4_t]
       - ["*const f32", float32x4x4_t]
     compose:
-      - LLVMLink:
-          name: "vld1x{neon_type[1].tuple}.{neon_type[1]}"
-          links:
-            - link: "llvm.aarch64.neon.ld1x{neon_type[1].tuple}.v{neon_type[1].lane}f{neon_type[1].base}.p0"
-              arch: aarch64,arm64ec
-            - link: "llvm.arm.neon.vld1x{neon_type[1].tuple}.v{neon_type[1].lane}f{neon_type[1].base}.p0"
-              arch: arm
+      - FnCall:
+          - 'crate::ptr::read_unaligned'
+          - - MethodCall:
+                - a
+                - cast
+                - []
 
   - name: "vld1{neon_type[1].no}"
     doc: "Load multiple single-element structures to one, two, three, or four registers"
@@ -2631,8 +2630,8 @@ intrinsics:
     return_type: "{neon_type[1]}"
     attr:
       - *neon-v7
-      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vld1]]}]]
-      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld1]]}]]
+      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vld]]}]]
+      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld]]}]]
       - *neon-not-arm-stable
       - *neon-cfg-arm-unstable
     safety:
@@ -2663,13 +2662,12 @@ intrinsics:
       - ["*const i64", int64x2x3_t]
       - ["*const i64", int64x2x4_t]
     compose:
-      - LLVMLink:
-          name: "ld1x{neon_type[1].tuple}.{neon_type[1]}"
-          links:
-            - link: "llvm.aarch64.neon.ld1x{neon_type[1].tuple}.v{neon_type[1].lane}i{neon_type[1].base}.p0"
-              arch: aarch64,arm64ec
-            - link: "llvm.arm.neon.vld1x{neon_type[1].tuple}.v{neon_type[1].lane}i{neon_type[1].base}.p0"
-              arch: arm
+      - FnCall:
+          - 'crate::ptr::read_unaligned'
+          - - MethodCall:
+                - a
+                - cast
+                - []
 
   - name: "vld1{neon_type[1].no}"
     doc: "Load multiple single-element structures to one, two, three, or four registers"
@@ -2677,10 +2675,11 @@ intrinsics:
     return_type: "{neon_type[1]}"
     attr:
       - *neon-v7
-      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vld1]]}]]
-      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld1]]}]]
+      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vld]]}]]
+      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld]]}]]
       - *neon-not-arm-stable
       - *neon-cfg-arm-unstable
+    big_endian_inverse: false
     safety:
       unsafe: [neon]
     types:
@@ -2722,12 +2721,11 @@ intrinsics:
       - ["*const p16", poly16x8x4_t, int16x8x4_t]
     compose:
       - FnCall:
-          - transmute
-          - - FnCall:
-                - "vld1{neon_type[2].no}"
-                - - FnCall:
-                      - transmute
-                      - - a
+          - 'crate::ptr::read_unaligned'
+          - - MethodCall:
+                - a
+                - cast
+                - []
 
   - name: "vld1{neon_type[1].no}"
     doc: "Load multiple single-element structures to one, two, three, or four registers"
@@ -2737,9 +2735,10 @@ intrinsics:
       - *neon-aes
       - *neon-v8
       - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [nop]]}]]
-      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld1]]}]]
+      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld]]}]]
       - *neon-not-arm-stable
       - *neon-cfg-arm-unstable
+    big_endian_inverse: false
     safety:
       unsafe: [neon]
     types:
@@ -2750,12 +2749,11 @@ intrinsics:
       - ["*const p64", poly64x2x4_t, int64x2x4_t]
     compose:
       - FnCall:
-          - transmute
-          - - FnCall:
-                - "vld1{neon_type[2].no}"
-                - - FnCall:
-                      - transmute
-                      - - a
+          - 'crate::ptr::read_unaligned'
+          - - MethodCall:
+                - a
+                - cast
+                - []
 
   - name: "vld1{neon_type[1].no}"
     doc: "Load multiple single-element structures to one, two, three, or four registers"
@@ -2764,8 +2762,8 @@ intrinsics:
     attr:
       - *neon-aes
       - *neon-v8
-      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vld1]]}]]
-      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld1]]}]]
+      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vld]]}]]
+      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld]]}]]
       - *neon-not-arm-stable
       - *neon-cfg-arm-unstable
     safety:
@@ -2774,12 +2772,11 @@ intrinsics:
       - ["*const p64", poly64x1x2_t, int64x1x2_t]
     compose:
       - FnCall:
-          - transmute
-          - - FnCall:
-                - "vld1{neon_type[2].no}"
-                - - FnCall:
-                      - transmute
-                      - - a
+          - 'crate::ptr::read_unaligned'
+          - - MethodCall:
+                - a
+                - cast
+                - []
 
   - name: "vld1{neon_type[1].no}"
     doc: "Load multiple single-element structures to one, two, three, or four registers"
@@ -2788,7 +2785,7 @@ intrinsics:
     attr:
       - *neon-v7
       - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vld1]]}]]
-      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld1]]}]]
+      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld]]}]]
       - *arm-fp16
       - *neon-unstable-f16
       - *target-not-arm64ec
@@ -2802,13 +2799,12 @@ intrinsics:
       - ["*const f16", float16x4x4_t]
       - ["*const f16", float16x8x4_t]
     compose:
-      - LLVMLink:
-          name: "vld1x{neon_type[1].tuple}.{neon_type[1]}"
-          links:
-            - link: "llvm.aarch64.neon.ld1x{neon_type[1].tuple}.v{neon_type[1].lane}f{neon_type[1].base}.p0"
-              arch: aarch64,arm64ec
-            - link: "llvm.arm.neon.vld1x{neon_type[1].tuple}.v{neon_type[1].lane}f{neon_type[1].base}.p0"
-              arch: arm
+      - FnCall:
+          - 'crate::ptr::read_unaligned'
+          - - MethodCall:
+                - a
+                - cast
+                - []
 
   - name: "vld1{type[2]}_{neon_type[1]}"
     doc: "Load one single-element structure to one lane of one register"
@@ -2980,6 +2976,7 @@ intrinsics:
       - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld2]]}]]
       - *neon-not-arm-stable
       - *neon-cfg-arm-unstable
+    big_endian_inverse: false
     safety:
       unsafe: [neon]
     types:
@@ -3010,6 +3007,7 @@ intrinsics:
       - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [nop]]}]]
       - *neon-not-arm-stable
       - *neon-cfg-arm-unstable
+    big_endian_inverse: false
     safety:
       unsafe: [neon]
     types:
@@ -3106,6 +3104,7 @@ intrinsics:
       - *neon-cfg-arm-unstable
     static_defs:
       - "const LANE: i32"
+    big_endian_inverse: false
     safety:
       unsafe: [neon]
     types:
@@ -3670,19 +3669,11 @@ intrinsics:
     safety:
       unsafe: [neon]
     types:
-      - ["*const f16", float16x4x3_t, f16]
-      - ["*const f16", float16x8x3_t, f16]
+      - ["*const f16", float16x4x3_t, f16, "4"]
+      - ["*const f16", float16x8x3_t, f16, "8"]
     compose:
-      - LLVMLink:
-          name: "vld3.{neon_type[1]}"
-          arguments:
-            - "ptr: {type[0]}"
-          links:
-            - link: "llvm.aarch64.neon.ld3.v{neon_type[1].lane}{type[2]}.p0"
-              arch: aarch64,arm64ec
-      - FnCall:
-          - "_vld3{neon_type[1].nox}"
-          - - "a as _"
+      - FnCall: ["crate::core_arch::macros::deinterleaving_load!", [{ Type: "{type[2]}" }, "{type[3]}", "3", a], [], true]
+
 
   - name: "vld3{neon_type[1].dup_nox}"
     doc: Load single 3-element structure and replicate to all lanes of two registers
@@ -3876,23 +3867,17 @@ intrinsics:
     safety:
       unsafe: [neon]
     types:
-      - ['*const i8', int8x8x3_t, '*const int8x8_t', i8]
-      - ['*const i16', int16x4x3_t, '*const int16x4_t', i16]
-      - ['*const i32', int32x2x3_t, '*const int32x2_t', i32]
-      - ['*const i8', int8x16x3_t, '*const int8x16_t', i8]
-      - ['*const i16', int16x8x3_t, '*const int16x8_t', i16]
-      - ['*const i32', int32x4x3_t, '*const int32x4_t', i32]
-      - ['*const f32', float32x2x3_t, '*const float32x2_t', f32]
-      - ['*const f32', float32x4x3_t, '*const float32x4_t', f32]
+      - ['*const i8', int8x8x3_t, i8, "8"]
+      - ['*const i16', int16x4x3_t, i16, "4"]
+      - ['*const i32', int32x2x3_t, i32, "2"]
+      - ['*const i8', int8x16x3_t, i8, "16"]
+      - ['*const i16', int16x8x3_t, i16, "8"]
+      - ['*const i32', int32x4x3_t, i32, "4"]
+      - ['*const f32', float32x2x3_t, f32, "2"]
+      - ['*const f32', float32x4x3_t, f32, "4"]
     compose:
-      - LLVMLink:
-          name: 'vld3{neon_type[1].nox}'
-          arguments:
-            - 'ptr: {type[2]}'
-          links:
-            - link: 'llvm.aarch64.neon.ld3.v{neon_type[1].lane}{type[3]}.p0'
-              arch: aarch64,arm64ec
-      - FnCall: ['_vld3{neon_type[1].nox}', ['a as _']]
+      - FnCall: ["crate::core_arch::macros::deinterleaving_load!", [{ Type: "{type[2]}" }, "{type[3]}", "3", a], [], true]
+
 
   - name: "vld3{neon_type[1].nox}"
     doc: Load multiple 3-element structures to three registers
@@ -3907,14 +3892,12 @@ intrinsics:
     types:
       - ['*const i64', int64x1x3_t, '*const int64x1_t', i64]
     compose:
-      - LLVMLink:
-          name: "vld3{neon_type[1].nox}"
-          arguments:
-            - 'ptr: {type[2]}'
-          links:
-            - link: 'llvm.aarch64.neon.ld3.v{neon_type[1].lane}{type[3]}.p0'
-              arch: aarch64,arm64ec
-      - FnCall: ['_vld3{neon_type[1].nox}', ['a as _']]
+      - FnCall:
+          - 'crate::ptr::read_unaligned'
+          - - MethodCall:
+                - a
+                - cast
+                - []
 
   - name: "vld3{neon_type[1].nox}"
     doc: Load multiple 3-element structures to three registers
@@ -4110,6 +4093,7 @@ intrinsics:
       - *neon-not-arm-stable
       - *neon-cfg-arm-unstable
     static_defs: ['const LANE: i32']
+    big_endian_inverse: false
     safety:
       unsafe: [neon]
     types:
@@ -4140,6 +4124,7 @@ intrinsics:
       - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld3]]}]]
       - *neon-not-arm-stable
       - *neon-cfg-arm-unstable
+    big_endian_inverse: false
     safety:
       unsafe: [neon]
     types:
@@ -4372,23 +4357,16 @@ intrinsics:
     safety:
       unsafe: [neon]
     types:
-      - ['*const i8', int8x8x4_t, i8, '*const int8x8_t']
-      - ['*const i32', int32x4x4_t, i32, '*const int32x4_t']
-      - ['*const i16', int16x4x4_t, i16, '*const int16x4_t']
-      - ['*const i32', int32x2x4_t, i32, '*const int32x2_t']
-      - ['*const i8', int8x16x4_t, i8, '*const int8x16_t']
-      - ['*const i16', int16x8x4_t, i16, '*const int16x8_t']
-      - ['*const f32', float32x2x4_t, f32, '*const float32x2_t']
-      - ['*const f32', float32x4x4_t, f32, '*const float32x4_t']
+      - ['*const i8', int8x8x4_t, i8, "8"]
+      - ['*const i32', int32x4x4_t, i32, "4"]
+      - ['*const i16', int16x4x4_t, i16, "4"]
+      - ['*const i32', int32x2x4_t, i32, "2"]
+      - ['*const i8', int8x16x4_t, i8, "16"]
+      - ['*const i16', int16x8x4_t, i16, "8"]
+      - ['*const f32', float32x2x4_t, f32, "2"]
+      - ['*const f32', float32x4x4_t, f32, "4"]
     compose:
-      - LLVMLink:
-          name: 'vld4{neon_type[1].nox}'
-          arguments:
-            - 'ptr: {type[3]}'
-          links:
-            - link: 'llvm.aarch64.neon.ld4.v{neon_type[1].lane}{type[2]}.p0'
-              arch: aarch64,arm64ec
-      - FnCall: ['_vld4{neon_type[1].nox}', ['a as _']]
+      - FnCall: ["crate::core_arch::macros::deinterleaving_load!", [{ Type: "{type[2]}" }, "{type[3]}", "4", a], [], true]
 
   - name: "vld4{neon_type[1].nox}"
     doc: Load multiple 4-element structures to four registers
@@ -4401,14 +4379,12 @@ intrinsics:
     types:
       - ['*const i64', int64x1x4_t, i64, '*const int64x1_t']
     compose:
-      - LLVMLink:
-          name: 'vld4{neon_type[1].nox}'
-          arguments:
-            - 'ptr: {type[3]}'
-          links:
-            - link: 'llvm.aarch64.neon.ld4.v{neon_type[1].lane}{type[2]}.p0'
-              arch: aarch64,arm64ec
-      - FnCall: ['_vld4{neon_type[1].nox}', ['a as _']]
+      - FnCall:
+          - 'crate::ptr::read_unaligned'
+          - - MethodCall:
+                - a
+                - cast
+                - []
 
   - name: "vld4{neon_type[1].lane_nox}"
     doc: Load multiple 4-element structures to four registers
@@ -4512,6 +4488,7 @@ intrinsics:
       - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [ld4]]}]]
       - *neon-not-arm-stable
       - *neon-cfg-arm-unstable
+    big_endian_inverse: false
     safety:
       unsafe: [neon]
     types:
@@ -4633,6 +4610,7 @@ intrinsics:
       - *neon-not-arm-stable
       - *neon-cfg-arm-unstable
     static_defs: ["const LANE: i32"]
+    big_endian_inverse: false
     safety:
       unsafe: [neon]
     types:
@@ -6511,13 +6489,10 @@ intrinsics:
       - ["s16", int16x4_t, int32x4_t]
       - ["s32", int32x2_t, int64x2_t]
     compose:
-      - LLVMLink:
-          name: "smull.{neon_type[1]}"
-          links:
-            - link: "llvm.aarch64.neon.smull.{neon_type[2]}"
-              arch: aarch64,arm64ec
-            - link: "llvm.arm.neon.vmulls.{neon_type[2]}"
-              arch: arm
+      - FnCall:
+          - simd_mul
+          - - FnCall: ['simd_cast', [a]]
+            - FnCall: ['simd_cast', [b]]
 
   - name: "vmull{neon_type[1].no}"
     doc: "Unsigned multiply long"
@@ -6535,13 +6510,10 @@ intrinsics:
       - ["u16", uint16x4_t, uint32x4_t]
       - ["u32", uint32x2_t, uint64x2_t]
     compose:
-      - LLVMLink:
-          name: "smull.{neon_type[1]}"
-          links:
-            - link: "llvm.aarch64.neon.umull.{neon_type[2]}"
-              arch: aarch64,arm64ec
-            - link: "llvm.arm.neon.vmullu.{neon_type[2]}"
-              arch: arm
+      - FnCall:
+          - simd_mul
+          - - FnCall: ['simd_cast', [a]]
+            - FnCall: ['simd_cast', [b]]
 
   - name: "vmull{neon_type[1].no}"
     doc: "Polynomial multiply long"
@@ -7095,6 +7067,132 @@ intrinsics:
           - "{neon_type[1]}"
           - FnCall: [simd_cast, [b]]
       - FnCall: [simd_sub, [c, d]]
+
+  - name: "vusdot{neon_type[0].laneq_nox}"
+    doc: "Dot product index form with unsigned and signed integers"
+    arguments: ["a: {neon_type[0]}", "b: {neon_type[1]}", "c: {neon_type[2]}"]
+    return_type: "{neon_type[0]}"
+    big_endian_inverse: true # TODO: Remove this attribute, and replace transmute with vreinterpret when https://github.com/llvm/llvm-project/pull/169337 is merged, LLVM inlining issue causing assertion failure.
+    attr:
+      - *neon-v8
+      - *neon-i8mm
+      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vusdot, 'LANE = 3']]}]]
+      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [usdot, 'LANE = 3']]}]]
+      - FnCall: [rustc_legacy_const_generics, ['3']]
+      - FnCall: [unstable, ['feature = "stdarch_neon_i8mm"', 'issue = "117223"']]
+    static_defs: ["const LANE: i32"]
+    safety: safe
+    types:
+      - [int32x2_t, uint8x8_t, int8x16_t, '[LANE as u32, LANE as u32]','']
+      - [int32x4_t, uint8x16_t, int8x16_t, '[LANE as u32, LANE as u32, LANE as u32, LANE as u32]','q']
+    compose:
+      - FnCall: [static_assert_uimm_bits!, [LANE, '2']]
+      - Let: [c, int32x4_t, {FnCall: [transmute, [c]]}]
+      - Let: [c, "{neon_type[0]}", {FnCall: [simd_shuffle!, [c, c, "{type[3]}"]]}]
+      - FnCall: ["vusdot{neon_type[0].no}", [a, b, {FnCall: [transmute, [c]]}]]
+      #- FnCall: ["vusdot{neon_type[0].no}", [a, b, {FnCall: ['vreinterpret{type[4]}_s8_s32', [c]]}]] 
+
+  - name: "vsudot{neon_type[0].laneq_nox}"
+    doc: "Dot product index form with signed and unsigned integers"
+    arguments: ["a: {neon_type[0]}", "b: {neon_type[1]}", "c: {neon_type[2]}"]
+    return_type: "{neon_type[0]}"
+    attr:
+      - *neon-v8
+      - *neon-i8mm
+      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vsudot, 'LANE = 1']]}]]
+      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [sudot, 'LANE = 3']]}]]
+      - FnCall: [rustc_legacy_const_generics, ['3']]
+      - FnCall: [unstable, ['feature = "stdarch_neon_i8mm"', 'issue = "117223"']]
+    static_defs: ["const LANE: i32"]
+    safety: safe
+    types:
+      - [int32x2_t, int8x8_t, uint8x16_t, '[LANE as u32, LANE as u32]', uint32x2_t]
+      - [int32x4_t, int8x16_t, uint8x16_t, '[LANE as u32, LANE as u32, LANE as u32, LANE as u32]', uint32x4_t]
+    compose:
+      - FnCall: [static_assert_uimm_bits!, [LANE, 2]]
+      - Let:
+          - c
+          - uint32x4_t
+          - FnCall: [transmute, [c]]
+      - Let:
+          - c
+          - "{type[4]}"
+          - FnCall: [simd_shuffle!, [c, c, "{type[3]}"]]
+      - FnCall: 
+          - "vusdot{neon_type[0].no}"
+          - - a
+            - FnCall: [transmute, [c]]
+            - b
+
+  - name: "vdot{neon_type[0].laneq_nox}"
+    doc: Dot product arithmetic (indexed)
+    arguments: ["a: {neon_type[0]}", "b: {neon_type[1]}", "c: {neon_type[2]}"]
+    return_type: "{neon_type[0]}"
+    static_defs: ["const LANE: i32"]
+    big_endian_inverse: true # TODO: Remove this attribute, and replace transmute with vreinterpret when https://github.com/llvm/llvm-project/pull/169337 is merged, LLVM inlining issue causing assertion failure.
+    attr:
+      - *neon-v8
+      - FnCall: [target_feature, ['enable = "neon,dotprod"']]
+      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vsdot, 'LANE = 0']]}]]
+      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [sdot, 'LANE = 0']]}]]
+      - FnCall: [rustc_legacy_const_generics, ['3']]
+      - FnCall: [unstable, ['feature = "stdarch_neon_dotprod"', 'issue = "117224"']]
+    safety: safe
+    types:
+      - [int32x2_t, int8x8_t, int8x16_t, int32x4_t, '[LANE as u32, LANE as u32]', '']
+      - [int32x4_t, int8x16_t, int8x16_t, int32x4_t, '[LANE as u32, LANE as u32, LANE as u32, LANE as u32]','q']
+    compose:
+      - FnCall: [static_assert_uimm_bits!, [LANE, '2']]
+      - Let:
+          - c
+          - "{neon_type[3]}"
+          - FnCall: [transmute, [c]]
+          #- FnCall: ['vreinterpretq_{neon_type[0]}_{neon_type[1]}', [c]]
+      - Let:
+          - c
+          - "{neon_type[0]}"
+          - FnCall: [simd_shuffle!, [c, c, '{type[4]}']]
+      - FnCall:
+          - "vdot{neon_type[0].no}"
+          - - a
+            - b
+            - FnCall: [transmute, [c]]
+            #- FnCall: ['vreinterpret{type[5]}_{neon_type[1]}_{neon_type[0]}', [c]]
+
+  - name: "vdot{neon_type[0].laneq_nox}"
+    doc: Dot product arithmetic (indexed)
+    arguments: ["a: {neon_type[0]}", "b: {neon_type[1]}", "c: {neon_type[2]}"]
+    return_type: "{neon_type[0]}"
+    static_defs: ["const LANE: i32"]
+    big_endian_inverse: true # TODO: Remove this attribute, and replace transmute with vreinterpret when https://github.com/llvm/llvm-project/pull/169337 is merged, LLVM inlining issue causing assertion failure.
+    attr:
+      - *neon-v8
+      - FnCall: [target_feature, ['enable = "neon,dotprod"']]
+      - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [vudot, 'LANE = 0']]}]]
+      - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [udot, 'LANE = 0']]}]]
+      - FnCall: [rustc_legacy_const_generics, ['3']]
+      - FnCall: [unstable, ['feature = "stdarch_neon_dotprod"', 'issue = "117224"']]
+    safety: safe
+    types:
+      - [uint32x2_t, uint8x8_t, uint8x16_t, uint32x4_t, '[LANE as u32, LANE as u32]','']
+      - [uint32x4_t, uint8x16_t, uint8x16_t, uint32x4_t, '[LANE as u32, LANE as u32, LANE as u32, LANE as u32]','q']
+    compose:
+      - FnCall: [static_assert_uimm_bits!, [LANE, '2']]
+      - Let:
+          - c
+          - "{neon_type[3]}"
+          - FnCall: [transmute, [c]]
+          #- FnCall: ['vreinterpretq_{neon_type[0]}_{neon_type[1]}', [c]]
+      - Let:
+          - c
+          - "{neon_type[0]}"
+          - FnCall: [simd_shuffle!, [c, c, '{type[4]}']]
+      - FnCall:
+          - "vdot{neon_type[0].no}"
+          - - a
+            - b
+            - FnCall: [transmute, [c]]
+            #- FnCall: ['vreinterpret{type[5]}_{neon_type[1]}_{neon_type[0]}', [c]]
 
   - name: "vdot{neon_type[0].no}"
     doc: Dot product arithmetic (vector)
@@ -8785,7 +8883,6 @@ intrinsics:
       - *neon-v7
       - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [nop]]}]]
       - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [nop]]}]]
-      - *neon-fp16
       - *neon-not-arm-stable-fp16
       - *neon-cfg-arm-unstable
       - *target-not-arm64ec
@@ -8849,7 +8946,6 @@ intrinsics:
       - *neon-v8
       - FnCall: [cfg_attr, [*test-is-arm, {FnCall: [assert_instr, [nop]]}]]
       - FnCall: [cfg_attr, [*neon-target-aarch64-arm64ec, {FnCall: [assert_instr, [nop]]}]]
-      - *neon-fp16
       - *neon-not-arm-stable-fp16
       - *neon-cfg-arm-unstable
       - *target-not-arm64ec
@@ -12313,19 +12409,10 @@ intrinsics:
     safety:
       unsafe: [neon]
     types:
-      - ["*const f16", float16x4x4_t, f16]
-      - ["*const f16", float16x8x4_t, f16]
+      - ["*const f16", float16x4x4_t, f16, "4"]
+      - ["*const f16", float16x8x4_t, f16, "8"]
     compose:
-      - LLVMLink:
-          name: "vld4.{neon_type[1]}"
-          arguments:
-            - "ptr: {type[0]}"
-          links:
-            - link: "llvm.aarch64.neon.ld4.v{neon_type[1].lane}{type[2]}.p0"
-              arch: aarch64,arm64ec
-      - FnCall:
-          - "_vld4{neon_type[1].nox}"
-          - - "a as _"
+      - FnCall: ["crate::core_arch::macros::deinterleaving_load!", [{ Type: "{type[2]}" }, "{type[3]}", "4", a], [], true]
 
   - name: "vld4{neon_type[1].dup_nox}"
     doc: Load single 4-element structure and replicate to all lanes of two registers

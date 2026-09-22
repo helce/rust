@@ -61,6 +61,7 @@ mod tests;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
 use base_db::Crate;
+use either::Either;
 use hir_expand::{
     EditionedFileId, ErasedAstId, HirFileId, InFile, MacroCallId, mod_path::ModPath, name::Name,
     proc_macro::ProcMacroKind,
@@ -75,8 +76,8 @@ use triomphe::Arc;
 use tt::TextRange;
 
 use crate::{
-    AstId, BlockId, BlockLoc, ExternCrateId, FunctionId, FxIndexMap, Lookup, MacroCallStyles,
-    MacroExpander, MacroId, ModuleId, ModuleIdLt, ProcMacroId, UseId,
+    AstId, BlockId, BlockLoc, BuiltinDeriveImplId, ExternCrateId, FunctionId, FxIndexMap, Lookup,
+    MacroCallStyles, MacroExpander, MacroId, ModuleId, ModuleIdLt, ProcMacroId, UseId,
     db::DefDatabase,
     item_scope::{BuiltinShadowMode, ItemScope},
     item_tree::TreeId,
@@ -192,7 +193,8 @@ pub struct DefMap {
     /// Tracks which custom derives are in scope for an item, to allow resolution of derive helper
     /// attributes.
     // FIXME: Figure out a better way for the IDE layer to resolve these?
-    derive_helpers_in_scope: FxHashMap<AstId<ast::Item>, Vec<(Name, MacroId, MacroCallId)>>,
+    derive_helpers_in_scope:
+        FxHashMap<AstId<ast::Item>, Vec<(Name, MacroId, Either<MacroCallId, BuiltinDeriveImplId>)>>,
     /// A mapping from [`hir_expand::MacroDefId`] to [`crate::MacroId`].
     pub macro_def_to_macro_id: FxHashMap<ErasedAstId, MacroId>,
 
@@ -209,12 +211,13 @@ struct DefMapCrateData {
     /// Side table for resolving derive helpers.
     exported_derives: FxHashMap<MacroId, Box<[Name]>>,
     fn_proc_macro_mapping: FxHashMap<FunctionId, ProcMacroId>,
+    fn_proc_macro_mapping_back: FxHashMap<ProcMacroId, FunctionId>,
 
     /// Custom tool modules registered with `#![register_tool]`.
     registered_tools: Vec<Symbol>,
     /// Unstable features of Rust enabled with `#![feature(A, B)]`.
     unstable_features: FxHashSet<Symbol>,
-    /// #[rustc_coherence_is_core]
+    /// `#[rustc_coherence_is_core]`
     rustc_coherence_is_core: bool,
     no_core: bool,
     no_std: bool,
@@ -228,6 +231,7 @@ impl DefMapCrateData {
         Self {
             exported_derives: FxHashMap::default(),
             fn_proc_macro_mapping: FxHashMap::default(),
+            fn_proc_macro_mapping_back: FxHashMap::default(),
             registered_tools: PREDEFINED_TOOLS.iter().map(|it| Symbol::intern(it)).collect(),
             unstable_features: FxHashSet::default(),
             rustc_coherence_is_core: false,
@@ -242,6 +246,7 @@ impl DefMapCrateData {
         let Self {
             exported_derives,
             fn_proc_macro_mapping,
+            fn_proc_macro_mapping_back,
             registered_tools,
             unstable_features,
             rustc_coherence_is_core: _,
@@ -252,6 +257,7 @@ impl DefMapCrateData {
         } = self;
         exported_derives.shrink_to_fit();
         fn_proc_macro_mapping.shrink_to_fit();
+        fn_proc_macro_mapping_back.shrink_to_fit();
         registered_tools.shrink_to_fit();
         unstable_features.shrink_to_fit();
     }
@@ -540,7 +546,7 @@ impl DefMap {
     pub fn derive_helpers_in_scope(
         &self,
         id: AstId<ast::Adt>,
-    ) -> Option<&[(Name, MacroId, MacroCallId)]> {
+    ) -> Option<&[(Name, MacroId, Either<MacroCallId, BuiltinDeriveImplId>)]> {
         self.derive_helpers_in_scope.get(&id.map(|it| it.upcast())).map(Deref::deref)
     }
 
@@ -566,6 +572,10 @@ impl DefMap {
 
     pub fn fn_as_proc_macro(&self, id: FunctionId) -> Option<ProcMacroId> {
         self.data.fn_proc_macro_mapping.get(&id).copied()
+    }
+
+    pub fn proc_macro_as_fn(&self, id: ProcMacroId) -> Option<FunctionId> {
+        self.data.fn_proc_macro_mapping_back.get(&id).copied()
     }
 
     pub fn krate(&self) -> Crate {

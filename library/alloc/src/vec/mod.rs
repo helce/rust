@@ -75,8 +75,6 @@
 
 #[cfg(not(no_global_oom_handling))]
 use core::clone::TrivialClone;
-#[cfg(not(no_global_oom_handling))]
-use core::cmp;
 use core::cmp::Ordering;
 use core::hash::{Hash, Hasher};
 #[cfg(not(no_global_oom_handling))]
@@ -88,7 +86,7 @@ use core::mem::{self, Assume, ManuallyDrop, MaybeUninit, SizedTypeProperties, Tr
 use core::ops::{self, Index, IndexMut, Range, RangeBounds};
 use core::ptr::{self, NonNull};
 use core::slice::{self, SliceIndex};
-use core::{fmt, hint, intrinsics, ub_checks};
+use core::{cmp, fmt, hint, intrinsics, ub_checks};
 
 #[stable(feature = "extract_if", since = "1.87.0")]
 pub use self::extract_if::ExtractIf;
@@ -1003,9 +1001,6 @@ const impl<T, A: [const] Allocator + [const] Destruct> Vec<T, A> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(push_mut)]
-    ///
-    ///
     /// let mut vec = vec![1, 2];
     /// let last = vec.push_mut(3);
     /// assert_eq!(*last, 3);
@@ -1023,7 +1018,7 @@ const impl<T, A: [const] Allocator + [const] Destruct> Vec<T, A> {
     /// vector's elements to a larger allocation. This expensive operation is
     /// offset by the *capacity* *O*(1) insertions it allows.
     #[inline]
-    #[unstable(feature = "push_mut", issue = "135974")]
+    #[stable(feature = "push_mut", since = "1.95.0")]
     #[must_use = "if you don't need a reference to the value, use `Vec::push` instead"]
     pub fn push_mut(&mut self, value: T) -> &mut T {
         // Inform codegen that the length does not change across grow_one().
@@ -1241,7 +1236,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(allocator_api, box_vec_non_null)]
+    /// #![feature(allocator_api)]
     ///
     /// use std::alloc::System;
     ///
@@ -1268,7 +1263,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// Using memory that was allocated elsewhere:
     ///
     /// ```rust
-    /// #![feature(allocator_api, box_vec_non_null)]
+    /// #![feature(allocator_api)]
     ///
     /// use std::alloc::{AllocError, Allocator, Global, Layout};
     ///
@@ -1368,7 +1363,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(allocator_api, box_vec_non_null)]
+    /// #![feature(allocator_api)]
     ///
     /// use std::alloc::System;
     ///
@@ -1613,6 +1608,73 @@ impl<T, A: Allocator> Vec<T, A> {
     pub fn shrink_to(&mut self, min_capacity: usize) {
         if self.capacity() > min_capacity {
             self.buf.shrink_to_fit(cmp::max(self.len, min_capacity));
+        }
+    }
+
+    /// Tries to shrink the capacity of the vector as much as possible
+    ///
+    /// The behavior of this method depends on the allocator, which may either shrink the vector
+    /// in-place or reallocate. The resulting vector might still have some excess capacity, just as
+    /// is the case for [`with_capacity`]. See [`Allocator::shrink`] for more details.
+    ///
+    /// [`with_capacity`]: Vec::with_capacity
+    ///
+    /// # Errors
+    ///
+    /// This function returns an error if the allocator fails to shrink the allocation,
+    /// the vector thereafter is still safe to use, the capacity remains unchanged
+    /// however. See [`Allocator::shrink`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(vec_fallible_shrink)]
+    ///
+    /// let mut vec = Vec::with_capacity(10);
+    /// vec.extend([1, 2, 3]);
+    /// assert!(vec.capacity() >= 10);
+    /// vec.try_shrink_to_fit().expect("why is the test harness failing to shrink to 12 bytes");
+    /// assert!(vec.capacity() >= 3);
+    /// ```
+    #[unstable(feature = "vec_fallible_shrink", issue = "152350")]
+    #[inline]
+    pub fn try_shrink_to_fit(&mut self) -> Result<(), TryReserveError> {
+        if self.capacity() > self.len { self.buf.try_shrink_to_fit(self.len) } else { Ok(()) }
+    }
+
+    /// Shrinks the capacity of the vector with a lower bound.
+    ///
+    /// The capacity will remain at least as large as both the length
+    /// and the supplied value.
+    ///
+    /// If the current capacity is less than the lower limit, this is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// This function returns an error if the allocator fails to shrink the allocation,
+    /// the vector thereafter is still safe to use, the capacity remains unchanged
+    /// however. See [`Allocator::shrink`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(vec_fallible_shrink)]
+    ///
+    /// let mut vec = Vec::with_capacity(10);
+    /// vec.extend([1, 2, 3]);
+    /// assert!(vec.capacity() >= 10);
+    /// vec.try_shrink_to(4).expect("why is the test harness failing to shrink to 12 bytes");
+    /// assert!(vec.capacity() >= 4);
+    /// vec.try_shrink_to(0).expect("this is a no-op and thus the allocator isn't involved.");
+    /// assert!(vec.capacity() >= 3);
+    /// ```
+    #[unstable(feature = "vec_fallible_shrink", issue = "152350")]
+    #[inline]
+    pub fn try_shrink_to(&mut self, min_capacity: usize) -> Result<(), TryReserveError> {
+        if self.capacity() > min_capacity {
+            self.buf.try_shrink_to_fit(cmp::max(self.len, min_capacity))
+        } else {
+            Ok(())
         }
     }
 
@@ -2196,7 +2258,6 @@ impl<T, A: Allocator> Vec<T, A> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(push_mut)]
     /// let mut vec = vec![1, 3, 5, 9];
     /// let x = vec.insert_mut(3, 6);
     /// *x += 1;
@@ -2210,7 +2271,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// the insertion index is 0.
     #[cfg(not(no_global_oom_handling))]
     #[inline]
-    #[unstable(feature = "push_mut", issue = "135974")]
+    #[stable(feature = "push_mut", since = "1.95.0")]
     #[track_caller]
     #[must_use = "if you don't need a reference to the value, use `Vec::insert` instead"]
     pub fn insert_mut(&mut self, index: usize, element: T) -> &mut T {
@@ -2689,7 +2750,6 @@ impl<T, A: Allocator> Vec<T, A> {
     /// Takes *O*(1) time.
     #[inline]
     #[unstable(feature = "vec_push_within_capacity", issue = "100486")]
-    // #[unstable(feature = "push_mut", issue = "135974")]
     pub fn push_within_capacity(&mut self, value: T) -> Result<&mut T, T> {
         if self.len == self.buf.capacity() {
             return Err(value);
@@ -2818,7 +2878,11 @@ impl<T, A: Allocator> Vec<T, A> {
         let count = other.len();
         self.reserve(count);
         let len = self.len();
-        unsafe { ptr::copy_nonoverlapping(other as *const T, self.as_mut_ptr().add(len), count) };
+        if count > 0 {
+            unsafe {
+                ptr::copy_nonoverlapping(other as *const T, self.as_mut_ptr().add(len), count)
+            };
+        }
         self.len += count;
     }
 

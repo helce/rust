@@ -1,7 +1,7 @@
 // tidy-alphabetical-start
+#![cfg_attr(bootstrap, feature(if_let_guard))]
 #![feature(assert_matches)]
 #![feature(box_patterns)]
-#![feature(if_let_guard)]
 #![feature(iter_intersperse)]
 #![feature(iter_order_by)]
 #![feature(never_type)]
@@ -66,8 +66,6 @@ use crate::diverges::Diverges;
 use crate::expectation::Expectation;
 use crate::fn_ctxt::LoweredTy;
 use crate::gather_locals::GatherLocalsVisitor;
-
-rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
 #[macro_export]
 macro_rules! type_error_struct {
@@ -199,6 +197,14 @@ fn typeck_with_inspect<'tcx>(
 
         let wf_code = ObligationCauseCode::WellFormed(Some(WellFormedLoc::Ty(def_id)));
         fcx.register_wf_obligation(expected_type.into(), body.value.span, wf_code);
+
+        if let hir::Node::AnonConst(_) = node {
+            fcx.require_type_is_sized(
+                expected_type,
+                body.value.span,
+                ObligationCauseCode::SizedConstOrStatic,
+            );
+        }
 
         fcx.check_expr_coercible_to_type(body.value, expected_type, None);
 
@@ -446,7 +452,7 @@ fn report_unexpected_variant_res(
                 }
             }
 
-            err.multipart_suggestion_verbose(descr, suggestion, Applicability::HasPlaceholders);
+            err.multipart_suggestion(descr, suggestion, Applicability::HasPlaceholders);
             err
         }
         Res::Def(DefKind::Variant, _) if expr.is_none() => {

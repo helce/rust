@@ -12,7 +12,7 @@ use clippy_utils::msrvs::{self, Msrv};
 use clippy_utils::res::MaybeDef;
 use clippy_utils::source::{SpanRangeExt, snippet};
 use clippy_utils::ty::implements_trait;
-use clippy_utils::{is_from_proc_macro, is_in_test, trait_ref_of_method};
+use clippy_utils::{is_from_proc_macro, is_in_test, sym, trait_ref_of_method};
 use itertools::Itertools;
 use rustc_ast::{
     FormatArgPosition, FormatArgPositionKind, FormatArgsPiece, FormatArgumentKind, FormatCount, FormatOptions,
@@ -21,14 +21,13 @@ use rustc_ast::{
 use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::Applicability;
 use rustc_errors::SuggestionStyle::{CompletelyHidden, ShowCode};
-use rustc_hir::attrs::AttributeKind;
 use rustc_hir::{Expr, ExprKind, LangItem, RustcVersion, find_attr};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_middle::ty::adjustment::{Adjust, Adjustment};
+use rustc_middle::ty::adjustment::{Adjust, Adjustment, DerefAdjustKind};
 use rustc_middle::ty::{self, GenericArg, List, TraitRef, Ty, TyCtxt, Upcast};
 use rustc_session::impl_lint_pass;
 use rustc_span::edition::Edition::Edition2021;
-use rustc_span::{Span, Symbol, sym};
+use rustc_span::{BytePos, Pos, Span, Symbol};
 use rustc_trait_selection::infer::TyCtxtInferExt;
 use rustc_trait_selection::traits::{Obligation, ObligationCause, Selection, SelectionContext};
 
@@ -229,6 +228,35 @@ declare_clippy_lint! {
     "formatting a pointer"
 }
 
+declare_clippy_lint! {
+    /// ### What it does
+    /// Suggests removing an unnecessary trailing comma before the closing parenthesis in
+    /// single-line macro invocations.
+    ///
+    /// ### Why is this bad?
+    /// The trailing comma is redundant and removing it is more consistent with how
+    /// `rustfmt` formats regular function calls.
+    ///
+    /// ### Known limitations
+    /// This lint currently only runs on format-like macros (e.g. `format!`, `println!`,
+    /// `write!`) because it relies on format-argument parsing; applying it to arbitrary
+    /// user macros could cause incorrect suggestions. It may be extended to other
+    /// macros in the future. Only single-line macro invocations are linted.
+    ///
+    /// ### Example
+    /// ```no_run
+    /// println!("Foo={}", 1,);
+    /// ```
+    /// Use instead:
+    /// ```no_run
+    /// println!("Foo={}", 1);
+    /// ```
+    #[clippy::version = "1.95.0"]
+    pub UNNECESSARY_TRAILING_COMMA,
+    pedantic,
+    "unnecessary trailing comma before closing parenthesis"
+}
+
 impl_lint_pass!(FormatArgs<'_> => [
     FORMAT_IN_FORMAT_ARGS,
     TO_STRING_IN_FORMAT_ARGS,
@@ -236,6 +264,7 @@ impl_lint_pass!(FormatArgs<'_> => [
     UNNECESSARY_DEBUG_FORMATTING,
     UNUSED_FORMAT_SPECS,
     POINTER_FORMAT,
+    UNNECESSARY_TRAILING_COMMA,
 ]);
 
 #[expect(clippy::struct_field_names)]
@@ -280,6 +309,7 @@ impl<'tcx> LateLintPass<'tcx> for FormatArgs<'tcx> {
                 has_pointer_format: &mut self.has_pointer_format,
             };
 
+            linter.check_trailing_comma();
             linter.check_templates();
 
             if self.msrv.meets(cx, msrvs::FORMAT_ARGS_CAPTURE) {
@@ -302,6 +332,29 @@ struct FormatArgsExpr<'a, 'tcx> {
 }
 
 impl<'tcx> FormatArgsExpr<'_, 'tcx> {
+    /// Check if there is a comma after the last format macro arg.
+    fn check_trailing_comma(&self) {
+        let span = self.macro_call.span;
+        if let Some(src) = span.get_source_text(self.cx)
+            && let Some(src) = src.strip_suffix([')', ']', '}'])
+            && let src = src.trim_end_matches(|c: char| c.is_whitespace() && c != '\n')
+            && let Some(src) = src.strip_suffix(',')
+            && let src = src.trim_end_matches(|c: char| c.is_whitespace() && c != '\n')
+            && !src.ends_with('\n')
+        {
+            span_lint_and_sugg(
+                self.cx,
+                UNNECESSARY_TRAILING_COMMA,
+                span.with_lo(span.lo() + BytePos::from_usize(src.len()))
+                    .with_hi(span.hi() - BytePos(1)),
+                "unnecessary trailing comma",
+                "remove the trailing comma",
+                String::new(),
+                Applicability::MachineApplicable,
+            );
+        }
+    }
+
     fn check_templates(&mut self) {
         for piece in &self.format_args.template {
             if let FormatArgsPiece::Placeholder(placeholder) = piece
@@ -662,10 +715,7 @@ impl<'tcx> FormatArgsExpr<'_, 'tcx> {
                     };
                     let selection = SelectionContext::new(&infcx).select(&obligation);
                     let derived = if let Ok(Some(Selection::UserDefined(data))) = selection {
-                        find_attr!(
-                            tcx.get_all_attrs(data.impl_def_id),
-                            AttributeKind::AutomaticallyDerived(..)
-                        )
+                        find_attr!(tcx, data.impl_def_id, AutomaticallyDerived(..))
                     } else {
                         false
                     };
@@ -704,12 +754,12 @@ where
     let mut n_needed = 0;
     loop {
         if let Some(Adjustment {
-            kind: Adjust::Deref(overloaded_deref),
+            kind: Adjust::Deref(deref),
             target,
         }) = iter.next()
         {
             n_total += 1;
-            if overloaded_deref.is_some() {
+            if let DerefAdjustKind::Overloaded(..) = deref {
                 n_needed = n_total;
             }
             ty = *target;

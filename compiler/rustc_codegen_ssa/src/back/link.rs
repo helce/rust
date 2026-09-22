@@ -11,24 +11,25 @@ use std::{env, fmt, fs, io, mem, str};
 
 use find_msvc_tools;
 use itertools::Itertools;
+use object::{Object, ObjectSection, ObjectSymbol};
 use regex::Regex;
 use rustc_arena::TypedArena;
 use rustc_attr_parsing::eval_config_entry;
-use rustc_data_structures::fx::FxIndexSet;
+use rustc_data_structures::fx::{FxHashSet, FxIndexSet};
 use rustc_data_structures::memmap::Mmap;
 use rustc_data_structures::temp_dir::MaybeTempDir;
-use rustc_errors::{DiagCtxtHandle, LintDiagnostic};
+use rustc_errors::DiagCtxtHandle;
 use rustc_fs_util::{TempDirBuilder, fix_windows_verbatim_for_gcc, try_canonicalize};
 use rustc_hir::attrs::NativeLibKind;
 use rustc_hir::def_id::{CrateNum, LOCAL_CRATE};
-use rustc_macros::LintDiagnostic;
+use rustc_macros::Diagnostic;
 use rustc_metadata::fs::{METADATA_FILENAME, copy_to_stdout, emit_wrapper_file};
 use rustc_metadata::{
     EncodedMetadata, NativeLibSearchFallback, find_native_static_library,
     walk_native_lib_search_dirs,
 };
 use rustc_middle::bug;
-use rustc_middle::lint::lint_level;
+use rustc_middle::lint::diag_lint_level;
 use rustc_middle::middle::debugger_visualizer::DebuggerVisualizerFile;
 use rustc_middle::middle::dependency_format::Linkage;
 use rustc_middle::middle::exported_symbols::SymbolExportKind;
@@ -136,7 +137,7 @@ pub fn link_binary(
                     )
                     .build(&out_filename);
                 }
-                CrateType::Staticlib => {
+                CrateType::StaticLib => {
                     link_staticlib(
                         sess,
                         archive_builder_builder,
@@ -474,7 +475,7 @@ fn link_staticlib(
 
     let res = each_linked_rlib(
         &codegen_results.crate_info,
-        Some(CrateType::Staticlib),
+        Some(CrateType::StaticLib),
         &mut |cnum, path| {
             let lto = are_upstream_rust_objects_already_included(sess)
                 && !ignored_for_lto(sess, &codegen_results.crate_info, cnum);
@@ -532,7 +533,7 @@ fn link_staticlib(
     let fmts = codegen_results
         .crate_info
         .dependency_formats
-        .get(&CrateType::Staticlib)
+        .get(&CrateType::StaticLib)
         .expect("no dependency formats for staticlib");
 
     let mut all_rust_dylibs = vec![];
@@ -661,8 +662,8 @@ fn link_dwarf_object(sess: &Session, cg_results: &CodegenResults, executable_out
     }
 }
 
-#[derive(LintDiagnostic)]
-#[diag(codegen_ssa_linker_output)]
+#[derive(Diagnostic)]
+#[diag("{$inner}")]
 /// Translating this is kind of useless. We don't pass translation flags to the linker, so we'd just
 /// end up with inconsistent languages within the same diagnostic.
 struct LinkerOutput {
@@ -937,9 +938,7 @@ fn link_natively(
 
             let level = codegen_results.crate_info.lint_levels.linker_messages;
             let lint = |msg| {
-                lint_level(sess, LINKER_MESSAGES, level, None, |diag| {
-                    LinkerOutput { inner: msg }.decorate_lint(diag)
-                })
+                diag_lint_level(sess, LINKER_MESSAGES, level, None, LinkerOutput { inner: msg });
             };
 
             if !prog.stderr.is_empty() {
@@ -1210,7 +1209,7 @@ fn add_sanitizer_libraries(
         return;
     }
 
-    if matches!(crate_type, CrateType::Rlib | CrateType::Staticlib) {
+    if matches!(crate_type, CrateType::Rlib | CrateType::StaticLib) {
         return;
     }
 
@@ -2185,6 +2184,71 @@ fn add_rpath_args(
     }
 }
 
+fn add_c_staticlib_symbols(
+    sess: &Session,
+    lib: &NativeLib,
+    out: &mut Vec<(String, SymbolExportKind)>,
+) -> io::Result<()> {
+    let file_path = find_native_static_library(lib.name.as_str(), lib.verbatim, sess);
+
+    let archive_map = unsafe { Mmap::map(File::open(&file_path)?)? };
+
+    let archive = object::read::archive::ArchiveFile::parse(&*archive_map)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    for member in archive.members() {
+        let member = member.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        let data = member
+            .data(&*archive_map)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        // clang LTO: raw LLVM bitcode
+        if data.starts_with(b"BC\xc0\xde") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "LLVM bitcode object in C static library (LTO not supported)",
+            ));
+        }
+
+        let object = object::File::parse(&*data)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        // gcc / clang ELF / Mach-O LTO
+        if object.sections().any(|s| {
+            s.name().map(|n| n.starts_with(".gnu.lto_") || n == ".llvm.lto").unwrap_or(false)
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "LTO object in C static library is not supported",
+            ));
+        }
+
+        for symbol in object.symbols() {
+            if symbol.scope() != object::SymbolScope::Dynamic {
+                continue;
+            }
+
+            let name = match symbol.name() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+
+            let export_kind = match symbol.kind() {
+                object::SymbolKind::Text => SymbolExportKind::Text,
+                object::SymbolKind::Data => SymbolExportKind::Data,
+                _ => continue,
+            };
+
+            // FIXME:The symbol mangle rules are slightly different in Windows(32-bit) and Apple.
+            // Need to be resolved.
+            out.push((name.to_string(), export_kind));
+        }
+    }
+
+    Ok(())
+}
+
 /// Produce the linker command line containing linker path and arguments.
 ///
 /// When comments in the function say "order-(in)dependent" they mean order-dependence between
@@ -2217,6 +2281,25 @@ fn linker_with_args(
     );
     let link_output_kind = link_output_kind(sess, crate_type);
 
+    let mut export_symbols = codegen_results.crate_info.exported_symbols[&crate_type].clone();
+
+    if crate_type == CrateType::Cdylib {
+        let mut seen = FxHashSet::default();
+
+        for lib in &codegen_results.crate_info.used_libraries {
+            if let NativeLibKind::Static { export_symbols: Some(true), .. } = lib.kind
+                && seen.insert((lib.name, lib.verbatim))
+            {
+                if let Err(err) = add_c_staticlib_symbols(&sess, lib, &mut export_symbols) {
+                    sess.dcx().fatal(format!(
+                        "failed to process C static library `{}`: {}",
+                        lib.name, err
+                    ));
+                }
+            }
+        }
+    }
+
     // ------------ Early order-dependent options ------------
 
     // If we're building something like a dynamic library then some platforms
@@ -2224,11 +2307,7 @@ fn linker_with_args(
     // dynamic library.
     // Must be passed before any libraries to prevent the symbols to export from being thrown away,
     // at least on some platforms (e.g. windows-gnu).
-    cmd.export_symbols(
-        tmpdir,
-        crate_type,
-        &codegen_results.crate_info.exported_symbols[&crate_type],
-    );
+    cmd.export_symbols(tmpdir, crate_type, &export_symbols);
 
     // Can be used for adding custom CRT objects or overriding order-dependent options above.
     // FIXME: In practice built-in target specs use this for arbitrary order-independent options,
@@ -2678,7 +2757,7 @@ fn add_native_libs_from_crate(
         let name = lib.name.as_str();
         let verbatim = lib.verbatim;
         match lib.kind {
-            NativeLibKind::Static { bundle, whole_archive } => {
+            NativeLibKind::Static { bundle, whole_archive, .. } => {
                 if link_static {
                     let bundle = bundle.unwrap_or(true);
                     let whole_archive = whole_archive == Some(true);

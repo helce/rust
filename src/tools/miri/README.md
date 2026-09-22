@@ -228,7 +228,8 @@ and macOS targets are usually on par. Windows is supported less well.
 
 ### Running tests in parallel
 
-Though it implements Rust threading, Miri itself is a single-threaded interpreter.
+Though it implements Rust threading, Miri itself is a single-threaded interpreter
+(it works like a multi-threaded OS on a single-core CPU).
 This means that when running `cargo miri test`, you will probably see a dramatic
 increase in the amount of time it takes to run your whole test suite due to the
 inherent interpreter slowdown and a loss of parallelism.
@@ -625,6 +626,8 @@ Definite bugs found:
 * [`ReentrantLock` not correctly dealing with reuse of addresses for TLS storage of different threads](https://github.com/rust-lang/rust/pull/141248)
 * [Rare Deadlock in the thread (un)parking example code](https://github.com/rust-lang/rust/issues/145816)
 * [`winit` registering a global constructor with the wrong ABI on Windows](https://github.com/rust-windowing/winit/issues/4435)
+* [`VecDeque::splice` confusing physical and logical indices](https://github.com/rust-lang/rust/issues/151758)
+* [Data race in `oneshot` channel](https://github.com/faern/oneshot/issues/69)
 
 Violations of [Stacked Borrows] found that are likely bugs (but Stacked Borrows is currently just an experiment):
 

@@ -692,6 +692,12 @@ declare_clippy_lint! {
     /// ///
     /// /// It was chosen by a fair dice roll.
     /// ```
+    ///
+    /// ### Terminal punctuation marks
+    /// This lint treats these characters as end markers: '.', '?', '!', '…' and ':'.
+    ///
+    /// The colon is not exactly a terminal punctuation mark, but this is required for paragraphs that
+    /// introduce a table or a list for example.
     #[clippy::version = "1.93.0"]
     pub DOC_PARAGRAPHS_MISSING_PUNCTUATION,
     restriction,
@@ -757,19 +763,11 @@ impl<'tcx> LateLintPass<'tcx> for Documentation {
                     self.check_private_items,
                 );
                 match item.kind {
-                    ItemKind::Fn { sig, body, .. } => {
+                    ItemKind::Fn { sig, body, .. }
                         if !(is_entrypoint_fn(cx, item.owner_id.to_def_id())
-                            || item.span.in_external_macro(cx.tcx.sess.source_map()))
-                        {
-                            missing_headers::check(
-                                cx,
-                                item.owner_id,
-                                sig,
-                                headers,
-                                Some(body),
-                                self.check_private_items,
-                            );
-                        }
+                            || item.span.in_external_macro(cx.tcx.sess.source_map())) =>
+                    {
+                        missing_headers::check(cx, item.owner_id, sig, headers, Some(body), self.check_private_items);
                     },
                     ItemKind::Trait(_, _, unsafety, ..) => match (headers.safety, unsafety) {
                         (false, Safety::Unsafe) => span_lint(
@@ -1010,6 +1008,7 @@ struct CodeTags {
     no_run: bool,
     ignore: bool,
     compile_fail: bool,
+    test_harness: bool,
 
     rust: bool,
 }
@@ -1020,6 +1019,7 @@ impl Default for CodeTags {
             no_run: false,
             ignore: false,
             compile_fail: false,
+            test_harness: false,
 
             rust: true,
         }
@@ -1053,7 +1053,11 @@ impl CodeTags {
                     tags.compile_fail = true;
                     seen_rust_tags = !seen_other_tags || seen_rust_tags;
                 },
-                "test_harness" | "standalone_crate" => {
+                "test_harness" => {
+                    tags.test_harness = true;
+                    seen_rust_tags = !seen_other_tags || seen_rust_tags;
+                },
+                "standalone_crate" => {
                     seen_rust_tags = !seen_other_tags || seen_rust_tags;
                 },
                 _ if item.starts_with("ignore-") => seen_rust_tags = true,
@@ -1289,7 +1293,7 @@ fn check_doc<'a, Events: Iterator<Item = (pulldown_cmark::Event<'a>, Range<usize
                     if tags.rust && !tags.compile_fail && !tags.ignore {
                         needless_doctest_main::check(cx, &text, range.start, fragments);
 
-                        if !tags.no_run {
+                        if !tags.no_run && !tags.test_harness {
                             test_attr_in_doctest::check(cx, &text, range.start, fragments);
                         }
                     }

@@ -367,7 +367,7 @@ impl<'tcx> Context<'tcx> {
         let file = match span.filename(self.sess()) {
             FileName::Real(ref path) => path
                 .local_path()
-                .unwrap_or(path.path(RemapPathScopeComponents::MACRO))
+                .unwrap_or(path.path(RemapPathScopeComponents::DOCUMENTATION))
                 .to_path_buf(),
             _ => return None,
         };
@@ -386,8 +386,9 @@ impl<'tcx> Context<'tcx> {
                     let e = ExternalCrate { crate_num: cnum };
                     (e.name(self.tcx()), e.src_root(self.tcx()))
                 }
-                ExternalLocation::Remote(ref s) => {
-                    root = s.to_string();
+                ExternalLocation::Remote { ref url, .. } => {
+                    // FIXME: relative extern URLs are not depth-adjusted for source pages
+                    root = url.to_string();
                     let e = ExternalCrate { crate_num: cnum };
                     (e.name(self.tcx()), e.src_root(self.tcx()))
                 }
@@ -503,7 +504,11 @@ impl<'tcx> Context<'tcx> {
 
         let src_root = match krate.src(tcx) {
             FileName::Real(ref p) => {
-                match p.local_path().unwrap_or(p.path(RemapPathScopeComponents::MACRO)).parent() {
+                match p
+                    .local_path()
+                    .unwrap_or(p.path(RemapPathScopeComponents::DOCUMENTATION))
+                    .parent()
+                {
                     Some(p) => p.to_path_buf(),
                     None => PathBuf::new(),
                 }

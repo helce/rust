@@ -12,7 +12,7 @@ use rustc_session::Session;
 use rustc_session::lint::{BuiltinLintDiag, LintId};
 use rustc_span::{DUMMY_SP, Span, Symbol, sym};
 
-use crate::context::{AcceptContext, FinalizeContext, SharedContext, Stage};
+use crate::context::{AcceptContext, FinalizeContext, FinalizeFn, SharedContext, Stage};
 use crate::early_parsed::{EARLY_PARSED_ATTRIBUTES, EarlyParsedState};
 use crate::parser::{ArgParser, PathParser, RefPathParser};
 use crate::session_diagnostics::ParsedDescription;
@@ -270,6 +270,8 @@ impl<'sess, S: Stage> AttributeParser<'sess, S> {
         let mut attr_paths: Vec<RefPathParser<'_>> = Vec::new();
         let mut early_parsed_state = EarlyParsedState::default();
 
+        let mut finalizers: Vec<&FinalizeFn<S>> = Vec::with_capacity(attrs.len());
+
         for attr in attrs {
             // If we're only looking for a single attribute, skip all the ones we don't care about.
             if let Some(expected) = self.parse_only {
@@ -325,7 +327,7 @@ impl<'sess, S: Stage> AttributeParser<'sess, S> {
                     let parts =
                         n.item.path.segments.iter().map(|seg| seg.ident.name).collect::<Vec<_>>();
 
-                    if let Some(accepts) = S::parsers().accepters.get(parts.as_slice()) {
+                    if let Some(accept) = S::parsers().accepters.get(parts.as_slice()) {
                         let Some(args) = ArgParser::from_attr_args(
                             args,
                             &parts,
@@ -366,26 +368,26 @@ impl<'sess, S: Stage> AttributeParser<'sess, S> {
                             continue;
                         }
 
-                        for accept in accepts {
-                            let mut cx: AcceptContext<'_, 'sess, S> = AcceptContext {
-                                shared: SharedContext {
-                                    cx: self,
-                                    target_span,
-                                    target,
-                                    emit_lint: &mut emit_lint,
-                                },
-                                attr_span,
-                                inner_span: lower_span(n.item.span()),
-                                attr_style: attr.style,
-                                parsed_description: ParsedDescription::Attribute,
-                                template: &accept.template,
-                                attr_path: attr_path.clone(),
-                            };
+                        let mut cx: AcceptContext<'_, 'sess, S> = AcceptContext {
+                            shared: SharedContext {
+                                cx: self,
+                                target_span,
+                                target,
+                                emit_lint: &mut emit_lint,
+                            },
+                            attr_span,
+                            inner_span: lower_span(n.item.span()),
+                            attr_style: attr.style,
+                            parsed_description: ParsedDescription::Attribute,
+                            template: &accept.template,
+                            attr_path: attr_path.clone(),
+                        };
 
-                            (accept.accept_fn)(&mut cx, &args);
-                            if !matches!(cx.stage.should_emit(), ShouldEmit::Nothing) {
-                                Self::check_target(&accept.allowed_targets, target, &mut cx);
-                            }
+                        (accept.accept_fn)(&mut cx, &args);
+                        finalizers.push(&accept.finalizer);
+
+                        if !matches!(cx.stage.should_emit(), ShouldEmit::Nothing) {
+                            Self::check_target(&accept.allowed_targets, target, &mut cx);
                         }
                     } else {
                         // If we're here, we must be compiling a tool attribute... Or someone
@@ -417,7 +419,7 @@ impl<'sess, S: Stage> AttributeParser<'sess, S> {
         }
 
         early_parsed_state.finalize_early_parsed_attributes(&mut attributes);
-        for f in &S::parsers().finalizers {
+        for f in &finalizers {
             if let Some(attr) = f(&mut FinalizeContext {
                 shared: SharedContext { cx: self, target_span, target, emit_lint: &mut emit_lint },
                 all_attrs: &attr_paths,

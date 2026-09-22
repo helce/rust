@@ -64,8 +64,6 @@ pub struct EnabledLibFeature {
 }
 
 impl Features {
-    /// `since` should be set for stable features that are nevertheless enabled with a `#[feature]`
-    /// attribute, indicating since when they are stable.
     pub fn set_enabled_lang_feature(&mut self, lang_feat: EnabledLangFeature) {
         self.enabled_lang_features.push(lang_feat);
         self.enabled_features.insert(lang_feat.gate_name);
@@ -289,10 +287,6 @@ declare_features! (
     (internal, panic_runtime, "1.10.0", Some(32837)),
     /// Allows using pattern types.
     (internal, pattern_types, "1.79.0", Some(123646)),
-    /// Allows using `#[rustc_allow_const_fn_unstable]`.
-    /// This is an attribute on `const fn` for the same
-    /// purpose as `#[allow_internal_unstable]`.
-    (internal, rustc_allow_const_fn_unstable, "1.49.0", Some(69399)),
     /// Allows using compiler's own crates.
     (unstable, rustc_private, "1.0.0", Some(27812)),
     /// Allows using internal rustdoc features like `doc(keyword)`.
@@ -373,6 +367,8 @@ declare_features! (
     (unstable, async_for_loop, "1.77.0", Some(118898)),
     /// Allows `async` trait bound modifier.
     (unstable, async_trait_bounds, "1.85.0", Some(62290)),
+    /// Target features on avr.
+    (unstable, avr_target_feature, "1.95.0", Some(146889)),
     /// Allows using Intel AVX10 target features and intrinsics
     (unstable, avx10_target_feature, "1.88.0", Some(138843)),
     /// Target features on bpf.
@@ -414,6 +410,10 @@ declare_features! (
     (unstable, cmse_nonsecure_entry, "1.48.0", Some(75835)),
     /// Allows `async {}` expressions in const contexts.
     (unstable, const_async_blocks, "1.53.0", Some(85368)),
+    /// Allows `const { ... }` as a shorthand for `const _: () = const { ... };` for module items.
+    (unstable, const_block_items, "1.95.0", Some(149226)),
+    /// Allows defining and calling c-variadic functions in const contexts.
+    (unstable, const_c_variadic, "1.95.0", Some(151787)),
     /// Allows `const || {}` closures in const contexts.
     (incomplete, const_closures, "1.68.0", Some(106003)),
     /// Allows using `[const] Destruct` bounds and calling drop impls in const contexts.
@@ -448,8 +448,6 @@ declare_features! (
     /// Allows the use of default values on struct definitions and the construction of struct
     /// literals with the functional update syntax without a base.
     (unstable, default_field_values, "1.85.0", Some(132162)),
-    /// Allows using `#[deprecated_safe]` to deprecate the safeness of a function or trait
-    (unstable, deprecated_safe, "1.61.0", Some(94978)),
     /// Allows having using `suggestion` in the `#[deprecated]` attribute.
     (unstable, deprecated_suggestion, "1.61.0", Some(94785)),
     /// Allows deref patterns.
@@ -490,6 +488,8 @@ declare_features! (
     (unstable, ffi_const, "1.45.0", Some(58328)),
     /// Allows the use of `#[ffi_pure]` on foreign functions.
     (unstable, ffi_pure, "1.45.0", Some(58329)),
+    /// Allows marking trait functions as `final` to prevent overriding impls
+    (unstable, final_associated_functions, "1.95.0", Some(131179)),
     /// Controlling the behavior of fmt::Debug
     (unstable, fmt_debug, "1.82.0", Some(129709)),
     /// Allows using `#[align(...)]` on function items
@@ -518,8 +518,6 @@ declare_features! (
     (unstable, half_open_range_patterns_in_slices, "1.66.0", Some(67264)),
     /// Target features on hexagon.
     (unstable, hexagon_target_feature, "1.27.0", Some(150250)),
-    /// Allows `if let` guard in match arms.
-    (unstable, if_let_guard, "1.47.0", Some(51114)),
     /// Allows `impl Trait` to be used inside associated types (RFC 2515).
     (unstable, impl_trait_in_assoc_type, "1.70.0", Some(63063)),
     /// Allows `impl Trait` in bindings (`let`).
@@ -557,6 +555,8 @@ declare_features! (
     (unstable, macro_metavar_expr_concat, "1.81.0", Some(124225)),
     /// Allows `#[marker]` on certain traits allowing overlapping implementations.
     (unstable, marker_trait_attr, "1.30.0", Some(29864)),
+    /// Enable mgca `type const` syntax before expansion.
+    (incomplete, mgca_type_const_syntax, "1.95.0", Some(132980)),
     /// Enables the generic const args MVP (only bare paths, not arbitrary computation).
     (incomplete, min_generic_const_args, "1.84.0", Some(132980)),
     /// A minimal, sound subset of specialization intended to be used by the
@@ -601,6 +601,8 @@ declare_features! (
     (unstable, offset_of_enum, "1.75.0", Some(120141)),
     /// Allows using fields with slice type in offset_of!
     (unstable, offset_of_slice, "1.81.0", Some(126151)),
+    /// Allows using generics in more complex const expressions, based on definitional equality.
+    (unstable, opaque_generic_const_args, "1.95.0", Some(151972)),
     /// Allows using `#[optimize(X)]`.
     (unstable, optimize_attribute, "1.34.0", Some(54882)),
     /// Allows specifying nop padding on functions for dynamic patching.
@@ -634,6 +636,8 @@ declare_features! (
     (unstable, rtm_target_feature, "1.35.0", Some(150258)),
     /// Allows `extern "rust-cold"`.
     (unstable, rust_cold_cc, "1.63.0", Some(97544)),
+    /// Allows `extern "rust-preserve-none"`.
+    (unstable, rust_preserve_none_cc, "1.95.0", Some(151401)),
     /// Target features on s390x.
     (unstable, s390x_target_feature, "1.82.0", Some(150259)),
     /// Allows the use of the `sanitize` attribute.
@@ -769,10 +773,17 @@ impl Features {
     }
 }
 
-/// Some features are not allowed to be used together at the same time, if
-/// the two are present, produce an error.
+/// Some features are not allowed to be used together at the same time.
+///
+/// If the two are present, produce an error.
 pub const INCOMPATIBLE_FEATURES: &[(Symbol, Symbol)] = &[
     // Experimental match ergonomics rulesets are incompatible with each other, to simplify the
     // boolean logic required to tell which typing rules to use.
     (sym::ref_pat_eat_one_layer_2024, sym::ref_pat_eat_one_layer_2024_structural),
+];
+
+/// Some features require one or more other features to be enabled.
+pub const DEPENDENT_FEATURES: &[(Symbol, &[Symbol])] = &[
+    (sym::opaque_generic_const_args, &[sym::min_generic_const_args]),
+    (sym::unsized_const_params, &[sym::adt_const_params]),
 ];

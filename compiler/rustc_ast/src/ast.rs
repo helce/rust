@@ -656,11 +656,7 @@ impl Pat {
             // A tuple pattern `(P0, .., Pn)` can be reparsed as `(T0, .., Tn)`
             // assuming `T0` to `Tn` are all syntactically valid as types.
             PatKind::Tuple(pats) => {
-                let mut tys = ThinVec::with_capacity(pats.len());
-                // FIXME(#48994) - could just be collected into an Option<Vec>
-                for pat in pats {
-                    tys.push(pat.to_ty()?);
-                }
+                let tys = pats.iter().map(|pat| pat.to_ty()).collect::<Option<ThinVec<_>>>()?;
                 TyKind::Tup(tys)
             }
             _ => return None,
@@ -3135,8 +3131,16 @@ pub enum Const {
 /// For details see the [RFC #2532](https://github.com/rust-lang/rfcs/pull/2532).
 #[derive(Copy, Clone, PartialEq, Encodable, Decodable, Debug, HashStable_Generic, Walkable)]
 pub enum Defaultness {
+    /// Item is unmarked. Implicitly determined based off of position.
+    /// For impls, this is `final`; for traits, this is `default`.
+    ///
+    /// If you're expanding an item in a built-in macro or parsing an item
+    /// by hand, you probably want to use this.
+    Implicit,
+    /// `default`
     Default(Span),
-    Final,
+    /// `final`; per RFC 3678, only trait items may be *explicitly* marked final.
+    Final(Span),
 }
 
 #[derive(Copy, Clone, PartialEq, Encodable, Decodable, HashStable_Generic, Walkable)]
@@ -3626,6 +3630,7 @@ impl Item {
     pub fn opt_generics(&self) -> Option<&Generics> {
         match &self.kind {
             ItemKind::ExternCrate(..)
+            | ItemKind::ConstBlock(_)
             | ItemKind::Use(_)
             | ItemKind::Mod(..)
             | ItemKind::ForeignMod(_)
@@ -3872,27 +3877,55 @@ pub struct ConstItem {
     pub ident: Ident,
     pub generics: Generics,
     pub ty: Box<Ty>,
-    pub rhs: Option<ConstItemRhs>,
+    pub rhs_kind: ConstItemRhsKind,
     pub define_opaque: Option<ThinVec<(NodeId, Path)>>,
 }
 
 #[derive(Clone, Encodable, Decodable, Debug, Walkable)]
-pub enum ConstItemRhs {
-    TypeConst(AnonConst),
-    Body(Box<Expr>),
+pub enum ConstItemRhsKind {
+    Body { rhs: Option<Box<Expr>> },
+    TypeConst { rhs: Option<AnonConst> },
 }
 
-impl ConstItemRhs {
-    pub fn span(&self) -> Span {
-        self.expr().span
+impl ConstItemRhsKind {
+    pub fn new_body(rhs: Box<Expr>) -> Self {
+        Self::Body { rhs: Some(rhs) }
     }
 
-    pub fn expr(&self) -> &Expr {
+    pub fn span(&self) -> Option<Span> {
+        Some(self.expr()?.span)
+    }
+
+    pub fn expr(&self) -> Option<&Expr> {
         match self {
-            ConstItemRhs::TypeConst(anon_const) => &anon_const.value,
-            ConstItemRhs::Body(expr) => expr,
+            Self::Body { rhs: Some(body) } => Some(&body),
+            Self::TypeConst { rhs: Some(anon) } => Some(&anon.value),
+            _ => None,
         }
     }
+
+    pub fn has_expr(&self) -> bool {
+        match self {
+            Self::Body { rhs: Some(_) } => true,
+            Self::TypeConst { rhs: Some(_) } => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_type_const(&self) -> bool {
+        matches!(self, &Self::TypeConst { .. })
+    }
+}
+
+#[derive(Clone, Encodable, Decodable, Debug, Walkable)]
+pub struct ConstBlockItem {
+    pub id: NodeId,
+    pub span: Span,
+    pub block: Box<Block>,
+}
+
+impl ConstBlockItem {
+    pub const IDENT: Ident = Ident { name: kw::Underscore, span: DUMMY_SP };
 }
 
 // Adding a new variant? Please update `test_item` in `tests/ui/macros/stringify.rs`.
@@ -3914,6 +3947,11 @@ pub enum ItemKind {
     ///
     /// E.g., `const FOO: i32 = 42;`.
     Const(Box<ConstItem>),
+    /// A module-level const block.
+    /// Equivalent to `const _: () = const { ... };`.
+    ///
+    /// E.g., `const { assert!(true) }`.
+    ConstBlock(ConstBlockItem),
     /// A function declaration (`fn`).
     ///
     /// E.g., `fn foo(bar: usize) -> usize { .. }`.
@@ -3990,6 +4028,8 @@ impl ItemKind {
             | ItemKind::MacroDef(ident, _)
             | ItemKind::Delegation(box Delegation { ident, .. }) => Some(ident),
 
+            ItemKind::ConstBlock(_) => Some(ConstBlockItem::IDENT),
+
             ItemKind::Use(_)
             | ItemKind::ForeignMod(_)
             | ItemKind::GlobalAsm(_)
@@ -4003,9 +4043,9 @@ impl ItemKind {
     pub fn article(&self) -> &'static str {
         use ItemKind::*;
         match self {
-            Use(..) | Static(..) | Const(..) | Fn(..) | Mod(..) | GlobalAsm(..) | TyAlias(..)
-            | Struct(..) | Union(..) | Trait(..) | TraitAlias(..) | MacroDef(..)
-            | Delegation(..) | DelegationMac(..) => "a",
+            Use(..) | Static(..) | Const(..) | ConstBlock(..) | Fn(..) | Mod(..)
+            | GlobalAsm(..) | TyAlias(..) | Struct(..) | Union(..) | Trait(..) | TraitAlias(..)
+            | MacroDef(..) | Delegation(..) | DelegationMac(..) => "a",
             ExternCrate(..) | ForeignMod(..) | MacCall(..) | Enum(..) | Impl { .. } => "an",
         }
     }
@@ -4016,6 +4056,7 @@ impl ItemKind {
             ItemKind::Use(..) => "`use` import",
             ItemKind::Static(..) => "static item",
             ItemKind::Const(..) => "constant item",
+            ItemKind::ConstBlock(..) => "const block",
             ItemKind::Fn(..) => "function",
             ItemKind::Mod(..) => "module",
             ItemKind::ForeignMod(..) => "extern block",
@@ -4045,7 +4086,18 @@ impl ItemKind {
             | Self::Trait(box Trait { generics, .. })
             | Self::TraitAlias(box TraitAlias { generics, .. })
             | Self::Impl(Impl { generics, .. }) => Some(generics),
-            _ => None,
+
+            Self::ExternCrate(..)
+            | Self::Use(..)
+            | Self::Static(..)
+            | Self::ConstBlock(..)
+            | Self::Mod(..)
+            | Self::ForeignMod(..)
+            | Self::GlobalAsm(..)
+            | Self::MacCall(..)
+            | Self::MacroDef(..)
+            | Self::Delegation(..)
+            | Self::DelegationMac(..) => None,
         }
     }
 }
@@ -4096,7 +4148,7 @@ impl AssocItemKind {
             | Self::Fn(box Fn { defaultness, .. })
             | Self::Type(box TyAlias { defaultness, .. }) => defaultness,
             Self::MacCall(..) | Self::Delegation(..) | Self::DelegationMac(..) => {
-                Defaultness::Final
+                Defaultness::Implicit
             }
         }
     }
@@ -4159,9 +4211,7 @@ impl ForeignItemKind {
 impl From<ForeignItemKind> for ItemKind {
     fn from(foreign_item_kind: ForeignItemKind) -> ItemKind {
         match foreign_item_kind {
-            ForeignItemKind::Static(box static_foreign_item) => {
-                ItemKind::Static(Box::new(static_foreign_item))
-            }
+            ForeignItemKind::Static(static_foreign_item) => ItemKind::Static(static_foreign_item),
             ForeignItemKind::Fn(fn_kind) => ItemKind::Fn(fn_kind),
             ForeignItemKind::TyAlias(ty_alias_kind) => ItemKind::TyAlias(ty_alias_kind),
             ForeignItemKind::MacCall(a) => ItemKind::MacCall(a),
@@ -4174,7 +4224,7 @@ impl TryFrom<ItemKind> for ForeignItemKind {
 
     fn try_from(item_kind: ItemKind) -> Result<ForeignItemKind, ItemKind> {
         Ok(match item_kind {
-            ItemKind::Static(box static_item) => ForeignItemKind::Static(Box::new(static_item)),
+            ItemKind::Static(static_item) => ForeignItemKind::Static(static_item),
             ItemKind::Fn(fn_kind) => ForeignItemKind::Fn(fn_kind),
             ItemKind::TyAlias(ty_alias_kind) => ForeignItemKind::TyAlias(ty_alias_kind),
             ItemKind::MacCall(a) => ForeignItemKind::MacCall(a),

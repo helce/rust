@@ -159,9 +159,7 @@ pub macro with_types_for_signature($e:expr) {{
 /// Avoids running any queries during prints.
 pub macro with_no_queries($e:expr) {{
     $crate::ty::print::with_reduced_queries!($crate::ty::print::with_forced_impl_filename_line!(
-        $crate::ty::print::with_no_trimmed_paths!($crate::ty::print::with_no_visible_paths!(
-            $crate::ty::print::with_forced_impl_filename_line!($e)
-        ))
+        $crate::ty::print::with_no_trimmed_paths!($crate::ty::print::with_no_visible_paths!($e))
     ))
 }}
 
@@ -199,7 +197,7 @@ pub struct RegionHighlightMode<'tcx> {
     /// This is used when you have a signature like `fn foo(x: &u32,
     /// y: &'a u32)` and we want to give a name to the region of the
     /// reference `x`.
-    highlight_bound_region: Option<(ty::BoundRegionKind, usize)>,
+    highlight_bound_region: Option<(ty::BoundRegionKind<'tcx>, usize)>,
 }
 
 impl<'tcx> RegionHighlightMode<'tcx> {
@@ -248,7 +246,7 @@ impl<'tcx> RegionHighlightMode<'tcx> {
     /// Highlight the given bound region.
     /// We can only highlight one bound region at a time. See
     /// the field `highlight_bound_region` for more detailed notes.
-    pub fn highlighting_bound_region(&mut self, br: ty::BoundRegionKind, number: usize) {
+    pub fn highlighting_bound_region(&mut self, br: ty::BoundRegionKind<'tcx>, number: usize) {
         assert!(self.highlight_bound_region.is_none());
         self.highlight_bound_region = Some((br, number));
     }
@@ -1911,14 +1909,16 @@ pub trait PrettyPrinter<'tcx>: Printer<'tcx> + fmt::Write {
                     return Ok(());
                 }
             },
-            (ty::ValTreeKind::Branch(_), ty::Array(t, _)) if t == u8_type => {
-                let bytes = cv.try_to_raw_bytes(self.tcx()).unwrap_or_else(|| {
-                    bug!("expected to convert valtree to raw bytes for type {:?}", t)
-                });
+            // If it is a branch with an array, and this array can be printed as raw bytes, then dump its bytes
+            (ty::ValTreeKind::Branch(_), ty::Array(t, _))
+                if t == u8_type
+                    && let Some(bytes) = cv.try_to_raw_bytes(self.tcx()) =>
+            {
                 write!(self, "*")?;
                 self.pretty_print_byte_str(bytes)?;
                 return Ok(());
             }
+            // Otherwise, print the array separated by commas (or if it's a tuple)
             (ty::ValTreeKind::Branch(fields), ty::Array(..) | ty::Tuple(..)) => {
                 let fields_iter = fields.iter().copied();
 
@@ -2639,12 +2639,12 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
 struct RegionFolder<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
     current_index: ty::DebruijnIndex,
-    region_map: UnordMap<ty::BoundRegion, ty::Region<'tcx>>,
+    region_map: UnordMap<ty::BoundRegion<'tcx>, ty::Region<'tcx>>,
     name: &'a mut (
                 dyn FnMut(
         Option<ty::DebruijnIndex>, // Debruijn index of the folded late-bound region
         ty::DebruijnIndex,         // Index corresponding to binder level
-        ty::BoundRegion,
+        ty::BoundRegion<'tcx>,
     ) -> ty::Region<'tcx>
                     + 'a
             ),
@@ -2717,7 +2717,7 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
         &mut self,
         value: &ty::Binder<'tcx, T>,
         mode: WrapBinderMode,
-    ) -> Result<(T, UnordMap<ty::BoundRegion, ty::Region<'tcx>>), fmt::Error>
+    ) -> Result<(T, UnordMap<ty::BoundRegion<'tcx>, ty::Region<'tcx>>), fmt::Error>
     where
         T: TypeFoldable<TyCtxt<'tcx>>,
     {
@@ -2810,12 +2810,12 @@ impl<'tcx> FmtPrinter<'_, 'tcx> {
             // see issue #102392.
             let mut name = |lifetime_idx: Option<ty::DebruijnIndex>,
                             binder_level_idx: ty::DebruijnIndex,
-                            br: ty::BoundRegion| {
+                            br: ty::BoundRegion<'tcx>| {
                 let (name, kind) = if let Some(name) = br.kind.get_name(tcx) {
                     (name, br.kind)
                 } else {
                     let name = next_name(self);
-                    (name, ty::BoundRegionKind::NamedAnon(name))
+                    (name, ty::BoundRegionKind::NamedForPrinting(name))
                 };
 
                 if let Some(lt_idx) = lifetime_idx {
@@ -3421,6 +3421,13 @@ fn for_each_def(tcx: TyCtxt<'_>, mut collect_fn: impl for<'b> FnMut(&'b Ident, N
                 def::Res::Def(DefKind::AssocTy, _) => {}
                 def::Res::Def(DefKind::TyAlias, _) => {}
                 def::Res::Def(defkind, def_id) => {
+                    // Ignore external `#[doc(hidden)]` items and their descendants.
+                    // They shouldn't prevent other items from being considered
+                    // unique, and should be printed with a full path if necessary.
+                    if tcx.is_doc_hidden(def_id) {
+                        continue;
+                    }
+
                     if let Some(ns) = defkind.ns() {
                         collect_fn(&child.ident, ns, def_id);
                     }

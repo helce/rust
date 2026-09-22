@@ -273,9 +273,8 @@ impl<'db> std::fmt::Debug for Clauses<'db> {
 
 impl<'db> Clauses<'db> {
     #[inline]
-    pub fn empty(_interner: DbInterner<'db>) -> Self {
-        // FIXME: Get from a static.
-        Self::new_from_slice(&[])
+    pub fn empty(interner: DbInterner<'db>) -> Self {
+        interner.default_types().empty.clauses
     }
 
     #[inline]
@@ -715,9 +714,9 @@ impl<'db> rustc_type_ir::inherent::Predicate<DbInterner<'db>> for Predicate<'db>
     fn allow_normalization(self) -> bool {
         // TODO: this should probably live in rustc_type_ir
         match self.inner().as_ref().skip_binder() {
-            PredicateKind::Clause(ClauseKind::WellFormed(_))
-            | PredicateKind::AliasRelate(..)
-            | PredicateKind::NormalizesTo(..) => false,
+            PredicateKind::Clause(ClauseKind::WellFormed(_)) | PredicateKind::AliasRelate(..) => {
+                false
+            }
             PredicateKind::Clause(ClauseKind::Trait(_))
             | PredicateKind::Clause(ClauseKind::RegionOutlives(_))
             | PredicateKind::Clause(ClauseKind::TypeOutlives(_))
@@ -730,6 +729,7 @@ impl<'db> rustc_type_ir::inherent::Predicate<DbInterner<'db>> for Predicate<'db>
             | PredicateKind::Coerce(_)
             | PredicateKind::Clause(ClauseKind::ConstEvaluatable(_))
             | PredicateKind::ConstEquate(_, _)
+            | PredicateKind::NormalizesTo(..)
             | PredicateKind::Ambiguous => true,
         }
     }

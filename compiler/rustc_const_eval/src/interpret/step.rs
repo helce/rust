@@ -86,7 +86,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             span = ?stmt.source_info.span,
             tracing_separate_thread = Empty,
         )
-        .or_if_tracing_disabled(|| info!(stmt = ?stmt.kind));
+        .or_if_tracing_disabled(|| info!("{:?}", stmt.kind));
 
         use rustc_middle::mir::StatementKind::*;
 
@@ -218,7 +218,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                 // A fresh reference was created, make sure it gets retagged.
                 let val = M::retag_ptr_value(
                     self,
-                    if borrow_kind.allows_two_phase_borrow() {
+                    if borrow_kind.is_two_phase_borrow() {
                         mir::RetagKind::TwoPhase
                     } else {
                         mir::RetagKind::Default
@@ -247,12 +247,6 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
                     val = M::retag_ptr_value(self, mir::RetagKind::Raw, &val)?;
                 }
                 self.write_immediate(*val, &dest)?;
-            }
-
-            ShallowInitBox(ref operand, _) => {
-                let src = self.eval_operand(operand, None)?;
-                let v = self.read_immediate(&src)?;
-                self.write_immediate(*v, &dest)?;
             }
 
             Cast(cast_kind, ref operand, cast_ty) => {
@@ -496,7 +490,7 @@ impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
             span = ?terminator.source_info.span,
             tracing_separate_thread = Empty,
         )
-        .or_if_tracing_disabled(|| info!(terminator = ?terminator.kind));
+        .or_if_tracing_disabled(|| info!("{:?}", terminator.kind));
 
         use rustc_middle::mir::TerminatorKind::*;
         match terminator.kind {

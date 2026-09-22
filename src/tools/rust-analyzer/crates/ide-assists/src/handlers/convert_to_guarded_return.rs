@@ -95,7 +95,9 @@ fn if_expr_to_guarded_return(
 
     let parent_block = if_expr.syntax().parent()?.ancestors().find_map(ast::BlockExpr::cast)?;
 
-    if parent_block.tail_expr()? != if_expr.clone().into() {
+    if parent_block.tail_expr() != Some(if_expr.clone().into())
+        && !(else_block.is_some() && ast::ExprStmt::can_cast(if_expr.syntax().parent()?.kind()))
+    {
         return None;
     }
 
@@ -497,6 +499,36 @@ fn main() {
         return
     };
     foo(x);
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn convert_if_let_has_else_block_in_statement() {
+        check_assist(
+            convert_to_guarded_return,
+            r#"
+fn main() {
+    some_statements();
+    if$0 let Ok(x) = Err(92) {
+        foo(x);
+    } else {
+        // needless comment
+        return;
+    }
+    some_statements();
+}
+"#,
+            r#"
+fn main() {
+    some_statements();
+    let Ok(x) = Err(92) else {
+        // needless comment
+        return;
+    };
+    foo(x);
+    some_statements();
 }
 "#,
         );
@@ -910,6 +942,32 @@ fn main() {
     }
 
     #[test]
+    fn convert_let_ref_stmt_inside_fn() {
+        check_assist(
+            convert_to_guarded_return,
+            r#"
+//- minicore: option
+fn foo() -> &'static Option<i32> {
+    &None
+}
+
+fn main() {
+    let x$0 = foo();
+}
+"#,
+            r#"
+fn foo() -> &'static Option<i32> {
+    &None
+}
+
+fn main() {
+    let Some(x) = foo() else { return };
+}
+"#,
+        );
+    }
+
+    #[test]
     fn convert_let_stmt_inside_fn_return_option() {
         check_assist(
             convert_to_guarded_return,
@@ -1131,6 +1189,44 @@ fn main() {
     } else {
         bar()
     }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn ignore_else_if() {
+        check_assist_not_applicable(
+            convert_to_guarded_return,
+            r#"
+fn main() {
+    some_statements();
+    if cond {
+        ()
+    } else if$0 let Ok(x) = Err(92) {
+        foo(x);
+    } else {
+        return;
+    }
+    some_statements();
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn ignore_if_inside_let() {
+        check_assist_not_applicable(
+            convert_to_guarded_return,
+            r#"
+fn main() {
+    some_statements();
+    let _ = if$0 let Ok(x) = Err(92) {
+        foo(x);
+    } else {
+        return;
+    }
+    some_statements();
 }
 "#,
         );

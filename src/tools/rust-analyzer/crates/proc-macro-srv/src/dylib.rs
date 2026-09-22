@@ -3,7 +3,7 @@
 mod proc_macros;
 mod version;
 
-use proc_macro::bridge;
+use rustc_proc_macro::bridge;
 use std::{fmt, fs, io, time::SystemTime};
 use temp_dir::TempDir;
 
@@ -48,7 +48,7 @@ impl Expander {
         callback: Option<ProcMacroClientHandle<'_>>,
     ) -> Result<TokenStream<S>, PanicMessage>
     where
-        <S::Server<'a> as bridge::server::Types>::TokenStream: Default,
+        <S::Server<'a> as bridge::server::Server>::TokenStream: Default,
     {
         self.inner
             .proc_macros

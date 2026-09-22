@@ -56,6 +56,7 @@
 //! [`Rc`]: rc
 //! [`RefCell`]: core::cell
 
+#![allow(unused_features)]
 #![allow(incomplete_features)]
 #![allow(unused_attributes)]
 #![stable(feature = "alloc", since = "1.36.0")]
@@ -85,15 +86,12 @@
 //
 // Library features:
 // tidy-alphabetical-start
-#![cfg_attr(not(no_global_oom_handling), feature(string_replace_in_place))]
-#![feature(alloc_layout_extra)]
 #![feature(allocator_api)]
 #![feature(array_into_iter_constructors)]
 #![feature(ascii_char)]
 #![feature(assert_matches)]
 #![feature(async_fn_traits)]
 #![feature(async_iterator)]
-#![feature(box_vec_non_null)]
 #![feature(bstr)]
 #![feature(bstr_internals)]
 #![feature(cast_maybe_uninit)]
@@ -150,7 +148,6 @@
 #![feature(slice_ptr_get)]
 #![feature(slice_range)]
 #![feature(std_internals)]
-#![feature(str_internals)]
 #![feature(temporary_niche_types)]
 #![feature(transmutability)]
 #![feature(trivial_clone)]
@@ -160,7 +157,6 @@
 #![feature(try_blocks)]
 #![feature(try_trait_v2)]
 #![feature(try_trait_v2_residual)]
-#![feature(try_with_capacity)]
 #![feature(tuple_trait)]
 #![feature(ub_checks)]
 #![feature(unicode_internals)]
@@ -178,10 +174,8 @@
 #![feature(const_trait_impl)]
 #![feature(coroutine_trait)]
 #![feature(decl_macro)]
-#![feature(derive_const)]
 #![feature(dropck_eyepatch)]
 #![feature(fundamental)]
-#![feature(hashmap_internals)]
 #![feature(intrinsics)]
 #![feature(lang_items)]
 #![feature(min_specialization)]
@@ -189,7 +183,6 @@
 #![feature(negative_impls)]
 #![feature(never_type)]
 #![feature(optimize_attribute)]
-#![feature(rustc_allow_const_fn_unstable)]
 #![feature(rustc_attrs)]
 #![feature(slice_internals)]
 #![feature(staged_api)]
@@ -231,6 +224,7 @@ pub mod collections;
 #[cfg(all(not(no_rc), not(no_sync), not(no_global_oom_handling)))]
 pub mod ffi;
 pub mod fmt;
+pub mod intrinsics;
 #[cfg(not(no_rc))]
 pub mod rc;
 pub mod slice;

@@ -659,7 +659,7 @@ where
         }
 
         // `rustc_transmute` does not have support for type or const params
-        if goal.has_non_region_placeholders() {
+        if goal.predicate.has_non_region_placeholders() {
             return Err(NoSolution);
         }
 
@@ -687,6 +687,9 @@ where
     ///
     /// because these impls overlap, and I'd rather not build a coherence hack for
     /// this harmless overlap.
+    ///
+    /// This trait is indirectly exposed on stable, so do *not* extend the set of types that
+    /// implement the trait without FCP!
     fn consider_builtin_bikeshed_guaranteed_no_drop_candidate(
         ecx: &mut EvalCtxt<'_, D>,
         goal: Goal<I, Self>,

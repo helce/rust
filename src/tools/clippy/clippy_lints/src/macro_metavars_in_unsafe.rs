@@ -2,7 +2,6 @@ use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_hir_and_then;
 use clippy_utils::is_lint_allowed;
 use itertools::Itertools;
-use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::intravisit::{Visitor, walk_block, walk_expr, walk_stmt};
 use rustc_hir::{BlockCheckMode, Expr, ExprKind, HirId, Stmt, UnsafeSource, find_attr};
@@ -147,8 +146,7 @@ struct BodyVisitor<'a, 'tcx> {
 }
 
 fn is_public_macro(cx: &LateContext<'_>, def_id: LocalDefId) -> bool {
-    (cx.effective_visibilities.is_exported(def_id)
-        || find_attr!(cx.tcx.get_all_attrs(def_id), AttributeKind::MacroExport { .. }))
+    (cx.effective_visibilities.is_exported(def_id) || find_attr!(cx.tcx, def_id, MacroExport { .. }))
         && !cx.tcx.is_doc_hidden(def_id)
 }
 
@@ -245,8 +243,8 @@ impl<'tcx> LateLintPass<'tcx> for ExprMetavarsInUnsafe {
         // We want to lint unsafe blocks #0 and #1
         let bad_unsafe_blocks = self
             .metavar_expns
-            .iter()
-            .filter_map(|(_, state)| match state {
+            .values()
+            .filter_map(|state| match state {
                 MetavarState::ReferencedInUnsafe { unsafe_blocks } => Some(unsafe_blocks.as_slice()),
                 MetavarState::ReferencedInSafe => None,
             })

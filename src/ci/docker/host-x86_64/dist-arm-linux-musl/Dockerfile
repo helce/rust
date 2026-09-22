@@ -3,24 +3,17 @@ FROM ghcr.io/rust-lang/ubuntu:22.04
 COPY scripts/cross-apt-packages.sh /scripts/
 RUN sh /scripts/cross-apt-packages.sh
 
-COPY scripts/crosstool-ng.sh /scripts/
-RUN sh /scripts/crosstool-ng.sh
-
 WORKDIR /build
 
 COPY scripts/musl-toolchain.sh /build/
+COPY scripts/musl-cve-2026-6042.diff /build/
+COPY scripts/musl-cve-2026-40200.diff /build/
 # We need to mitigate rust-lang/rust#34978 when compiling musl itself as well
 RUN CFLAGS="-Wa,--compress-debug-sections=none -Wl,--compress-debug-sections=none" \
     CXXFLAGS="-Wa,--compress-debug-sections=none -Wl,--compress-debug-sections=none" \
     bash musl-toolchain.sh aarch64 && rm -rf build
 
-COPY scripts/rustbuild-setup.sh /scripts/
-RUN sh /scripts/rustbuild-setup.sh
 WORKDIR /tmp
-
-COPY scripts/crosstool-ng-build.sh /scripts/
-COPY host-x86_64/dist-arm-linux-musl/arm-linux-musl.defconfig /tmp/crosstool.defconfig
-RUN /scripts/crosstool-ng-build.sh
 
 COPY scripts/sccache.sh /scripts/
 RUN sh /scripts/sccache.sh

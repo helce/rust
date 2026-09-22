@@ -1,15 +1,15 @@
 //! The `Visitor` responsible for actually checking a `mir::Body` for invalid operations.
 
-use std::assert_matches::assert_matches;
 use std::borrow::Cow;
 use std::mem;
 use std::num::NonZero;
 use std::ops::Deref;
 
+use rustc_data_structures::assert_matches;
 use rustc_errors::{Diag, ErrorGuaranteed};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
-use rustc_hir::{self as hir, LangItem};
+use rustc_hir::{self as hir, LangItem, find_attr};
 use rustc_index::bit_set::DenseBitSet;
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_middle::mir::visit::Visitor;
@@ -215,7 +215,7 @@ impl<'mir, 'tcx> Checker<'mir, 'tcx> {
             return;
         }
 
-        if !tcx.has_attr(def_id, sym::rustc_do_not_const_check) {
+        if !find_attr!(tcx, def_id, RustcDoNotConstCheck) {
             self.visit_body(body);
         }
 
@@ -577,7 +577,7 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
 
             Rvalue::Aggregate(kind, ..) => {
                 if let AggregateKind::Coroutine(def_id, ..) = kind.as_ref()
-                    && let Some(coroutine_kind) = self.tcx.coroutine_kind(def_id)
+                    && let Some(coroutine_kind) = self.tcx.coroutine_kind(*def_id)
                 {
                     self.check_op(ops::Coroutine(coroutine_kind));
                 }
@@ -644,8 +644,6 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
             }
 
             Rvalue::Cast(_, _, _) => {}
-
-            Rvalue::ShallowInitBox(_, _) => {}
 
             Rvalue::UnaryOp(op, operand) => {
                 let ty = operand.ty(self.body, self.tcx);
@@ -774,16 +772,16 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
 
                 // Attempting to call a trait method?
                 if let Some(trait_did) = tcx.trait_of_assoc(callee) {
-                    // We can't determine the actual callee here, so we have to do different checks
-                    // than usual.
+                    // We can't determine the actual callee (the underlying impl of the trait) here, so we have
+                    // to do different checks than usual.
 
                     trace!("attempting to call a trait method");
-                    let trait_is_const = tcx.is_const_trait(trait_did);
+                    let is_const = tcx.constness(callee) == hir::Constness::Const;
 
                     // Only consider a trait to be const if the const conditions hold.
                     // Otherwise, it's really misleading to call something "conditionally"
                     // const when it's very obviously not conditionally const.
-                    if trait_is_const && has_const_conditions == Some(ConstConditionsHold::Yes) {
+                    if is_const && has_const_conditions == Some(ConstConditionsHold::Yes) {
                         // Trait calls are always conditionally-const.
                         self.check_op(ops::ConditionallyConstCall {
                             callee,
@@ -815,6 +813,10 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
                     });
                 }
 
+                if self.tcx.fn_sig(callee).skip_binder().c_variadic() {
+                    self.check_op(ops::FnCallCVariadic)
+                }
+
                 // At this point, we are calling a function, `callee`, whose `DefId` is known...
 
                 // `begin_panic` and `panic_display` functions accept generic
@@ -841,13 +843,6 @@ impl<'tcx> Visitor<'tcx> for Checker<'_, 'tcx> {
                     } else {
                         self.check_op(ops::PanicNonStr);
                     }
-                    // Allow this call, skip all the checks below.
-                    return;
-                }
-
-                // This can be called on stable via the `vec!` macro.
-                if tcx.is_lang_item(callee, LangItem::ExchangeMalloc) {
-                    self.check_op(ops::HeapAllocation);
                     // Allow this call, skip all the checks below.
                     return;
                 }

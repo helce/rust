@@ -62,6 +62,10 @@ pub trait MetaSized: PointeeSized {}
 )]
 pub trait Sized: MetaSized {}
 
+#[lang = "destruct"]
+#[rustc_on_unimplemented(message = "can't drop `{Self}`", append_const_msg)]
+pub trait Destruct: PointeeSized {}
+
 #[lang = "legacy_receiver"]
 pub trait LegacyReceiver {}
 impl<T: PointeeSized> LegacyReceiver for &T {}
@@ -75,6 +79,9 @@ pub trait BikeshedGuaranteedNoDrop {}
 
 #[lang = "freeze"]
 pub unsafe auto trait Freeze {}
+
+#[lang = "unsafe_unpin"]
+pub unsafe auto trait UnsafeUnpin {}
 
 #[lang = "unpin"]
 #[diagnostic::on_unimplemented(

@@ -1,6 +1,6 @@
 use std::collections::hash_map::Entry;
-use std::mem;
 use std::sync::Arc;
+use std::{fmt, mem};
 
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap, FxIndexSet};
 use rustc_data_structures::memmap::Mmap;
@@ -11,7 +11,6 @@ use rustc_hir::def_id::{CrateNum, DefId, DefIndex, LOCAL_CRATE, LocalDefId, Stab
 use rustc_hir::definitions::DefPathHash;
 use rustc_index::{Idx, IndexVec};
 use rustc_macros::{Decodable, Encodable};
-use rustc_query_system::query::QuerySideEffect;
 use rustc_serialize::opaque::{FileEncodeResult, FileEncoder, IntEncodedWithFixedSize, MemDecoder};
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_session::Session;
@@ -24,7 +23,7 @@ use rustc_span::{
     SourceFile, Span, SpanDecoder, SpanEncoder, StableSourceFileId, Symbol,
 };
 
-use crate::dep_graph::{DepNodeIndex, SerializedDepNodeIndex};
+use crate::dep_graph::{DepNodeIndex, QuerySideEffect, SerializedDepNodeIndex};
 use crate::mir::interpret::{AllocDecodingSession, AllocDecodingState};
 use crate::mir::mono::MonoItem;
 use crate::mir::{self, interpret};
@@ -262,7 +261,7 @@ impl OnDiskCache {
             tcx.sess.time("encode_query_results", || {
                 let enc = &mut encoder;
                 let qri = &mut query_result_index;
-                (tcx.query_system.fns.encode_query_results)(tcx, enc, qri);
+                tcx.encode_all_query_results(enc, qri);
             });
 
             // Encode side effects.
@@ -509,7 +508,7 @@ impl<'a, 'tcx> CacheDecoder<'a, 'tcx> {
 // tag matches and the correct amount of bytes was read.
 fn decode_tagged<D, T, V>(decoder: &mut D, expected_tag: T) -> V
 where
-    T: Decodable<D> + Eq + std::fmt::Debug,
+    T: Decodable<D> + Eq + fmt::Debug,
     V: Decodable<D>,
     D: Decoder,
 {
@@ -828,6 +827,13 @@ pub struct CacheEncoder<'a, 'tcx> {
     hygiene_context: &'a HygieneEncodeContext,
     // Used for both `Symbol`s and `ByteSymbol`s.
     symbol_index_table: FxHashMap<u32, usize>,
+}
+
+impl<'a, 'tcx> fmt::Debug for CacheEncoder<'a, 'tcx> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Add more details here if/when necessary.
+        f.write_str("CacheEncoder")
+    }
 }
 
 impl<'a, 'tcx> CacheEncoder<'a, 'tcx> {

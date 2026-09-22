@@ -1,5 +1,5 @@
+#[path = "../unsupported/os.rs"]
 pub mod os;
-pub mod time;
 
 #[expect(dead_code)]
 #[path = "../unsupported/common.rs"]

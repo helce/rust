@@ -3,9 +3,7 @@
     clippy::manual_range_contains,
     clippy::useless_format,
     clippy::field_reassign_with_default,
-    clippy::needless_lifetimes,
-    rustc::diagnostic_outside_of_impl,
-    rustc::untranslatable_diagnostic
+    clippy::needless_lifetimes
 )]
 
 // The rustc crates we need
@@ -41,6 +39,7 @@ mod log;
 use std::env;
 use std::num::{NonZero, NonZeroI32};
 use std::ops::Range;
+use std::process::ExitCode;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Once;
@@ -406,7 +405,11 @@ fn run_compiler_and_exit(
     // Invoke compiler, catch any unwinding panics and handle return code.
     let exit_code =
         rustc_driver::catch_with_exit_code(move || rustc_driver::run_compiler(args, callbacks));
-    exit(exit_code)
+    exit(if exit_code == ExitCode::SUCCESS {
+        rustc_driver::EXIT_SUCCESS
+    } else {
+        rustc_driver::EXIT_FAILURE
+    })
 }
 
 /// Parses a comma separated list of `T` from the given string:
@@ -436,7 +439,7 @@ fn parse_range(val: &str) -> Result<Range<u32>, &'static str> {
     Ok(from..to)
 }
 
-fn main() {
+fn main() -> ExitCode {
     let early_dcx = EarlyDiagCtxt::new(ErrorOutputType::default());
 
     // Snapshot a copy of the environment before `rustc` starts messing with it.
@@ -451,9 +454,7 @@ fn main() {
         if crate_kind == "host" {
             // For host crates like proc macros and build scripts, we are an entirely normal rustc.
             // These eventually produce actual binaries and never run in Miri.
-            match rustc_driver::main() {
-                // Empty match proves this function will never return.
-            }
+            return rustc_driver::main();
         } else if crate_kind != "target" {
             panic!("invalid `MIRI_BE_RUSTC` value: {crate_kind:?}")
         };
@@ -710,7 +711,7 @@ fn main() {
     if !miri_config.native_lib.is_empty() && miri_config.provenance_mode == ProvenanceMode::Strict {
         fatal_error!("strict provenance is not compatible with calling native functions");
     }
-    // Native calls and many-seeds are an "intersting" combination.
+    // Native calls and many-seeds are an "interesting" combination.
     if !miri_config.native_lib.is_empty() && many_seeds.is_some() {
         eprintln!(
             "warning: `-Zmiri-many-seeds` runs multiple instances of the program in the same address space, \

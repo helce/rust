@@ -1,6 +1,7 @@
 use ide_db::assists::AssistId;
 use syntax::{
-    AstNode, SyntaxToken, T,
+    AstNode, SyntaxKind, SyntaxToken, T,
+    algo::{previous_non_trivia_token, skip_trivia_token},
     ast::{self, syntax_factory::SyntaxFactory},
 };
 
@@ -36,14 +37,17 @@ pub(crate) fn toggle_macro_delimiter(acc: &mut Assists, ctx: &AssistContext<'_>)
         RCur,
     }
 
-    let makro = ctx.find_node_at_offset::<ast::MacroCall>()?;
+    let token_tree = ctx.find_node_at_offset::<ast::TokenTree>()?;
 
     let cursor_offset = ctx.offset();
-    let semicolon = macro_semicolon(&makro);
-    let token_tree = makro.token_tree()?;
+    let semicolon = macro_semicolon(&token_tree);
 
     let ltoken = token_tree.left_delimiter_token()?;
     let rtoken = token_tree.right_delimiter_token()?;
+
+    if !is_macro_call(&token_tree)? {
+        return None;
+    }
 
     if !ltoken.text_range().contains(cursor_offset) && !rtoken.text_range().contains(cursor_offset)
     {
@@ -70,7 +74,7 @@ pub(crate) fn toggle_macro_delimiter(acc: &mut Assists, ctx: &AssistContext<'_>)
         token_tree.syntax().text_range(),
         |builder| {
             let make = SyntaxFactory::with_mappings();
-            let mut editor = builder.make_editor(makro.syntax());
+            let mut editor = builder.make_editor(token_tree.syntax());
 
             match token {
                 MacroDelims::LPar | MacroDelims::RPar => {
@@ -86,7 +90,14 @@ pub(crate) fn toggle_macro_delimiter(acc: &mut Assists, ctx: &AssistContext<'_>)
                 }
                 MacroDelims::LCur | MacroDelims::RCur => {
                     editor.replace(ltoken, make.token(T!['[']));
-                    editor.replace(rtoken, make.token(T![']']));
+                    if semicolon.is_some() || !needs_semicolon(token_tree) {
+                        editor.replace(rtoken, make.token(T![']']));
+                    } else {
+                        editor.replace_with_many(
+                            rtoken,
+                            vec![make.token(T![']']).into(), make.token(T![;]).into()],
+                        );
+                    }
                 }
             }
             editor.add_mappings(make.finish_with_mappings());
@@ -95,12 +106,45 @@ pub(crate) fn toggle_macro_delimiter(acc: &mut Assists, ctx: &AssistContext<'_>)
     )
 }
 
-fn macro_semicolon(makro: &ast::MacroCall) -> Option<SyntaxToken> {
-    makro.semicolon_token().or_else(|| {
-        let macro_expr = ast::MacroExpr::cast(makro.syntax().parent()?)?;
-        let expr_stmt = ast::ExprStmt::cast(macro_expr.syntax().parent()?)?;
-        expr_stmt.semicolon_token()
-    })
+fn is_macro_call(token_tree: &ast::TokenTree) -> Option<bool> {
+    let parent = token_tree.syntax().parent()?;
+    if ast::MacroCall::can_cast(parent.kind()) {
+        return Some(true);
+    }
+
+    let token_tree = ast::TokenTree::cast(parent)?;
+    let prev = previous_non_trivia_token(token_tree.syntax().clone())?;
+    let prev_prev = previous_non_trivia_token(prev.clone())?;
+    Some(prev.kind() == T![!] && prev_prev.kind() == SyntaxKind::IDENT)
+}
+
+fn macro_semicolon(token_tree: &ast::TokenTree) -> Option<SyntaxToken> {
+    let next_token = token_tree.syntax().last_token()?.next_token()?;
+    skip_trivia_token(next_token, syntax::Direction::Next).filter(|it| it.kind() == T![;])
+}
+
+fn needs_semicolon(tt: ast::TokenTree) -> bool {
+    (|| {
+        let call = ast::MacroCall::cast(tt.syntax().parent()?)?;
+        let container = call.syntax().parent()?;
+        let kind = container.kind();
+
+        if call.semicolon_token().is_some() {
+            return Some(false);
+        }
+
+        Some(
+            ast::ItemList::can_cast(kind)
+                || ast::SourceFile::can_cast(kind)
+                || ast::AssocItemList::can_cast(kind)
+                || ast::ExternItemList::can_cast(kind)
+                || ast::MacroItems::can_cast(kind)
+                || ast::MacroExpr::can_cast(kind)
+                    && ast::ExprStmt::cast(container.parent()?)
+                        .is_some_and(|it| it.semicolon_token().is_none()),
+        )
+    })()
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -161,7 +205,7 @@ macro_rules! sth {
     () => {};
 }
 
-sth!$0{ };
+sth!$0{ }
             "#,
             r#"
 macro_rules! sth {
@@ -170,7 +214,117 @@ macro_rules! sth {
 
 sth![ ];
             "#,
-        )
+        );
+
+        check_assist(
+            toggle_macro_delimiter,
+            r#"
+macro_rules! sth {
+    () => {};
+}
+
+fn foo() -> i32 {
+    sth!$0{ }
+    2
+}
+            "#,
+            r#"
+macro_rules! sth {
+    () => {};
+}
+
+fn foo() -> i32 {
+    sth![ ];
+    2
+}
+            "#,
+        );
+
+        check_assist(
+            toggle_macro_delimiter,
+            r#"
+macro_rules! sth {
+    () => {2};
+}
+
+fn foo() {
+    sth!$0{ };
+}
+            "#,
+            r#"
+macro_rules! sth {
+    () => {2};
+}
+
+fn foo() {
+    sth![ ];
+}
+            "#,
+        );
+
+        check_assist(
+            toggle_macro_delimiter,
+            r#"
+macro_rules! sth {
+    () => {2};
+}
+
+fn foo() -> i32 {
+    sth!$0{ }
+}
+            "#,
+            r#"
+macro_rules! sth {
+    () => {2};
+}
+
+fn foo() -> i32 {
+    sth![ ]
+}
+            "#,
+        );
+
+        check_assist(
+            toggle_macro_delimiter,
+            r#"
+macro_rules! sth {
+    () => {};
+}
+impl () {
+    sth!$0{}
+}
+            "#,
+            r#"
+macro_rules! sth {
+    () => {};
+}
+impl () {
+    sth![];
+}
+            "#,
+        );
+
+        check_assist(
+            toggle_macro_delimiter,
+            r#"
+macro_rules! sth {
+    () => {2};
+}
+
+fn foo() -> i32 {
+    bar(sth!$0{ })
+}
+            "#,
+            r#"
+macro_rules! sth {
+    () => {2};
+}
+
+fn foo() -> i32 {
+    bar(sth![ ])
+}
+            "#,
+        );
     }
 
     #[test]
@@ -204,7 +358,7 @@ mod abc {
         () => {};
     }
 
-    sth!$0{ };
+    sth!$0{ }
 }
             "#,
             r#"
@@ -261,10 +415,9 @@ prt!{(3 + 5)}
         )
     }
 
-    // FIXME @alibektas : Inner macro_call is not seen as such. So this doesn't work.
     #[test]
     fn test_nested_macros() {
-        check_assist_not_applicable(
+        check_assist(
             toggle_macro_delimiter,
             r#"
 macro_rules! prt {
@@ -279,7 +432,22 @@ macro_rules! abc {
     }};
 }
 
-prt!{abc!($03 + 5)};
+prt!{abc!$0(3 + 5)};
+"#,
+            r#"
+macro_rules! prt {
+    ($e:expr) => {{
+        println!("{}", stringify!{$e});
+    }};
+}
+
+macro_rules! abc {
+    ($e:expr) => {{
+        println!("{}", stringify!{$e});
+    }};
+}
+
+prt!{abc!{3 + 5}};
 "#,
         )
     }

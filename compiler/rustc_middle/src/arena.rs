@@ -90,7 +90,7 @@ macro_rules! arena_types {
             [] codegen_unit: rustc_middle::mir::mono::CodegenUnit<'tcx>,
             [decode] attribute: rustc_hir::Attribute,
             [] name_set: rustc_data_structures::unord::UnordSet<rustc_span::Symbol>,
-            [] autodiff_item: rustc_ast::expand::autodiff_attrs::AutoDiffItem,
+            [] autodiff_item: rustc_hir::attrs::AutoDiffItem,
             [] ordered_name_set: rustc_data_structures::fx::FxIndexSet<rustc_span::Symbol>,
             [] valtree: rustc_middle::ty::ValTreeKind<rustc_middle::ty::TyCtxt<'tcx>>,
             [] stable_order_of_exportable_impls:
@@ -104,7 +104,7 @@ macro_rules! arena_types {
             [decode] is_late_bound_map: rustc_data_structures::fx::FxIndexSet<rustc_hir::ItemLocalId>,
             [decode] impl_source: rustc_middle::traits::ImplSource<'tcx, ()>,
 
-            [] dep_kind: rustc_middle::dep_graph::DepKindStruct<'tcx>,
+            [] dep_kind_vtable: rustc_middle::dep_graph::DepKindVTable<'tcx>,
 
             [decode] trait_impl_trait_tys:
                 rustc_data_structures::unord::UnordMap<

@@ -15,6 +15,7 @@
 extern crate rustc_driver as _;
 
 mod cli;
+mod flycheck;
 mod ratoml;
 mod support;
 mod testdir;
@@ -1447,7 +1448,27 @@ foo = { path = "../foo" }
     .server()
     .wait_until_workspace_is_loaded();
 
-    server.request::<WorkspaceSymbolRequest>(Default::default(), json!([]));
+    server.request::<WorkspaceSymbolRequest>(
+        Default::default(),
+        json!([
+        {
+          "name": "bar",
+          "kind": 4,
+          "location": {
+            "uri": "file:///[..]bar/src/lib.rs",
+            "range": {
+              "start": {
+                "line": 0,
+                "character": 0
+              },
+              "end": {
+                "line": 0,
+                "character": 0
+              }
+            }
+          }
+        }]),
+    );
 
     let server = Project::with_fixture(
         r#"
@@ -1486,7 +1507,27 @@ version = "0.0.0"
     .server()
     .wait_until_workspace_is_loaded();
 
-    server.request::<WorkspaceSymbolRequest>(Default::default(), json!([]));
+    server.request::<WorkspaceSymbolRequest>(
+        Default::default(),
+        json!([
+        {
+          "name": "baz",
+          "kind": 4,
+          "location": {
+            "uri": "file:///[..]baz/src/lib.rs",
+            "range": {
+              "start": {
+                "line": 0,
+                "character": 0
+              },
+              "end": {
+                "line": 0,
+                "character": 0
+              }
+            }
+          }
+        }]),
+    );
 }
 
 #[test]

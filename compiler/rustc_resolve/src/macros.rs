@@ -4,8 +4,9 @@
 use std::mem;
 use std::sync::Arc;
 
-use rustc_ast::{self as ast, Crate, NodeId, attr};
+use rustc_ast::{self as ast, Crate, DUMMY_NODE_ID, NodeId};
 use rustc_ast_pretty::pprust;
+use rustc_attr_parsing::AttributeParser;
 use rustc_errors::{Applicability, DiagCtxtHandle, StashKey};
 use rustc_expand::base::{
     Annotatable, DeriveResolution, Indeterminate, ResolverExpand, SyntaxExtension,
@@ -15,12 +16,14 @@ use rustc_expand::compile_declarative_macro;
 use rustc_expand::expand::{
     AstFragment, AstFragmentKind, Invocation, InvocationKind, SupportsMacroExpansion,
 };
-use rustc_hir::StabilityLevel;
-use rustc_hir::attrs::{CfgEntry, StrippedCfgItem};
+use rustc_feature::Features;
+use rustc_hir::attrs::{AttributeKind, CfgEntry, StrippedCfgItem};
 use rustc_hir::def::{self, DefKind, MacroKinds, Namespace, NonMacroAttrKind};
 use rustc_hir::def_id::{CrateNum, DefId, LocalDefId};
+use rustc_hir::{Attribute, StabilityLevel};
 use rustc_middle::middle::stability;
 use rustc_middle::ty::{RegisteredTools, TyCtxt};
+use rustc_session::Session;
 use rustc_session::lint::builtin::{
     LEGACY_DERIVE_HELPERS, OUT_OF_SCOPE_MACRO_CALLS, UNKNOWN_DIAGNOSTIC_ATTRIBUTES,
     UNUSED_MACRO_RULES, UNUSED_MACROS,
@@ -29,16 +32,17 @@ use rustc_session::parse::feature_err;
 use rustc_span::edit_distance::find_best_match_for_name;
 use rustc_span::edition::Edition;
 use rustc_span::hygiene::{self, AstPass, ExpnData, ExpnKind, LocalExpnId, MacroKind};
-use rustc_span::{DUMMY_SP, Ident, Macros20NormalizedIdent, Span, Symbol, kw, sym};
+use rustc_span::{DUMMY_SP, Ident, Span, Symbol, kw, sym};
 
 use crate::Namespace::*;
 use crate::errors::{
     self, AddAsNonDerive, CannotDetermineMacroResolution, CannotFindIdentInThisScope,
     MacroExpectedFound, RemoveSurroundingDerive,
 };
+use crate::hygiene::Macros20NormalizedSyntaxContext;
 use crate::imports::Import;
 use crate::{
-    BindingKey, CacheCell, CmResolver, Decl, DeclKind, DeriveData, Determinacy, Finalize,
+    BindingKey, CacheCell, CmResolver, Decl, DeclKind, DeriveData, Determinacy, Finalize, IdentKey,
     InvocationParent, MacroData, ModuleKind, ModuleOrUniformRoot, ParentScope, PathResult,
     ResolutionError, Resolver, ScopeSet, Segment, Used,
 };
@@ -52,7 +56,8 @@ pub(crate) struct MacroRulesDecl<'ra> {
     pub(crate) decl: Decl<'ra>,
     /// `macro_rules` scope into which the `macro_rules` item was planted.
     pub(crate) parent_macro_rules_scope: MacroRulesScopeRef<'ra>,
-    pub(crate) ident: Macros20NormalizedIdent,
+    pub(crate) ident: IdentKey,
+    pub(crate) orig_ident_span: Span,
 }
 
 /// The scope introduced by a `macro_rules!` macro.
@@ -120,35 +125,38 @@ fn fast_print_path(path: &ast::Path) -> Symbol {
 
 pub(crate) fn registered_tools(tcx: TyCtxt<'_>, (): ()) -> RegisteredTools {
     let (_, pre_configured_attrs) = &*tcx.crate_for_resolver(()).borrow();
-    registered_tools_ast(tcx.dcx(), pre_configured_attrs)
+    registered_tools_ast(tcx.dcx(), pre_configured_attrs, tcx.sess, tcx.features())
 }
 
 pub fn registered_tools_ast(
     dcx: DiagCtxtHandle<'_>,
     pre_configured_attrs: &[ast::Attribute],
+    sess: &Session,
+    features: &Features,
 ) -> RegisteredTools {
     let mut registered_tools = RegisteredTools::default();
-    for attr in attr::filter_by_name(pre_configured_attrs, sym::register_tool) {
-        for meta_item_inner in attr.meta_item_list().unwrap_or_default() {
-            match meta_item_inner.ident() {
-                Some(ident) => {
-                    if let Some(old_ident) = registered_tools.replace(ident) {
-                        dcx.emit_err(errors::ToolWasAlreadyRegistered {
-                            span: ident.span,
-                            tool: ident,
-                            old_ident_span: old_ident.span,
-                        });
-                    }
-                }
-                None => {
-                    dcx.emit_err(errors::ToolOnlyAcceptsIdentifiers {
-                        span: meta_item_inner.span(),
-                        tool: sym::register_tool,
-                    });
-                }
+
+    if let Some(Attribute::Parsed(AttributeKind::RegisterTool(tools, _))) =
+        AttributeParser::parse_limited(
+            sess,
+            pre_configured_attrs,
+            sym::register_tool,
+            DUMMY_SP,
+            DUMMY_NODE_ID,
+            Some(features),
+        )
+    {
+        for tool in tools {
+            if let Some(old_tool) = registered_tools.replace(tool) {
+                dcx.emit_err(errors::ToolWasAlreadyRegistered {
+                    span: tool.span,
+                    tool,
+                    old_ident_span: old_tool.span,
+                });
             }
         }
     }
+
     // We implicitly add `rustfmt`, `clippy`, `diagnostic`, `miri` and `rust_analyzer` to known
     // tools, but it's not an error to register them explicitly.
     let predefined_tools =
@@ -164,6 +172,14 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
 
     fn invocation_parent(&self, id: LocalExpnId) -> LocalDefId {
         self.invocation_parents[&id].parent_def
+    }
+
+    fn mark_scope_with_compile_error(&mut self, id: NodeId) {
+        if let Some(id) = self.opt_local_def_id(id)
+            && self.tcx.def_kind(id).is_module_like()
+        {
+            self.mods_with_parse_errors.insert(id.to_def_id());
+        }
     }
 
     fn resolve_dollar_crates(&self) {
@@ -212,17 +228,19 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
     ) -> LocalExpnId {
         let parent_module =
             parent_module_id.map(|module_id| self.local_def_id(module_id).to_def_id());
-        let expn_id = LocalExpnId::fresh(
-            ExpnData::allow_unstable(
-                ExpnKind::AstPass(pass),
-                call_site,
-                self.tcx.sess.edition(),
-                features.into(),
-                None,
-                parent_module,
-            ),
-            self.create_stable_hashing_context(),
-        );
+        let expn_id = self.tcx.with_stable_hashing_context(|hcx| {
+            LocalExpnId::fresh(
+                ExpnData::allow_unstable(
+                    ExpnKind::AstPass(pass),
+                    call_site,
+                    self.tcx.sess.edition(),
+                    features.into(),
+                    None,
+                    parent_module,
+                ),
+                hcx,
+            )
+        });
 
         let parent_scope =
             parent_module.map_or(self.empty_module, |def_id| self.expect_module(def_id));
@@ -312,17 +330,19 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
 
         let span = invoc.span();
         let def_id = if deleg_impl.is_some() { None } else { res.opt_def_id() };
-        invoc_id.set_expn_data(
-            ext.expn_data(
-                parent_scope.expansion,
-                span,
-                fast_print_path(path),
-                kind,
-                def_id,
-                def_id.map(|def_id| self.macro_def_scope(def_id).nearest_parent_mod()),
-            ),
-            self.create_stable_hashing_context(),
-        );
+        self.tcx.with_stable_hashing_context(|hcx| {
+            invoc_id.set_expn_data(
+                ext.expn_data(
+                    parent_scope.expansion,
+                    span,
+                    fast_print_path(path),
+                    kind,
+                    def_id,
+                    def_id.map(|def_id| self.macro_def_scope(def_id).nearest_parent_mod()),
+                ),
+                hcx,
+            )
+        });
 
         Ok(ext)
     }
@@ -404,9 +424,12 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
                         Ok((Some(ext), _)) => {
                             if !ext.helper_attrs.is_empty() {
                                 let span = resolution.path.segments.last().unwrap().ident.span;
-                                entry.helper_attrs.extend(ext.helper_attrs.iter().map(|name| {
-                                    (i, Macros20NormalizedIdent::new(Ident::new(*name, span)))
-                                }));
+                                let ctxt = Macros20NormalizedSyntaxContext::new(span.ctxt());
+                                entry.helper_attrs.extend(
+                                    ext.helper_attrs
+                                        .iter()
+                                        .map(|&name| (i, IdentKey { name, ctxt }, span)),
+                                );
                             }
                             entry.has_derive_copy |= ext.builtin_name == Some(sym::Copy);
                             ext
@@ -422,13 +445,14 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
             }
         }
         // Sort helpers in a stable way independent from the derive resolution order.
-        entry.helper_attrs.sort_by_key(|(i, _)| *i);
+        entry.helper_attrs.sort_by_key(|(i, ..)| *i);
         let helper_attrs = entry
             .helper_attrs
             .iter()
-            .map(|(_, ident)| {
+            .map(|&(_, ident, orig_ident_span)| {
                 let res = Res::NonMacroAttr(NonMacroAttrKind::DeriveHelper);
-                (*ident, self.arenas.new_pub_def_decl(res, ident.span, expn_id))
+                let decl = self.arenas.new_pub_def_decl(res, orig_ident_span, expn_id);
+                (ident, orig_ident_span, decl)
             })
             .collect();
         self.helper_attrs.insert(expn_id, helper_attrs);
@@ -524,14 +548,14 @@ impl<'ra, 'tcx> ResolverExpand for Resolver<'ra, 'tcx> {
         }
 
         let mut idents = Vec::new();
-        target_trait.for_each_child(self, |this, ident, ns, _binding| {
+        target_trait.for_each_child(self, |this, ident, orig_ident_span, ns, _binding| {
             // FIXME: Adjust hygiene for idents from globs, like for glob imports.
             if let Some(overriding_keys) = this.impl_binding_keys.get(&impl_def_id)
                 && overriding_keys.contains(&BindingKey::new(ident, ns))
             {
                 // The name is overridden, do not produce it from the glob delegation.
             } else {
-                idents.push((ident.0, None));
+                idents.push((ident.orig(orig_ident_span), None));
             }
         });
         Ok(idents)
@@ -785,10 +809,12 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 ScopeSet::Macro(kind),
                 parent_scope,
                 None,
-                force,
                 None,
                 None,
             );
+            let binding = binding.map_err(|determinacy| {
+                Determinacy::determined(determinacy == Determinacy::Determined || force)
+            });
             if let Err(Determinacy::Undetermined) = binding {
                 return Err(Determinacy::Undetermined);
             }
@@ -888,10 +914,10 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 ),
                 path_res @ (PathResult::NonModule(..) | PathResult::Failed { .. }) => {
                     let mut suggestion = None;
-                    let (span, label, module, segment) =
-                        if let PathResult::Failed { span, label, module, segment_name, .. } =
-                            path_res
-                        {
+                    let (span, message, label, module, segment) = match path_res {
+                        PathResult::Failed {
+                            span, label, module, segment_name, message, ..
+                        } => {
                             // try to suggest if it's not a macro, maybe a function
                             if let PathResult::NonModule(partial_res) = self
                                 .cm()
@@ -910,26 +936,52 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                                     Applicability::MaybeIncorrect,
                                 ));
                             }
-                            (span, label, module, segment_name)
-                        } else {
+                            (span, message, label, module, segment_name)
+                        }
+                        PathResult::NonModule(partial_res) => {
+                            let found_an = partial_res.base_res().article();
+                            let found_descr = partial_res.base_res().descr();
+                            let scope = match &path[..partial_res.unresolved_segments()] {
+                                [.., prev] => {
+                                    format!("{found_descr} `{}`", prev.ident)
+                                }
+                                _ => found_descr.to_string(),
+                            };
+                            let expected_an = kind.article();
+                            let expected_descr = kind.descr();
+                            let expected_name = path[partial_res.unresolved_segments()].ident;
+
                             (
                                 path_span,
                                 format!(
-                                    "partially resolved path in {} {}",
-                                    kind.article(),
-                                    kind.descr()
+                                    "cannot find {expected_descr} `{expected_name}` in {scope}"
                                 ),
+                                match partial_res.base_res() {
+                                    Res::Def(
+                                        DefKind::Mod | DefKind::Macro(..) | DefKind::ExternCrate,
+                                        _,
+                                    ) => format!(
+                                        "partially resolved path in {expected_an} {expected_descr}",
+                                    ),
+                                    _ => format!(
+                                        "{expected_an} {expected_descr} can't exist within \
+                                         {found_an} {found_descr}"
+                                    ),
+                                },
                                 None,
                                 path.last().map(|segment| segment.ident.name).unwrap(),
                             )
-                        };
+                        }
+                        _ => unreachable!(),
+                    };
                     self.report_error(
                         span,
                         ResolutionError::FailedToResolve {
-                            segment: Some(segment),
+                            segment,
                             label,
                             suggestion,
                             module,
+                            message,
                         },
                     );
                 }
@@ -944,7 +996,6 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 ScopeSet::Macro(kind),
                 &parent_scope,
                 Some(Finalize::new(ast::CRATE_NODE_ID, ident.span)),
-                true,
                 None,
                 None,
             ) {
@@ -999,7 +1050,6 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 ScopeSet::Macro(MacroKind::Attr),
                 &parent_scope,
                 Some(Finalize::new(ast::CRATE_NODE_ID, ident.span)),
-                true,
                 None,
                 None,
             );
@@ -1103,7 +1153,6 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 ScopeSet::Macro(MacroKind::Bang),
                 &ParentScope { macro_rules: no_macro_rules, ..*parent_scope },
                 None,
-                false,
                 None,
                 None,
             );
@@ -1130,7 +1179,6 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     errors::OutOfScopeMacroCalls {
                         span: path.span,
                         path: pprust::path_to_string(path),
-                        // FIXME: Make this translatable.
                         location,
                     },
                 );
@@ -1138,14 +1186,13 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         }
     }
 
-    pub(crate) fn check_reserved_macro_name(&self, ident: Ident, res: Res) {
+    pub(crate) fn check_reserved_macro_name(&self, name: Symbol, span: Span, res: Res) {
         // Reserve some names that are not quite covered by the general check
         // performed on `Resolver::builtin_attrs`.
-        if ident.name == sym::cfg || ident.name == sym::cfg_attr {
+        if name == sym::cfg || name == sym::cfg_attr {
             let macro_kinds = self.get_macro(res).map(|macro_data| macro_data.ext.macro_kinds());
             if macro_kinds.is_some() && sub_namespace_match(macro_kinds, Some(MacroKind::Attr)) {
-                self.dcx()
-                    .emit_err(errors::NameReservedInAttributeNamespace { span: ident.span, ident });
+                self.dcx().emit_err(errors::NameReservedInAttributeNamespace { span, ident: name });
             }
         }
     }

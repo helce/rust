@@ -1,7 +1,7 @@
 use super::prelude::*;
 
-pub(crate) struct AsPtrParser;
-impl<S: Stage> NoArgsAttributeParser<S> for AsPtrParser {
+pub(crate) struct RustcAsPtrParser;
+impl<S: Stage> NoArgsAttributeParser<S> for RustcAsPtrParser {
     const PATH: &[Symbol] = &[sym::rustc_as_ptr];
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
     const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[
@@ -11,11 +11,11 @@ impl<S: Stage> NoArgsAttributeParser<S> for AsPtrParser {
         Allow(Target::Method(MethodKind::Trait { body: true })),
         Allow(Target::Method(MethodKind::TraitImpl)),
     ]);
-    const CREATE: fn(Span) -> AttributeKind = AttributeKind::AsPtr;
+    const CREATE: fn(Span) -> AttributeKind = AttributeKind::RustcAsPtr;
 }
 
-pub(crate) struct PubTransparentParser;
-impl<S: Stage> NoArgsAttributeParser<S> for PubTransparentParser {
+pub(crate) struct RustcPubTransparentParser;
+impl<S: Stage> NoArgsAttributeParser<S> for RustcPubTransparentParser {
     const PATH: &[Symbol] = &[sym::rustc_pub_transparent];
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
     const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[
@@ -23,11 +23,11 @@ impl<S: Stage> NoArgsAttributeParser<S> for PubTransparentParser {
         Allow(Target::Enum),
         Allow(Target::Union),
     ]);
-    const CREATE: fn(Span) -> AttributeKind = AttributeKind::PubTransparent;
+    const CREATE: fn(Span) -> AttributeKind = AttributeKind::RustcPubTransparent;
 }
 
-pub(crate) struct PassByValueParser;
-impl<S: Stage> NoArgsAttributeParser<S> for PassByValueParser {
+pub(crate) struct RustcPassByValueParser;
+impl<S: Stage> NoArgsAttributeParser<S> for RustcPassByValueParser {
     const PATH: &[Symbol] = &[sym::rustc_pass_by_value];
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
     const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[
@@ -35,11 +35,11 @@ impl<S: Stage> NoArgsAttributeParser<S> for PassByValueParser {
         Allow(Target::Enum),
         Allow(Target::TyAlias),
     ]);
-    const CREATE: fn(Span) -> AttributeKind = AttributeKind::PassByValue;
+    const CREATE: fn(Span) -> AttributeKind = AttributeKind::RustcPassByValue;
 }
 
-pub(crate) struct RustcShouldNotBeCalledOnConstItems;
-impl<S: Stage> NoArgsAttributeParser<S> for RustcShouldNotBeCalledOnConstItems {
+pub(crate) struct RustcShouldNotBeCalledOnConstItemsParser;
+impl<S: Stage> NoArgsAttributeParser<S> for RustcShouldNotBeCalledOnConstItemsParser {
     const PATH: &[Symbol] = &[sym::rustc_should_not_be_called_on_const_items];
     const ON_DUPLICATE: OnDuplicate<S> = OnDuplicate::Error;
     const ALLOWED_TARGETS: AllowedTargets = AllowedTargets::AllowList(&[

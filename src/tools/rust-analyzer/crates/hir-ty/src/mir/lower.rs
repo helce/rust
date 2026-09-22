@@ -9,7 +9,7 @@ use hir_def::{
     expr_store::{Body, ExpressionStore, HygieneId, path::Path},
     hir::{
         ArithOp, Array, BinaryOp, BindingAnnotation, BindingId, ExprId, LabelId, Literal, MatchArm,
-        Pat, PatId, RecordFieldPat, RecordLitField,
+        Pat, PatId, RecordFieldPat, RecordLitField, RecordSpread,
     },
     item_tree::FieldsShape,
     lang_item::LangItems,
@@ -867,16 +867,17 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
             }
             Expr::Become { .. } => not_supported!("tail-calls"),
             Expr::Yield { .. } => not_supported!("yield"),
-            Expr::RecordLit { fields, path, spread } => {
-                let spread_place = match spread {
-                    &Some(it) => {
+            Expr::RecordLit { fields, path, spread, .. } => {
+                let spread_place = match *spread {
+                    RecordSpread::Expr(it) => {
                         let Some((p, c)) = self.lower_expr_as_place(current, it, true)? else {
                             return Ok(None);
                         };
                         current = c;
                         Some(p)
                     }
-                    None => None,
+                    RecordSpread::None => None,
+                    RecordSpread::FieldDefaults => not_supported!("empty record spread"),
                 };
                 let variant_id =
                     self.infer.variant_resolution_for_expr(expr_id).ok_or_else(|| match path {
@@ -1428,7 +1429,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                     .resolve_path_in_value_ns(self.db, c, HygieneId::ROOT)
                     .ok_or_else(unresolved_name)?;
                 match pr {
-                    ResolveValueResult::ValueNs(v, _) => {
+                    ResolveValueResult::ValueNs(v) => {
                         if let ValueNs::ConstId(c) = v {
                             self.lower_const_to_operand(
                                 GenericArgs::empty(self.interner()),
@@ -1438,7 +1439,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                             not_supported!("bad path in range pattern");
                         }
                     }
-                    ResolveValueResult::Partial(_, _, _) => {
+                    ResolveValueResult::Partial(_, _) => {
                         not_supported!("associated constants in range pattern")
                     }
                 }

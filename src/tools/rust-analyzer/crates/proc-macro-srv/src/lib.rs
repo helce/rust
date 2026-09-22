@@ -22,9 +22,12 @@
 )]
 #![deny(deprecated_safe, clippy::undocumented_unsafe_blocks)]
 
-extern crate proc_macro;
+#[cfg(not(feature = "in-rust-tree"))]
+extern crate proc_macro as rustc_proc_macro;
 #[cfg(feature = "in-rust-tree")]
 extern crate rustc_driver as _;
+#[cfg(feature = "in-rust-tree")]
+extern crate rustc_proc_macro;
 
 #[cfg(not(feature = "in-rust-tree"))]
 extern crate ra_ap_rustc_lexer as rustc_lexer;
@@ -41,6 +44,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
+    ops::Range,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
     thread,
@@ -52,7 +56,7 @@ use temp_dir::TempDir;
 
 pub use crate::server_impl::token_id::SpanId;
 
-pub use proc_macro::Delimiter;
+pub use rustc_proc_macro::Delimiter;
 pub use span;
 
 pub use crate::bridge::*;
@@ -92,15 +96,50 @@ impl<'env> ProcMacroSrv<'env> {
     }
 }
 
+#[derive(Debug)]
+pub enum ProcMacroClientError {
+    Cancelled { reason: String },
+    Io(std::io::Error),
+    Protocol(String),
+    Eof,
+}
+
+#[derive(Debug)]
+pub enum ProcMacroPanicMarker {
+    Cancelled { reason: String },
+    Internal { reason: String },
+}
+
 pub type ProcMacroClientHandle<'a> = &'a mut (dyn ProcMacroClientInterface + Sync + Send);
 
 pub trait ProcMacroClientInterface {
     fn file(&mut self, file_id: span::FileId) -> String;
     fn source_text(&mut self, span: Span) -> Option<String>;
     fn local_file(&mut self, file_id: span::FileId) -> Option<String>;
+    /// Line and column are 1-based.
+    fn line_column(&mut self, span: Span) -> Option<(u32, u32)>;
+
+    fn byte_range(&mut self, span: Span) -> Range<usize>;
+    fn span_source(&mut self, span: Span) -> Span;
 }
 
 const EXPANDER_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+pub enum ExpandError {
+    Panic(PanicMessage),
+    Cancelled { reason: Option<String> },
+    Internal { reason: Option<String> },
+}
+
+impl ExpandError {
+    pub fn into_string(self) -> Option<String> {
+        match self {
+            ExpandError::Panic(panic_message) => panic_message.into_string(),
+            ExpandError::Cancelled { reason } => reason,
+            ExpandError::Internal { reason } => reason,
+        }
+    }
+}
 
 impl ProcMacroSrv<'_> {
     pub fn expand<S: ProcMacroSrvSpan>(
@@ -115,10 +154,10 @@ impl ProcMacroSrv<'_> {
         call_site: S,
         mixed_site: S,
         callback: Option<ProcMacroClientHandle<'_>>,
-    ) -> Result<token_stream::TokenStream<S>, PanicMessage> {
+    ) -> Result<token_stream::TokenStream<S>, ExpandError> {
         let snapped_env = self.env;
-        let expander = self.expander(lib.as_ref()).map_err(|err| PanicMessage {
-            message: Some(format!("failed to load macro: {err}")),
+        let expander = self.expander(lib.as_ref()).map_err(|err| ExpandError::Internal {
+            reason: Some(format!("failed to load macro: {err}")),
         })?;
 
         let prev_env = EnvChange::apply(snapped_env, env, current_dir.as_ref().map(<_>::as_ref));
@@ -136,8 +175,22 @@ impl ProcMacroSrv<'_> {
                     )
                 });
             match thread.unwrap().join() {
-                Ok(res) => res,
-                Err(e) => std::panic::resume_unwind(e),
+                Ok(res) => res.map_err(ExpandError::Panic),
+
+                Err(payload) => {
+                    if let Some(marker) = payload.downcast_ref::<ProcMacroPanicMarker>() {
+                        return match marker {
+                            ProcMacroPanicMarker::Cancelled { reason } => {
+                                Err(ExpandError::Cancelled { reason: Some(reason.clone()) })
+                            }
+                            ProcMacroPanicMarker::Internal { reason } => {
+                                Err(ExpandError::Internal { reason: Some(reason.clone()) })
+                            }
+                        };
+                    }
+
+                    std::panic::resume_unwind(payload)
+                }
             }
         });
         prev_env.rollback();
@@ -181,7 +234,9 @@ impl ProcMacroSrv<'_> {
 }
 
 pub trait ProcMacroSrvSpan: Copy + Send + Sync {
-    type Server<'a>: proc_macro::bridge::server::Server<TokenStream = crate::token_stream::TokenStream<Self>>;
+    type Server<'a>: rustc_proc_macro::bridge::server::Server<
+            TokenStream = crate::token_stream::TokenStream<Self>,
+        >;
     fn make_server<'a>(
         call_site: Self,
         def_site: Self,

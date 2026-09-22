@@ -7,7 +7,7 @@ use rustc_abi::Align;
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_data_structures::profiling::TimePassesFormat;
 use rustc_data_structures::stable_hasher::StableHasher;
-use rustc_errors::{ColorConfig, LanguageIdentifier, TerminalUrl};
+use rustc_errors::{ColorConfig, TerminalUrl};
 use rustc_feature::UnstableFeatures;
 use rustc_hashes::Hash64;
 use rustc_hir::attrs::CollapseMacroDebuginfo;
@@ -454,6 +454,8 @@ top_level_options!(
 
         /// Remap source path prefixes in all output (messages, object files, debug, etc.).
         remap_path_prefix: Vec<(PathBuf, PathBuf)> [TRACKED_NO_CRATE_HASH],
+        /// Defines which scopes of paths should be remapped by `--remap-path-prefix`.
+        remap_path_scope: RemapPathScopeComponents [TRACKED_NO_CRATE_HASH],
 
         /// Base directory containing the `library/` directory for the Rust standard library.
         /// Right now it's always `$sysroot/lib/rustlib/src/rust`
@@ -609,7 +611,7 @@ macro_rules! options {
         $parse:ident,
         [$dep_tracking_marker:ident $( $tmod:ident )?],
         $desc:expr
-        $(, deprecated_do_nothing: $dnn:literal )?)
+        $(, is_deprecated_and_do_nothing: $dnn:literal )?)
      ),* ,) =>
 (
     #[derive(Clone)]
@@ -724,7 +726,6 @@ impl<O> OptionDesc<O> {
     }
 }
 
-#[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
 fn build_options<O: Default>(
     early_dcx: &EarlyDiagCtxt,
     matches: &getopts::Matches,
@@ -759,7 +760,7 @@ fn build_options<O: Default>(
                     match value {
                         None => early_dcx.early_fatal(
                             format!(
-                                "{outputname} option `{key}` requires {type_desc} ({prefix} {key}=<value>)"
+                                "{outputname} option `{key}` requires {type_desc} (`-{prefix} {key}=<value>`)"
                             ),
                         ),
                         Some(value) => early_dcx.early_fatal(
@@ -789,7 +790,6 @@ mod desc {
     pub(crate) const parse_string: &str = "a string";
     pub(crate) const parse_opt_string: &str = parse_string;
     pub(crate) const parse_string_push: &str = parse_string;
-    pub(crate) const parse_opt_langid: &str = "a language identifier";
     pub(crate) const parse_opt_pathbuf: &str = "a path";
     pub(crate) const parse_list: &str = "a space-separated list of strings";
     pub(crate) const parse_list_with_polarity: &str =
@@ -873,7 +873,6 @@ mod desc {
     pub(crate) const parse_branch_protection: &str = "a `,` separated combination of `bti`, `gcs`, `pac-ret`, (optionally with `pc`, `b-key`, `leaf` if `pac-ret` is set)";
     pub(crate) const parse_proc_macro_execution_strategy: &str =
         "one of supported execution strategies (`same-thread`, or `cross-thread`)";
-    pub(crate) const parse_remap_path_scope: &str = "comma separated list of scopes: `macro`, `diagnostics`, `debuginfo`, `coverage`, `object`, `all`";
     pub(crate) const parse_inlining_threshold: &str =
         "either a boolean (`yes`, `no`, `on`, `off`, etc), or a non-negative number";
     pub(crate) const parse_llvm_module_flag: &str = "<key>:<type>:<value>:<behavior>. Type must currently be `u32`. Behavior should be one of (`error`, `warning`, `require`, `override`, `append`, `appendunique`, `max`, `min`)";
@@ -992,17 +991,6 @@ pub mod parse {
         match v {
             Some(s) => {
                 *slot = Some(s.to_string());
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Parse an optional language identifier, e.g. `en-US` or `zh-CN`.
-    pub(crate) fn parse_opt_langid(slot: &mut Option<LanguageIdentifier>, v: Option<&str>) -> bool {
-        match v {
-            Some(s) => {
-                *slot = rustc_errors::LanguageIdentifier::from_str(s).ok();
                 true
             }
             None => false,
@@ -1738,29 +1726,6 @@ pub mod parse {
         true
     }
 
-    pub(crate) fn parse_remap_path_scope(
-        slot: &mut RemapPathScopeComponents,
-        v: Option<&str>,
-    ) -> bool {
-        if let Some(v) = v {
-            *slot = RemapPathScopeComponents::empty();
-            for s in v.split(',') {
-                *slot |= match s {
-                    "macro" => RemapPathScopeComponents::MACRO,
-                    "diagnostics" => RemapPathScopeComponents::DIAGNOSTICS,
-                    "debuginfo" => RemapPathScopeComponents::DEBUGINFO,
-                    "coverage" => RemapPathScopeComponents::COVERAGE,
-                    "object" => RemapPathScopeComponents::OBJECT,
-                    "all" => RemapPathScopeComponents::all(),
-                    _ => return false,
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
-
     pub(crate) fn parse_relocation_model(slot: &mut Option<RelocModel>, v: Option<&str>) -> bool {
         match v.and_then(|s| RelocModel::from_str(s).ok()) {
             Some(relocation_model) => *slot = Some(relocation_model),
@@ -2094,7 +2059,7 @@ options! {
     #[rustc_lint_opt_deny_field_access("documented to do nothing")]
     ar: String = (String::new(), parse_string, [UNTRACKED],
         "this option is deprecated and does nothing",
-        deprecated_do_nothing: true),
+        is_deprecated_and_do_nothing: true),
     #[rustc_lint_opt_deny_field_access("use `Session::code_model` instead of this field")]
     code_model: Option<CodeModel> = (None, parse_code_model, [TRACKED],
         "choose the code model to use (`rustc --print code-models` for details)"),
@@ -2126,13 +2091,14 @@ options! {
     #[rustc_lint_opt_deny_field_access("use `Session::must_emit_unwind_tables` instead of this field")]
     force_unwind_tables: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "force use of unwind tables"),
+    help: bool = (false, parse_no_value, [UNTRACKED], "Print codegen options"),
     incremental: Option<String> = (None, parse_opt_string, [UNTRACKED],
         "enable incremental compilation"),
     #[rustc_lint_opt_deny_field_access("documented to do nothing")]
     inline_threshold: Option<u32> = (None, parse_opt_number, [UNTRACKED],
         "this option is deprecated and does nothing \
         (consider using `-Cllvm-args=--inline-threshold=...`)",
-        deprecated_do_nothing: true),
+        is_deprecated_and_do_nothing: true),
     #[rustc_lint_opt_deny_field_access("use `Session::instrument_coverage` instead of this field")]
     instrument_coverage: InstrumentCoverage = (InstrumentCoverage::No, parse_instrument_coverage, [TRACKED],
         "instrument the generated code to support LLVM source-based code coverage reports \
@@ -2173,7 +2139,7 @@ options! {
     #[rustc_lint_opt_deny_field_access("documented to do nothing")]
     no_stack_check: bool = (false, parse_no_value, [UNTRACKED],
         "this option is deprecated and does nothing",
-        deprecated_do_nothing: true),
+        is_deprecated_and_do_nothing: true),
     no_vectorize_loops: bool = (false, parse_no_value, [TRACKED],
         "disable loop vectorization optimization passes"),
     no_vectorize_slp: bool = (false, parse_no_value, [TRACKED],
@@ -2357,8 +2323,6 @@ options! {
         "embed source text in DWARF debug sections (default: no)"),
     emit_stack_sizes: bool = (false, parse_bool, [UNTRACKED],
         "emit a section containing stack size metadata (default: no)"),
-    emit_thin_lto: bool = (true, parse_bool, [TRACKED],
-        "emit the bc module with thin LTO info (default: yes)"),
     emscripten_wasm_eh: bool = (true, parse_bool, [TRACKED],
         "Use WebAssembly error handling for wasm32-unknown-emscripten"),
     enforce_type_length_limit: bool = (false, parse_bool, [TRACKED],
@@ -2398,6 +2362,7 @@ options! {
         environment variable `RUSTC_GRAPHVIZ_FONT` (default: `Courier, monospace`)"),
     has_thread_local: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "explicitly enable the `cfg(target_thread_local)` directive"),
+    help: bool = (false, parse_no_value, [UNTRACKED], "Print unstable compiler options"),
     higher_ranked_assumptions: bool = (false, parse_bool, [TRACKED],
         "allow deducing higher-ranked outlives assumptions from coroutines when proving auto traits"),
     hint_mostly_unused: bool = (false, parse_bool, [TRACKED],
@@ -2447,6 +2412,9 @@ options! {
          `=skip-entry`
          `=skip-exit`
          Multiple options can be combined with commas."),
+    large_data_threshold: Option<u64> = (None, parse_opt_number, [TRACKED],
+        "set the threshold for objects to be stored in a \"large data\" section \
+         (only effective with -Ccode-model=medium, default: 65536)"),
     layout_seed: Option<u64> = (None, parse_opt_number, [TRACKED],
         "seed layout randomization"),
     link_directives: bool = (true, parse_bool, [TRACKED],
@@ -2499,6 +2467,9 @@ options! {
     mir_include_spans: MirIncludeSpans = (MirIncludeSpans::default(), parse_mir_include_spans, [UNTRACKED],
         "include extra comments in mir pretty printing, like line numbers and statement indices, \
          details about types, etc. (boolean for all passes, 'nll' to enable in NLL MIR only, default: 'nll')"),
+    mir_opt_bisect_limit: Option<usize> = (None, parse_opt_number, [TRACKED],
+        "limit the number of MIR optimization pass executions (global across all bodies). \
+        Pass executions after this limit are skipped and reported. (default: no limit)"),
     #[rustc_lint_opt_deny_field_access("use `Session::mir_opt_level` instead of this field")]
     mir_opt_level: Option<usize> = (None, parse_opt_number, [TRACKED],
         "MIR optimization level (0-4; default: 1 in non optimized builds and 2 in optimized builds)"),
@@ -2613,8 +2584,6 @@ options! {
         "whether ELF relocations can be relaxed"),
     remap_cwd_prefix: Option<PathBuf> = (None, parse_opt_pathbuf, [TRACKED],
         "remap paths under the current working directory to this path prefix"),
-    remap_path_scope: RemapPathScopeComponents = (RemapPathScopeComponents::all(), parse_remap_path_scope, [TRACKED],
-        "remap path scope (default: all)"),
     remark_dir: Option<PathBuf> = (None, parse_opt_pathbuf, [UNTRACKED],
         "directory into which to write optimization remarks (if not specified, they will be \
 written to standard error output)"),
@@ -2730,15 +2699,6 @@ written to standard error output)"),
         "for every macro invocation, print its name and arguments (default: no)"),
     track_diagnostics: bool = (false, parse_bool, [UNTRACKED],
         "tracks where in rustc a diagnostic was emitted"),
-    // Diagnostics are considered side-effects of a query (see `QuerySideEffect`) and are saved
-    // alongside query results and changes to translation options can affect diagnostics - so
-    // translation options should be tracked.
-    translate_additional_ftl: Option<PathBuf> = (None, parse_opt_pathbuf, [TRACKED],
-        "additional fluent translation to preferentially use (for testing translation)"),
-    translate_directionality_markers: bool = (false, parse_bool, [TRACKED],
-        "emit directionality isolation markers in translated diagnostics"),
-    translate_lang: Option<LanguageIdentifier> = (None, parse_opt_langid, [TRACKED],
-        "language identifier for diagnostic output"),
     translate_remapped_path_to_local_path: bool = (true, parse_bool, [TRACKED],
         "translate remapped paths into local paths when possible (default: yes)"),
     trap_unreachable: Option<bool> = (None, parse_opt_bool, [TRACKED],

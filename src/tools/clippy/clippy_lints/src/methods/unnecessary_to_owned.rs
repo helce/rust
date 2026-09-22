@@ -14,7 +14,7 @@ use rustc_hir::{BorrowKind, Expr, ExprKind, ItemKind, LangItem, Node};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::LateContext;
 use rustc_middle::mir::Mutability;
-use rustc_middle::ty::adjustment::{Adjust, Adjustment, OverloadedDeref};
+use rustc_middle::ty::adjustment::{Adjust, Adjustment, DerefAdjustKind, OverloadedDeref};
 use rustc_middle::ty::{
     self, ClauseKind, GenericArg, GenericArgKind, GenericArgsRef, ParamTy, ProjectionPredicate, TraitPredicate, Ty,
 };
@@ -78,7 +78,7 @@ fn check_addr_of_expr(
             // For matching uses of `Cow::from`
             [
                 Adjustment {
-                    kind: Adjust::Deref(None),
+                    kind: Adjust::Deref(DerefAdjustKind::Builtin),
                     target: referent_ty,
                 },
                 Adjustment {
@@ -89,7 +89,7 @@ fn check_addr_of_expr(
             // For matching uses of arrays
             | [
                 Adjustment {
-                    kind: Adjust::Deref(None),
+                    kind: Adjust::Deref(DerefAdjustKind::Builtin),
                     target: referent_ty,
                 },
                 Adjustment {
@@ -104,11 +104,11 @@ fn check_addr_of_expr(
             // For matching everything else
             | [
                 Adjustment {
-                    kind: Adjust::Deref(None),
+                    kind: Adjust::Deref(DerefAdjustKind::Builtin),
                     target: referent_ty,
                 },
                 Adjustment {
-                    kind: Adjust::Deref(Some(OverloadedDeref { .. })),
+                    kind: Adjust::Deref(DerefAdjustKind::Overloaded(OverloadedDeref { .. })),
                     ..
                 },
                 Adjustment {
@@ -482,15 +482,11 @@ fn get_input_traits_and_projections<'tcx>(
     let mut projection_predicates = Vec::new();
     for predicate in cx.tcx.param_env(callee_def_id).caller_bounds() {
         match predicate.kind().skip_binder() {
-            ClauseKind::Trait(trait_predicate) => {
-                if trait_predicate.trait_ref.self_ty() == input {
-                    trait_predicates.push(trait_predicate);
-                }
+            ClauseKind::Trait(trait_predicate) if trait_predicate.trait_ref.self_ty() == input => {
+                trait_predicates.push(trait_predicate);
             },
-            ClauseKind::Projection(projection_predicate) => {
-                if projection_predicate.projection_term.self_ty() == input {
-                    projection_predicates.push(projection_predicate);
-                }
+            ClauseKind::Projection(projection_predicate) if projection_predicate.projection_term.self_ty() == input => {
+                projection_predicates.push(projection_predicate);
             },
             _ => {},
         }
@@ -702,8 +698,7 @@ fn check_if_applicable_to_argument<'tcx>(cx: &LateContext<'tcx>, arg: &Expr<'tcx
             sym::to_vec => cx
                 .tcx
                 .impl_of_assoc(method_def_id)
-                .filter(|&impl_did| cx.tcx.type_of(impl_did).instantiate_identity().is_slice())
-                .is_some(),
+                .is_some_and(|impl_did| cx.tcx.type_of(impl_did).instantiate_identity().is_slice()),
             _ => false,
         }
         && let original_arg_ty = cx.typeck_results().node_type(caller.hir_id).peel_refs()

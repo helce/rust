@@ -8,7 +8,7 @@
 //! Thank you!
 //! ~The `INTERNAL_METADATA_COLLECTOR` lint
 
-use rustc_errors::{Applicability, Diag, DiagMessage, MultiSpan, SubdiagMessage};
+use rustc_errors::{Applicability, Diag, DiagMessage, MultiSpan};
 #[cfg(debug_assertions)]
 use rustc_errors::{EmissionGuarantee, SubstitutionPart, Suggestions};
 use rustc_hir::HirId;
@@ -104,14 +104,7 @@ fn validate_diag(diag: &Diag<'_, impl EmissionGuarantee>) {
 /// ```
 #[track_caller]
 pub fn span_lint<T: LintContext>(cx: &T, lint: &'static Lint, sp: impl Into<MultiSpan>, msg: impl Into<DiagMessage>) {
-    #[expect(clippy::disallowed_methods)]
-    cx.span_lint(lint, sp, |diag| {
-        diag.primary_message(msg);
-        docs_link(diag, lint);
-
-        #[cfg(debug_assertions)]
-        validate_diag(diag);
-    });
+    span_lint_and_then(cx, lint, sp, msg, |_| {});
 }
 
 /// Same as [`span_lint`] but with an extra `help` message.
@@ -155,20 +148,14 @@ pub fn span_lint_and_help<T: LintContext>(
     span: impl Into<MultiSpan>,
     msg: impl Into<DiagMessage>,
     help_span: Option<Span>,
-    help: impl Into<SubdiagMessage>,
+    help: impl Into<DiagMessage>,
 ) {
-    #[expect(clippy::disallowed_methods)]
-    cx.span_lint(lint, span, |diag| {
-        diag.primary_message(msg);
+    span_lint_and_then(cx, lint, span, msg, |diag| {
         if let Some(help_span) = help_span {
             diag.span_help(help_span, help.into());
         } else {
             diag.help(help.into());
         }
-        docs_link(diag, lint);
-
-        #[cfg(debug_assertions)]
-        validate_diag(diag);
     });
 }
 
@@ -216,20 +203,14 @@ pub fn span_lint_and_note<T: LintContext>(
     span: impl Into<MultiSpan>,
     msg: impl Into<DiagMessage>,
     note_span: Option<Span>,
-    note: impl Into<SubdiagMessage>,
+    note: impl Into<DiagMessage>,
 ) {
-    #[expect(clippy::disallowed_methods)]
-    cx.span_lint(lint, span, |diag| {
-        diag.primary_message(msg);
+    span_lint_and_then(cx, lint, span, msg, |diag| {
         if let Some(note_span) = note_span {
             diag.span_note(note_span, note.into());
         } else {
             diag.note(note.into());
         }
-        docs_link(diag, lint);
-
-        #[cfg(debug_assertions)]
-        validate_diag(diag);
     });
 }
 
@@ -296,14 +277,7 @@ where
 /// the `#[allow]` will work.
 #[track_caller]
 pub fn span_lint_hir(cx: &LateContext<'_>, lint: &'static Lint, hir_id: HirId, sp: Span, msg: impl Into<DiagMessage>) {
-    #[expect(clippy::disallowed_methods)]
-    cx.tcx.node_span_lint(lint, hir_id, sp, |diag| {
-        diag.primary_message(msg);
-        docs_link(diag, lint);
-
-        #[cfg(debug_assertions)]
-        validate_diag(diag);
-    });
+    span_lint_hir_and_then(cx, lint, hir_id, sp, msg, |_| {});
 }
 
 /// Like [`span_lint_and_then`], but emits the lint at the node identified by the given `HirId`.
@@ -383,21 +357,22 @@ pub fn span_lint_hir_and_then(
 ///     |
 ///     = note: `-D fold-any` implied by `-D warnings`
 /// ```
-#[cfg_attr(not(debug_assertions), expect(clippy::collapsible_span_lint_calls))]
 #[track_caller]
 pub fn span_lint_and_sugg<T: LintContext>(
     cx: &T,
     lint: &'static Lint,
     sp: Span,
     msg: impl Into<DiagMessage>,
-    help: impl Into<SubdiagMessage>,
+    help: impl Into<DiagMessage>,
     sugg: String,
     applicability: Applicability,
 ) {
     span_lint_and_then(cx, lint, sp, msg.into(), |diag| {
         diag.span_suggestion(sp, help.into(), sugg, applicability);
 
-        #[cfg(debug_assertions)]
-        validate_diag(diag);
+        // This dummy construct is here to prevent the internal `clippy::collapsible_span_lint_calls`
+        // lint from triggering. We don't want to allow/expect it as internal lints might or might
+        // not be activated when linting, and we don't want an unknown lint warning either.
+        std::hint::black_box(());
     });
 }

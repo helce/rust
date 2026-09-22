@@ -1,19 +1,12 @@
+#![cfg_attr(bootstrap, feature(if_let_guard))]
 #![feature(box_patterns)]
-#![feature(if_let_guard)]
 #![feature(macro_metavar_expr)]
 #![feature(never_type)]
 #![feature(rustc_private)]
 #![feature(assert_matches)]
 #![feature(unwrap_infallible)]
-#![cfg_attr(bootstrap, feature(array_windows))]
 #![recursion_limit = "512"]
-#![allow(
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::must_use_candidate,
-    rustc::diagnostic_outside_of_impl,
-    rustc::untranslatable_diagnostic
-)]
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc, clippy::must_use_candidate)]
 #![warn(
     trivial_casts,
     trivial_numeric_casts,
@@ -96,7 +89,7 @@ use rustc_data_structures::indexmap;
 use rustc_data_structures::packed::Pu128;
 use rustc_data_structures::unhash::UnindexMap;
 use rustc_hir::LangItem::{OptionNone, OptionSome, ResultErr, ResultOk};
-use rustc_hir::attrs::{AttributeKind, CfgEntry};
+use rustc_hir::attrs::CfgEntry;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId, LocalModDefId};
 use rustc_hir::definitions::{DefPath, DefPathData};
@@ -115,7 +108,7 @@ use rustc_middle::hir::nested_filter;
 use rustc_middle::hir::place::PlaceBase;
 use rustc_middle::lint::LevelAndSource;
 use rustc_middle::mir::{AggregateKind, Operand, RETURN_PLACE, Rvalue, StatementKind, TerminatorKind};
-use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow, PointerCoercion};
+use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow, DerefAdjustKind, PointerCoercion};
 use rustc_middle::ty::layout::IntegerExt;
 use rustc_middle::ty::{
     self as rustc_ty, Binder, BorrowKind, ClosureKind, EarlyBinder, GenericArgKind, GenericArgsRef, IntTy, Ty, TyCtxt,
@@ -484,8 +477,8 @@ pub fn expr_custom_deref_adjustment(cx: &LateContext<'_>, e: &Expr<'_>) -> Optio
         .expr_adjustments(e)
         .iter()
         .find_map(|a| match a.kind {
-            Adjust::Deref(Some(d)) => Some(Some(d.mutbl)),
-            Adjust::Deref(None) => None,
+            Adjust::Deref(DerefAdjustKind::Overloaded(d)) => Some(Some(d.mutbl)),
+            Adjust::Deref(DerefAdjustKind::Builtin) => None,
             _ => Some(None),
         })
         .and_then(|x| x)
@@ -608,9 +601,9 @@ pub fn is_default_equivalent_call(
             && let StatementKind::Assign(assign) = &block_data.statements[0].kind
             && assign.0.local == RETURN_PLACE
             && let Rvalue::Aggregate(kind, _places) = &assign.1
-            && let AggregateKind::Adt(did, variant_index, _, _, _) = &**kind
+            && let AggregateKind::Adt(did, variant_index, _, _, _) = **kind
             && let def = cx.tcx.adt_def(did)
-            && let variant = &def.variant(*variant_index)
+            && let variant = &def.variant(variant_index)
             && variant.fields.is_empty()
             && let Some((_, did)) = variant.ctor
             && did == repl_def_id
@@ -1149,6 +1142,27 @@ pub fn get_enclosing_block<'tcx>(cx: &LateContext<'tcx>, hir_id: HirId) -> Optio
         },
         _ => None,
     })
+}
+
+/// Returns the [`Closure`] enclosing `hir_id`, if any.
+pub fn get_enclosing_closure<'tcx>(cx: &LateContext<'tcx>, hir_id: HirId) -> Option<&'tcx Closure<'tcx>> {
+    cx.tcx.hir_parent_iter(hir_id).find_map(|(_, node)| {
+        if let Node::Expr(expr) = node
+            && let ExprKind::Closure(closure) = expr.kind
+        {
+            Some(closure)
+        } else {
+            None
+        }
+    })
+}
+
+/// Checks whether a local identified by `local_id` is captured as an upvar by the given `closure`.
+pub fn is_upvar_in_closure(cx: &LateContext<'_>, closure: &Closure<'_>, local_id: HirId) -> bool {
+    cx.typeck_results()
+        .closure_min_captures
+        .get(&closure.def_id)
+        .is_some_and(|x| x.contains_key(&local_id))
 }
 
 /// Gets the loop or closure enclosing the given expression, if any.
@@ -1698,7 +1712,7 @@ pub fn has_attr(attrs: &[hir::Attribute], symbol: Symbol) -> bool {
 }
 
 pub fn has_repr_attr(cx: &LateContext<'_>, hir_id: HirId) -> bool {
-    find_attr!(cx.tcx.hir_attrs(hir_id), AttributeKind::Repr { .. })
+    find_attr!(cx.tcx.hir_attrs(hir_id), Repr { .. })
 }
 
 pub fn any_parent_has_attr(tcx: TyCtxt<'_>, node: HirId, symbol: Symbol) -> bool {
@@ -1723,7 +1737,7 @@ pub fn in_automatically_derived(tcx: TyCtxt<'_>, id: HirId) -> bool {
         .any(|(id, _)| {
             find_attr!(
                 tcx.hir_attrs(tcx.local_def_id_to_hir_id(id.def_id)),
-                AttributeKind::AutomaticallyDerived(..)
+                AutomaticallyDerived(..)
             )
         })
 }
@@ -1814,7 +1828,7 @@ pub fn is_must_use_func_call(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
         _ => None,
     };
 
-    did.is_some_and(|did| find_attr!(cx.tcx.get_all_attrs(did), AttributeKind::MustUse { .. }))
+    did.is_some_and(|did| find_attr!(cx.tcx, did, MustUse { .. }))
 }
 
 /// Checks if a function's body represents the identity function. Looks for bodies of the form:
@@ -2031,21 +2045,21 @@ pub fn is_expr_temporary_value(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
 }
 
 pub fn std_or_core(cx: &LateContext<'_>) -> Option<&'static str> {
-    if !is_no_std_crate(cx) {
-        Some("std")
-    } else if !is_no_core_crate(cx) {
+    if is_no_core_crate(cx) {
+        None
+    } else if is_no_std_crate(cx) {
         Some("core")
     } else {
-        None
+        Some("std")
     }
 }
 
 pub fn is_no_std_crate(cx: &LateContext<'_>) -> bool {
-    find_attr!(cx.tcx.hir_attrs(hir::CRATE_HIR_ID), AttributeKind::NoStd(..))
+    find_attr!(cx.tcx, crate, NoStd(..))
 }
 
 pub fn is_no_core_crate(cx: &LateContext<'_>) -> bool {
-    find_attr!(cx.tcx.hir_attrs(hir::CRATE_HIR_ID), AttributeKind::NoCore(..))
+    find_attr!(cx.tcx, crate, NoCore(..))
 }
 
 /// Check if parent of a hir node is a trait implementation block.
@@ -2325,6 +2339,7 @@ pub fn is_hir_ty_cfg_dependant(cx: &LateContext<'_>, ty: &hir::Ty<'_>) -> bool {
     if let TyKind::Path(QPath::Resolved(_, path)) = ty.kind
         && let Res::Def(_, def_id) = path.res
     {
+        #[allow(deprecated)]
         return cx.tcx.has_attr(def_id, sym::cfg) || cx.tcx.has_attr(def_id, sym::cfg_attr);
     }
     false
@@ -2347,16 +2362,11 @@ fn with_test_item_names(tcx: TyCtxt<'_>, module: LocalModDefId, f: impl FnOnce(&
                     && let item = tcx.hir_item(id)
                     && let ItemKind::Const(ident, _generics, ty, _body) = item.kind
                     && let TyKind::Path(QPath::Resolved(_, path)) = ty.kind
-                        // We could also check for the type name `test::TestDescAndFn`
-                        && let Res::Def(DefKind::Struct, _) = path.res
+                    // We could also check for the type name `test::TestDescAndFn`
+                    && let Res::Def(DefKind::Struct, _) = path.res
+                    && find_attr!(tcx.hir_attrs(item.hir_id()), RustcTestMarker(..))
                 {
-                    let has_test_marker = tcx
-                        .hir_attrs(item.hir_id())
-                        .iter()
-                        .any(|a| a.has_name(sym::rustc_test_marker));
-                    if has_test_marker {
-                        names.push(ident.name);
-                    }
+                    names.push(ident.name);
                 }
             }
             names.sort_unstable();
@@ -2412,7 +2422,7 @@ pub fn is_test_function(tcx: TyCtxt<'_>, fn_def_id: LocalDefId) -> bool {
 /// This only checks directly applied attributes, to see if a node is inside a `#[cfg(test)]` parent
 /// use [`is_in_cfg_test`]
 pub fn is_cfg_test(tcx: TyCtxt<'_>, id: HirId) -> bool {
-    if let Some(cfgs) = find_attr!(tcx.hir_attrs(id), AttributeKind::CfgTrace(cfgs) => cfgs)
+    if let Some(cfgs) = find_attr!(tcx.hir_attrs(id), CfgTrace(cfgs) => cfgs)
         && cfgs
             .iter()
             .any(|(cfg, _)| matches!(cfg, CfgEntry::NameValue { name: sym::test, .. }))
@@ -2435,11 +2445,11 @@ pub fn is_in_test(tcx: TyCtxt<'_>, hir_id: HirId) -> bool {
 
 /// Checks if the item of any of its parents has `#[cfg(...)]` attribute applied.
 pub fn inherits_cfg(tcx: TyCtxt<'_>, def_id: LocalDefId) -> bool {
-    find_attr!(tcx.get_all_attrs(def_id), AttributeKind::CfgTrace(..))
+    find_attr!(tcx, def_id, CfgTrace(..))
         || find_attr!(
             tcx.hir_parent_iter(tcx.local_def_id_to_hir_id(def_id))
                 .flat_map(|(parent_id, _)| tcx.hir_attrs(parent_id)),
-            AttributeKind::CfgTrace(..)
+            CfgTrace(..)
         )
 }
 
@@ -3255,6 +3265,8 @@ fn maybe_get_relative_path(from: &DefPath, to: &DefPath, max_super: usize) -> St
                 None
             }
         })))
+    } else if go_up_by == 0 && path.is_empty() {
+        String::from("Self")
     } else {
         join_path_syms(repeat_n(kw::Super, go_up_by).chain(path))
     }
@@ -3544,7 +3556,9 @@ pub fn expr_adjustment_requires_coercion(cx: &LateContext<'_>, expr: &Expr<'_>) 
     cx.typeck_results().expr_adjustments(expr).iter().any(|adj| {
         matches!(
             adj.kind,
-            Adjust::Deref(Some(_)) | Adjust::Pointer(PointerCoercion::Unsize) | Adjust::NeverToAny
+            Adjust::Deref(DerefAdjustKind::Overloaded(_))
+                | Adjust::Pointer(PointerCoercion::Unsize)
+                | Adjust::NeverToAny
         )
     })
 }

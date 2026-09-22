@@ -32,8 +32,8 @@ use triomphe::Arc;
 use tt::TextRange;
 
 use crate::{
-    AdtId, BlockId, BlockLoc, DefWithBodyId, FunctionId, GenericDefId, ImplId, MacroId,
-    ModuleDefId, ModuleId, TraitId, TypeAliasId, UnresolvedMacro,
+    AdtId, BlockId, BlockLoc, DefWithBodyId, FunctionId, GenericDefId, ImplId, ItemContainerId,
+    MacroId, ModuleDefId, ModuleId, TraitId, TypeAliasId, UnresolvedMacro,
     attrs::AttrFlags,
     db::DefDatabase,
     expr_store::{
@@ -47,7 +47,7 @@ use crate::{
     hir::{
         Array, Binding, BindingAnnotation, BindingId, BindingProblems, CaptureBy, ClosureKind,
         Expr, ExprId, Item, Label, LabelId, Literal, MatchArm, Movability, OffsetOf, Pat, PatId,
-        RecordFieldPat, RecordLitField, Statement, generics::GenericParams,
+        RecordFieldPat, RecordLitField, RecordSpread, Statement, generics::GenericParams,
     },
     item_scope::BuiltinShadowMode,
     item_tree::FieldsShape,
@@ -141,15 +141,26 @@ pub(super) fn lower_body(
             source_map_self_param = Some(collector.expander.in_file(AstPtr::new(&self_param_syn)));
         }
 
+        let is_extern = matches!(
+            owner,
+            DefWithBodyId::FunctionId(id)
+                if matches!(id.loc(db).container, ItemContainerId::ExternBlockId(_)),
+        );
+
         for param in param_list.params() {
             if collector.check_cfg(&param) {
-                let param_pat = collector.collect_pat_top(param.pat());
+                let param_pat = if is_extern {
+                    collector.collect_extern_fn_param(param.pat())
+                } else {
+                    collector.collect_pat_top(param.pat())
+                };
                 params.push(param_pat);
             }
         }
     };
 
     let body_expr = collector.collect(
+        &mut params,
         body,
         if is_async_fn {
             Awaitable::Yes
@@ -425,7 +436,7 @@ pub struct ExprCollector<'db> {
     /// and we need to find the current definition. So we track the number of definitions we saw.
     current_block_legacy_macro_defs_count: FxHashMap<Name, usize>,
 
-    current_try_block_label: Option<LabelId>,
+    current_try_block: Option<TryBlock>,
 
     label_ribs: Vec<LabelRib>,
     unowned_bindings: Vec<BindingId>,
@@ -469,6 +480,13 @@ impl RibKind {
 enum Awaitable {
     Yes,
     No(&'static str),
+}
+
+enum TryBlock {
+    // `try { ... }`
+    Homogeneous { label: LabelId },
+    // `try bikeshed Ty { ... }`
+    Heterogeneous { label: LabelId },
 }
 
 #[derive(Debug, Default)]
@@ -531,7 +549,7 @@ impl<'db> ExprCollector<'db> {
             lang_items: OnceCell::new(),
             store: ExpressionStoreBuilder::default(),
             expander,
-            current_try_block_label: None,
+            current_try_block: None,
             is_lowering_coroutine: false,
             label_ribs: Vec::new(),
             unowned_bindings: Vec::new(),
@@ -903,24 +921,57 @@ impl<'db> ExprCollector<'db> {
         })
     }
 
-    fn collect(&mut self, expr: Option<ast::Expr>, awaitable: Awaitable) -> ExprId {
+    /// An `async fn` needs to capture all parameters in the generated `async` block, even if they have
+    /// non-captured patterns such as wildcards (to ensure consistent drop order).
+    fn lower_async_fn(&mut self, params: &mut Vec<PatId>, body: ExprId) -> ExprId {
+        let mut statements = Vec::new();
+        for param in params {
+            let name = match self.store.pats[*param] {
+                Pat::Bind { id, .. }
+                    if matches!(
+                        self.store.bindings[id].mode,
+                        BindingAnnotation::Unannotated | BindingAnnotation::Mutable
+                    ) =>
+                {
+                    // If this is a direct binding, we can leave it as-is, as it'll always be captured anyway.
+                    continue;
+                }
+                Pat::Bind { id, .. } => {
+                    // If this is a `ref` binding, we can't leave it as is but we can at least reuse the name, for better display.
+                    self.store.bindings[id].name.clone()
+                }
+                _ => self.generate_new_name(),
+            };
+            let binding_id =
+                self.alloc_binding(name.clone(), BindingAnnotation::Mutable, HygieneId::ROOT);
+            let pat_id = self.alloc_pat_desugared(Pat::Bind { id: binding_id, subpat: None });
+            let expr = self.alloc_expr_desugared(Expr::Path(name.into()));
+            statements.push(Statement::Let {
+                pat: *param,
+                type_ref: None,
+                initializer: Some(expr),
+                else_branch: None,
+            });
+            *param = pat_id;
+        }
+
+        self.alloc_expr_desugared(Expr::Async {
+            id: None,
+            statements: statements.into_boxed_slice(),
+            tail: Some(body),
+        })
+    }
+
+    fn collect(
+        &mut self,
+        params: &mut Vec<PatId>,
+        expr: Option<ast::Expr>,
+        awaitable: Awaitable,
+    ) -> ExprId {
         self.awaitable_context.replace(awaitable);
         self.with_label_rib(RibKind::Closure, |this| {
-            if awaitable == Awaitable::Yes {
-                match expr {
-                    Some(e) => {
-                        let syntax_ptr = AstPtr::new(&e);
-                        let expr = this.collect_expr(e);
-                        this.alloc_expr_desugared_with_ptr(
-                            Expr::Async { id: None, statements: Box::new([]), tail: Some(expr) },
-                            syntax_ptr,
-                        )
-                    }
-                    None => this.missing_expr(),
-                }
-            } else {
-                this.collect_expr_opt(expr)
-            }
+            let body = this.collect_expr_opt(expr);
+            if awaitable == Awaitable::Yes { this.lower_async_fn(params, body) } else { body }
         })
     }
 
@@ -1035,7 +1086,9 @@ impl<'db> ExprCollector<'db> {
                 self.alloc_expr(Expr::Let { pat, expr }, syntax_ptr)
             }
             ast::Expr::BlockExpr(e) => match e.modifier() {
-                Some(ast::BlockModifier::Try(_)) => self.desugar_try_block(e),
+                Some(ast::BlockModifier::Try { try_token: _, bikeshed_token: _, result_type }) => {
+                    self.desugar_try_block(e, result_type)
+                }
                 Some(ast::BlockModifier::Unsafe(_)) => {
                     self.collect_block_(e, |id, statements, tail| Expr::Unsafe {
                         id,
@@ -1232,10 +1285,16 @@ impl<'db> ExprCollector<'db> {
                             Some(RecordLitField { name, expr })
                         })
                         .collect();
-                    let spread = nfl.spread().map(|s| self.collect_expr(s));
+                    let spread_expr = nfl.spread().map(|s| self.collect_expr(s));
+                    let has_spread_syntax = nfl.dotdot_token().is_some();
+                    let spread = match (spread_expr, has_spread_syntax) {
+                        (None, false) => RecordSpread::None,
+                        (None, true) => RecordSpread::FieldDefaults,
+                        (Some(expr), _) => RecordSpread::Expr(expr),
+                    };
                     Expr::RecordLit { path, fields, spread }
                 } else {
-                    Expr::RecordLit { path, fields: Box::default(), spread: None }
+                    Expr::RecordLit { path, fields: Box::default(), spread: RecordSpread::None }
                 };
 
                 self.alloc_expr(record_lit, syntax_ptr)
@@ -1304,7 +1363,7 @@ impl<'db> ExprCollector<'db> {
                         .map(|it| this.lower_type_ref_disallow_impl_trait(it));
 
                     let prev_is_lowering_coroutine = mem::take(&mut this.is_lowering_coroutine);
-                    let prev_try_block_label = this.current_try_block_label.take();
+                    let prev_try_block = this.current_try_block.take();
 
                     let awaitable = if e.async_token().is_some() {
                         Awaitable::Yes
@@ -1329,7 +1388,7 @@ impl<'db> ExprCollector<'db> {
                     let capture_by =
                         if e.move_token().is_some() { CaptureBy::Value } else { CaptureBy::Ref };
                     this.is_lowering_coroutine = prev_is_lowering_coroutine;
-                    this.current_try_block_label = prev_try_block_label;
+                    this.current_try_block = prev_try_block;
                     this.alloc_expr(
                         Expr::Closure {
                             args: args.into(),
@@ -1646,11 +1705,15 @@ impl<'db> ExprCollector<'db> {
     /// Desugar `try { <stmts>; <expr> }` into `'<new_label>: { <stmts>; ::std::ops::Try::from_output(<expr>) }`,
     /// `try { <stmts>; }` into `'<new_label>: { <stmts>; ::std::ops::Try::from_output(()) }`
     /// and save the `<new_label>` to use it as a break target for desugaring of the `?` operator.
-    fn desugar_try_block(&mut self, e: BlockExpr) -> ExprId {
+    fn desugar_try_block(&mut self, e: BlockExpr, result_type: Option<ast::Type>) -> ExprId {
         let try_from_output = self.lang_path(self.lang_items().TryTraitFromOutput);
         let label = self.generate_new_name();
         let label = self.alloc_label_desugared(Label { name: label }, AstPtr::new(&e).wrap_right());
-        let old_label = self.current_try_block_label.replace(label);
+        let try_block_info = match result_type {
+            Some(_) => TryBlock::Heterogeneous { label },
+            None => TryBlock::Homogeneous { label },
+        };
+        let old_try_block = self.current_try_block.replace(try_block_info);
 
         let ptr = AstPtr::new(&e).upcast();
         let (btail, expr_id) = self.with_labeled_rib(label, HygieneId::ROOT, |this| {
@@ -1680,8 +1743,38 @@ impl<'db> ExprCollector<'db> {
             unreachable!("block was lowered to non-block");
         };
         *tail = Some(next_tail);
-        self.current_try_block_label = old_label;
-        expr_id
+        self.current_try_block = old_try_block;
+        match result_type {
+            Some(ty) => {
+                // `{ let <name>: <ty> = <expr>; <name> }`
+                let name = self.generate_new_name();
+                let type_ref = self.lower_type_ref_disallow_impl_trait(ty);
+                let binding = self.alloc_binding(
+                    name.clone(),
+                    BindingAnnotation::Unannotated,
+                    HygieneId::ROOT,
+                );
+                let pat = self.alloc_pat_desugared(Pat::Bind { id: binding, subpat: None });
+                self.add_definition_to_binding(binding, pat);
+                let tail_expr =
+                    self.alloc_expr_desugared_with_ptr(Expr::Path(Path::from(name)), ptr);
+                self.alloc_expr_desugared_with_ptr(
+                    Expr::Block {
+                        id: None,
+                        statements: Box::new([Statement::Let {
+                            pat,
+                            type_ref: Some(type_ref),
+                            initializer: Some(expr_id),
+                            else_branch: None,
+                        }]),
+                        tail: Some(tail_expr),
+                        label: None,
+                    },
+                    ptr,
+                )
+            }
+            None => expr_id,
+        }
     }
 
     /// Desugar `ast::WhileExpr` from: `[opt_ident]: while <cond> <body>` into:
@@ -1823,6 +1916,8 @@ impl<'db> ExprCollector<'db> {
     ///     ControlFlow::Continue(val) => val,
     ///     ControlFlow::Break(residual) =>
     ///         // If there is an enclosing `try {...}`:
+    ///         break 'catch_target Residual::into_try_type(residual),
+    ///         // If there is an enclosing `try bikeshed Ty {...}`:
     ///         break 'catch_target Try::from_residual(residual),
     ///         // Otherwise:
     ///         return Try::from_residual(residual),
@@ -1833,7 +1928,6 @@ impl<'db> ExprCollector<'db> {
         let try_branch = self.lang_path(lang_items.TryTraitBranch);
         let cf_continue = self.lang_path(lang_items.ControlFlowContinue);
         let cf_break = self.lang_path(lang_items.ControlFlowBreak);
-        let try_from_residual = self.lang_path(lang_items.TryTraitFromResidual);
         let operand = self.collect_expr_opt(e.expr());
         let try_branch = self.alloc_expr(try_branch.map_or(Expr::Missing, Expr::Path), syntax_ptr);
         let expr = self
@@ -1870,13 +1964,23 @@ impl<'db> ExprCollector<'db> {
             guard: None,
             expr: {
                 let it = self.alloc_expr(Expr::Path(Path::from(break_name)), syntax_ptr);
-                let callee = self
-                    .alloc_expr(try_from_residual.map_or(Expr::Missing, Expr::Path), syntax_ptr);
+                let convert_fn = match self.current_try_block {
+                    Some(TryBlock::Homogeneous { .. }) => {
+                        self.lang_path(lang_items.ResidualIntoTryType)
+                    }
+                    Some(TryBlock::Heterogeneous { .. }) | None => {
+                        self.lang_path(lang_items.TryTraitFromResidual)
+                    }
+                };
+                let callee =
+                    self.alloc_expr(convert_fn.map_or(Expr::Missing, Expr::Path), syntax_ptr);
                 let result =
                     self.alloc_expr(Expr::Call { callee, args: Box::new([it]) }, syntax_ptr);
                 self.alloc_expr(
-                    match self.current_try_block_label {
-                        Some(label) => Expr::Break { expr: Some(result), label: Some(label) },
+                    match self.current_try_block {
+                        Some(
+                            TryBlock::Heterogeneous { label } | TryBlock::Homogeneous { label },
+                        ) => Expr::Break { expr: Some(result), label: Some(label) },
                         None => Expr::Return { expr: Some(result) },
                     },
                     syntax_ptr,
@@ -1961,7 +2065,7 @@ impl<'db> ExprCollector<'db> {
         }
     }
 
-    fn collect_expr_opt(&mut self, expr: Option<ast::Expr>) -> ExprId {
+    pub fn collect_expr_opt(&mut self, expr: Option<ast::Expr>) -> ExprId {
         match expr {
             Some(expr) => self.collect_expr(expr),
             None => self.missing_expr(),
@@ -2151,6 +2255,32 @@ impl<'db> ExprCollector<'db> {
                 self.with_labeled_rib(label, hygiene, |this| this.collect_block_opt(expr))
             }
             None => self.collect_block_opt(expr),
+        }
+    }
+
+    fn collect_extern_fn_param(&mut self, pat: Option<ast::Pat>) -> PatId {
+        // `extern` functions cannot have pattern-matched parameters, and furthermore, the identifiers
+        // in their parameters are always interpreted as bindings, even if in a normal function they
+        // won't be, because they would refer to a path pattern.
+        let Some(pat) = pat else { return self.missing_pat() };
+
+        match &pat {
+            ast::Pat::IdentPat(bp) => {
+                // FIXME: Emit an error if `!bp.is_simple_ident()`.
+
+                let name = bp.name().map(|nr| nr.as_name()).unwrap_or_else(Name::missing);
+                let hygiene = bp
+                    .name()
+                    .map(|name| self.hygiene_id_for(name.syntax().text_range()))
+                    .unwrap_or(HygieneId::ROOT);
+                let binding = self.alloc_binding(name, BindingAnnotation::Unannotated, hygiene);
+                let pat =
+                    self.alloc_pat(Pat::Bind { id: binding, subpat: None }, AstPtr::new(&pat));
+                self.add_definition_to_binding(binding, pat);
+                pat
+            }
+            // FIXME: Emit an error.
+            _ => self.missing_pat(),
         }
     }
 

@@ -77,8 +77,8 @@
 //! containing both `C` and `packed` annotations.
 
 // tidy-alphabetical-start
+#![cfg_attr(bootstrap, feature(if_let_guard))]
 #![feature(decl_macro)]
-#![feature(if_let_guard)]
 #![feature(iter_intersperse)]
 #![recursion_limit = "256"]
 // tidy-alphabetical-end
@@ -113,5 +113,3 @@ pub use attributes::util::{is_builtin_attr, parse_version};
 pub use context::{Early, Late, OmitDoc, ShouldEmit};
 pub use interface::AttributeParser;
 pub use session_diagnostics::ParsedDescription;
-
-rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

@@ -393,8 +393,7 @@ pub fn check_generic_arg_count_for_call(
         IsMethodCall::Yes => GenericArgPosition::MethodCall,
         IsMethodCall::No => GenericArgPosition::Value,
     };
-    let has_self = generics.parent.is_none() && generics.has_self;
-    check_generic_arg_count(cx, def_id, seg, generics, gen_pos, has_self)
+    check_generic_arg_count(cx, def_id, seg, generics, gen_pos, generics.has_own_self())
 }
 
 /// Checks that the correct number of generic arguments have been provided.
@@ -627,13 +626,10 @@ pub(crate) fn prohibit_explicit_late_bound_lifetimes(
     position: GenericArgPosition,
 ) -> ExplicitLateBound {
     let param_counts = def.own_counts();
-    let infer_lifetimes = position != GenericArgPosition::Type && !args.has_lifetime_params();
 
-    if infer_lifetimes {
-        return ExplicitLateBound::No;
-    }
-
-    if let Some(span_late) = def.has_late_bound_regions {
+    if let Some(span_late) = def.has_late_bound_regions
+        && args.has_lifetime_params()
+    {
         let msg = "cannot specify lifetime arguments explicitly \
                        if late bound lifetime parameters are present";
         let note = "the late bound lifetime parameter is introduced here";

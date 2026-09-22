@@ -2,7 +2,6 @@ use rand::RngCore;
 
 #[cfg(not(miri))]
 use super::Dir;
-use crate::assert_matches::assert_matches;
 use crate::fs::{self, File, FileTimes, OpenOptions, TryLockError};
 #[cfg(not(miri))]
 use crate::io;
@@ -21,7 +20,7 @@ use crate::path::Path;
 use crate::sync::Arc;
 use crate::test_helpers::{TempDir, tmpdir};
 use crate::time::{Duration, Instant, SystemTime};
-use crate::{env, str, thread};
+use crate::{assert_matches, env, str, thread};
 
 macro_rules! check {
     ($e:expr) => {
@@ -2294,6 +2293,57 @@ fn test_fs_set_times() {
     }
 
     let metadata = fs::metadata(&path).unwrap();
+    assert_eq!(metadata.accessed().unwrap(), accessed);
+    assert_eq!(metadata.modified().unwrap(), modified);
+    #[cfg(any(windows, target_vendor = "apple"))]
+    {
+        assert_eq!(metadata.created().unwrap(), created);
+    }
+}
+
+#[test]
+fn test_fs_set_times_on_dir() {
+    #[cfg(target_vendor = "apple")]
+    use crate::os::darwin::fs::FileTimesExt;
+    #[cfg(windows)]
+    use crate::os::windows::fs::FileTimesExt;
+
+    let tmp = tmpdir();
+    let dir_path = tmp.join("testdir");
+    fs::create_dir(&dir_path).unwrap();
+
+    let mut times = FileTimes::new();
+    let accessed = SystemTime::UNIX_EPOCH + Duration::from_secs(12345);
+    let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(54321);
+    times = times.set_accessed(accessed).set_modified(modified);
+
+    #[cfg(any(windows, target_vendor = "apple"))]
+    let created = SystemTime::UNIX_EPOCH + Duration::from_secs(32123);
+    #[cfg(any(windows, target_vendor = "apple"))]
+    {
+        times = times.set_created(created);
+    }
+
+    match fs::set_times(&dir_path, times) {
+        // Allow unsupported errors on platforms which don't support setting times.
+        #[cfg(not(any(
+            windows,
+            all(
+                unix,
+                not(any(
+                    target_os = "android",
+                    target_os = "redox",
+                    target_os = "espidf",
+                    target_os = "horizon"
+                ))
+            )
+        )))]
+        Err(e) if e.kind() == ErrorKind::Unsupported => return,
+        Err(e) => panic!("error setting directory times: {e:?}"),
+        Ok(_) => {}
+    }
+
+    let metadata = fs::metadata(&dir_path).unwrap();
     assert_eq!(metadata.accessed().unwrap(), accessed);
     assert_eq!(metadata.modified().unwrap(), modified);
     #[cfg(any(windows, target_vendor = "apple"))]

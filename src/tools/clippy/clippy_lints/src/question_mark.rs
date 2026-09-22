@@ -474,7 +474,6 @@ fn check_if_let_some_or_err_and_early_return<'tcx>(cx: &LateContext<'tcx>, expr:
         if_else,
         ..
     }) = higher::IfLet::hir(cx, expr)
-        && !is_else_clause(cx.tcx, expr)
         && let PatKind::TupleStruct(ref path1, [field], ddpos) = let_pat.kind
         && ddpos.as_opt_usize().is_none()
         && let PatKind::Binding(BindingMode(by_ref, _), bind_id, ident, None) = field.kind
@@ -491,8 +490,7 @@ fn check_if_let_some_or_err_and_early_return<'tcx>(cx: &LateContext<'tcx>, expr:
             || is_early_return(sym::Result, cx, &if_block))
         && if_else
             .map(|e| eq_expr_value(cx, let_expr, peel_blocks(e)))
-            .filter(|e| *e)
-            .is_none()
+            .is_none_or(|e| !e)
     {
         if !is_copy(cx, caller_ty)
             && let Some(hir_id) = let_expr.res_local_id()
@@ -509,10 +507,15 @@ fn check_if_let_some_or_err_and_early_return<'tcx>(cx: &LateContext<'tcx>, expr:
             ByRef::Yes(_, Mutability::Not) => ".as_ref()",
             ByRef::No => "",
         };
-        let sugg = format!(
+
+        let mut sugg = format!(
             "{receiver_str}{method_call_str}?{}",
             if requires_semi { ";" } else { "" }
         );
+        if is_else_clause(cx.tcx, expr) {
+            sugg = format!("{{ {sugg} }}");
+        }
+
         span_lint_and_sugg(
             cx,
             QUESTION_MARK,

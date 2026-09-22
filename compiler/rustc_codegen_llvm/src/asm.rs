@@ -1,9 +1,8 @@
-use std::assert_matches::assert_matches;
-
 use rustc_abi::{BackendRepr, Float, Integer, Primitive, Scalar};
 use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
 use rustc_codegen_ssa::mir::operand::OperandValue;
 use rustc_codegen_ssa::traits::*;
+use rustc_data_structures::assert_matches;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::ty::Instance;
 use rustc_middle::ty::layout::TyAndLayout;
@@ -403,7 +402,8 @@ impl<'tcx> AsmCodegenMethods<'tcx> for CodegenCx<'_, 'tcx> {
         for piece in template {
             match *piece {
                 InlineAsmTemplatePiece::String(ref s) => template_str.push_str(s),
-                InlineAsmTemplatePiece::Placeholder { operand_idx, modifier: _, span: _ } => {
+                InlineAsmTemplatePiece::Placeholder { operand_idx, modifier: _, span } => {
+                    use rustc_codegen_ssa::back::symbol_export::escape_symbol_name;
                     match operands[operand_idx] {
                         GlobalAsmOperandRef::Const { ref string } => {
                             // Const operands get injected directly into the
@@ -418,7 +418,7 @@ impl<'tcx> AsmCodegenMethods<'tcx> for CodegenCx<'_, 'tcx> {
                                 llvm::LLVMRustGetMangledName(llval, s);
                             })
                             .expect("symbol is not valid UTF-8");
-                            template_str.push_str(&symbol);
+                            template_str.push_str(&escape_symbol_name(self.tcx, &symbol, span));
                         }
                         GlobalAsmOperandRef::SymStatic { def_id } => {
                             let llval = self
@@ -432,7 +432,7 @@ impl<'tcx> AsmCodegenMethods<'tcx> for CodegenCx<'_, 'tcx> {
                                 llvm::LLVMRustGetMangledName(llval, s);
                             })
                             .expect("symbol is not valid UTF-8");
-                            template_str.push_str(&symbol);
+                            template_str.push_str(&escape_symbol_name(self.tcx, &symbol, span));
                         }
                     }
                 }

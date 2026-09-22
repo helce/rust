@@ -197,7 +197,7 @@ fn generate_item_with_correct_attrs(
             // itself matter), for non-inlined re-exports see #85043.
             let import_is_inline = find_attr!(
                 inline::load_attrs(cx, import_id.to_def_id()),
-                AttributeKind::Doc(d)
+                Doc(d)
                 if d.inline.first().is_some_and(|(inline, _)| *inline == DocInline::Inline)
             ) || (is_glob_import(cx.tcx, import_id)
                 && (cx.document_hidden() || !cx.tcx.is_doc_hidden(def_id)));
@@ -334,7 +334,7 @@ pub(crate) fn clean_const<'tcx>(constant: &hir::ConstArg<'tcx>) -> ConstantKind 
         }
         hir::ConstArgKind::Anon(anon) => ConstantKind::Anonymous { body: anon.body },
         hir::ConstArgKind::Infer(..) | hir::ConstArgKind::Error(..) => ConstantKind::Infer,
-        hir::ConstArgKind::Literal(..) => {
+        hir::ConstArgKind::Literal { .. } => {
             ConstantKind::Path { path: "/* LITERAL */".to_string().into() }
         }
     }
@@ -1007,7 +1007,7 @@ fn clean_proc_macro<'tcx>(
         return ProcMacroItem(ProcMacro { kind, helpers: vec![] });
     }
     let attrs = cx.tcx.hir_attrs(item.hir_id());
-    let Some((trait_name, helper_attrs)) = find_attr!(attrs, AttributeKind::ProcMacroDerive { trait_name, helper_attrs, ..} => (*trait_name, helper_attrs))
+    let Some((trait_name, helper_attrs)) = find_attr!(attrs, ProcMacroDerive { trait_name, helper_attrs, ..} => (*trait_name, helper_attrs))
     else {
         return ProcMacroItem(ProcMacro { kind, helpers: vec![] });
     };
@@ -1026,11 +1026,11 @@ fn clean_fn_or_proc_macro<'tcx>(
     cx: &mut DocContext<'tcx>,
 ) -> ItemKind {
     let attrs = cx.tcx.hir_attrs(item.hir_id());
-    let macro_kind = if find_attr!(attrs, AttributeKind::ProcMacro(..)) {
+    let macro_kind = if find_attr!(attrs, ProcMacro(..)) {
         Some(MacroKind::Bang)
-    } else if find_attr!(attrs, AttributeKind::ProcMacroDerive { .. }) {
+    } else if find_attr!(attrs, ProcMacroDerive { .. }) {
         Some(MacroKind::Derive)
-    } else if find_attr!(attrs, AttributeKind::ProcMacroAttribute(..)) {
+    } else if find_attr!(attrs, ProcMacroAttribute(..)) {
         Some(MacroKind::Attr)
     } else {
         None
@@ -1050,8 +1050,7 @@ fn clean_fn_or_proc_macro<'tcx>(
 /// `rustc_legacy_const_generics`. More information in
 /// <https://github.com/rust-lang/rust/issues/83167>.
 fn clean_fn_decl_legacy_const_generics(func: &mut Function, attrs: &[hir::Attribute]) {
-    let Some(indexes) =
-        find_attr!(attrs, AttributeKind::RustcLegacyConstGenerics{fn_indexes,..} => fn_indexes)
+    let Some(indexes) = find_attr!(attrs, RustcLegacyConstGenerics{fn_indexes,..} => fn_indexes)
     else {
         return;
     };
@@ -1209,24 +1208,24 @@ fn clean_trait_item<'tcx>(trait_item: &hir::TraitItem<'tcx>, cx: &mut DocContext
     let local_did = trait_item.owner_id.to_def_id();
     cx.with_param_env(local_did, |cx| {
         let inner = match trait_item.kind {
-            hir::TraitItemKind::Const(ty, Some(default)) => {
+            hir::TraitItemKind::Const(ty, Some(default), _) => {
                 ProvidedAssocConstItem(Box::new(Constant {
                     generics: enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx)),
                     kind: clean_const_item_rhs(default, local_did),
                     type_: clean_ty(ty, cx),
                 }))
             }
-            hir::TraitItemKind::Const(ty, None) => {
+            hir::TraitItemKind::Const(ty, None, _) => {
                 let generics = enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx));
                 RequiredAssocConstItem(generics, Box::new(clean_ty(ty, cx)))
             }
             hir::TraitItemKind::Fn(ref sig, hir::TraitFn::Provided(body)) => {
                 let m = clean_function(cx, sig, trait_item.generics, ParamsSrc::Body(body));
-                MethodItem(m, None)
+                MethodItem(m, Defaultness::from_trait_item(trait_item.defaultness))
             }
             hir::TraitItemKind::Fn(ref sig, hir::TraitFn::Required(idents)) => {
                 let m = clean_function(cx, sig, trait_item.generics, ParamsSrc::Idents(idents));
-                RequiredMethodItem(m)
+                RequiredMethodItem(m, Defaultness::from_trait_item(trait_item.defaultness))
             }
             hir::TraitItemKind::Type(bounds, Some(default)) => {
                 let generics = enter_impl_trait(cx, |cx| clean_generics(trait_item.generics, cx));
@@ -1271,7 +1270,7 @@ pub(crate) fn clean_impl_item<'tcx>(
                     hir::ImplItemImplKind::Inherent { .. } => hir::Defaultness::Final,
                     hir::ImplItemImplKind::Trait { defaultness, .. } => defaultness,
                 };
-                MethodItem(m, Some(defaultness))
+                MethodItem(m, Defaultness::from_impl_item(defaultness))
             }
             hir::ImplItemKind::Type(hir_ty) => {
                 let type_ = clean_ty(hir_ty, cx);
@@ -1353,18 +1352,20 @@ pub(crate) fn clean_middle_assoc_item(assoc_item: &ty::AssocItem, cx: &mut DocCo
                 }
             }
 
-            let provided = match assoc_item.container {
-                ty::AssocContainer::InherentImpl | ty::AssocContainer::TraitImpl(_) => true,
-                ty::AssocContainer::Trait => assoc_item.defaultness(tcx).has_value(),
+            let defaultness = assoc_item.defaultness(tcx);
+            let (provided, defaultness) = match assoc_item.container {
+                ty::AssocContainer::Trait => {
+                    (defaultness.has_value(), Defaultness::from_trait_item(defaultness))
+                }
+                ty::AssocContainer::InherentImpl | ty::AssocContainer::TraitImpl(_) => {
+                    (true, Defaultness::from_impl_item(defaultness))
+                }
             };
+
             if provided {
-                let defaultness = match assoc_item.container {
-                    ty::AssocContainer::TraitImpl(_) => Some(assoc_item.defaultness(tcx)),
-                    ty::AssocContainer::InherentImpl | ty::AssocContainer::Trait => None,
-                };
                 MethodItem(item, defaultness)
             } else {
-                RequiredMethodItem(item)
+                RequiredMethodItem(item, defaultness)
             }
         }
         ty::AssocKind::Type { .. } => {
@@ -1829,7 +1830,7 @@ pub(crate) fn clean_ty<'tcx>(ty: &hir::Ty<'tcx>, cx: &mut DocContext<'tcx>) -> T
                 | hir::ConstArgKind::TupleCall(..)
                 | hir::ConstArgKind::Tup(..)
                 | hir::ConstArgKind::Array(..)
-                | hir::ConstArgKind::Literal(..) => {
+                | hir::ConstArgKind::Literal { .. } => {
                     let ct = lower_const_arg_for_rustdoc(cx.tcx, const_arg, cx.tcx.types.usize);
                     print_const(cx, ct)
                 }
@@ -2904,6 +2905,9 @@ fn clean_impl<'tcx>(
             )),
             _ => None,
         });
+    let is_deprecated = tcx
+        .lookup_deprecation(def_id.to_def_id())
+        .is_some_and(|deprecation| deprecation.is_in_effect());
     let mut make_item = |trait_: Option<Path>, for_: Type, items: Vec<Item>| {
         let kind = ImplItem(Box::new(Impl {
             safety: match impl_.of_trait {
@@ -2924,6 +2928,7 @@ fn clean_impl<'tcx>(
             } else {
                 ImplKind::Normal
             },
+            is_deprecated,
         }));
         Item::from_def_id_and_parts(def_id.to_def_id(), None, kind, cx)
     };
@@ -3016,7 +3021,7 @@ fn clean_use_statement_inner<'tcx>(
     let attrs = cx.tcx.hir_attrs(import.hir_id());
     let inline_attr = find_attr!(
         attrs,
-        AttributeKind::Doc(d) if d.inline.first().is_some_and(|(i, _)| *i == DocInline::Inline) => d
+        Doc(d) if d.inline.first().is_some_and(|(i, _)| *i == DocInline::Inline) => d
     )
     .and_then(|d| d.inline.first());
     let pub_underscore = visibility.is_public() && name == Some(kw::Underscore);
@@ -3174,7 +3179,7 @@ fn clean_assoc_item_constraint<'tcx>(
 }
 
 fn clean_bound_vars<'tcx>(
-    bound_vars: &ty::List<ty::BoundVariableKind>,
+    bound_vars: &ty::List<ty::BoundVariableKind<'tcx>>,
     cx: &mut DocContext<'tcx>,
 ) -> Vec<GenericParamDef> {
     bound_vars

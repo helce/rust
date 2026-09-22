@@ -92,10 +92,7 @@ fn result_methods() {
     let _ = opt_map!(res, |x| x + 1).unwrap_or_else(|_e| 0); // should not lint
 }
 
-fn main() {
-    option_methods();
-    result_methods();
-}
+fn main() {}
 
 #[clippy::msrv = "1.40"]
 fn msrv_1_40() {
@@ -155,4 +152,12 @@ mod issue_10579 {
         let y = Some(()).map(|_| s.v.clone()).unwrap_or(s.v);
         println!("{y:?}");
     }
+}
+
+fn issue15752() {
+    struct Foo<'a>(&'a [u32]);
+
+    let x = Some(Foo(&[1, 2, 3]));
+    x.map(|y| y.0).unwrap_or(&[]);
+    //~^ map_unwrap_or
 }

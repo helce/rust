@@ -15,7 +15,6 @@ use rustc_errors::{
     Applicability, Diag, ErrorGuaranteed, MultiSpan, StashKey, Subdiagnostic, listify, pluralize,
     struct_span_code_err,
 };
-use rustc_hir::attrs::AttributeKind;
 use rustc_hir::def::{CtorKind, DefKind, Res};
 use rustc_hir::def_id::DefId;
 use rustc_hir::lang_items::LangItem;
@@ -434,43 +433,34 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             hir::UnOp::Not | hir::UnOp::Neg => expected,
             hir::UnOp::Deref => NoExpectation,
         };
-        let mut oprnd_t = self.check_expr_with_expectation(oprnd, expected_inner);
+        let oprnd_t = self.check_expr_with_expectation(oprnd, expected_inner);
 
-        if !oprnd_t.references_error() {
-            oprnd_t = self.structurally_resolve_type(expr.span, oprnd_t);
-            match unop {
-                hir::UnOp::Deref => {
-                    if let Some(ty) = self.lookup_derefing(expr, oprnd, oprnd_t) {
-                        oprnd_t = ty;
-                    } else {
-                        let mut err =
-                            self.dcx().create_err(CantDereference { span: expr.span, ty: oprnd_t });
-                        let sp = tcx.sess.source_map().start_point(expr.span).with_parent(None);
-                        if let Some(sp) =
-                            tcx.sess.psess.ambiguous_block_expr_parse.borrow().get(&sp)
-                        {
-                            err.subdiagnostic(ExprParenthesesNeeded::surrounding(*sp));
-                        }
-                        oprnd_t = Ty::new_error(tcx, err.emit());
-                    }
+        if let Err(guar) = oprnd_t.error_reported() {
+            return Ty::new_error(tcx, guar);
+        }
+
+        let oprnd_t = self.structurally_resolve_type(expr.span, oprnd_t);
+        match unop {
+            hir::UnOp::Deref => self.lookup_derefing(expr, oprnd, oprnd_t).unwrap_or_else(|| {
+                let mut err =
+                    self.dcx().create_err(CantDereference { span: expr.span, ty: oprnd_t });
+                let sp = tcx.sess.source_map().start_point(expr.span).with_parent(None);
+                if let Some(sp) = tcx.sess.psess.ambiguous_block_expr_parse.borrow().get(&sp) {
+                    err.subdiagnostic(ExprParenthesesNeeded::surrounding(*sp));
                 }
-                hir::UnOp::Not => {
-                    let result = self.check_user_unop(expr, oprnd_t, unop, expected_inner);
-                    // If it's builtin, we can reuse the type, this helps inference.
-                    if !(oprnd_t.is_integral() || *oprnd_t.kind() == ty::Bool) {
-                        oprnd_t = result;
-                    }
-                }
-                hir::UnOp::Neg => {
-                    let result = self.check_user_unop(expr, oprnd_t, unop, expected_inner);
-                    // If it's builtin, we can reuse the type, this helps inference.
-                    if !oprnd_t.is_numeric() {
-                        oprnd_t = result;
-                    }
-                }
+                Ty::new_error(tcx, err.emit())
+            }),
+            hir::UnOp::Not => {
+                let result = self.check_user_unop(expr, oprnd_t, unop, expected_inner);
+                // If it's builtin, we can reuse the type, this helps inference.
+                if oprnd_t.is_integral() || *oprnd_t.kind() == ty::Bool { oprnd_t } else { result }
+            }
+            hir::UnOp::Neg => {
+                let result = self.check_user_unop(expr, oprnd_t, unop, expected_inner);
+                // If it's builtin, we can reuse the type, this helps inference.
+                if oprnd_t.is_numeric() { oprnd_t } else { result }
             }
         }
-        oprnd_t
     }
 
     fn check_expr_addr_of(
@@ -1679,11 +1669,22 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
             let coerce_to = expected
                 .to_option(self)
-                .and_then(|uty| self.try_structurally_resolve_type(expr.span, uty).builtin_index())
+                .and_then(|uty| {
+                    self.try_structurally_resolve_type(expr.span, uty)
+                        .builtin_index()
+                        // Avoid using the original type variable as the coerce_to type, as it may resolve
+                        // during the first coercion instead of being the LUB type.
+                        .filter(|t| !self.try_structurally_resolve_type(expr.span, *t).is_ty_var())
+                })
                 .unwrap_or_else(|| self.next_ty_var(expr.span));
             let mut coerce = CoerceMany::with_capacity(coerce_to, args.len());
 
             for e in args {
+                // FIXME: the element expectation should use
+                // `try_structurally_resolve_and_adjust_for_branches` just like in `if` and `match`.
+                // While that fixes nested coercion, it will break [some
+                // code like this](https://github.com/rust-lang/rust/pull/140283#issuecomment-2958776528).
+                // If we find a way to support recursive tuple coercion, this break can be avoided.
                 let e_ty = self.check_expr_with_hint(e, coerce_to);
                 let cause = self.misc(e.span);
                 coerce.coerce(self, &cause, e, e_ty);
@@ -2447,7 +2448,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 .tcx
                 .inherent_impls(def_id)
                 .into_iter()
-                .flat_map(|i| self.tcx.associated_items(i).in_definition_order())
+                .flat_map(|&i| self.tcx.associated_items(i).in_definition_order())
                 // Only assoc fn with no receivers.
                 .filter(|item| item.is_fn() && !item.is_method())
                 .filter_map(|item| {
@@ -3182,7 +3183,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         // Check if there is an associated function with the same name.
         if let Some(def_id) = base_ty.peel_refs().ty_adt_def().map(|d| d.did()) {
-            for impl_def_id in self.tcx.inherent_impls(def_id) {
+            for &impl_def_id in self.tcx.inherent_impls(def_id) {
                 for item in self.tcx.associated_items(impl_def_id).in_definition_order() {
                     if let ExprKind::Field(base_expr, _) = expr.kind
                         && item.name() == field.name
@@ -3674,7 +3675,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     fn check_expr_asm(&self, asm: &'tcx hir::InlineAsm<'tcx>, span: Span) -> Ty<'tcx> {
         if let rustc_ast::AsmMacro::NakedAsm = asm.asm_macro {
-            if !find_attr!(self.tcx.get_all_attrs(self.body_id), AttributeKind::Naked(..)) {
+            if !find_attr!(self.tcx, self.body_id, Naked(..)) {
                 self.tcx.dcx().emit_err(NakedAsmOutsideNakedFn { span });
             }
         }

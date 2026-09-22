@@ -1005,8 +1005,8 @@ crate::target_spec_enum! {
     pub enum RustcAbi {
         /// On x86-32 only: make use of SSE and SSE2 for ABI purposes.
         X86Sse2 = "x86-sse2",
-        /// On x86-32/64 only: do not use any FPU or SIMD registers for the ABI.
-        X86Softfloat = "x86-softfloat",
+        /// On x86-32/64 and S390x: do not use any FPU or SIMD registers for the ABI.
+        Softfloat = "softfloat", "x86-softfloat",
     }
 
     parse_error_type = "rustc abi";
@@ -1082,7 +1082,7 @@ crate::target_spec_enum! {
 }
 
 crate::target_spec_enum! {
-    #[derive(Default)]
+    #[derive(Default, Encodable, Decodable)]
     pub enum SplitDebuginfo {
         /// Split debug-information is disabled, meaning that on supported platforms
         /// you can find all debug information in the executable itself. This is
@@ -1460,6 +1460,7 @@ supported_targets! {
     ("powerpc64le-unknown-linux-gnu", powerpc64le_unknown_linux_gnu),
     ("powerpc64le-unknown-linux-musl", powerpc64le_unknown_linux_musl),
     ("s390x-unknown-linux-gnu", s390x_unknown_linux_gnu),
+    ("s390x-unknown-none-softfloat", s390x_unknown_none_softfloat),
     ("s390x-unknown-linux-musl", s390x_unknown_linux_musl),
     ("sparc-unknown-linux-gnu", sparc_unknown_linux_gnu),
     ("sparc64-unknown-linux-gnu", sparc64_unknown_linux_gnu),
@@ -1596,8 +1597,11 @@ supported_targets! {
     ("armebv7r-none-eabi", armebv7r_none_eabi),
     ("armebv7r-none-eabihf", armebv7r_none_eabihf),
     ("armv7r-none-eabi", armv7r_none_eabi),
+    ("thumbv7r-none-eabi", thumbv7r_none_eabi),
     ("armv7r-none-eabihf", armv7r_none_eabihf),
+    ("thumbv7r-none-eabihf", thumbv7r_none_eabihf),
     ("armv8r-none-eabihf", armv8r_none_eabihf),
+    ("thumbv8r-none-eabihf", thumbv8r_none_eabihf),
 
     ("armv7-rtems-eabihf", armv7_rtems_eabihf),
 
@@ -1649,7 +1653,9 @@ supported_targets! {
     ("thumbv8m.main-none-eabihf", thumbv8m_main_none_eabihf),
 
     ("armv7a-none-eabi", armv7a_none_eabi),
+    ("thumbv7a-none-eabi", thumbv7a_none_eabi),
     ("armv7a-none-eabihf", armv7a_none_eabihf),
+    ("thumbv7a-none-eabihf", thumbv7a_none_eabihf),
     ("armv7a-nuttx-eabi", armv7a_nuttx_eabi),
     ("armv7a-nuttx-eabihf", armv7a_nuttx_eabihf),
     ("armv7a-vex-v5", armv7a_vex_v5),
@@ -1704,6 +1710,8 @@ supported_targets! {
     ("aarch64-unknown-none-softfloat", aarch64_unknown_none_softfloat),
     ("aarch64_be-unknown-none-softfloat", aarch64_be_unknown_none_softfloat),
     ("aarch64-unknown-nuttx", aarch64_unknown_nuttx),
+    ("aarch64v8r-unknown-none", aarch64v8r_unknown_none),
+    ("aarch64v8r-unknown-none-softfloat", aarch64v8r_unknown_none_softfloat),
 
     ("x86_64-fortanix-unknown-sgx", x86_64_fortanix_unknown_sgx),
 
@@ -1741,10 +1749,14 @@ supported_targets! {
     ("mipsel-unknown-none", mipsel_unknown_none),
     ("mips-mti-none-elf", mips_mti_none_elf),
     ("mipsel-mti-none-elf", mipsel_mti_none_elf),
-    ("thumbv4t-none-eabi", thumbv4t_none_eabi),
+
     ("armv4t-none-eabi", armv4t_none_eabi),
-    ("thumbv5te-none-eabi", thumbv5te_none_eabi),
     ("armv5te-none-eabi", armv5te_none_eabi),
+    ("armv6-none-eabi", armv6_none_eabi),
+    ("armv6-none-eabihf", armv6_none_eabihf),
+    ("thumbv4t-none-eabi", thumbv4t_none_eabi),
+    ("thumbv5te-none-eabi", thumbv5te_none_eabi),
+    ("thumbv6-none-eabi", thumbv6_none_eabi),
 
     ("aarch64_be-unknown-linux-gnu", aarch64_be_unknown_linux_gnu),
     ("aarch64-unknown-linux-gnu_ilp32", aarch64_unknown_linux_gnu_ilp32),
@@ -1817,6 +1829,8 @@ supported_targets! {
     ("x86_64-lynx-lynxos178", x86_64_lynx_lynxos178),
 
     ("x86_64-pc-cygwin", x86_64_pc_cygwin),
+
+    ("x86_64-unknown-linux-gnuasan", x86_64_unknown_linux_gnuasan),
 }
 
 /// Cow-Vec-Str: Cow<'static, [Cow<'static, str>]>
@@ -3198,6 +3212,27 @@ impl Target {
                     "ARM targets must set `llvm-floatabi` to `hard` or `soft`",
                 )
             }
+            // PowerPC64 targets that are not AIX must set their ABI to either ELFv1 or ELFv2
+            Arch::PowerPC64 => {
+                if self.os == Os::Aix {
+                    check!(
+                        self.llvm_abiname.is_empty(),
+                        "AIX targets always use the AIX ABI and `llvm_abiname` should be left empty",
+                    );
+                } else if self.endian == Endian::Big {
+                    check_matches!(
+                        &*self.llvm_abiname,
+                        "elfv1" | "elfv2",
+                        "invalid PowerPC64 ABI name: {}",
+                        self.llvm_abiname,
+                    );
+                } else {
+                    check!(
+                        self.llvm_abiname == "elfv2",
+                        "little-endian PowerPC64 targets only support the `elfv2` ABI",
+                    );
+                }
+            }
             _ => {}
         }
 
@@ -3209,10 +3244,10 @@ impl Target {
                     Arch::X86,
                     "`x86-sse2` ABI is only valid for x86-32 targets"
                 ),
-                RustcAbi::X86Softfloat => check_matches!(
+                RustcAbi::Softfloat => check_matches!(
                     self.arch,
-                    Arch::X86 | Arch::X86_64,
-                    "`x86-softfloat` ABI is only valid for x86 targets"
+                    Arch::X86 | Arch::X86_64 | Arch::S390x,
+                    "`softfloat` ABI is only valid for x86 and s390x targets"
                 ),
             }
         }
@@ -3314,10 +3349,19 @@ impl Target {
     pub fn search(
         target_tuple: &TargetTuple,
         sysroot: &Path,
+        unstable_options: bool,
     ) -> Result<(Target, TargetWarnings), String> {
         use std::{env, fs};
 
-        fn load_file(path: &Path) -> Result<(Target, TargetWarnings), String> {
+        fn load_file(
+            path: &Path,
+            unstable_options: bool,
+        ) -> Result<(Target, TargetWarnings), String> {
+            if !unstable_options {
+                return Err(
+                    "custom targets are unstable and require `-Zunstable-options`".to_string()
+                );
+            }
             let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
             Target::from_json(&contents)
         }
@@ -3341,7 +3385,7 @@ impl Target {
                 for dir in env::split_paths(&target_path) {
                     let p = dir.join(&path);
                     if p.is_file() {
-                        return load_file(&p);
+                        return load_file(&p, unstable_options);
                     }
                 }
 
@@ -3354,10 +3398,13 @@ impl Target {
                     Path::new("target.json"),
                 ]);
                 if p.is_file() {
-                    return load_file(&p);
+                    return load_file(&p, unstable_options);
                 }
 
                 Err(format!("could not find specification for target {target_tuple:?}"))
+            }
+            TargetTuple::TargetJson { ref contents, .. } if !unstable_options => {
+                Err("custom targets are unstable and require `-Zunstable-options`".to_string())
             }
             TargetTuple::TargetJson { ref contents, .. } => Target::from_json(contents),
         }

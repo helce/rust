@@ -14,11 +14,9 @@
 //
 // Library features:
 // tidy-alphabetical-start
-#![feature(alloc_layout_extra)]
 #![feature(allocator_api)]
 #![feature(array_into_iter_constructors)]
 #![feature(assert_matches)]
-#![feature(box_vec_non_null)]
 #![feature(char_internals)]
 #![feature(const_alloc_error)]
 #![feature(const_cmp)]
@@ -57,16 +55,12 @@
 //
 // Language features:
 // tidy-alphabetical-start
-#![feature(cfg_sanitize)]
 #![feature(const_trait_impl)]
 #![feature(dropck_eyepatch)]
-#![feature(lang_items)]
 #![feature(min_specialization)]
-#![feature(negative_impls)]
 #![feature(never_type)]
 #![feature(optimize_attribute)]
 #![feature(prelude_import)]
-#![feature(rustc_allow_const_fn_unstable)]
 #![feature(rustc_attrs)]
 #![feature(staged_api)]
 #![feature(test)]

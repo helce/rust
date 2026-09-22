@@ -1,11 +1,9 @@
 //! Construction of MIR from HIR.
 
 // tidy-alphabetical-start
-#![allow(rustc::diagnostic_outside_of_impl)]
-#![allow(rustc::untranslatable_diagnostic)]
+#![cfg_attr(bootstrap, feature(if_let_guard))]
 #![feature(assert_matches)]
 #![feature(box_patterns)]
-#![feature(if_let_guard)]
 #![feature(try_blocks)]
 // tidy-alphabetical-end
 
@@ -19,8 +17,6 @@ mod errors;
 pub mod thir;
 
 use rustc_middle::util::Providers;
-
-rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
 pub fn provide(providers: &mut Providers) {
     providers.queries.check_match = thir::pattern::check_match;

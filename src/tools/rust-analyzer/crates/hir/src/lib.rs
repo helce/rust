@@ -610,6 +610,23 @@ impl Module {
         res
     }
 
+    pub fn modules_in_scope(&self, db: &dyn HirDatabase, pub_only: bool) -> Vec<(Name, Module)> {
+        let def_map = self.id.def_map(db);
+        let scope = &def_map[self.id].scope;
+
+        let mut res = Vec::new();
+
+        for (name, item) in scope.types() {
+            if let ModuleDefId::ModuleId(m) = item.def
+                && (!pub_only || item.vis == Visibility::Public)
+            {
+                res.push((name.clone(), Module { id: m }));
+            }
+        }
+
+        res
+    }
+
     /// Returns a `ModuleScope`: a set of items, visible in this module.
     pub fn scope(
         self,
@@ -2226,6 +2243,39 @@ impl DefWithBody {
         for diag in hir_ty::diagnostics::incorrect_case(db, id.into()) {
             acc.push(diag.into())
         }
+    }
+
+    /// Returns an iterator over the inferred types of all expressions in this body.
+    pub fn expression_types<'db>(
+        self,
+        db: &'db dyn HirDatabase,
+    ) -> impl Iterator<Item = Type<'db>> {
+        self.id().into_iter().flat_map(move |def_id| {
+            let infer = InferenceResult::for_body(db, def_id);
+            let resolver = def_id.resolver(db);
+
+            infer.expression_types().map(move |(_, ty)| Type::new_with_resolver(db, &resolver, ty))
+        })
+    }
+
+    /// Returns an iterator over the inferred types of all patterns in this body.
+    pub fn pattern_types<'db>(self, db: &'db dyn HirDatabase) -> impl Iterator<Item = Type<'db>> {
+        self.id().into_iter().flat_map(move |def_id| {
+            let infer = InferenceResult::for_body(db, def_id);
+            let resolver = def_id.resolver(db);
+
+            infer.pattern_types().map(move |(_, ty)| Type::new_with_resolver(db, &resolver, ty))
+        })
+    }
+
+    /// Returns an iterator over the inferred types of all bindings in this body.
+    pub fn binding_types<'db>(self, db: &'db dyn HirDatabase) -> impl Iterator<Item = Type<'db>> {
+        self.id().into_iter().flat_map(move |def_id| {
+            let infer = InferenceResult::for_body(db, def_id);
+            let resolver = def_id.resolver(db);
+
+            infer.binding_types().map(move |(_, ty)| Type::new_with_resolver(db, &resolver, ty))
+        })
     }
 }
 
@@ -4216,6 +4266,10 @@ impl Local {
         self.parent(db).module(db)
     }
 
+    pub fn as_id(self) -> u32 {
+        self.binding_id.into_raw().into_u32()
+    }
+
     pub fn ty(self, db: &dyn HirDatabase) -> Type<'_> {
         let def = self.parent;
         let infer = InferenceResult::for_body(db, def);
@@ -6047,11 +6101,7 @@ impl<'db> Type<'db> {
 
             match name {
                 Some(name) => {
-                    match ctx.probe_for_name(
-                        method_resolution::Mode::MethodCall,
-                        name.clone(),
-                        self_ty,
-                    ) {
+                    match ctx.probe_for_name(method_resolution::Mode::Path, name.clone(), self_ty) {
                         Ok(candidate)
                         | Err(method_resolution::MethodError::PrivateMatch(candidate)) => {
                             let id = candidate.item.into();
@@ -6117,6 +6167,7 @@ impl<'db> Type<'db> {
         self.autoderef_(db)
             .filter_map(|ty| ty.dyn_trait())
             .flat_map(move |dyn_trait_id| hir_ty::all_super_traits(db, dyn_trait_id))
+            .copied()
             .map(Trait::from)
     }
 
@@ -6134,6 +6185,7 @@ impl<'db> Type<'db> {
                         _ => None,
                     })
                     .flat_map(|t| hir_ty::all_super_traits(db, t))
+                    .copied()
             })
             .map(Trait::from)
     }

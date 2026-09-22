@@ -1584,7 +1584,7 @@ impl<'body, 'db> InferenceContext<'body, 'db> {
                 return (self.err_ty(), None);
             };
             match res {
-                ResolveValueResult::ValueNs(value, _) => match value {
+                ResolveValueResult::ValueNs(value) => match value {
                     ValueNs::EnumVariantId(var) => {
                         let args = path_ctx.substs_from_path(var.into(), true, false);
                         drop(ctx);
@@ -1608,7 +1608,7 @@ impl<'body, 'db> InferenceContext<'body, 'db> {
                         return (self.err_ty(), None);
                     }
                 },
-                ResolveValueResult::Partial(typens, unresolved, _) => (typens, Some(unresolved)),
+                ResolveValueResult::Partial(typens, unresolved) => (typens, Some(unresolved)),
             }
         } else {
             match path_ctx.resolve_path_in_type_ns() {
@@ -1815,18 +1815,34 @@ impl<'body, 'db> InferenceContext<'body, 'db> {
         Some(struct_.into())
     }
 
+    fn has_new_range_feature(&self) -> bool {
+        self.resolver.top_level_def_map().is_unstable_feature_enabled(&sym::new_range)
+    }
+
     fn resolve_range(&self) -> Option<AdtId> {
-        let struct_ = self.lang_items.Range?;
+        let struct_ = if self.has_new_range_feature() {
+            self.lang_items.RangeCopy?
+        } else {
+            self.lang_items.Range?
+        };
         Some(struct_.into())
     }
 
     fn resolve_range_inclusive(&self) -> Option<AdtId> {
-        let struct_ = self.lang_items.RangeInclusiveStruct?;
+        let struct_ = if self.has_new_range_feature() {
+            self.lang_items.RangeInclusiveCopy?
+        } else {
+            self.lang_items.RangeInclusiveStruct?
+        };
         Some(struct_.into())
     }
 
     fn resolve_range_from(&self) -> Option<AdtId> {
-        let struct_ = self.lang_items.RangeFrom?;
+        let struct_ = if self.has_new_range_feature() {
+            self.lang_items.RangeFromCopy?
+        } else {
+            self.lang_items.RangeFrom?
+        };
         Some(struct_.into())
     }
 
@@ -1836,7 +1852,11 @@ impl<'body, 'db> InferenceContext<'body, 'db> {
     }
 
     fn resolve_range_to_inclusive(&self) -> Option<AdtId> {
-        let struct_ = self.lang_items.RangeToInclusive?;
+        let struct_ = if self.has_new_range_feature() {
+            self.lang_items.RangeToInclusiveCopy?
+        } else {
+            self.lang_items.RangeToInclusive?
+        };
         Some(struct_.into())
     }
 
