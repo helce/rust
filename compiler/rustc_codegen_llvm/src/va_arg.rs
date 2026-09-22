@@ -137,6 +137,37 @@ fn emit_ptr_va_arg<'ll, 'tcx>(
     }
 }
 
+fn emit_e2k_va_arg<'ll, 'tcx>(
+    bx: &mut Builder<'_, 'll, 'tcx>,
+    list: OperandRef<'tcx, &'ll Value>,
+    target_ty: Ty<'tcx>,
+) -> &'ll Value {
+    // Arg size <= 8: next free slot
+    // Arg size <= 16: next even slot
+    // Arg size > 16: next even slot. Size aligned by 8.
+
+    let layout = bx.cx.layout_of(target_ty);
+    let slot_size = Align::from_bytes(8).unwrap();
+    let size = layout.size.align_to(slot_size);
+    let llty = layout.llvm_type(bx.cx);
+    let align = if size.bytes() > 8 {
+        Align::from_bytes(16).unwrap()
+    } else {
+        slot_size
+    };
+
+    let (addr, addr_align) = emit_direct_ptr_va_arg(
+        bx,
+        list,
+        size,
+        align,
+        slot_size,
+        true,
+        false,
+    );
+    bx.load(llty, addr, addr_align)
+}
+
 fn emit_aapcs_va_arg<'ll, 'tcx>(
     bx: &mut Builder<'_, 'll, 'tcx>,
     list: OperandRef<'tcx, &'ll Value>,
@@ -1174,6 +1205,7 @@ pub(super) fn emit_va_arg<'ll, 'tcx>(
             AllowHigherAlign::Yes,
             ForceRightAdjust::No,
         ),
+        Arch::E2k => emit_e2k_va_arg(bx, addr, target_ty),
 
         Arch::Bpf => bug!("bpf does not support c-variadic functions"),
         Arch::SpirV => bug!("spirv does not support c-variadic functions"),
