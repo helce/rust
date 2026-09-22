@@ -626,6 +626,7 @@ complete -c x.py -n "__fish_x.py_using_subcommand vendor" -l reproducible-artifa
 complete -c x.py -n "__fish_x.py_using_subcommand vendor" -l set -d 'override options in bootstrap.toml' -r -f
 complete -c x.py -n "__fish_x.py_using_subcommand vendor" -l ci -d 'Make bootstrap to behave as it\'s running on the CI environment or not' -r -f -a "{true\t'',false\t''}"
 complete -c x.py -n "__fish_x.py_using_subcommand vendor" -l versioned-dirs -d 'Always include version in subdir name'
+complete -c x.py -n "__fish_x.py_using_subcommand vendor" -l respect-source -d 'Use source from config'
 complete -c x.py -n "__fish_x.py_using_subcommand vendor" -s v -l verbose -d 'use verbose output (-vv for very verbose)'
 complete -c x.py -n "__fish_x.py_using_subcommand vendor" -s i -l incremental -d 'use incremental compilation'
 complete -c x.py -n "__fish_x.py_using_subcommand vendor" -l include-default-paths -d 'include default paths in addition to the provided ones'

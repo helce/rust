@@ -729,6 +729,7 @@ Register-ArgumentCompleter -Native -CommandName 'x' -ScriptBlock {
             [CompletionResult]::new('--set', '--set', [CompletionResultType]::ParameterName, 'override options in bootstrap.toml')
             [CompletionResult]::new('--ci', '--ci', [CompletionResultType]::ParameterName, 'Make bootstrap to behave as it''s running on the CI environment or not')
             [CompletionResult]::new('--versioned-dirs', '--versioned-dirs', [CompletionResultType]::ParameterName, 'Always include version in subdir name')
+            [CompletionResult]::new('--respect-source', '--respect-source', [CompletionResultType]::ParameterName, 'Use source from config')
             [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'use verbose output (-vv for very verbose)')
             [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'use verbose output (-vv for very verbose)')
             [CompletionResult]::new('-i', '-i', [CompletionResultType]::ParameterName, 'use incremental compilation')
