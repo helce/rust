@@ -207,7 +207,7 @@ error: fn_abi_of(TestFnPtr) = FnAbi {
                mode: Direct(
                    ArgAttributes {
                        regular: NoUndef,
-                       arg_ext: None,
+                       arg_ext: Zext,
                        pointee_size: Size(0 bytes),
                        pointee_align: None,
                    },
@@ -413,7 +413,7 @@ error: ABIs are not compatible
                    mode: Direct(
                        ArgAttributes {
                            regular: NoUndef,
-                           arg_ext: Sext,
+                           arg_ext: Zext,
                            pointee_size: Size(0 bytes),
                            pointee_align: None,
                        },
@@ -714,7 +714,7 @@ error: ABIs are not compatible
                    mode: Direct(
                        ArgAttributes {
                            regular: NoUndef,
-                           arg_ext: Sext,
+                           arg_ext: Zext,
                            pointee_size: Size(0 bytes),
                            pointee_align: None,
                        },
@@ -864,7 +864,7 @@ error: ABIs are not compatible
                    mode: Direct(
                        ArgAttributes {
                            regular: NoUndef,
-                           arg_ext: Sext,
+                           arg_ext: Zext,
                            pointee_size: Size(0 bytes),
                            pointee_align: None,
                        },

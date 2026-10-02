@@ -17,6 +17,6 @@ pub fn hi(n: i32) -> i32 {
 
 #[no_mangle]
 pub unsafe fn hey() {
-    // CHECK: call i32 @hi(i32
+    // CHECK: call {{(signext )?}}i32 @hi(i32
     const_eval_select((42,), foo, hi);
 }

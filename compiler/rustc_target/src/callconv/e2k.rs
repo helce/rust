@@ -67,3 +67,18 @@ where
         classify_arg(cx, arg);
     }
 }
+
+pub(crate) fn compute_rust_abi_info<Ty>(fn_abi: &mut FnAbi<'_, Ty>) {
+    // Need explicit integer args extension, or llvm will extend it implicitly
+    // And it will cause problems with debuginfo
+
+    fn_abi.ret.extend_integer_width_to(64);
+
+    for arg in fn_abi.args.iter_mut() {
+        if arg.is_ignore() {
+            continue;
+        }
+
+        arg.extend_integer_width_to(64);
+    }
+}

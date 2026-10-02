@@ -2,7 +2,7 @@
 
 #![crate_type = "rlib"]
 
-// CHECK: define i8 @call_foreign_fn()
+// CHECK: define {{(zeroext )?}}i8 @call_foreign_fn()
 #[no_mangle]
 pub fn call_foreign_fn() -> u8 {
     unsafe { foreign_fn() }

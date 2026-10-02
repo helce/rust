@@ -722,6 +722,7 @@ impl<'a, Ty> FnAbi<'a, Ty> {
             Arch::LoongArch32 | Arch::LoongArch64 => loongarch::compute_rust_abi_info(cx, self),
             Arch::AArch64 => aarch64::compute_rust_abi_info(cx, self),
             Arch::Bpf => bpf::compute_rust_abi_info(self),
+            Arch::E2k => e2k::compute_rust_abi_info(self),
             _ => {}
         };
 

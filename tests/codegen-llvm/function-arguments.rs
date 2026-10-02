@@ -50,7 +50,7 @@ pub fn maybeuninit_enum_bool(x: MaybeUninit<MyBool>) -> MaybeUninit<MyBool> {
     x
 }
 
-// CHECK: noundef{{( range\(i32 0, 1114112\))?}} i32 @char(i32{{.*}}{{( range\(i32 0, 1114112\))?}} %x)
+// CHECK: noundef{{( zeroext)?}}{{( range\(i32 0, 1114112\))?}} i32 @char(i32{{.*}}{{( range\(i32 0, 1114112\))?}} %x)
 #[no_mangle]
 pub fn char(x: char) -> char {
     x
