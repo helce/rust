@@ -4,5 +4,11 @@ pub(crate) fn target() -> Target {
     let mut base = super::e2k_unknown_linux_gnu::target();
     base.cpu = "elbrus-16c".into();
     base.llvm_args = cvs!["-enable-elbrus-fma-legalization=0"];
+    base.metadata = crate::spec::TargetMetadata {
+        description: Some("64-bit Linux (kernel 5.10+, glibc 2.35+)".into()),
+        tier: Some(2),
+        host_tools: Some(true),
+        std: Some(true),
+    };
     base
 }
